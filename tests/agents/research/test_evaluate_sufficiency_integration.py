@@ -80,7 +80,7 @@ def test_unparseable_response_falls_through_to_zero() -> None:
     """When neither JSON nor regex find a confidence, fall through cleanly to 0.0."""
     backend = _FakeLLMBackend(response="The results are interesting but I cannot say more.")
     result = evaluate_sufficiency(_state_with_chunks(), llm_backend=backend)
-    assert result["confidence"] == 0.0
+    assert result["confidence"] == pytest.approx(0.0)
 
 
 @pytest.mark.unit
@@ -89,7 +89,7 @@ def test_empty_chunks_returns_zero_without_calling_llm() -> None:
     backend = _FakeLLMBackend(response='{"confidence": 0.99}')
     state = {"query": "q", "refined_query": "q", "retrieved_chunks": [], "turns": 0}
     result = evaluate_sufficiency(state, llm_backend=backend)
-    assert result["confidence"] == 0.0
+    assert result["confidence"] == pytest.approx(0.0)
 
 
 @pytest.mark.unit

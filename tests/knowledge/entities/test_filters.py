@@ -39,8 +39,8 @@ class TestRolePhraseFilter:
     @pytest.mark.unit
     def test_drops_definite_article_role_phrase(self) -> None:
         filt = RolePhraseFilter()
-        suggestions = [_ner("the APAC GTM", "ORG")]
-        assert filt.apply(suggestions, "in the APAC GTM team") == []
+        suggestions = [_ner("the regional team", "ORG")]
+        assert filt.apply(suggestions, "in the regional team team") == []
 
     @pytest.mark.unit
     def test_drops_lowercase_org_phrase(self) -> None:
@@ -57,14 +57,14 @@ class TestRolePhraseFilter:
     @pytest.mark.unit
     def test_keeps_real_org(self) -> None:
         filt = RolePhraseFilter()
-        suggestions = [_ner("Bupa", "ORG")]
-        assert filt.apply(suggestions, "Bupa announced") == suggestions
+        suggestions = [_ner("ContosoCo", "ORG")]
+        assert filt.apply(suggestions, "ContosoCo announced") == suggestions
 
     @pytest.mark.unit
     def test_returns_new_list(self) -> None:
         """Filter must not mutate its input."""
         filt = RolePhraseFilter()
-        suggestions = [_ner("Bupa", "ORG"), _ner("the regional lead", "ORG")]
+        suggestions = [_ner("ContosoCo", "ORG"), _ner("the regional lead", "ORG")]
         original = list(suggestions)
         result = filt.apply(suggestions, "ctx")
         assert suggestions == original
@@ -82,41 +82,41 @@ class TestKnownEntityAllowlist:
 
     @pytest.mark.unit
     def test_promotes_missing_allowlist_entry(self) -> None:
-        allow = KnownEntityAllowlist([{"text": "Bupa", "label": "ORG"}])
-        result = allow.apply([], "Bupa announced a new partnership")
+        allow = KnownEntityAllowlist([{"text": "ContosoCo", "label": "ORG"}])
+        result = allow.apply([], "ContosoCo announced a new partnership")
         assert len(result) == 1
-        assert result[0]["text"] == "Bupa"
+        assert result[0]["text"] == "ContosoCo"
         assert result[0]["label"] == "ORG"
         assert result[0]["source"] == "allowlist"
         assert result[0]["confidence"] == 1.0
 
     @pytest.mark.unit
     def test_does_not_duplicate_existing_suggestion(self) -> None:
-        allow = KnownEntityAllowlist([{"text": "Bupa", "label": "ORG"}])
-        existing = [_ner("Bupa", "ORG")]
-        result = allow.apply(existing, "Bupa announced")
+        allow = KnownEntityAllowlist([{"text": "ContosoCo", "label": "ORG"}])
+        existing = [_ner("ContosoCo", "ORG")]
+        result = allow.apply(existing, "ContosoCo announced")
         assert len(result) == 1
         # The existing NER entry is preserved untouched.
         assert result[0]["source"] == "ner"
 
     @pytest.mark.unit
     def test_case_insensitive_context_match(self) -> None:
-        allow = KnownEntityAllowlist([{"text": "Bupa", "label": "ORG"}])
+        allow = KnownEntityAllowlist([{"text": "ContosoCo", "label": "ORG"}])
         result = allow.apply([], "BUPA announced something")
         assert len(result) == 1
-        assert result[0]["text"] == "Bupa"
+        assert result[0]["text"] == "ContosoCo"
 
     @pytest.mark.unit
     def test_does_not_promote_when_text_absent_from_context(self) -> None:
-        allow = KnownEntityAllowlist([{"text": "Avanade", "label": "ORG"}])
+        allow = KnownEntityAllowlist([{"text": "AcmeCorp", "label": "ORG"}])
         result = allow.apply([], "no relevant content here")
         assert result == []
 
     @pytest.mark.unit
     def test_empty_allowlist_passes_through(self) -> None:
         allow = KnownEntityAllowlist([])
-        existing = [_ner("Bupa", "ORG")]
-        assert allow.apply(existing, "Bupa") == existing
+        existing = [_ner("ContosoCo", "ORG")]
+        assert allow.apply(existing, "ContosoCo") == existing
 
 
 # ---------------------------------------------------------------------------
@@ -130,14 +130,14 @@ class TestNerLabelFilter:
 
     @pytest.mark.unit
     def test_person_override_flips_org_to_person(self) -> None:
-        filt = NerLabelFilter(person_overrides={"Mitch Tomazic"}, org_overrides=set())
-        result = filt.apply([_ner("Mitch Tomazic", "ORG")], "ctx")
+        filt = NerLabelFilter(person_overrides={"Alex Smith"}, org_overrides=set())
+        result = filt.apply([_ner("Alex Smith", "ORG")], "ctx")
         assert result[0]["label"] == "PERSON"
 
     @pytest.mark.unit
     def test_org_override_flips_person_to_org(self) -> None:
-        filt = NerLabelFilter(person_overrides=set(), org_overrides={"Avanade"})
-        result = filt.apply([_ner("Avanade", "PERSON")], "ctx")
+        filt = NerLabelFilter(person_overrides=set(), org_overrides={"AcmeCorp"})
+        result = filt.apply([_ner("AcmeCorp", "PERSON")], "ctx")
         assert result[0]["label"] == "ORG"
 
     @pytest.mark.unit
@@ -149,7 +149,7 @@ class TestNerLabelFilter:
     @pytest.mark.unit
     def test_empty_overrides_pass_through(self) -> None:
         filt = NerLabelFilter(person_overrides=set(), org_overrides=set())
-        suggestions = [_ner("Bupa", "ORG"), _ner("Dan McMahon", "PERSON")]
+        suggestions = [_ner("ContosoCo", "ORG"), _ner("Jane Doe", "PERSON")]
         assert filt.apply(suggestions, "ctx") == suggestions
 
 
@@ -165,15 +165,15 @@ class TestChainedSuggestionFilter:
     @pytest.mark.unit
     def test_empty_chain_is_pass_through(self) -> None:
         chain = ChainedSuggestionFilter(filters=[])
-        suggestions = [_ner("Bupa", "ORG")]
+        suggestions = [_ner("ContosoCo", "ORG")]
         assert chain.apply(suggestions, "ctx") == suggestions
 
     @pytest.mark.unit
     def test_single_filter_chain_equals_that_filter(self) -> None:
         only = RolePhraseFilter()
         chain = ChainedSuggestionFilter(filters=[only])
-        suggestions = [_ner("Bupa", "ORG"), _ner("the APAC GTM", "ORG")]
-        ctx = "Bupa and the APAC GTM met"
+        suggestions = [_ner("ContosoCo", "ORG"), _ner("the regional team", "ORG")]
+        ctx = "ContosoCo and the regional team met"
         assert chain.apply(suggestions, ctx) == only.apply(suggestions, ctx)
 
     @pytest.mark.unit
@@ -181,24 +181,24 @@ class TestChainedSuggestionFilter:
         chain = ChainedSuggestionFilter(
             filters=[
                 RolePhraseFilter(),
-                KnownEntityAllowlist([{"text": "Avanade", "label": "ORG"}]),
-                NerLabelFilter(person_overrides={"Mitch Tomazic"}, org_overrides=set()),
+                KnownEntityAllowlist([{"text": "AcmeCorp", "label": "ORG"}]),
+                NerLabelFilter(person_overrides={"Alex Smith"}, org_overrides=set()),
             ]
         )
         suggestions = [
-            _ner("Bupa", "ORG"),
-            _ner("the APAC GTM", "ORG"),
-            _ner("Mitch Tomazic", "ORG"),
+            _ner("ContosoCo", "ORG"),
+            _ner("the regional team", "ORG"),
+            _ner("Alex Smith", "ORG"),
         ]
-        ctx = "Bupa, the APAC GTM, Mitch Tomazic, and Avanade attended"
+        ctx = "ContosoCo, the regional team, Alex Smith, and AcmeCorp attended"
         result = chain.apply(suggestions, ctx)
 
         texts = {s["text"]: s for s in result}
-        assert "the APAC GTM" not in texts  # dropped by RolePhraseFilter
-        assert texts["Bupa"]["label"] == "ORG"
-        assert texts["Mitch Tomazic"]["label"] == "PERSON"  # corrected
-        assert texts["Avanade"]["source"] == "allowlist"  # promoted
-        assert texts["Avanade"]["confidence"] == 1.0
+        assert "the regional team" not in texts  # dropped by RolePhraseFilter
+        assert texts["ContosoCo"]["label"] == "ORG"
+        assert texts["Alex Smith"]["label"] == "PERSON"  # corrected
+        assert texts["AcmeCorp"]["source"] == "allowlist"  # promoted
+        assert texts["AcmeCorp"]["confidence"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -217,13 +217,13 @@ _PASS_PERSON = "PERSON"
 @pytest.mark.parametrize(
     ("phrase", "input_label", "expected"),
     [
-        ("the APAC GTM", "ORG", _DROPPED),
-        ("Mitch Tomazic", "ORG", _PASS_PERSON),
-        ("Avanade", None, _PROMOTED_ORG),
+        ("the regional team", "ORG", _DROPPED),
+        ("Alex Smith", "ORG", _PASS_PERSON),
+        ("AcmeCorp", None, _PROMOTED_ORG),
         ("MIT", None, _PROMOTED_ORG),
         ("CIOs", None, _PROMOTED_ORG),
-        ("Dan McMahon", "PERSON", _PASS_PERSON),
-        ("Bupa", "ORG", _PASS_ORG),
+        ("Jane Doe", "PERSON", _PASS_PERSON),
+        ("ContosoCo", "ORG", _PASS_ORG),
         ("the regional lead", "ORG", _DROPPED),
         ("Chief Officer", "ORG", _DROPPED),
         ("Microsoft", "ORG", _PASS_ORG),
@@ -236,11 +236,11 @@ def test_default_chain_handles_dogfood_false_positives(
 ) -> None:
     """Each dogfood-reported phrase yields the expected post-chain outcome."""
     allowlist: list[Suggestion] = [
-        {"text": "Avanade", "label": "ORG"},
+        {"text": "AcmeCorp", "label": "ORG"},
         {"text": "MIT", "label": "ORG"},
         {"text": "CIOs", "label": "ORG"},
     ]
-    person_overrides = {"Mitch Tomazic"}
+    person_overrides = {"Alex Smith"}
     org_overrides: set[str] = set()
     chain = default_suggestion_filter_chain(
         allowlist=allowlist,

@@ -53,8 +53,8 @@ def test_parse_llm_score_with_preamble_extracts_object() -> None:
 def test_parse_llm_score_clamps_to_unit_range() -> None:
     above, _ = parse_llm_score('{"score": 1.5, "reason": ""}')
     below, _ = parse_llm_score('{"score": -0.3, "reason": ""}')
-    assert above == 1.0
-    assert below == 0.0
+    assert above == pytest.approx(1.0)
+    assert below == pytest.approx(0.0)
 
 
 @pytest.mark.unit
@@ -123,7 +123,7 @@ def test_scorer_returns_zero_on_llm_failure() -> None:
             raise RuntimeError("rate-limited")
 
     score, reason = DirectContradictionScorer(_BrokenLLM()).score("a", "b")
-    assert score == 0.0
+    assert score == pytest.approx(0.0)
     assert reason == ""
 
 
@@ -195,7 +195,7 @@ def test_composite_score_all_returns_per_category_breakdown() -> None:
 def test_composite_with_no_scorers_returns_zero() -> None:
     composite = CompositeContradictionScorer(scorers=[])
     score, reason = composite.score("claim", "candidate")
-    assert score == 0.0
+    assert score == pytest.approx(0.0)
     assert reason == ""
 
 
