@@ -109,6 +109,10 @@ Key fields to check:
 
 ## What to do when results are poor
 
+### `-32602 Invalid request parameters` on every MCP call (post-v2026.5.3 only)
+
+You're hitting the legacy `/sse` endpoint and the gateway is dropping the idle connection. Update your MCP client config to point at `/mcp` instead — see [MCP-CLIENT-MIGRATION.md](../operations/MCP-CLIENT-MIGRATION.md). The migration is a one-line URL change in your client config; the old `/sse` path stays mounted, so this is a fix for your client, not a kairix change.
+
 ### vec_failed=true (vector search broken)
 This means Azure credentials aren't loaded. Every search falls back to BM25-only, which misses semantic matches.
 
