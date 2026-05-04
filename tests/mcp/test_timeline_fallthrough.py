@@ -32,16 +32,36 @@ def _rewrite_temporal(query: str, reference_date: Any = None) -> str:
 
 
 def _build_fake_search(results: list[dict[str, Any]]) -> Any:
-    """Build a search_fn that records the query it was called with and returns SearchResult-shaped data."""
+    """Build a search_fn that records its query and returns BudgetedResult-shaped data.
 
-    class _Result:
+    Mirrors production: ``sr.results`` is a list of BudgetedResult, each with
+    a ``.result`` (carrying path/title/snippet/boosted_score) and a ``.content``
+    snippet trimmed at the budget boundary.
+    """
+
+    class _Inner:
+        def __init__(self, *, path: str, title: str, snippet: str, score: float) -> None:
+            self.path = path
+            self.title = title
+            self.snippet = snippet
+            self.boosted_score = score
+            self.score = score
+
+    class _Budgeted:
         def __init__(self, **kw: Any) -> None:
-            for k, v in kw.items():
-                setattr(self, k, v)
+            self.result = _Inner(
+                path=kw.get("path", ""),
+                title=kw.get("title", ""),
+                snippet=kw.get("snippet", ""),
+                score=kw.get("score", 0.0),
+            )
+            self.content = kw.get("snippet", "")
+            self.token_estimate = kw.get("tokens", 0)
+            self.tier = kw.get("tier", "L2")
 
     class _SearchResult:
         def __init__(self) -> None:
-            self.results = [_Result(**r) for r in results]
+            self.results = [_Budgeted(**r) for r in results]
             self.last_query: str | None = None
 
     sr = _SearchResult()
@@ -128,3 +148,33 @@ def test_response_shape_includes_required_fields() -> None:
     result = tool_timeline(query="anything", extract_fn=_extract_non_temporal, search_fn=search_fn)
     for key in ("original_query", "rewritten_query", "is_temporal", "fell_back", "time_window", "results", "error"):
         assert key in result
+
+
+@pytest.mark.unit
+def test_results_carry_real_path_title_snippet_score() -> None:
+    """Regression for Shape's 2026-05-05 MCP path report.
+
+    The earlier code unpacked BudgetedResult with ``getattr(r, "path", "")`` —
+    which always returned the default empty string because path lives on
+    ``r.result.path``. Result: ``fell_back: true`` and a list of dicts whose
+    string fields were all empty (the "empty placeholders" symptom).
+
+    This test pins the fix: every dict in ``results`` must carry the real
+    path/title/snippet/score from the underlying SearchResultItem.
+    """
+    search_fn, _ = _build_fake_search(
+        [
+            {"path": "deep/path/doc.md", "title": "Real Title", "snippet": "real body content", "score": 0.42},
+        ]
+    )
+    result = tool_timeline(
+        query="anything",
+        extract_fn=_extract_non_temporal,
+        search_fn=search_fn,
+    )
+    assert len(result["results"]) == 1
+    hit = result["results"][0]
+    assert hit["path"] == "deep/path/doc.md"
+    assert hit["title"] == "Real Title"
+    assert hit["snippet"] == "real body content"
+    assert hit["score"] == pytest.approx(0.42)

@@ -44,6 +44,19 @@ class DefaultCollectionResolver:
 
     _DEFAULT_AGENT_PATTERN = "{agent}-memory"
 
+    # Reserved collections that must never appear in default user-facing
+    # search scopes (SHARED, AGENT, SHARED_AGENT, ALL_AGENTS). These are
+    # corpora that ride alongside the user's documents in the same SQLite
+    # index but are an order of magnitude larger and would dominate result
+    # mix on common terms. Callers that explicitly want them must pass
+    # ``collections=[...]`` to SearchPipeline.search or use Scope.EVERYTHING.
+    #
+    # Why baked in: an operator misconfig (listing reference-library in
+    # collections.shared) shipped to production on 2026-05-05 and polluted
+    # every user search until detected. Defending in code means the foot-gun
+    # can't be re-armed by editing yaml.
+    _RESERVED_COLLECTIONS: frozenset[str] = frozenset({"reference-library"})
+
     def __init__(
         self,
         *,
@@ -86,8 +99,8 @@ class DefaultCollectionResolver:
     def _shared_collections(self) -> list[str]:
         cols: list[str] = []
         if self._config:
-            cols.extend(c.name for c in self._config.shared)
-        cols.extend(self._extra)
+            cols.extend(c.name for c in self._config.shared if c.name not in self._RESERVED_COLLECTIONS)
+        cols.extend(c for c in self._extra if c not in self._RESERVED_COLLECTIONS)
         return cols
 
     def _all_agent_collections(self) -> list[str]:

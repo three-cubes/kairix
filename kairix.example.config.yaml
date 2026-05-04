@@ -24,6 +24,14 @@
 # Each collection maps a name to a folder inside your document store.
 # If not configured, all documents in your vault are searched as one collection.
 #
+# Note: ``reference-library`` is a reserved name. Even if listed in
+# ``shared``, the search resolver excludes it from default user-facing
+# scopes (shared / agent / shared+agent / all-agents / everything).
+# Reflib content is reachable only via ``--collection reference-library``
+# on a search call. Adding it to shared is a no-op — kept that way to
+# prevent the corpus (much larger than user docs) from polluting result
+# mix on common terms.
+#
 # collections:
 #   # Shared collections — searched by all agents
 #   shared:
