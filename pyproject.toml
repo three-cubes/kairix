@@ -21,8 +21,10 @@ dependencies = [
 
 [project.optional-dependencies]
 agents = [
-    # MCP server (Model Context Protocol — exposes kairix tools to agents)
-    "mcp>=1.0,<2",
+    # MCP server (Model Context Protocol — exposes kairix tools to agents).
+    # Floor 1.20 ensures streamable-HTTP transport and stateless mode are GA;
+    # see Sprint 19 plan WS1 (engineering/SPRINT-19-PLAN.md).
+    "mcp>=1.20,<2",
 ]
 neo4j = [
     # Neo4j Python driver — required for entity graph, multi-hop queries, and curator health

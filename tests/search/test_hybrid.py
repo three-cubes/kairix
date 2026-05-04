@@ -33,11 +33,12 @@ from kairix.core.search.bm25 import BM25Result
 from kairix.core.search.budget import DEFAULT_BUDGET, apply_budget
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.fusion import RRFFusion
-from kairix.core.search.hybrid import _collections_for
 from kairix.core.search.intent import QueryIntent
 from kairix.core.search.pipeline import SearchPipeline
 from kairix.core.search.pipeline import SearchResult as PipelineSearchResult
+from kairix.core.search.resolver import DefaultCollectionResolver
 from kairix.core.search.rrf import rrf
+from kairix.core.search.scope import Scope
 from kairix.core.search.vec_index import VecResult
 from tests.fakes import (
     FakeClassifier,
@@ -177,39 +178,47 @@ def test_apply_budget_assigns_l2_tier_in_phase1() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _collections_for helper
+# Collection resolution — public DefaultCollectionResolver Adapter
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_collections_for_no_config_returns_none() -> None:
-    """Without collections config, returns None (search everything)."""
-    cols = _collections_for("shape", "shared")
-    assert cols is None
+def test_resolver_no_config_no_agent_returns_none() -> None:
+    """Without config and without an agent, resolve returns None (search everything)."""
+    resolver = DefaultCollectionResolver(collections_config=None)
+    assert resolver.resolve(None, Scope.SHARED) is None
 
 
 @pytest.mark.unit
-def test_collections_for_with_agent_includes_agent_pattern() -> None:
-    """scope='shared+agent' appends agent-specific collection."""
-    # Simulate having collections config with env var
-    import os
+def test_resolver_shared_agent_appends_agent_pattern() -> None:
+    """scope=shared+agent with extras + agent appends the agent's collection."""
+    resolver = DefaultCollectionResolver(
+        collections_config=None,
+        extra_collections=["test-collection"],
+    )
+    cols = resolver.resolve("shape", Scope.SHARED_AGENT)
+    assert cols is not None
+    assert "shape-memory" in cols
+    assert "test-collection" in cols
 
-    import kairix.core.search.hybrid as _mod
 
-    old = os.environ.get("KAIRIX_EXTRA_COLLECTIONS", "")
-    os.environ["KAIRIX_EXTRA_COLLECTIONS"] = "test-collection"
-    _mod._COLLECTIONS_CONFIG = None  # reset cache
-    try:
-        cols = _collections_for("shape", "shared+agent")
-        assert cols is not None
-        assert "shape-memory" in cols
-        assert "test-collection" in cols
-    finally:
-        if old:
-            os.environ["KAIRIX_EXTRA_COLLECTIONS"] = old
-        else:
-            os.environ.pop("KAIRIX_EXTRA_COLLECTIONS", None)
-        _mod._COLLECTIONS_CONFIG = None
+@pytest.mark.unit
+def test_resolver_agent_only_excludes_shared() -> None:
+    """scope=agent returns only the agent's own collection."""
+    resolver = DefaultCollectionResolver(
+        collections_config=None,
+        extra_collections=["shared-test"],
+    )
+    cols = resolver.resolve("shape", Scope.AGENT)
+    assert cols == ["shape-memory"]
+
+
+@pytest.mark.unit
+def test_resolver_all_agents_not_yet_implemented() -> None:
+    """ALL_AGENTS scope explicitly raises until WS3-3 (AgentRegistry) lands."""
+    resolver = DefaultCollectionResolver(collections_config=None)
+    with pytest.raises(NotImplementedError, match="AgentRegistry"):
+        resolver.resolve("shape", Scope.ALL_AGENTS)
 
 
 # ---------------------------------------------------------------------------

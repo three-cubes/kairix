@@ -20,7 +20,7 @@ services:
     # To build from source instead: comment out 'image' above and uncomment:
     # build: .
     ports:
-      - "8080:8080"  # Change to "9090:8080" if port 8080 is already in use
+      - "127.0.0.1:8080:8080"  # Bound to localhost only — kairix has no auth. Drop the 127.0.0.1 prefix and put a gateway in front to expose externally.
     volumes:
       - ./documents:/data/documents  # Your documents folder → container's document store
       - kairix-data:/data/kairix

@@ -114,3 +114,42 @@ class SearchLogger(Protocol):
     def log_search(self, event: dict[str, Any]) -> None: ...
 
     def log_query(self, event: dict[str, Any]) -> None: ...
+
+
+@runtime_checkable
+class CollectionResolver(Protocol):
+    """Resolves the collection list for a search call given an agent + scope.
+
+    Returning None means "no collection filter — search everything". Returning
+    a non-empty list scopes BM25 and vector backends to those collection names.
+    Returning an empty list is equivalent to None.
+
+    Implementations should be constructed at the boundary (factory.py) with
+    the loaded CollectionsConfig and any environment-derived extras, so that
+    business logic only depends on the Protocol surface (G4: config at boundary).
+    """
+
+    def resolve(self, agent: str | None, scope: Any) -> list[str] | None: ...
+
+
+@runtime_checkable
+class AgentRegistry(Protocol):
+    """Declarative agent → collection mapping for the multi-agent architecture.
+
+    Used by:
+      - CollectionResolver (resolves scope=all-agents / everything to the
+        concrete list of agent collection names).
+      - Embed pipeline (validates that writes under an agent's write_path
+        are being performed by that agent).
+
+    Implementations are constructed once at startup from the YAML config
+    (G4: config at boundary). When the YAML has no ``agents:`` section the
+    registry is empty and callers get explicit NotImplementedError for
+    ALL_AGENTS / EVERYTHING scope so the misconfiguration is loud.
+    """
+
+    def list_agents(self) -> list[Any]: ...
+
+    def collection_for(self, name: str) -> str: ...
+
+    def validate_write(self, agent_name: str, path: str) -> bool: ...

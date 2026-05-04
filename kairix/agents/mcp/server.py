@@ -31,7 +31,9 @@ from typing import Any, Literal
 
 import requests
 
+from kairix.agents.mcp.errors import wrap_tool_errors
 from kairix.core.search.intent import QueryIntent
+from kairix.core.search.scope import Scope
 from kairix.text import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_SCOPE: Literal["shared+agent"] = "shared+agent"
+DEFAULT_SCOPE: Scope = Scope.SHARED_AGENT
 
 # ---------------------------------------------------------------------------
 # Budget inference + entity name extraction (AFF-1, AFF-3)
@@ -171,7 +173,7 @@ def _fetch_entity_card(name: str, *, neo4j_client: Any | None = None) -> dict[st
 def tool_search(
     query: str,
     agent: str | None = None,
-    scope: Literal["shared", "agent", "shared+agent"] = "shared+agent",
+    scope: Scope = Scope.SHARED_AGENT,
     budget: int = 3000,
     *,
     search_fn: Callable[..., Any] | None = None,
@@ -306,6 +308,7 @@ def tool_prep(
     query: str,
     agent: str | None = None,
     tier: Literal["l0", "l1"] = "l0",
+    scope: Scope = DEFAULT_SCOPE,
     *,
     search_fn: Callable[..., Any] | None = None,
     chat_fn: Callable[..., Any] | None = None,
@@ -317,6 +320,8 @@ def tool_prep(
     Retrieves relevant documents first, then summarises from them.
 
     Args:
+        scope:     Search scope — shared, agent, shared+agent, all-agents,
+                   or everything. Default shared+agent.
         search_fn: Injectable search function for testing.
                    Defaults to the production hybrid search.
         chat_fn:   Injectable chat completion function for testing.
@@ -335,7 +340,7 @@ def tool_prep(
 
         # Retrieve context first — prep is grounded, not hallucinated
         budget = 1500 if tier == "l0" else 3000
-        sr = search_fn(query, agent=agent, scope=DEFAULT_SCOPE, budget=budget)
+        sr = search_fn(query, agent=agent, scope=scope, budget=budget)
         context_parts = []
         for r in sr.results[:5]:
             context_parts.append(f"[{r.result.title or r.result.path}]\n{r.content[:500]}")
@@ -388,21 +393,35 @@ def tool_prep(
 def tool_timeline(
     query: str,
     anchor_date: str | None = None,
+    agent: str | None = None,
+    scope: Scope = DEFAULT_SCOPE,
     *,
     extract_fn: Callable[..., Any] | None = None,
     rewrite_fn: Callable[..., Any] | None = None,
+    search_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    """Check how a date-related question will be interpreted.
+    """Date-aware retrieval: rewrite a temporal query and fetch results.
 
-    For debugging only — you don't need to call this before searching;
-    date handling is automatic. Shows how date expressions like "last week"
-    or "yesterday" are rewritten into specific date ranges.
+    Behaviour matches the CLI's ``kairix timeline`` (closes the WS2-C asymmetry
+    flagged in the 2026-05-02 dogfood):
+
+      - When the query contains a temporal expression ("last week", "April 2026"),
+        the rewriter expands it into a date range; ``rewritten_query`` carries
+        the expanded form.
+      - When no temporal expression is found, ``is_temporal=False`` and
+        ``fell_back=True``; the search is performed against the original query
+        rather than returning nothing useful.
+      - Either way, ``results`` carries the search hits when ``search_fn`` is
+        provided. Tests that don't want the search side-effect omit ``search_fn``
+        and get an empty ``results`` list.
 
     Args:
-        extract_fn: Injectable time window extraction for testing.
-                    Defaults to extract_time_window.
+        extract_fn: Injectable time window extraction for testing. Defaults to
+            extract_time_window in production via build_server wiring.
         rewrite_fn: Injectable temporal rewriter for testing.
-                    Defaults to rewrite_temporal_query.
+        search_fn:  Injectable search function. When None, no search is
+            performed (rewriter-only mode for unit tests). Production
+            invocations from build_server pass a wired SearchPipeline.search.
     """
     try:
         from datetime import date as _date
@@ -438,12 +457,34 @@ def tool_timeline(
 
         is_temporal = bool(time_window)
         rewritten = rewrite_fn(query=query, reference_date=anchor) if is_temporal else query
+        rewritten = rewritten if rewritten is not None else query
+
+        # Fallthrough search: when search_fn is wired, always run a search using
+        # the (possibly rewritten) query so MCP callers get results even on
+        # non-temporal queries. fell_back signals the rewrite was a no-op.
+        results_list: list[dict[str, Any]] = []
+        if search_fn is not None:
+            try:
+                sr = search_fn(query=rewritten, budget=3000, agent=agent, scope=scope)
+                for r in getattr(sr, "results", []):
+                    results_list.append(
+                        {
+                            "path": getattr(r, "path", ""),
+                            "title": getattr(r, "title", ""),
+                            "snippet": getattr(r, "snippet", "")[:300],
+                            "score": getattr(r, "score", 0.0),
+                        }
+                    )
+            except Exception:
+                logger.debug("timeline fallthrough search failed", exc_info=True)
 
         return {
             "original_query": query,
-            "rewritten_query": rewritten if rewritten is not None else query,
+            "rewritten_query": rewritten,
             "is_temporal": is_temporal,
+            "fell_back": not is_temporal,
             "time_window": time_window,
+            "results": results_list,
             "error": "",
         }
     except Exception as exc:
@@ -452,7 +493,9 @@ def tool_timeline(
             "original_query": query,
             "rewritten_query": query,
             "is_temporal": False,
+            "fell_back": True,
             "time_window": {},
+            "results": [],
             "error": "Timeline processing failed — check server logs for details.",
         }
 
@@ -593,7 +636,8 @@ def tool_contradict(
     content: str,
     agent: str | None = None,
     top_k: int = 5,
-    threshold: float = 0.6,
+    threshold: float = 0.45,
+    scope: Scope = DEFAULT_SCOPE,
     *,
     llm_backend: Any | None = None,
     contradict_fn: Callable[..., Any] | None = None,
@@ -620,11 +664,19 @@ def tool_contradict(
 
             llm_backend = get_default_backend()
 
+        # Agent forwarding stays conditional — the WS2-B design intentionally
+        # doesn't lock contradict to a single agent's collection so cross-agent
+        # contradictions surface. Scope is always forwarded so callers who want
+        # explicit broadening (scope=everything) or narrowing get it.
+        extra: dict[str, Any] = {"scope": scope}
+        if agent is not None:
+            extra["agent"] = agent
         results = contradict_fn(
             content=content,
             llm=llm_backend,
             top_k=top_k,
             threshold=threshold,
+            **extra,
         )
         return {
             "content": content,
@@ -676,46 +728,79 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     server = FastMCP("kairix", host=host, port=port)
 
     @server.tool()
+    @wrap_tool_errors
     def search(
         query: str,
         agent: str | None = None,
-        scope: Literal["shared", "agent", "shared+agent"] = DEFAULT_SCOPE,
+        scope: Scope = DEFAULT_SCOPE,
         budget: int = 3000,
     ) -> dict[str, Any]:
         """Search your knowledge store — finds the best answers to any question."""
         return tool_search(query=query, agent=agent, scope=scope, budget=budget)
 
     @server.tool()
+    @wrap_tool_errors
     def entity(name: str) -> dict[str, Any]:
         """Entity lookup from Neo4j."""
         return tool_entity(name=name)
 
     @server.tool()
-    def prep(query: str, agent: str | None = None, tier: Literal["l0", "l1"] = "l0") -> dict[str, Any]:
+    @wrap_tool_errors
+    def prep(
+        query: str,
+        agent: str | None = None,
+        tier: Literal["l0", "l1"] = "l0",
+        scope: Scope = DEFAULT_SCOPE,
+    ) -> dict[str, Any]:
         """Context preparation: tiered L0/L1 summary generation."""
-        return tool_prep(query=query, agent=agent, tier=tier)
+        return tool_prep(query=query, agent=agent, tier=tier, scope=scope)
 
     @server.tool()
-    def timeline(query: str, anchor_date: str | None = None) -> dict[str, Any]:
+    @wrap_tool_errors
+    def timeline(
+        query: str,
+        anchor_date: str | None = None,
+        agent: str | None = None,
+        scope: Scope = DEFAULT_SCOPE,
+    ) -> dict[str, Any]:
         """Temporal query rewriting + date-aware retrieval."""
-        return tool_timeline(query=query, anchor_date=anchor_date)
+        from kairix.core.factory import build_search_pipeline
+
+        _timeline_pipeline = build_search_pipeline()
+        return tool_timeline(
+            query=query,
+            anchor_date=anchor_date,
+            agent=agent,
+            scope=scope,
+            search_fn=_timeline_pipeline.search,
+        )
 
     @server.tool()
+    @wrap_tool_errors
     def research(query: str, agent: str | None = None, max_turns: int = 4) -> dict[str, Any]:
         """Research a complex question. Searches iteratively until it finds a good answer."""
         return tool_research(query=query, agent=agent, max_turns=max_turns)
 
     @server.tool()
+    @wrap_tool_errors
     def contradict(
         content: str,
         agent: str | None = None,
         top_k: int = 5,
-        threshold: float = 0.6,
+        threshold: float = 0.45,
+        scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Check new content against existing knowledge for contradictions."""
-        return tool_contradict(content=content, agent=agent, top_k=top_k, threshold=threshold)
+        return tool_contradict(
+            content=content,
+            agent=agent,
+            top_k=top_k,
+            threshold=threshold,
+            scope=scope,
+        )
 
     @server.tool()
+    @wrap_tool_errors
     def usage_guide(topic: str = "") -> dict[str, Any]:
         """Return the kairix agent usage guide. Call this when unsure how to use kairix."""
         return tool_usage_guide(topic=topic)

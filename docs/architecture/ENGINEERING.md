@@ -511,7 +511,9 @@ Kairix follows a protocol-driven architecture. Domain boundaries are defined as 
 
 ### 10.1 Protocols
 
-All domain boundary contracts are defined in `kairix/core/protocols.py`:
+Core protocols live in `kairix/core/protocols.py`; domain-local protocols live in their own modules and are listed below with their location.
+
+**Core protocols (`kairix/core/protocols.py`):**
 
 | Protocol | Responsibility |
 |---|---|
@@ -524,8 +526,20 @@ All domain boundary contracts are defined in `kairix/core/protocols.py`:
 | `BoostStrategy` | Apply contextual score boosts (entity, temporal, procedural) |
 | `ScoringStrategy` | Evaluate retrieval quality against gold documents |
 | `SearchLogger` | Structured logging for search operations |
+| `CollectionResolver` | Resolve agent + scope to a list of collection names (sprint-19 WS3-2) |
+| `AgentRegistry` | Declarative agent → collections mapping for multi-agent retrieval (sprint-19 WS3-3) |
 
-Test compliance: `tests/contracts/test_protocols.py` verifies every implementation satisfies its protocol.
+**Domain-local protocols:**
+
+| Protocol | Module | Responsibility |
+|---|---|---|
+| `ConfidenceParser` | `kairix/agents/research/protocols.py` | Extract a numeric confidence from an LLM response |
+| `ContradictionScorer` | `kairix/knowledge/contradict/protocols.py` | Score a (claim, candidate) pair on one contradiction category |
+| `ClaimExtractor` | `kairix/knowledge/contradict/protocols.py` | Split content into top-N high-signal claims |
+| `SuggestionFilter` | `kairix/knowledge/entities/protocols.py` | Drop, promote, or relabel NER suggestions |
+| `ReadinessGate` | `kairix/agents/mcp/readiness.py` | Cold-start readiness signal for the MCP server |
+
+Test compliance: `tests/contracts/test_protocols.py` plus per-protocol contract tests under `tests/contracts/` verify every implementation satisfies its protocol via `isinstance()`.
 
 ### 10.2 Pipelines
 
@@ -568,6 +582,29 @@ Behavioural variation is handled by registered strategies, not `if/elif` branche
 **Scoring strategies** (`kairix/quality/eval/scorers.py`):
 - `SCORERS` registry — pluggable scorer implementations for benchmark evaluation
 
+**Contradiction scorers** (`kairix/knowledge/contradict/scorers.py`, sprint-19 WS2-B):
+- `DirectContradictionScorer` — direct factual contradictions
+- `OverstatementScorer` — claims asserting a stronger position than evidence supports
+- `StatusMismatchScorer` — different states for the same entity at the same time
+- `CompositeContradictionScorer` — composes the three categories; aggregates by max with per-category breakdown
+
+**Confidence parsers** (`kairix/agents/research/confidence.py`, sprint-19 WS2-D):
+- `JsonModeConfidenceParser` — parses `{"confidence": float}` JSON; returns `(None, "")` on failure
+- `RegexExtractConfidenceParser` — extracts confidence from prose responses; tolerant of "Confidence: 70%" idioms
+- `ChainedConfidenceParser` — runs parsers left-to-right; first non-failure wins; logs warning on each fallthrough
+
+**Suggestion filters** (`kairix/knowledge/entities/filters.py`, sprint-19 WS2-E):
+- `RolePhraseFilter` — drops role-phrase NER hits ("the regional team", "Senior Director")
+- `KnownEntityAllowlist` — promotes pre-loaded entity names that NER missed
+- `NerLabelFilter` — corrects mistyped labels via override sets
+- `ChainedSuggestionFilter` — left-to-right composition
+
+**Claim extractor** (`kairix/knowledge/contradict/extract.py`, sprint-19 WS2-B):
+- `EntityDensityClaimExtractor` — ranks sentences by proper-noun count + modal-verb weighting; returns top-N
+
+**Scope enum** (`kairix/core/search/scope.py`, sprint-19 WS3-1):
+- `Scope` — typed multi-agent scope (subclasses `str` for backwards-compat). Five values: `SHARED`, `AGENT`, `SHARED_AGENT`, `ALL_AGENTS`, `EVERYTHING`. Closes the SMELL #7 Primitive Obsession on scope strings.
+
 ### 10.6 Adapters
 
 Adapters wrap external services behind protocol interfaces, keeping domain logic decoupled from infrastructure.
@@ -577,6 +614,20 @@ Adapters wrap external services behind protocol interfaces, keeping domain logic
 | `BM25SearchBackend` | `kairix/core/search/backends.py` |
 | `VectorSearchBackend` | `kairix/core/search/backends.py` |
 | `AzureEmbeddingService` | `kairix/core/search/backends.py` |
+| `JsonlSearchLogger` | `kairix/core/search/logger.py` (sprint-19 XC-1) |
+| `DefaultCollectionResolver` | `kairix/core/search/resolver.py` (sprint-19 WS3-2) |
+| `ConfigDrivenAgentRegistry` | `kairix/core/search/registry.py` (sprint-19 WS3-3) |
+| `EventReadinessGate` | `kairix/agents/mcp/readiness.py` (sprint-19 WS1-5) |
+
+### 10.7 MCP transport composer
+
+`kairix/agents/mcp/transport.py` exposes a single public function:
+
+```python
+build_mcp_app(server, *, with_sse=True, sse_mount_path="/sse", healthz_path="/healthz", readiness_check=None) -> Starlette
+```
+
+Composes the FastMCP server's `streamable_http_app()` (mounted at `/mcp`) plus `sse_app()` (legacy `/sse`, optional via `with_sse=False`) plus a `/healthz` route into a single Starlette app served via uvicorn. Stateless HTTP per request — gateway timeouts on idle SSE connections are no longer a failure mode (the 2026-05-02 dogfood `-32602` cascade). Tool errors are caught by the public `wrap_tool_errors` decorator in `kairix/agents/mcp/errors.py` and returned as structured `{"error": "<class>: <msg>"}` dicts rather than reaching FastMCP's generic `-32602` mapper. See `docs/operations/MCP-DEPLOYMENT.md` and `docs/operations/MCP-CLIENT-MIGRATION.md` for operator and client-side guidance.
 
 ---
 

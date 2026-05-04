@@ -45,6 +45,7 @@ _COMMANDS: dict[str, tuple[str, str, bool]] = {
     "reference-library": ("kairix.knowledge.reflib.cli", "main", True),
     "setup": ("kairix.platform.setup.cli", "main", True),
     "worker": ("kairix.worker", "main", False),
+    "config": ("kairix.core.search.config_validator", "main", True),
 }
 
 

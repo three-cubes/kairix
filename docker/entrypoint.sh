@@ -16,7 +16,7 @@ MODE="${1:-serve}"
 case "$MODE" in
     serve)
         echo "Starting kairix MCP server on port 8080..."
-        exec kairix mcp serve --transport sse --host 0.0.0.0 --port 8080
+        exec kairix mcp serve --transport http --host 0.0.0.0 --port 8080
         ;;
     embed)
         echo "Running incremental embed..."

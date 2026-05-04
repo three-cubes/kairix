@@ -47,8 +47,25 @@ kairix search "tell me about Acme Corp" --agent builder
 | Flag | Default | When to use |
 |---|---|---|
 | `--agent <name>` | None | Always — scopes results to your agent's collections + shared |
+| `--scope <value>` | `shared+agent` | Override the default scope. See "Scope" section below. |
 | `--budget <tokens>` | 5000 | Reduce if context window is tight; 2000–3000 is usually enough |
 | `--json` | Off | Machine-readable output — use when parsing results programmatically |
+
+---
+
+## Scope
+
+Every retrieval tool (`search`, `prep`, `timeline`, `contradict`) accepts a `scope` value. It controls which document collections the search reaches.
+
+| Scope | Reaches | When to use |
+|---|---|---|
+| `shared` | Shared collections only (vault content not tied to any agent) | When the agent's own memory shouldn't influence the answer — e.g. fact-checking a claim against curated knowledge. |
+| `agent` | Only the calling agent's own memory | When you specifically want to recall what *this agent* has previously written — e.g. session continuity. |
+| `shared+agent` (default) | Shared + the calling agent's memory | Usual case — the agent has access to organisational knowledge plus its own history. |
+| `all-agents` | Every agent's memory, no shared | Cross-agent synthesis — "what has the team collectively discovered about X?" Requires `agents:` configured in `kairix.config.yaml`. |
+| `everything` | Shared + every agent's memory | Maximum-recall queries; treat as a last resort because it dilutes precision. |
+
+**MCP equivalents:** the same values (as strings) are accepted on the `scope` parameter of `mcp-kairix__search`, `mcp-kairix__prep`, `mcp-kairix__timeline`, and `mcp-kairix__contradict`.
 
 ---
 
@@ -91,6 +108,10 @@ Key fields to check:
 ---
 
 ## What to do when results are poor
+
+### `-32602 Invalid request parameters` on every MCP call (post-v2026.5.3 only)
+
+You're hitting the legacy `/sse` endpoint and the gateway is dropping the idle connection. Update your MCP client config to point at `/mcp` instead — see [MCP-CLIENT-MIGRATION.md](../operations/MCP-CLIENT-MIGRATION.md). The migration is a one-line URL change in your client config; the old `/sse` path stays mounted, so this is a fix for your client, not a kairix change.
 
 ### vec_failed=true (vector search broken)
 This means Azure credentials aren't loaded. Every search falls back to BM25-only, which misses semantic matches.

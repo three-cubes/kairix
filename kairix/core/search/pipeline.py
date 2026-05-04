@@ -18,10 +18,10 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Literal
 
 from kairix.core.protocols import (
     BoostStrategy,
+    CollectionResolver,
     FusionStrategy,
     GraphRepository,
     SearchLogger,
@@ -30,6 +30,7 @@ from kairix.core.search.backends import BM25SearchBackend, VectorSearchBackend
 from kairix.core.search.budget import apply_budget
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.intent import QueryIntent
+from kairix.core.search.scope import Scope
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +72,14 @@ class SearchPipeline:
     fusion: FusionStrategy
     boosts: list[BoostStrategy] = field(default_factory=list)
     logger: SearchLogger | None = None
+    resolver: CollectionResolver | None = None
     config: RetrievalConfig = field(default_factory=RetrievalConfig.defaults)
 
     def search(
         self,
         query: str,
         budget: int = 3000,
-        scope: Literal["shared", "agent", "shared+agent"] = "shared+agent",
+        scope: Scope = Scope.SHARED_AGENT,
         agent: str | None = None,
         collections: list[str] | None = None,
     ) -> SearchResult:
@@ -106,7 +108,22 @@ class SearchPipeline:
                 ),
             )
 
-        # 3. Dispatch BM25 + vector search
+        # 3. Resolve collections via the injected CollectionResolver if not
+        # explicitly provided. Callers passing collections=None (the default)
+        # get scope-aware filtering; callers passing an explicit list override.
+        if collections is None and self.resolver is not None:
+            try:
+                collections = self.resolver.resolve(agent, scope)
+            except NotImplementedError as e:
+                # Operator misconfiguration (scope=all-agents without registry).
+                # Surface as a structured search error rather than crashing.
+                return SearchResult(
+                    query=query,
+                    intent=intent,
+                    error=str(e),
+                )
+
+        # 4. Dispatch BM25 + vector search
         cfg = self.config
         bm25_results: list[dict] = []
         vec_results: list[dict] = []
@@ -178,13 +195,16 @@ class SearchPipeline:
                         "query_hash": query_hash,
                         "intent": intent.value,
                         "agent": agent,
-                        "scope": scope,
+                        # scope is a Scope enum (str subclass); .value for stable serialisation
+                        "scope": scope.value if hasattr(scope, "value") else str(scope),
+                        "collections_searched": collections or [],
                         "bm25_count": len(bm25_results),
                         "vec_count": len(vec_results),
                         "fused_count": len(fused),
                         "total_tokens": total_tokens,
                         "latency_ms": round(latency_ms, 1),
                         "vec_failed": vec_failed,
+                        "fallback_used": not bm25_results and bool(vec_results),
                         "ts": int(time.time()),
                     }
                 )

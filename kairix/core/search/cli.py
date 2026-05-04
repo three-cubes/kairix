@@ -31,7 +31,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--scope",
         default="shared+agent",
-        choices=["shared", "agent", "shared+agent"],
+        choices=["shared", "agent", "shared+agent", "all-agents", "everything"],
         help="Collection scope (default: shared+agent)",
     )
     parser.add_argument("--budget", type=int, default=3000, help="Token budget (default: 3000)")

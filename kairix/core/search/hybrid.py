@@ -32,7 +32,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from kairix.core.db import get_db_path, open_db
 from kairix.core.search.bm25 import BM25Result
@@ -46,6 +46,7 @@ from kairix.core.search.rrf import (
     procedural_boost,
     temporal_date_boost,
 )
+from kairix.core.search.scope import Scope
 from kairix.core.search.vec_index import VECTOR_DEFAULT_K, VecResult
 
 logger = logging.getLogger(__name__)
@@ -90,39 +91,6 @@ _QUERY_LOG_MAX_BYTES: int = 10 * 1024 * 1024  # 10 MB
 
 # Collections — loaded from kairix.config.yaml if configured, otherwise use defaults.
 # Override with KAIRIX_EXTRA_COLLECTIONS env var (comma-separated) for quick additions.
-_COLLECTIONS_CONFIG = None  # loaded lazily from config
-
-
-def _get_shared_collections() -> list[str]:
-    """Get shared collection names from config or defaults."""
-    global _COLLECTIONS_CONFIG
-    if _COLLECTIONS_CONFIG is None:
-        try:
-            from kairix.core.search.config_loader import load_collections
-
-            _COLLECTIONS_CONFIG = load_collections()
-        except (ImportError, OSError, ValueError):
-            _COLLECTIONS_CONFIG = False  # mark as "tried and failed"
-
-    if _COLLECTIONS_CONFIG:
-        names = [c.name for c in _COLLECTIONS_CONFIG.shared]
-    else:
-        # Fallback: search all documents (no collection scoping)
-        names = []
-
-    # Add extra collections from env var
-    extra = os.environ.get("KAIRIX_EXTRA_COLLECTIONS", "")
-    names.extend(c.strip() for c in extra.split(",") if c.strip())
-    return names
-
-
-def _get_agent_pattern() -> str:
-    """Get the per-agent collection name template."""
-    if _COLLECTIONS_CONFIG:
-        return _COLLECTIONS_CONFIG.agent_pattern
-    return "{agent}-memory"
-
-
 # ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
@@ -132,22 +100,6 @@ def _get_agent_pattern() -> str:
 # Deprecated: import from kairix.core.search.pipeline instead.
 # Will be removed no sooner than 2 releases after 2026.04.
 from kairix.core.search.pipeline import SearchResult as SearchResult  # noqa: E402
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _collections_for(agent: str | None, scope: Literal["shared", "agent", "shared+agent"]) -> list[str] | None:
-    """Build collection list from config, agent name, and scope.
-
-    If no collections are configured, returns an empty list (search all documents).
-    """
-    cols: list[str] = list(_get_shared_collections())
-    if agent and "agent" in scope:
-        pattern = _get_agent_pattern()
-        cols.append(pattern.format(agent=agent))
-    return cols or None  # None = no collection filter (search everything)
 
 
 def _log_search_event(event: dict) -> None:
@@ -307,7 +259,7 @@ class _SearchPipelineState:
     fallback_used: bool
     temporal_chunks: list | None = None
     agent: str | None = None
-    scope: Literal["shared", "agent", "shared+agent"] = "shared+agent"
+    scope: Scope = Scope.SHARED_AGENT
 
 
 def _preprocess_temporal(
