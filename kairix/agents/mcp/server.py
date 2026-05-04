@@ -393,18 +393,30 @@ def tool_timeline(
     *,
     extract_fn: Callable[..., Any] | None = None,
     rewrite_fn: Callable[..., Any] | None = None,
+    search_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    """Check how a date-related question will be interpreted.
+    """Date-aware retrieval: rewrite a temporal query and fetch results.
 
-    For debugging only — you don't need to call this before searching;
-    date handling is automatic. Shows how date expressions like "last week"
-    or "yesterday" are rewritten into specific date ranges.
+    Behaviour matches the CLI's ``kairix timeline`` (closes the WS2-C asymmetry
+    flagged in the 2026-05-02 dogfood):
+
+      - When the query contains a temporal expression ("last week", "April 2026"),
+        the rewriter expands it into a date range; ``rewritten_query`` carries
+        the expanded form.
+      - When no temporal expression is found, ``is_temporal=False`` and
+        ``fell_back=True``; the search is performed against the original query
+        rather than returning nothing useful.
+      - Either way, ``results`` carries the search hits when ``search_fn`` is
+        provided. Tests that don't want the search side-effect omit ``search_fn``
+        and get an empty ``results`` list.
 
     Args:
-        extract_fn: Injectable time window extraction for testing.
-                    Defaults to extract_time_window.
+        extract_fn: Injectable time window extraction for testing. Defaults to
+            extract_time_window in production via build_server wiring.
         rewrite_fn: Injectable temporal rewriter for testing.
-                    Defaults to rewrite_temporal_query.
+        search_fn:  Injectable search function. When None, no search is
+            performed (rewriter-only mode for unit tests). Production
+            invocations from build_server pass a wired SearchPipeline.search.
     """
     try:
         from datetime import date as _date
@@ -440,12 +452,34 @@ def tool_timeline(
 
         is_temporal = bool(time_window)
         rewritten = rewrite_fn(query=query, reference_date=anchor) if is_temporal else query
+        rewritten = rewritten if rewritten is not None else query
+
+        # Fallthrough search: when search_fn is wired, always run a search using
+        # the (possibly rewritten) query so MCP callers get results even on
+        # non-temporal queries. fell_back signals the rewrite was a no-op.
+        results_list: list[dict[str, Any]] = []
+        if search_fn is not None:
+            try:
+                sr = search_fn(query=rewritten, budget=3000)
+                for r in getattr(sr, "results", []):
+                    results_list.append(
+                        {
+                            "path": getattr(r, "path", ""),
+                            "title": getattr(r, "title", ""),
+                            "snippet": getattr(r, "snippet", "")[:300],
+                            "score": getattr(r, "score", 0.0),
+                        }
+                    )
+            except Exception:
+                logger.debug("timeline fallthrough search failed", exc_info=True)
 
         return {
             "original_query": query,
-            "rewritten_query": rewritten if rewritten is not None else query,
+            "rewritten_query": rewritten,
             "is_temporal": is_temporal,
+            "fell_back": not is_temporal,
             "time_window": time_window,
+            "results": results_list,
             "error": "",
         }
     except Exception as exc:
@@ -454,7 +488,9 @@ def tool_timeline(
             "original_query": query,
             "rewritten_query": query,
             "is_temporal": False,
+            "fell_back": True,
             "time_window": {},
+            "results": [],
             "error": "Timeline processing failed — check server logs for details.",
         }
 
@@ -704,7 +740,14 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     @wrap_tool_errors
     def timeline(query: str, anchor_date: str | None = None) -> dict[str, Any]:
         """Temporal query rewriting + date-aware retrieval."""
-        return tool_timeline(query=query, anchor_date=anchor_date)
+        from kairix.core.factory import build_search_pipeline
+
+        _timeline_pipeline = build_search_pipeline()
+        return tool_timeline(
+            query=query,
+            anchor_date=anchor_date,
+            search_fn=_timeline_pipeline.search,
+        )
 
     @server.tool()
     @wrap_tool_errors
