@@ -2,8 +2,9 @@
 kairix.knowledge.entities.suggest — NER-based entity suggestion.
 
 Uses spaCy (optional) to extract named entities from freetext input,
-then cross-references against the Neo4j entity graph to identify which
-are already known and which are candidates for new stubs.
+then runs them through a SuggestionFilter chain (drop role phrases,
+promote allowlisted entities, correct mistyped labels) before
+cross-referencing against the Neo4j entity graph.
 
 Install spaCy support: pip install kairix[nlp]
 """
@@ -29,7 +30,13 @@ class SuggestedEntity:
     context: str = ""  # Surrounding sentence for review
 
 
-def suggest_entities(text: str, neo4j_client: Any) -> list[SuggestedEntity]:
+def suggest_entities(
+    text: str,
+    neo4j_client: Any,
+    *,
+    filter_chain: Any = None,
+    nlp: Any = None,
+) -> list[SuggestedEntity]:
     """
     Extract named entities from text and cross-reference against Neo4j.
 
@@ -37,42 +44,81 @@ def suggest_entities(text: str, neo4j_client: Any) -> list[SuggestedEntity]:
         text: Freetext input (document body, meeting notes, etc.)
         neo4j_client: Neo4jClient instance (kairix.knowledge.graph.client.get_client()).
             When unavailable, returns [] with a warning.
+        filter_chain: Optional SuggestionFilter applied to NER hits before Neo4j
+            lookup. When None, uses default_suggestion_filter_chain() — drops
+            role phrases, no allowlist, no label overrides. Production callers
+            constructing a chain at the boundary (factory.py) pass it in here
+            so the suggester gets per-deployment allowlists and overrides.
+        nlp: Optional spaCy nlp pipeline. When None, lazily loads en_core_web_sm
+            via _load_model. Tests pass a fake to bypass the spaCy import path.
 
     Returns:
-        List of SuggestedEntity, deduped by surface form.
+        List of SuggestedEntity, deduped by surface form, after filter chain.
         Never raises.
     """
     if not getattr(neo4j_client, "available", False):
         logger.warning("suggest_entities: Neo4j unavailable — returning empty list")
         return []
 
-    try:
-        import spacy  # lazy import — optional dependency  # noqa: F401
-    except ImportError as exc:
-        raise ImportError(
-            "spaCy is required for entity suggestion. Install it with:\n"
-            "  pip install 'kairix[nlp]'\n"
-            "  python -m spacy download en_core_web_sm"
-        ) from exc
+    if nlp is None:
+        try:
+            import spacy  # lazy import — optional dependency  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "spaCy is required for entity suggestion. Install it with:\n"
+                "  pip install 'kairix[nlp]'\n"
+                "  python -m spacy download en_core_web_sm"
+            ) from exc
+
+        try:
+            nlp = _load_model()
+        except Exception as exc:
+            logger.warning("suggest_entities: spaCy load failed — %s", exc)
+            return []
 
     try:
-        nlp = _load_model()
         doc = nlp(text)
     except Exception as exc:
         logger.warning("suggest_entities: spaCy processing failed — %s", exc)
         return []
 
-    # Collect unique surface forms with their labels and context sentences
-    seen: dict[str, tuple[str, str]] = {}  # text → (label, context)
+    # NER pass: collect unique surface forms with labels and context sentences.
+    # ner_suggestions is the list passed to the filter chain; context_map is
+    # consulted after filtering to attach the original sentence to each survivor.
+    ner_suggestions: list[dict[str, Any]] = []
+    context_map: dict[str, str] = {}
     for sent in doc.sents:
         for ent in sent.ents:
             if ent.label_ in {"ORG", "PERSON", "GPE", "PRODUCT", "WORK_OF_ART"}:
                 key = ent.text.strip()
-                if key and key not in seen:
-                    seen[key] = (ent.label_, sent.text.strip()[:200])
+                if key and key not in context_map:
+                    context_map[key] = sent.text.strip()[:200]
+                    ner_suggestions.append(
+                        {
+                            "text": key,
+                            "label": ent.label_,
+                            "source": "ner",
+                            "confidence": 1.0,
+                        }
+                    )
+
+    # Apply filter chain: drop role phrases, promote allowlist, correct labels.
+    if filter_chain is None:
+        from kairix.knowledge.entities.filters import default_suggestion_filter_chain
+
+        filter_chain = default_suggestion_filter_chain()
+    filtered = filter_chain.apply(ner_suggestions, context=text)
 
     results: list[SuggestedEntity] = []
-    for surface_form, (label, context) in seen.items():
+    for suggestion in filtered:
+        surface_form = suggestion.get("text", "")
+        if not surface_form:
+            continue
+        label = suggestion.get("label", "")
+        # NER hits have a context sentence; allowlist promotions don't (their
+        # surface form was found via substring match against the full text).
+        context = context_map.get(surface_form, "")
+
         existing_id = None
         existing_name = None
         is_new = True
