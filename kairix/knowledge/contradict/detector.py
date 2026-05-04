@@ -1,13 +1,18 @@
 """
 kairix.knowledge.contradict.detector — Contradiction detection for new memory writes.
 
-Checks whether a new piece of content directly contradicts existing knowledge
-in the vault by:
-  1. Retrieving the top-K most similar documents via hybrid search
-  2. Scoring each retrieved snippet against the new content using LLM
-  3. Returning results where the contradiction score >= threshold
+Checks whether a new piece of content contradicts existing knowledge in
+the document store via a Strategy-pattern pipeline:
 
-Never raises — failures return empty lists. Pass a mock LLM/search for testing.
+  1. ``ClaimExtractor`` splits the input into top-N high-signal claims.
+  2. For each claim, hybrid search retrieves candidate snippets.
+  3. ``CompositeContradictionScorer`` evaluates each (claim, candidate)
+     pair across three categories — direct, overstatement, status
+     mismatch — and returns the winning category for each candidate.
+  4. Results above ``threshold`` are returned, sorted by score.
+
+Never raises — failures return empty lists. Pass injectable scorer/
+extractor/search/LLM for testing without monkey-patching.
 """
 
 from __future__ import annotations
@@ -17,20 +22,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
-_CONTRADICTION_PROMPT = (
-    "You are a knowledge consistency analyst.\n\n"
-    "Existing document snippet:\n{snippet}\n\n"
-    "New content claim:\n{content}\n\n"
-    "Does the existing snippet directly contradict the new content? "
-    "A contradiction exists when the two statements cannot both be true "
-    "(e.g., different facts about the same entity, conflicting decisions, "
-    "mutually exclusive states). Incidental differences or missing context "
-    "do NOT constitute contradictions.\n\n"
-    "Reply with ONLY a JSON object: "
-    '{{"score": <0.0-1.0>, "reason": "<one sentence>"}}'
+from kairix.knowledge.contradict.extract import EntityDensityClaimExtractor
+from kairix.knowledge.contradict.scorers import (
+    CompositeContradictionScorer,
+    default_contradiction_scorer,
+    parse_llm_score,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,31 +38,59 @@ class ContradictionResult:
 
     doc_path: str
     score: float  # 0.0-1.0; higher = stronger contradiction
-    reason: str  # LLM one-sentence explanation
+    reason: str  # one-sentence explanation
     snippet: str  # excerpt from the existing document
+    category: str = "direct"  # which scorer fired (direct | overstatement | status_mismatch)
+    claim: str = ""  # the extracted claim that drove the search/scoring
+
+
+# Backwards-compat shim — historical callers and tests imported the private
+# parser; kept as a thin alias around the new public parse_llm_score. Marked
+# for removal in a future sprint.
+def _parse_llm_response(raw: str) -> tuple[float | None, str]:
+    """Deprecated: use kairix.knowledge.contradict.scorers.parse_llm_score."""
+    score, reason = parse_llm_score(raw)
+    if score == 0.0 and reason == "":
+        # Distinguish parse-fail from genuine 0.0 — the historical contract
+        # used None to signal parse fail. Best-effort: if the raw input looks
+        # like JSON-with-explicit-zero, return (0.0, reason); otherwise None.
+        if not raw or "{" not in raw:
+            return None, ""
+    return score, reason
 
 
 def check_contradiction(
     content: str,
     llm: Any,
     top_k: int = 5,
-    threshold: float = 0.5,
+    threshold: float = 0.45,
+    *,
+    top_claims: int = 3,
     search_fn: Callable[..., Any] | None = None,
+    scorer: CompositeContradictionScorer | None = None,
+    extractor: Any | None = None,
 ) -> list[ContradictionResult]:
     """
     Check whether *content* contradicts existing knowledge in the document store.
 
     Args:
-        content:   The new content to check (raw text; may be a claim, note, or decision).
-        llm:       An LLMBackend instance (must implement `chat(messages)`).
-        top_k:     How many similar documents to compare against.
-        threshold: Minimum contradiction score (0.0-1.0) to include in results.
-        search_fn: Injectable search function for testing.
-                   Defaults to ``SearchPipeline.search()`` via the factory.
+        content:    The new content to check (claim, note, decision, etc.).
+        llm:        An LLM backend implementing ``chat(messages)`` — only used
+                    if scorer is None (the default scorer wraps the LLM).
+        top_k:      How many similar documents to compare against per claim.
+        threshold:  Minimum contradiction score (0.0-1.0) to include. Default
+                    0.45 — calibrated for the three-category composite which
+                    individually scores more conservatively than the historic
+                    single-prompt scorer.
+        top_claims: How many high-signal claims to extract from content.
+        search_fn:  Injectable search function. Defaults to SearchPipeline.search.
+        scorer:     Injectable composite scorer. Defaults to all three categories
+                    (direct + overstatement + status_mismatch).
+        extractor:  Injectable claim extractor. Defaults to entity-density rank.
 
     Returns:
-        List of ContradictionResult, sorted by score descending.
-        Empty list when no contradictions found or on any failure.
+        List of ContradictionResult, sorted by score descending. Empty list
+        when no contradictions found or on any failure.
     """
     if search_fn is None:
         from kairix.core.factory import build_search_pipeline
@@ -71,98 +98,50 @@ def check_contradiction(
         _pipeline = build_search_pipeline()
         search_fn = _pipeline.search
 
-    results: list[ContradictionResult] = []
+    if scorer is None:
+        scorer = default_contradiction_scorer(llm)
 
-    # Truncate content to first 500 chars for the search query — the claim
-    # is typically at the start, and full-text queries dilute BM25/vector signal
-    search_query = content[:500]
+    if extractor is None:
+        extractor = EntityDensityClaimExtractor()
 
-    try:
-        sr = search_fn(query=search_query, budget=5000)
-        candidates = sr.results[:top_k]
-        logger.info(
-            "contradict: retrieved %d candidates (query length=%d, threshold=%.2f)",
-            len(candidates),
-            len(search_query),
-            threshold,
-        )
-    except Exception as exc:
-        logger.warning("contradict: hybrid search failed — %s", exc)
-        return []
+    claims = extractor.extract(content, top_n=top_claims) or [content[:500]]
 
-    for bundle in candidates:
-        snippet = bundle.content[:800]
-        doc_path = bundle.result.path
-
-        prompt = _CONTRADICTION_PROMPT.format(
-            snippet=snippet,
-            content=content[:1000],
-        )
-
+    # Union candidates across all claims, deduping on doc_path so a doc that
+    # surfaced for two claims is scored once against the most-relevant claim.
+    seen_paths: dict[str, tuple[str, Any]] = {}
+    for claim in claims:
         try:
-            raw = llm.chat([{"role": "user", "content": prompt}])
+            sr = search_fn(query=claim[:500], budget=5000)
+            for bundle in sr.results[:top_k]:
+                path = bundle.result.path
+                if path not in seen_paths:
+                    seen_paths[path] = (claim, bundle)
         except Exception as exc:
-            logger.debug("contradict: LLM call failed for %s — %s", doc_path, exc)
-            continue
+            logger.warning("contradict: hybrid search failed for claim — %s", exc)
 
-        score, reason = _parse_llm_response(raw)
-        if score is None:
-            logger.debug("contradict: unparseable LLM response for %s", doc_path)
-            continue
+    logger.info(
+        "contradict: extracted %d claims, retrieved %d unique candidates (threshold=%.2f)",
+        len(claims),
+        len(seen_paths),
+        threshold,
+    )
 
-        logger.debug("contradict: %s → score=%.2f reason=%s", doc_path, score, reason[:80])
-
+    results: list[ContradictionResult] = []
+    for path, (claim, bundle) in seen_paths.items():
+        snippet = bundle.content[:800]
+        category, score, reason = scorer.best_category(claim, snippet)
         if score >= threshold:
             results.append(
                 ContradictionResult(
-                    doc_path=doc_path,
+                    doc_path=path,
                     score=score,
                     reason=reason,
                     snippet=snippet[:300],
+                    category=category or "direct",
+                    claim=claim,
                 )
             )
 
     results.sort(key=lambda r: r.score, reverse=True)
     logger.info("contradict: %d contradictions found (threshold=%.2f)", len(results), threshold)
     return results
-
-
-def _parse_llm_response(raw: str) -> tuple[float | None, str]:
-    """
-    Parse LLM contradiction response.
-
-    Expected format: {"score": 0.8, "reason": "..."}
-
-    Returns (score, reason) or (None, "") on parse failure.
-    """
-    import json
-    import re
-
-    if not raw:
-        return None, ""
-
-    # Extract JSON object from response (model may add preamble)
-    match = re.search(r"\{[^{}]*\}", raw, re.DOTALL)
-    if not match:
-        logger.debug("contradict: no JSON object in LLM response")
-        return None, ""
-
-    try:
-        obj = json.loads(match.group())
-    except json.JSONDecodeError:
-        logger.debug("contradict: JSON parse failed")
-        return None, ""
-
-    score_raw = obj.get("score")
-    reason = str(obj.get("reason", ""))
-
-    if score_raw is None:
-        return None, ""
-
-    try:
-        score = float(score_raw)
-        score = max(0.0, min(1.0, score))
-    except (TypeError, ValueError):
-        return None, ""
-
-    return score, reason
