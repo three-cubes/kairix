@@ -88,7 +88,7 @@ class TestKnownEntityAllowlist:
         assert result[0]["text"] == "ContosoCo"
         assert result[0]["label"] == "ORG"
         assert result[0]["source"] == "allowlist"
-        assert result[0]["confidence"] == 1.0
+        assert result[0]["confidence"] == pytest.approx(1.0)
 
     @pytest.mark.unit
     def test_does_not_duplicate_existing_suggestion(self) -> None:
@@ -198,7 +198,7 @@ class TestChainedSuggestionFilter:
         assert texts["ContosoCo"]["label"] == "ORG"
         assert texts["Alex Smith"]["label"] == "PERSON"  # corrected
         assert texts["AcmeCorp"]["source"] == "allowlist"  # promoted
-        assert texts["AcmeCorp"]["confidence"] == 1.0
+        assert texts["AcmeCorp"]["confidence"] == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +265,7 @@ def test_default_chain_handles_dogfood_false_positives(
         assert len(matches) == 1
         assert matches[0]["label"] == "ORG"
         assert matches[0]["source"] == "allowlist"
-        assert matches[0]["confidence"] == 1.0
+        assert matches[0]["confidence"] == pytest.approx(1.0)
     else:
         # Pass-through with an expected final label.
         assert len(matches) == 1
