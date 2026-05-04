@@ -114,6 +114,27 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
     if cfg.procedural.enabled:
         boosts.append(ProceduralBoost(config=cfg.procedural))
 
+    # Search logger — JSONL adapter writing to /data/kairix/logs/ in Docker,
+    # ~/.cache/kairix/logs/ otherwise. Path resolution lives at the boundary
+    # so business logic never reads env vars (G4). Query log is privacy-gated
+    # via KAIRIX_LOG_QUERIES (off by default).
+    import os
+    from pathlib import Path
+
+    from kairix.core.search.logger import JsonlSearchLogger, default_search_log_paths
+
+    if Path("/.dockerenv").exists() or os.environ.get("KAIRIX_DOCKER") == "1":
+        log_base = Path("/data/kairix/logs")
+    else:
+        log_base = Path.home() / ".cache" / "kairix" / "logs"
+
+    search_log_path, query_log_path = default_search_log_paths(base=log_base)
+    enable_query_log = os.environ.get("KAIRIX_LOG_QUERIES") == "1"
+    search_logger = JsonlSearchLogger(
+        search_log_path=search_log_path,
+        query_log_path=query_log_path if enable_query_log else None,
+    )
+
     return SearchPipeline(
         classifier=_RuleClassifier(),
         bm25=bm25,
@@ -121,5 +142,6 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
         graph=graph,
         fusion=fusion,
         boosts=boosts,
+        logger=search_logger,
         config=cfg,
     )

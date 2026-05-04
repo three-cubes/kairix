@@ -178,13 +178,16 @@ class SearchPipeline:
                         "query_hash": query_hash,
                         "intent": intent.value,
                         "agent": agent,
-                        "scope": scope,
+                        # scope is a Scope enum (str subclass); .value for stable serialisation
+                        "scope": scope.value if hasattr(scope, "value") else str(scope),
+                        "collections_searched": collections or [],
                         "bm25_count": len(bm25_results),
                         "vec_count": len(vec_results),
                         "fused_count": len(fused),
                         "total_tokens": total_tokens,
                         "latency_ms": round(latency_ms, 1),
                         "vec_failed": vec_failed,
+                        "fallback_used": not bm25_results and bool(vec_results),
                         "ts": int(time.time()),
                     }
                 )
