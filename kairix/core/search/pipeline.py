@@ -18,7 +18,6 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Literal
 
 from kairix.core.protocols import (
     BoostStrategy,
@@ -30,6 +29,7 @@ from kairix.core.search.backends import BM25SearchBackend, VectorSearchBackend
 from kairix.core.search.budget import apply_budget
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.intent import QueryIntent
+from kairix.core.search.scope import Scope
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ class SearchPipeline:
         self,
         query: str,
         budget: int = 3000,
-        scope: Literal["shared", "agent", "shared+agent"] = "shared+agent",
+        scope: Scope = Scope.SHARED_AGENT,
         agent: str | None = None,
         collections: list[str] | None = None,
     ) -> SearchResult:

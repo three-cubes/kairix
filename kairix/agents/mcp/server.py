@@ -32,6 +32,7 @@ from typing import Any, Literal
 import requests
 
 from kairix.core.search.intent import QueryIntent
+from kairix.core.search.scope import Scope
 from kairix.text import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_SCOPE: Literal["shared+agent"] = "shared+agent"
+DEFAULT_SCOPE: Scope = Scope.SHARED_AGENT
 
 # ---------------------------------------------------------------------------
 # Budget inference + entity name extraction (AFF-1, AFF-3)
@@ -171,7 +172,7 @@ def _fetch_entity_card(name: str, *, neo4j_client: Any | None = None) -> dict[st
 def tool_search(
     query: str,
     agent: str | None = None,
-    scope: Literal["shared", "agent", "shared+agent"] = "shared+agent",
+    scope: Scope = Scope.SHARED_AGENT,
     budget: int = 3000,
     *,
     search_fn: Callable[..., Any] | None = None,
@@ -679,7 +680,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     def search(
         query: str,
         agent: str | None = None,
-        scope: Literal["shared", "agent", "shared+agent"] = DEFAULT_SCOPE,
+        scope: Scope = DEFAULT_SCOPE,
         budget: int = 3000,
     ) -> dict[str, Any]:
         """Search your knowledge store — finds the best answers to any question."""

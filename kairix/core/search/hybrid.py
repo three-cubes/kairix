@@ -32,7 +32,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from kairix.core.db import get_db_path, open_db
 from kairix.core.search.bm25 import BM25Result
@@ -46,6 +46,7 @@ from kairix.core.search.rrf import (
     procedural_boost,
     temporal_date_boost,
 )
+from kairix.core.search.scope import Scope
 from kairix.core.search.vec_index import VECTOR_DEFAULT_K, VecResult
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,7 @@ from kairix.core.search.pipeline import SearchResult as SearchResult  # noqa: E4
 # ---------------------------------------------------------------------------
 
 
-def _collections_for(agent: str | None, scope: Literal["shared", "agent", "shared+agent"]) -> list[str] | None:
+def _collections_for(agent: str | None, scope: Scope) -> list[str] | None:
     """Build collection list from config, agent name, and scope.
 
     If no collections are configured, returns an empty list (search all documents).
@@ -307,7 +308,7 @@ class _SearchPipelineState:
     fallback_used: bool
     temporal_chunks: list | None = None
     agent: str | None = None
-    scope: Literal["shared", "agent", "shared+agent"] = "shared+agent"
+    scope: Scope = Scope.SHARED_AGENT
 
 
 def _preprocess_temporal(
