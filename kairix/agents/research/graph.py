@@ -27,13 +27,16 @@ def build_researcher_graph(
     search_fn: Any | None = None,
     llm_backend: Any | None = None,
     classify_fn: Any | None = None,
+    confidence_parser: Any | None = None,
 ) -> Any:
     """Build the LangGraph state machine for iterative research.
 
     Args:
-        search_fn:   Injectable search function (passed to retrieve node).
-        llm_backend: Injectable LLM backend (passed to evaluate/synthesise nodes).
-        classify_fn: Injectable intent classifier (passed to classify_intent node).
+        search_fn:         Injectable search function (passed to retrieve node).
+        llm_backend:       Injectable LLM backend (passed to evaluate/synthesise nodes).
+        classify_fn:       Injectable intent classifier (passed to classify_intent node).
+        confidence_parser: Injectable ConfidenceParser (passed to evaluate node).
+                           If None, evaluate_sufficiency uses default_confidence_parser_chain().
 
     Returns a compiled graph ready to invoke with an initial state.
     """
@@ -46,7 +49,15 @@ def build_researcher_graph(
     # Add nodes — inject dependencies via partial where provided
     _classify = partial(classify_intent, classify_fn=classify_fn) if classify_fn else classify_intent
     _retrieve = partial(retrieve, search_fn=search_fn) if search_fn else retrieve
-    _eval = partial(evaluate_sufficiency, llm_backend=llm_backend) if llm_backend else evaluate_sufficiency
+
+    # evaluate gets both llm_backend and confidence_parser if either is set
+    _eval_kwargs: dict[str, Any] = {}
+    if llm_backend is not None:
+        _eval_kwargs["llm_backend"] = llm_backend
+    if confidence_parser is not None:
+        _eval_kwargs["confidence_parser"] = confidence_parser
+    _eval = partial(evaluate_sufficiency, **_eval_kwargs) if _eval_kwargs else evaluate_sufficiency
+
     _synth = partial(synthesise, llm_backend=llm_backend) if llm_backend else synthesise
 
     graph.add_node("classify_intent", _classify)
@@ -80,6 +91,7 @@ def run_research(
     search_fn: Any | None = None,
     llm_backend: Any | None = None,
     classify_fn: Any | None = None,
+    confidence_parser: Any | None = None,
 ) -> dict[str, Any]:
     """Run a research query through the full iterative search pipeline.
 
@@ -87,11 +99,12 @@ def run_research(
     question, and refines the search if needed — up to max_turns rounds.
 
     Args:
-        query:       The question to research.
-        max_turns:   Maximum search rounds before giving up (default 4).
-        search_fn:   Injectable search function for testing.
-        llm_backend: Injectable LLM backend for testing.
-        classify_fn: Injectable intent classifier for testing.
+        query:             The question to research.
+        max_turns:         Maximum search rounds before giving up (default 4).
+        search_fn:         Injectable search function for testing.
+        llm_backend:       Injectable LLM backend for testing.
+        classify_fn:       Injectable intent classifier for testing.
+        confidence_parser: Injectable ConfidenceParser for testing.
 
     Returns:
         dict with: query, synthesis, retrieved_chunks, entities_found,
@@ -102,6 +115,7 @@ def run_research(
             search_fn=search_fn,
             llm_backend=llm_backend,
             classify_fn=classify_fn,
+            confidence_parser=confidence_parser,
         )
 
         initial_state: ResearcherState = {

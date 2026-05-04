@@ -80,8 +80,21 @@ def retrieve(state: ResearcherState, *, search_fn: Callable[..., Any] | None = N
     return {"retrieved_chunks": existing}
 
 
-def evaluate_sufficiency(state: ResearcherState, *, llm_backend: Any = None) -> dict[str, Any]:
-    """Ask the LLM whether the search results answer the question well enough."""
+def evaluate_sufficiency(
+    state: ResearcherState,
+    *,
+    llm_backend: Any = None,
+    confidence_parser: Any = None,
+) -> dict[str, Any]:
+    """Ask the LLM whether the search results answer the question well enough.
+
+    Uses a ConfidenceParser chain (kairix.agents.research.confidence) to
+    extract the confidence value from the LLM response. The chain tries
+    JSON-mode first and falls back to regex extraction on prose, so the
+    function returns a real confidence even when the LLM produces
+    unstructured output. Closes the dogfood-reported bug where confidence
+    was always 0.0 because raw json.loads failed silently.
+    """
     query = state["query"]
     chunks = state.get("retrieved_chunks", [])
     turns = state.get("turns", 0)
@@ -120,31 +133,50 @@ def evaluate_sufficiency(state: ResearcherState, *, llm_backend: Any = None) -> 
 
             llm_backend = get_default_backend()
         response = llm_backend.chat(messages, max_tokens=300)
-
-        # Parse JSON from response
-        parsed = json.loads(response)
-        confidence = float(parsed.get("confidence", 0.0))
-        refined = parsed.get("refined_query")
-        gaps = parsed.get("gaps") or []
-        if not isinstance(gaps, list):
-            gaps = [str(gaps)]
-
-        logger.info(
-            "research: evaluate turn=%d confidence=%.2f sufficient=%s gaps=%d",
-            turns,
-            confidence,
-            confidence >= SUFFICIENCY_THRESHOLD,
-            len(gaps),
-        )
-        return {
-            "confidence": confidence,
-            "gaps": gaps,
-            "refined_query": refined or state.get("refined_query") or query,
-        }
     except Exception as exc:
         logger.warning("research: evaluate_sufficiency LLM call failed — %s", exc)
         # If LLM fails, treat as insufficient so we try again (up to max_turns)
         return {"confidence": 0.0, "gaps": [], "refined_query": query}
+
+    # Confidence via the parser chain — works on both JSON and prose
+    if confidence_parser is None:
+        from kairix.agents.research.confidence import default_confidence_parser_chain
+
+        confidence_parser = default_confidence_parser_chain()
+
+    from kairix.agents.research.protocols import ConfidenceParseError
+
+    try:
+        confidence = confidence_parser.parse(response)
+    except ConfidenceParseError as exc:
+        logger.warning("research: confidence parse fell through — %s", exc)
+        confidence = 0.0
+
+    # Gaps and refined_query — best-effort JSON parse, independent of confidence
+    refined: str | None = None
+    gaps: list[str] = []
+    try:
+        parsed = json.loads(response)
+        refined = parsed.get("refined_query")
+        raw_gaps = parsed.get("gaps") or []
+        gaps = raw_gaps if isinstance(raw_gaps, list) else [str(raw_gaps)]
+    except (json.JSONDecodeError, TypeError):
+        # LLM returned prose; the confidence parser already handled it. Fall
+        # through with empty gaps and the prior refined query.
+        pass
+
+    logger.info(
+        "research: evaluate turn=%d confidence=%.2f sufficient=%s gaps=%d",
+        turns,
+        confidence,
+        confidence >= SUFFICIENCY_THRESHOLD,
+        len(gaps),
+    )
+    return {
+        "confidence": confidence,
+        "gaps": gaps,
+        "refined_query": refined or state.get("refined_query") or query,
+    }
 
 
 def refine_query(state: ResearcherState) -> dict[str, Any]:
