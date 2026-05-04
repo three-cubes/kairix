@@ -102,7 +102,7 @@ class TestKnownEntityAllowlist:
     @pytest.mark.unit
     def test_case_insensitive_context_match(self) -> None:
         allow = KnownEntityAllowlist([{"text": "ContosoCo", "label": "ORG"}])
-        result = allow.apply([], "BUPA announced something")
+        result = allow.apply([], "CONTOSOCO announced something")
         assert len(result) == 1
         assert result[0]["text"] == "ContosoCo"
 
