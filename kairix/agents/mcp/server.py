@@ -664,13 +664,19 @@ def tool_contradict(
 
             llm_backend = get_default_backend()
 
+        # Agent forwarding stays conditional — the WS2-B design intentionally
+        # doesn't lock contradict to a single agent's collection so cross-agent
+        # contradictions surface. Scope is always forwarded so callers who want
+        # explicit broadening (scope=everything) or narrowing get it.
+        extra: dict[str, Any] = {"scope": scope}
+        if agent is not None:
+            extra["agent"] = agent
         results = contradict_fn(
             content=content,
             llm=llm_backend,
             top_k=top_k,
             threshold=threshold,
-            agent=agent,
-            scope=scope,
+            **extra,
         )
         return {
             "content": content,

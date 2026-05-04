@@ -46,7 +46,7 @@ def _build_fake_search(results: list[dict[str, Any]]) -> Any:
 
     sr = _SearchResult()
 
-    def search_fn(*, query: str, budget: int = 3000) -> _SearchResult:
+    def search_fn(*, query: str, budget: int = 3000, **_kwargs: Any) -> _SearchResult:
         sr.last_query = query
         return sr
 
@@ -108,7 +108,7 @@ def test_no_search_fn_returns_empty_results() -> None:
 def test_search_failure_does_not_break_timeline() -> None:
     """When the wired search_fn raises, timeline returns an empty results list, not an error."""
 
-    def failing_search(*, query: str, budget: int = 3000) -> Any:
+    def failing_search(*, query: str, budget: int = 3000, **_kwargs: Any) -> Any:
         raise RuntimeError("search down")
 
     result = tool_timeline(

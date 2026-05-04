@@ -14,7 +14,6 @@ import pytest
 from kairix.agents.mcp.server import tool_contradict, tool_timeline
 from kairix.core.search.scope import Scope
 
-
 # tool_timeline ------------------------------------------------------
 
 
