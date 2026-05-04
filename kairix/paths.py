@@ -12,11 +12,14 @@ Resolution order (highest wins):
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _is_docker() -> bool:
@@ -226,8 +229,25 @@ def agent_memory_path(agent: str) -> Path:
 
     Default: {document_root}/04-Agent-Knowledge/{agent}/memory
     Override with KAIRIX_AGENT_MEMORY_ROOT env var for custom layouts.
+
+    If the override path already ends with /{agent}/memory (a common
+    misuse — passing the full agent-memory path rather than the parent
+    of agent directories), the function detects this and returns the
+    path as-is rather than double-appending. This is the regression
+    guard for the path-doubling bug fixed in #67 / #93 — silently
+    handling the misuse with a warning is friendlier than failing.
     """
     override = os.environ.get("KAIRIX_AGENT_MEMORY_ROOT")
     if override:
-        return Path(override) / agent / "memory"
+        override_path = Path(override)
+        if override_path.parts[-2:] == (agent, "memory"):
+            logger.warning(
+                "agent_memory_path: KAIRIX_AGENT_MEMORY_ROOT already ends with "
+                "/%s/memory; using it as-is to avoid path-doubling. Pass the "
+                "parent of the agent directories (e.g. .../04-Agent-Knowledge) "
+                "to silence this warning.",
+                agent,
+            )
+            return override_path
+        return override_path / agent / "memory"
     return document_root() / "04-Agent-Knowledge" / agent / "memory"
