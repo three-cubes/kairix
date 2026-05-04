@@ -56,8 +56,17 @@ jobs:
               // Warning only — not a hard failure. Builder to verify.
             }
 
-            // Check no secrets in title or description (basic)
-            const secret_patterns = [/sk-[a-zA-Z0-9]{20,}/, /[a-f0-9]{32,}/];
+            // Check no secrets in title or description.
+            // Only match known secret formats — bare hex strings produce false
+            // positives on Dependabot commit SHAs. detect-secrets handles the
+            // file-scan side; this gate just covers obvious paste-into-PR mistakes.
+            const secret_patterns = [
+              /sk-[a-zA-Z0-9]{20,}/,
+              /AKIA[0-9A-Z]{16}/,
+              /gh[pousr]_[A-Za-z0-9_]{36,}/,
+              /xox[abprs]-[A-Za-z0-9-]{10,}/,
+              /AIza[0-9A-Za-z_-]{35}/,
+            ];
             for (const pattern of secret_patterns) {
               if (pattern.test(title) || pattern.test(body)) {
                 core.setFailed('Potential secret detected in PR title or description.');
