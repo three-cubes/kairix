@@ -2,17 +2,19 @@
 
 Replaces the historical ``_collections_for`` private helper in hybrid.py
 which read module-level state and env vars on every call. The Adapter
-takes the loaded CollectionsConfig + extra-collections list at
+takes the loaded CollectionsConfig + extra-collections + AgentRegistry at
 construction time (G4: config at boundary), so call sites depend on the
 Protocol surface and tests inject ``FakeCollectionResolver`` from
 ``tests/fakes`` rather than reaching into private module state.
 
-Closes the TEST-INFRA-AUDIT #6 private-import debt and lays the
-groundwork for KFEAT-GAP-8 ``scope=all-agents`` (deferred to WS3-3:
-AgentRegistry, which the resolver will consult once available).
+Closes the TEST-INFRA-AUDIT #6 private-import debt and implements
+KFEAT-GAP-8 ``scope=all-agents`` semantics via the injected
+AgentRegistry (WS3-3).
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from kairix.core.search.config_loader import CollectionsConfig
 from kairix.core.search.scope import Scope
@@ -47,9 +49,11 @@ class DefaultCollectionResolver:
         *,
         collections_config: CollectionsConfig | None,
         extra_collections: list[str] | None = None,
+        agent_registry: Any | None = None,
     ) -> None:
         self._config = collections_config
         self._extra: list[str] = list(extra_collections or [])
+        self._registry = agent_registry
 
     def resolve(self, agent: str | None, scope: object) -> list[str] | None:
         # Accept Scope or any string-convertible scope value (Scope subclasses str,
@@ -71,15 +75,9 @@ class DefaultCollectionResolver:
             if agent:
                 cols.append(pattern.format(agent=agent))
         elif scope_enum is Scope.ALL_AGENTS:
-            raise NotImplementedError(
-                "scope=all-agents requires AgentRegistry (sprint-19 WS3-3); "
-                "not yet wired. Use scope=shared+agent for now."
-            )
+            cols = self._all_agent_collections()
         elif scope_enum is Scope.EVERYTHING:
-            raise NotImplementedError(
-                "scope=everything requires AgentRegistry (sprint-19 WS3-3); "
-                "not yet wired. Use scope=shared+agent for now."
-            )
+            cols = list(self._shared_collections()) + self._all_agent_collections()
         else:  # pragma: no cover — defensive; Scope.parse rejects unknowns
             cols = []
 
@@ -91,3 +89,18 @@ class DefaultCollectionResolver:
             cols.extend(c.name for c in self._config.shared)
         cols.extend(self._extra)
         return cols
+
+    def _all_agent_collections(self) -> list[str]:
+        """Concrete agent collections from the AgentRegistry.
+
+        Raises NotImplementedError when no registry is configured — the
+        misconfiguration is loud rather than silent (returns empty list →
+        "search nothing" would mask bad ops).
+        """
+        if self._registry is None:
+            raise NotImplementedError(
+                "scope=all-agents / everything requires an AgentRegistry. "
+                "Configure agents: in kairix.config.yaml or pass agent_registry "
+                "to DefaultCollectionResolver."
+            )
+        return [agent.collection for agent in self._registry.list_agents()]

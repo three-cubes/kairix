@@ -8,12 +8,11 @@ lands. No @patch, no monkeypatch, no private symbol imports.
 
 from __future__ import annotations
 
+import pytest
+
 from kairix.core.search.config_loader import CollectionDef, CollectionsConfig
 from kairix.core.search.resolver import DefaultCollectionResolver
 from kairix.core.search.scope import Scope
-
-
-import pytest
 
 
 def _config_with_shared(*names: str, pattern: str = "{agent}-memory") -> CollectionsConfig:
@@ -97,14 +96,14 @@ def test_default_pattern_when_no_config() -> None:
 
 
 @pytest.mark.unit
-def test_all_agents_scope_raises_not_implemented() -> None:
+def test_all_agents_scope_without_registry_raises() -> None:
     resolver = DefaultCollectionResolver(collections_config=None)
     with pytest.raises(NotImplementedError, match="AgentRegistry"):
         resolver.resolve("alpha", Scope.ALL_AGENTS)
 
 
 @pytest.mark.unit
-def test_everything_scope_raises_not_implemented() -> None:
+def test_everything_scope_without_registry_raises() -> None:
     resolver = DefaultCollectionResolver(collections_config=None)
     with pytest.raises(NotImplementedError, match="AgentRegistry"):
         resolver.resolve("alpha", Scope.EVERYTHING)

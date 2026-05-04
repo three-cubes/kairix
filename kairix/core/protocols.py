@@ -130,3 +130,26 @@ class CollectionResolver(Protocol):
     """
 
     def resolve(self, agent: str | None, scope: Any) -> list[str] | None: ...
+
+
+@runtime_checkable
+class AgentRegistry(Protocol):
+    """Declarative agent → collection mapping for the multi-agent architecture.
+
+    Used by:
+      - CollectionResolver (resolves scope=all-agents / everything to the
+        concrete list of agent collection names).
+      - Embed pipeline (validates that writes under an agent's write_path
+        are being performed by that agent).
+
+    Implementations are constructed once at startup from the YAML config
+    (G4: config at boundary). When the YAML has no ``agents:`` section the
+    registry is empty and callers get explicit NotImplementedError for
+    ALL_AGENTS / EVERYTHING scope so the misconfiguration is loud.
+    """
+
+    def list_agents(self) -> list[Any]: ...
+
+    def collection_for(self, name: str) -> str: ...
+
+    def validate_write(self, agent_name: str, path: str) -> bool: ...

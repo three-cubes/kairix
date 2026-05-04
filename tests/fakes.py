@@ -198,3 +198,43 @@ class FakeCollectionResolver:
     def resolve(self, agent: str | None, scope: Any) -> list[str] | None:
         scope_value = scope.value if hasattr(scope, "value") else str(scope)
         return self._by_key.get((agent, scope_value))
+
+
+class FakeAgentRegistry:
+    """In-memory AgentRegistry constructed from a list of agent dicts.
+
+    Each entry is a dict with at least ``name`` and ``collection``; optional
+    ``write_path`` and ``read_only`` mirror AgentDef in the production
+    Adapter. Tests use this rather than ConfigDrivenAgentRegistry so they
+    don't have to construct the full YAML pipeline.
+    """
+
+    def __init__(self, agents: list[dict[str, Any]] | None = None) -> None:
+        self._agents = list(agents or [])
+
+    def list_agents(self) -> list[Any]:
+        # Returns dict-like entries; resolver only needs .collection attribute,
+        # so wrap each in a minimal namespace-style object.
+        class _Agent:
+            def __init__(self, d: dict[str, Any]) -> None:
+                self.name = d["name"]
+                self.collection = d.get("collection", f"{d['name']}-memory")
+                self.write_path = d.get("write_path", "")
+                self.read_only = d.get("read_only", False)
+
+        return [_Agent(a) for a in self._agents]
+
+    def collection_for(self, name: str) -> str:
+        for a in self._agents:
+            if a["name"] == name:
+                return str(a.get("collection", f"{name}-memory"))
+        raise KeyError(f"unknown agent {name!r}")
+
+    def validate_write(self, agent_name: str, path: str) -> bool:
+        for a in self._agents:
+            if a["name"] == agent_name and not a.get("read_only", False):
+                wp = a.get("write_path", "")
+                if not wp:
+                    return False
+                return path == wp or path.startswith(wp.rstrip("/") + "/")
+        return False
