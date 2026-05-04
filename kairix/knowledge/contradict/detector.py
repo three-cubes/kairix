@@ -56,6 +56,8 @@ def check_contradiction(
     llm: Any,
     top_k: int = 5,
     threshold: float = 0.45,
+    agent: str | None = None,
+    scope: Any = None,
     *,
     top_claims: int = 3,
     search_fn: Callable[..., Any] | None = None,
@@ -100,10 +102,18 @@ def check_contradiction(
 
     # Union candidates across all claims, deduping on doc_path so a doc that
     # surfaced for two claims is scored once against the most-relevant claim.
+    # Build search kwargs — agent and scope only forwarded when explicitly set
+    # so callers passing fakes that don't accept those kwargs aren't broken.
+    search_kwargs: dict[str, Any] = {"budget": 5000}
+    if agent is not None:
+        search_kwargs["agent"] = agent
+    if scope is not None:
+        search_kwargs["scope"] = scope
+
     seen_paths: dict[str, tuple[str, Any]] = {}
     for claim in claims:
         try:
-            sr = search_fn(query=claim[:500], budget=5000)
+            sr = search_fn(query=claim[:500], **search_kwargs)
             for bundle in sr.results[:top_k]:
                 path = bundle.result.path
                 if path not in seen_paths:

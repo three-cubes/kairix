@@ -393,6 +393,8 @@ def tool_prep(
 def tool_timeline(
     query: str,
     anchor_date: str | None = None,
+    agent: str | None = None,
+    scope: Scope = DEFAULT_SCOPE,
     *,
     extract_fn: Callable[..., Any] | None = None,
     rewrite_fn: Callable[..., Any] | None = None,
@@ -463,7 +465,7 @@ def tool_timeline(
         results_list: list[dict[str, Any]] = []
         if search_fn is not None:
             try:
-                sr = search_fn(query=rewritten, budget=3000)
+                sr = search_fn(query=rewritten, budget=3000, agent=agent, scope=scope)
                 for r in getattr(sr, "results", []):
                     results_list.append(
                         {
@@ -634,7 +636,8 @@ def tool_contradict(
     content: str,
     agent: str | None = None,
     top_k: int = 5,
-    threshold: float = 0.6,
+    threshold: float = 0.45,
+    scope: Scope = DEFAULT_SCOPE,
     *,
     llm_backend: Any | None = None,
     contradict_fn: Callable[..., Any] | None = None,
@@ -666,6 +669,8 @@ def tool_contradict(
             llm=llm_backend,
             top_k=top_k,
             threshold=threshold,
+            agent=agent,
+            scope=scope,
         )
         return {
             "content": content,
@@ -746,7 +751,12 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
 
     @server.tool()
     @wrap_tool_errors
-    def timeline(query: str, anchor_date: str | None = None) -> dict[str, Any]:
+    def timeline(
+        query: str,
+        anchor_date: str | None = None,
+        agent: str | None = None,
+        scope: Scope = DEFAULT_SCOPE,
+    ) -> dict[str, Any]:
         """Temporal query rewriting + date-aware retrieval."""
         from kairix.core.factory import build_search_pipeline
 
@@ -754,6 +764,8 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         return tool_timeline(
             query=query,
             anchor_date=anchor_date,
+            agent=agent,
+            scope=scope,
             search_fn=_timeline_pipeline.search,
         )
 
@@ -769,10 +781,17 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         content: str,
         agent: str | None = None,
         top_k: int = 5,
-        threshold: float = 0.6,
+        threshold: float = 0.45,
+        scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Check new content against existing knowledge for contradictions."""
-        return tool_contradict(content=content, agent=agent, top_k=top_k, threshold=threshold)
+        return tool_contradict(
+            content=content,
+            agent=agent,
+            top_k=top_k,
+            threshold=threshold,
+            scope=scope,
+        )
 
     @server.tool()
     @wrap_tool_errors
