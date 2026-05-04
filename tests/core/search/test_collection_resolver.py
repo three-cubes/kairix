@@ -123,3 +123,69 @@ def test_unknown_scope_string_raises_value_error() -> None:
     resolver = DefaultCollectionResolver(collections_config=None)
     with pytest.raises(ValueError, match="unknown scope"):
         resolver.resolve("alpha", "not-a-scope")
+
+
+# ---------------------------------------------------------------------------
+# Reserved-collection invariant — reference-library never leaks into default
+# user search scopes regardless of yaml content. Regression guard for the
+# 2026-05-05 production pollution incident where an operator config listed
+# reference-library in collections.shared and reflib docs (5,835 rows in the
+# index vs ~4,400 user rows) dominated result mix on common terms.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_reflib_in_shared_config_excluded_from_shared_scope() -> None:
+    config = _config_with_shared("docs", "reference-library", "research")
+    resolver = DefaultCollectionResolver(collections_config=config)
+    cols = resolver.resolve("alpha", Scope.SHARED)
+    assert cols == ["docs", "research"]
+    assert "reference-library" not in (cols or [])
+
+
+@pytest.mark.unit
+def test_reflib_in_shared_config_excluded_from_shared_agent_scope() -> None:
+    config = _config_with_shared("docs", "reference-library")
+    resolver = DefaultCollectionResolver(collections_config=config)
+    cols = resolver.resolve("alpha", Scope.SHARED_AGENT)
+    assert cols == ["docs", "alpha-memory"]
+    assert "reference-library" not in (cols or [])
+
+
+@pytest.mark.unit
+def test_reflib_in_extra_collections_excluded() -> None:
+    config = _config_with_shared("docs")
+    resolver = DefaultCollectionResolver(
+        collections_config=config,
+        extra_collections=["reference-library", "operator-extra"],
+    )
+    cols = resolver.resolve("alpha", Scope.SHARED_AGENT)
+    assert cols == ["docs", "operator-extra", "alpha-memory"]
+    assert "reference-library" not in (cols or [])
+
+
+@pytest.mark.unit
+def test_reflib_excluded_from_everything_scope() -> None:
+    """Even Scope.EVERYTHING — the broadest default — does not pull reflib.
+
+    Reflib is reachable only via explicit ``collections=["reference-library"]``
+    on the search call. This keeps the benchmark/eval path working while
+    preventing default-scope pollution.
+    """
+
+    class _StubRegistry:
+        @staticmethod
+        def list_agents():
+            from types import SimpleNamespace
+
+            return [SimpleNamespace(collection="alpha-memory")]
+
+    config = _config_with_shared("docs", "reference-library")
+    resolver = DefaultCollectionResolver(
+        collections_config=config,
+        agent_registry=_StubRegistry(),
+    )
+    cols = resolver.resolve("alpha", Scope.EVERYTHING)
+    assert "reference-library" not in (cols or [])
+    assert "docs" in (cols or [])
+    assert "alpha-memory" in (cols or [])

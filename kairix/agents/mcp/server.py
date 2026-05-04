@@ -462,17 +462,24 @@ def tool_timeline(
         # Fallthrough search: when search_fn is wired, always run a search using
         # the (possibly rewritten) query so MCP callers get results even on
         # non-temporal queries. fell_back signals the rewrite was a no-op.
+        # Result items are BudgetedResult — fields live on .result; .content
+        # is the boundary-trimmed snippet. Earlier code shape-mismatched and
+        # produced empty placeholders (Shape's 2026-05-05 MCP path report).
         results_list: list[dict[str, Any]] = []
         if search_fn is not None:
             try:
                 sr = search_fn(query=rewritten, budget=3000, agent=agent, scope=scope)
-                for r in getattr(sr, "results", []):
+                for budgeted in getattr(sr, "results", []):
+                    inner = getattr(budgeted, "result", None)
+                    if inner is None:
+                        continue
+                    snippet = getattr(budgeted, "content", "") or getattr(inner, "snippet", "")
                     results_list.append(
                         {
-                            "path": getattr(r, "path", ""),
-                            "title": getattr(r, "title", ""),
-                            "snippet": getattr(r, "snippet", "")[:300],
-                            "score": getattr(r, "score", 0.0),
+                            "path": getattr(inner, "path", ""),
+                            "title": getattr(inner, "title", ""),
+                            "snippet": snippet[:300],
+                            "score": getattr(inner, "boosted_score", getattr(inner, "score", 0.0)),
                         }
                     )
             except Exception:
