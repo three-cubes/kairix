@@ -7,6 +7,21 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
+## [2026.5.4] - 2026-05-05 — Hotfix: search-result hygiene + MCP timeline result-shape
+
+> Hotfix off `2026.5.3`. Two production defects from the 2026-05-05 dogfood. Pull the new image and restart — no re-embed, no client config change.
+
+### Fixed
+- **Reference-library no longer pollutes default search results.** The reflib corpus (~5.8k docs) ships indexed in the same SQLite store as your vault. An operator config that listed `reference-library` under `collections.shared` caused reflib hits to dominate result mix on common terms. `DefaultCollectionResolver` now treats `reference-library` as a reserved collection name — it is excluded from every default scope (`shared`, `agent`, `shared+agent`, `all-agents`, `everything`) regardless of yaml. Reflib remains reachable for benchmarks via explicit `--collection reference-library`. Defense-in-depth: future operator config errors can't re-arm the foot-gun.
+- **MCP `tool_timeline` returns populated results for non-temporal queries.** Previously the fallthrough search produced response objects whose `path`/`title`/`snippet` were silently empty strings (Shape's 2026-05-05 MCP path report). Root cause: the result handler dereferenced `BudgetedResult` with `getattr(r, "path", "")` instead of `r.result.path`. Now mirrors `tool_search`'s access pattern. Real path/title/snippet/score values flow through.
+
+### Tests
+- Four resolver invariants pinning reflib exclusion across `SHARED`, `SHARED_AGENT`, `EVERYTHING`, and `extra_collections`.
+- Timeline regression test asserting `BudgetedResult` fields propagate. Existing fakes updated to mirror production shape (the old fake mirrored the broken shape, which is why the bug slipped past CI).
+
+### Operator note
+- `kairix.example.config.yaml` documents `reference-library` as a reserved name. Adding it to `shared` is now a no-op rather than a foot-gun.
+
 ## [2026.5.3] - 2026-05-04 — MCP availability, agent bug closure, scope semantics
 
 > **Upgrading? Read [`docs/upgrades/v2026.5.3.md`](docs/upgrades/v2026.5.3.md) first.** It tells your agents (or you) exactly what to change. The TL;DR is: **swap `/sse` to `/mcp` in your MCP client config.** No auth changes, no tunnels.
