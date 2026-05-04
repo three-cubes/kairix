@@ -31,6 +31,7 @@ from typing import Any, Literal
 
 import requests
 
+from kairix.agents.mcp.errors import wrap_tool_errors
 from kairix.core.search.intent import QueryIntent
 from kairix.core.search.scope import Scope
 from kairix.text import estimate_tokens
@@ -677,6 +678,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     server = FastMCP("kairix", host=host, port=port)
 
     @server.tool()
+    @wrap_tool_errors
     def search(
         query: str,
         agent: str | None = None,
@@ -687,26 +689,31 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         return tool_search(query=query, agent=agent, scope=scope, budget=budget)
 
     @server.tool()
+    @wrap_tool_errors
     def entity(name: str) -> dict[str, Any]:
         """Entity lookup from Neo4j."""
         return tool_entity(name=name)
 
     @server.tool()
+    @wrap_tool_errors
     def prep(query: str, agent: str | None = None, tier: Literal["l0", "l1"] = "l0") -> dict[str, Any]:
         """Context preparation: tiered L0/L1 summary generation."""
         return tool_prep(query=query, agent=agent, tier=tier)
 
     @server.tool()
+    @wrap_tool_errors
     def timeline(query: str, anchor_date: str | None = None) -> dict[str, Any]:
         """Temporal query rewriting + date-aware retrieval."""
         return tool_timeline(query=query, anchor_date=anchor_date)
 
     @server.tool()
+    @wrap_tool_errors
     def research(query: str, agent: str | None = None, max_turns: int = 4) -> dict[str, Any]:
         """Research a complex question. Searches iteratively until it finds a good answer."""
         return tool_research(query=query, agent=agent, max_turns=max_turns)
 
     @server.tool()
+    @wrap_tool_errors
     def contradict(
         content: str,
         agent: str | None = None,
@@ -717,6 +724,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         return tool_contradict(content=content, agent=agent, top_k=top_k, threshold=threshold)
 
     @server.tool()
+    @wrap_tool_errors
     def usage_guide(topic: str = "") -> dict[str, Any]:
         """Return the kairix agent usage guide. Call this when unsure how to use kairix."""
         return tool_usage_guide(topic=topic)
