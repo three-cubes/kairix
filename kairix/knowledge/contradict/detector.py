@@ -26,7 +26,6 @@ from kairix.knowledge.contradict.extract import EntityDensityClaimExtractor
 from kairix.knowledge.contradict.scorers import (
     CompositeContradictionScorer,
     default_contradiction_scorer,
-    parse_llm_score,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,13 +41,6 @@ class ContradictionResult:
     snippet: str  # excerpt from the existing document
     category: str = "direct"  # which scorer fired (direct | overstatement | status_mismatch)
     claim: str = ""  # the extracted claim that drove the search/scoring
-
-
-# Backwards-compat shim — historical callers and tests imported the private
-# parser. parse_llm_score now returns (None, "") on failure so this is a
-# direct alias. Marked for removal once tests/contradict/test_detector.py
-# migrates to the public parse_llm_score.
-_parse_llm_response = parse_llm_score
 
 
 def check_contradiction(

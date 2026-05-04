@@ -14,9 +14,9 @@ import pytest
 
 from kairix.knowledge.contradict.detector import (
     ContradictionResult,
-    _parse_llm_response,
     check_contradiction,
 )
+from kairix.knowledge.contradict.scorers import parse_llm_score
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,79 +61,79 @@ def _llm_response(score: float, reason: str = "test reason") -> str:
 
 
 # ---------------------------------------------------------------------------
-# _parse_llm_response
+# parse_llm_score
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_parse_llm_response_valid_json() -> None:
+def testparse_llm_score_valid_json() -> None:
     raw = '{"score": 0.8, "reason": "conflicting facts"}'
-    score, reason = _parse_llm_response(raw)
+    score, reason = parse_llm_score(raw)
     assert score == pytest.approx(0.8)
     assert reason == "conflicting facts"
 
 
 @pytest.mark.unit
-def test_parse_llm_response_clamps_above_1() -> None:
+def testparse_llm_score_clamps_above_1() -> None:
     raw = '{"score": 1.5, "reason": "extreme"}'
-    score, _reason = _parse_llm_response(raw)
+    score, _reason = parse_llm_score(raw)
     assert score == pytest.approx(1.0)
 
 
 @pytest.mark.unit
-def test_parse_llm_response_clamps_below_0() -> None:
+def testparse_llm_score_clamps_below_0() -> None:
     raw = '{"score": -0.3, "reason": "negative"}'
-    score, _reason = _parse_llm_response(raw)
+    score, _reason = parse_llm_score(raw)
     assert score == pytest.approx(0.0)
 
 
 @pytest.mark.unit
-def test_parse_llm_response_zero_score() -> None:
+def testparse_llm_score_zero_score() -> None:
     raw = '{"score": 0.0, "reason": "no contradiction"}'
-    score, reason = _parse_llm_response(raw)
+    score, reason = parse_llm_score(raw)
     assert score == pytest.approx(0.0)
     assert reason == "no contradiction"
 
 
 @pytest.mark.unit
-def test_parse_llm_response_empty_string() -> None:
-    score, reason = _parse_llm_response("")
+def testparse_llm_score_empty_string() -> None:
+    score, reason = parse_llm_score("")
     assert score is None
     assert reason == ""
 
 
 @pytest.mark.unit
-def test_parse_llm_response_no_json() -> None:
-    score, _reason = _parse_llm_response("no json here at all")
+def testparse_llm_score_no_json() -> None:
+    score, _reason = parse_llm_score("no json here at all")
     assert score is None
 
 
 @pytest.mark.unit
-def test_parse_llm_response_malformed_json() -> None:
-    score, _reason = _parse_llm_response("{score: not valid json}")
+def testparse_llm_score_malformed_json() -> None:
+    score, _reason = parse_llm_score("{score: not valid json}")
     assert score is None
 
 
 @pytest.mark.unit
-def test_parse_llm_response_extracts_from_preamble() -> None:
+def testparse_llm_score_extracts_from_preamble() -> None:
     """Model may prefix JSON with explanatory text — still parses."""
     raw = 'Here is my assessment: {"score": 0.7, "reason": "contradicts existing record"}'
-    score, reason = _parse_llm_response(raw)
+    score, reason = parse_llm_score(raw)
     assert score == pytest.approx(0.7)
     assert "contradicts" in reason
 
 
 @pytest.mark.unit
-def test_parse_llm_response_missing_score_key() -> None:
+def testparse_llm_score_missing_score_key() -> None:
     raw = '{"reason": "no score key"}'
-    score, _reason = _parse_llm_response(raw)
+    score, _reason = parse_llm_score(raw)
     assert score is None
 
 
 @pytest.mark.unit
-def test_parse_llm_response_non_numeric_score() -> None:
+def testparse_llm_score_non_numeric_score() -> None:
     raw = '{"score": "high", "reason": "non-numeric"}'
-    score, _reason = _parse_llm_response(raw)
+    score, _reason = parse_llm_score(raw)
     assert score is None
 
 
