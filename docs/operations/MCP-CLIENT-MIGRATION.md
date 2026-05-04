@@ -4,14 +4,16 @@ If you talk to kairix over MCP — Claude Desktop, Claude Code, OpenClaw, a cust
 
 ## TL;DR
 
-Change `/sse` to `/mcp` in your MCP client configuration.
+Change `/sse` to `/mcp` in your MCP client configuration. Nothing else.
 
 ```diff
 - "url": "http://kairix.example.com/sse"
 + "url": "http://kairix.example.com/mcp"
 ```
 
-That's it. Same host, same port, same authentication (if any), same tools, same parameters. Only the path changes.
+That's the entire client-side migration. Same host, same port, same tools, same parameters.
+
+> **You do NOT need to set up Cloudflare tunnels, Cloudflare Access, OAuth, JWT, or any other auth.** If your kairix is at `http://localhost:8090` (the standard TC deployment), it stays at `http://localhost:8090`. If your kairix sits behind a gateway someone else operates, that gateway's auth keeps working unchanged for `/mcp` exactly as it did for `/sse` — that's an *operator* concern, not yours. Anything in this doc about Cloudflare or Caddy is reference material for whoever runs the kairix server, not steps you need to take.
 
 If you can't migrate yet, **the old `/sse` endpoint still works** — kairix mounts both. You can move at your own pace. New clients should target `/mcp`; old clients can stay on `/sse` until you have time.
 
@@ -150,15 +152,16 @@ curl -X POST http://localhost:8090/mcp \
 
 If both succeed, the server side is good. Any client-side issue is in your MCP client configuration.
 
-## Common errors and fixes
+## Common errors and fixes (client-side)
 
 | What you see | What it means | Fix |
 |---|---|---|
-| `-32602 Invalid request parameters` on every tool call | You're hitting `/sse` against an older kairix that drops idle connections, OR your client is hitting `/sse` and the gateway is timing out idle connections | Move to `/mcp`. The new transport doesn't keep an idle connection so this failure mode is impossible. |
-| `404 Not Found` when you POST to `/mcp` | The kairix you're hitting is older than v2026.5.3 — `/mcp` doesn't exist yet | Either upgrade kairix or stay on `/sse` for now. |
-| Tool calls silently hang | Your client library is using the old SSE transport against the new `/mcp` path | Update your MCP client library to a version that supports streamable HTTP (Python `mcp>=1.20`, Node `@modelcontextprotocol/sdk>=1.5`), then point at `/mcp`. |
-| `connection refused` | kairix isn't running, or you're hitting the wrong host/port | Check `docker compose ps kairix` and `curl http://localhost:8090/healthz`. |
-| `gateway timeout` only on long-running tools (e.g. `research`) | Gateway has an HTTP request timeout shorter than the tool's processing time | Increase the gateway's request timeout (Caddy: `request_timeout` directive; Cloudflare: this is a Cloudflare-side limit you may need a Worker for). With streamable HTTP this is a normal HTTP timeout, not an SSE keep-alive. |
+| `-32602 Invalid request parameters` on every tool call | You're hitting `/sse` and the connection between your client and kairix dropped while idle | Change `/sse` to `/mcp` in your client config. |
+| `404 Not Found` when you POST to `/mcp` | The kairix you're hitting is older than v2026.5.3 — `/mcp` doesn't exist yet | Either ask the operator to upgrade kairix, or stay on `/sse` for now. |
+| Tool calls silently hang | Your MCP client library is too old for streamable HTTP | Update: Python `mcp>=1.20`, Node `@modelcontextprotocol/sdk>=1.5`. |
+| `connection refused` | kairix isn't running, or you're hitting the wrong host/port | Ask the operator to confirm `kairix mcp serve` is running and `curl http://<host>/healthz` returns ready. |
+
+If you're seeing something not in this table, capture the exact error and ping the operator — it's almost certainly an operator-side issue, not your client config.
 
 ## Rollback
 
