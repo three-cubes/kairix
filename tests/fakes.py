@@ -183,3 +183,18 @@ class FakeSearchLogger:
 
     def log_query(self, event: dict[str, Any]) -> None:
         self.events.append(event)
+
+
+class FakeCollectionResolver:
+    """In-memory CollectionResolver that returns configured lists per (agent, scope) key.
+
+    Constructed with a mapping from (agent_or_None, scope_value) tuples to
+    collection lists. Anything not in the map returns None.
+    """
+
+    def __init__(self, by_key: dict[tuple[str | None, str], list[str] | None] | None = None) -> None:
+        self._by_key: dict[tuple[str | None, str], list[str] | None] = dict(by_key or {})
+
+    def resolve(self, agent: str | None, scope: Any) -> list[str] | None:
+        scope_value = scope.value if hasattr(scope, "value") else str(scope)
+        return self._by_key.get((agent, scope_value))

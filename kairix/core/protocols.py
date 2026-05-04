@@ -114,3 +114,19 @@ class SearchLogger(Protocol):
     def log_search(self, event: dict[str, Any]) -> None: ...
 
     def log_query(self, event: dict[str, Any]) -> None: ...
+
+
+@runtime_checkable
+class CollectionResolver(Protocol):
+    """Resolves the collection list for a search call given an agent + scope.
+
+    Returning None means "no collection filter — search everything". Returning
+    a non-empty list scopes BM25 and vector backends to those collection names.
+    Returning an empty list is equivalent to None.
+
+    Implementations should be constructed at the boundary (factory.py) with
+    the loaded CollectionsConfig and any environment-derived extras, so that
+    business logic only depends on the Protocol surface (G4: config at boundary).
+    """
+
+    def resolve(self, agent: str | None, scope: Any) -> list[str] | None: ...
