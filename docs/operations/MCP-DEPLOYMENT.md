@@ -83,7 +83,7 @@ Schema:
 ```json
 {
   "ts": 1709553600,
-  "query_hash": "abcdef123456",
+  "query_hash": "12-hex-chars",
   "intent": "semantic",
   "agent": "alpha",
   "scope": "shared+agent",
