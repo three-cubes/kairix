@@ -42,10 +42,7 @@ def test_ranks_high_entity_density_sentences_first() -> None:
 def test_modal_words_boost_score() -> None:
     """A sentence with 'only' / 'monopoly' outranks a similar-length factual sentence
     when entity density is otherwise comparable."""
-    content = (
-        "AcmeCorp is the only provider of Widgets. "
-        "AcmeCorp also makes Widgets in Sydney."
-    )
+    content = "AcmeCorp is the only provider of Widgets. AcmeCorp also makes Widgets in Sydney."
     extractor = EntityDensityClaimExtractor()
     # Both sentences have AcmeCorp and Widgets; the first has "only" (modal-weighted)
     result = extractor.extract(content, top_n=1)

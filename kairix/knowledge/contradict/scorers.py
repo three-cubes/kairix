@@ -65,34 +65,38 @@ _STATUS_MISMATCH_PROMPT = (
 )
 
 
-def parse_llm_score(raw: str) -> tuple[float, str]:
+def parse_llm_score(raw: str) -> tuple[float | None, str]:
     """Parse a {"score": float, "reason": str} object out of an LLM response.
 
-    Tolerant of preamble/markdown around the JSON. Returns (0.0, "") on
-    any parse failure — never raises. Score is clamped to [0.0, 1.0].
+    Tolerant of preamble/markdown around the JSON. Returns (None, "") on
+    any parse failure so callers can distinguish "the LLM said 0" from
+    "the LLM response was unparseable". Score is clamped to [0.0, 1.0]
+    when present.
+
+    Never raises.
     """
     if not raw:
-        return 0.0, ""
+        return None, ""
 
     match = re.search(r"\{[^{}]*\}", raw, re.DOTALL)
     if not match:
-        return 0.0, ""
+        return None, ""
 
     try:
         obj = json.loads(match.group())
     except json.JSONDecodeError:
-        return 0.0, ""
+        return None, ""
 
     score_raw = obj.get("score")
     reason = str(obj.get("reason", ""))
 
     if score_raw is None:
-        return 0.0, ""
+        return None, ""
 
     try:
         score = float(score_raw)
     except (TypeError, ValueError):
-        return 0.0, ""
+        return None, ""
 
     return max(0.0, min(1.0, score)), reason
 
@@ -113,7 +117,10 @@ class _PromptedScorer:
         except Exception as exc:
             logger.debug("contradict: %s LLM call failed — %s", self.category, exc)
             return 0.0, ""
-        return parse_llm_score(raw)
+        score, reason = parse_llm_score(raw)
+        if score is None:
+            return 0.0, ""
+        return score, reason
 
 
 class DirectContradictionScorer(_PromptedScorer):

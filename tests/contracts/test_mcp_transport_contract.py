@@ -10,6 +10,11 @@ from __future__ import annotations
 
 import pytest
 
+# Skip when the optional [agents] extras aren't installed — the transport
+# module imports starlette at module level. CI's contract stage runs base
+# deps only; full-extras stages exercise this contract.
+pytest.importorskip("starlette")
+
 pytestmark = pytest.mark.contract
 
 

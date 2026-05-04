@@ -58,16 +58,17 @@ def test_parse_llm_score_clamps_to_unit_range() -> None:
 
 
 @pytest.mark.unit
-def test_parse_llm_score_returns_zero_on_garbage() -> None:
+def test_parse_llm_score_returns_none_on_garbage() -> None:
+    """Distinguishes 'unparseable response' from 'parsed score of zero'."""
     score, reason = parse_llm_score("not json at all")
-    assert score == 0.0
+    assert score is None
     assert reason == ""
 
 
 @pytest.mark.unit
 def test_parse_llm_score_handles_empty_input() -> None:
     score, reason = parse_llm_score("")
-    assert score == 0.0
+    assert score is None
     assert reason == ""
 
 
@@ -94,7 +95,7 @@ def test_overstatement_scorer_uses_overstatement_prompt() -> None:
     llm = _FakeLLM(['{"score": 0.6, "reason": "claim overstates"}'])
     scorer = OverstatementScorer(llm)
 
-    score, reason = scorer.score("X is the only one", "Y also does it")
+    score, _reason = scorer.score("X is the only one", "Y also does it")
 
     assert score == pytest.approx(0.6)
     assert scorer.category == "overstatement"

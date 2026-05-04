@@ -219,9 +219,6 @@ def test_resolver_all_agents_not_yet_implemented() -> None:
     resolver = DefaultCollectionResolver(collections_config=None)
     with pytest.raises(NotImplementedError, match="AgentRegistry"):
         resolver.resolve("shape", Scope.ALL_AGENTS)
-        else:
-            os.environ.pop("KAIRIX_EXTRA_COLLECTIONS", None)
-        _mod._COLLECTIONS_CONFIG = None
 
 
 # ---------------------------------------------------------------------------

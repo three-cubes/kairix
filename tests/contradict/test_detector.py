@@ -184,12 +184,28 @@ def test_check_contradiction_returns_result_above_threshold() -> None:
 @pytest.mark.unit
 def test_check_contradiction_respects_top_k() -> None:
     """Only top_k bundles are evaluated, not all search results."""
+    from kairix.knowledge.contradict.scorers import (
+        CompositeContradictionScorer,
+        DirectContradictionScorer,
+    )
+
     llm = MagicMock()
     llm.chat.return_value = _llm_response(0.8)
 
     bundles = [_make_search_result(f"doc{i}.md", f"content {i}") for i in range(10)]
-    check_contradiction("claim", llm=llm, top_k=3, threshold=0.0, search_fn=_fake_search(bundles))
-    # Only 3 LLM calls should have been made
+    # Use a single-scorer composite so the LLM call count maps 1:1 to candidates
+    # — keeps the test's "respects top_k" intent intact under the WS2-B
+    # three-category default which would otherwise make 3 calls per candidate.
+    scorer = CompositeContradictionScorer(scorers=[DirectContradictionScorer(llm)])
+    check_contradiction(
+        "claim",
+        llm=llm,
+        top_k=3,
+        threshold=0.0,
+        search_fn=_fake_search(bundles),
+        scorer=scorer,
+    )
+    # Only 3 LLM calls should have been made (3 unique candidates x 1 scorer)
     assert llm.chat.call_count == 3
 
 
@@ -214,6 +230,11 @@ def test_check_contradiction_sorts_by_score_descending() -> None:
 @pytest.mark.unit
 def test_check_contradiction_handles_llm_exception() -> None:
     """Skips a document when LLM call raises — does not crash."""
+    from kairix.knowledge.contradict.scorers import (
+        CompositeContradictionScorer,
+        DirectContradictionScorer,
+    )
+
     llm = MagicMock()
     llm.chat.side_effect = [RuntimeError("LLM timeout"), _llm_response(0.8)]
 
@@ -221,7 +242,17 @@ def test_check_contradiction_handles_llm_exception() -> None:
         _make_search_result("fail.md", "will fail"),
         _make_search_result("ok.md", "will succeed"),
     ]
-    results = check_contradiction("claim", llm=llm, threshold=0.0, search_fn=_fake_search(bundles))
+    # Use a single-scorer composite so each candidate gets exactly one LLM call
+    # — keeps the test's intent (one fail, one succeed) intact under WS2-B's
+    # three-category composite which would otherwise consume 3 side-effects per candidate.
+    scorer = CompositeContradictionScorer(scorers=[DirectContradictionScorer(llm)])
+    results = check_contradiction(
+        "claim",
+        llm=llm,
+        threshold=0.5,
+        search_fn=_fake_search(bundles),
+        scorer=scorer,
+    )
     assert len(results) == 1
     assert results[0].doc_path == "ok.md"
 

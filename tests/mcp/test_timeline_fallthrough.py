@@ -80,9 +80,7 @@ def test_non_temporal_query_falls_through_to_search() -> None:
 @pytest.mark.unit
 def test_temporal_query_uses_rewritten_query_for_search() -> None:
     """When the query is temporal, the rewriter expands it and search runs against the rewrite."""
-    search_fn, sr = _build_fake_search(
-        [{"path": "memory.md", "title": "Last week", "snippet": "...", "score": 0.7}]
-    )
+    search_fn, sr = _build_fake_search([{"path": "memory.md", "title": "Last week", "snippet": "...", "score": 0.7}])
     result = tool_timeline(
         query="what happened last week",
         extract_fn=_extract_temporal,

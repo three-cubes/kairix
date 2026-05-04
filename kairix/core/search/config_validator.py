@@ -140,10 +140,7 @@ def _validate_agents(agents: Any, collections: Any) -> list[str]:
                 # Detect overlapping write_paths — one being a prefix of another.
                 for other_name, other_path in write_paths:
                     if write_path == other_path:
-                        errors.append(
-                            f"{prefix} ({name}): write_path {write_path!r} duplicates "
-                            f"agent {other_name!r}"
-                        )
+                        errors.append(f"{prefix} ({name}): write_path {write_path!r} duplicates agent {other_name!r}")
                     elif other_path and (
                         write_path.startswith(other_path.rstrip("/") + "/")
                         or other_path.startswith(write_path.rstrip("/") + "/")

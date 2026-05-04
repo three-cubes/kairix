@@ -1,12 +1,12 @@
 """Protocols for the contradict pipeline.
 
-  - ``ClaimExtractor``: split content into a small set of high-signal
-    claims that the search step retrieves candidates against. Replaces
-    the historical 500-char truncation in detector.py.
-  - ``ContradictionScorer``: score a (claim, candidate) pair on one
-    contradiction category. Three Strategies — direct, overstatement,
-    status mismatch — compose into a CompositeContradictionScorer
-    aggregating by max.
+- ``ClaimExtractor``: split content into a small set of high-signal
+  claims that the search step retrieves candidates against. Replaces
+  the historical 500-char truncation in detector.py.
+- ``ContradictionScorer``: score a (claim, candidate) pair on one
+  contradiction category. Three Strategies — direct, overstatement,
+  status mismatch — compose into a CompositeContradictionScorer
+  aggregating by max.
 """
 
 from __future__ import annotations

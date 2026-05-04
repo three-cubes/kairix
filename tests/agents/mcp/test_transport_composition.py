@@ -12,12 +12,17 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from starlette.applications import Starlette
-from starlette.responses import PlainTextResponse, Response
-from starlette.routing import Mount, Route
-from starlette.testclient import TestClient
 
-from kairix.agents.mcp.transport import build_mcp_app
+# Skip the entire module when the optional [agents] extras (mcp + starlette
+# transitively) aren't installed. CI's contract stage runs the base deps only;
+# the agents-extras tests run in stages that install the full extras.
+starlette = pytest.importorskip("starlette")
+from starlette.applications import Starlette  # noqa: E402
+from starlette.responses import PlainTextResponse, Response  # noqa: E402
+from starlette.routing import Mount, Route  # noqa: E402
+from starlette.testclient import TestClient  # noqa: E402
+
+from kairix.agents.mcp.transport import build_mcp_app  # noqa: E402
 
 pytestmark = pytest.mark.unit
 

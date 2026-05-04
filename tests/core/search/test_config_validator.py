@@ -47,22 +47,14 @@ def test_duplicate_collection_name_reports_error() -> None:
 
 @pytest.mark.unit
 def test_unknown_retrieval_override_key_reports_error() -> None:
-    data = {
-        "collections": {
-            "shared": [{"name": "docs", "path": "docs", "retrieval": {"not_a_real_key": True}}]
-        }
-    }
+    data = {"collections": {"shared": [{"name": "docs", "path": "docs", "retrieval": {"not_a_real_key": True}}]}}
     errors = validate_config(data)
     assert any("unknown retrieval override key" in e for e in errors)
 
 
 @pytest.mark.unit
 def test_known_retrieval_override_keys_pass() -> None:
-    data = {
-        "collections": {
-            "shared": [{"name": "docs", "path": "docs", "retrieval": {"rrf_k": 30, "bm25_limit": 10}}]
-        }
-    }
+    data = {"collections": {"shared": [{"name": "docs", "path": "docs", "retrieval": {"rrf_k": 30, "bm25_limit": 10}}]}}
     assert validate_config(data) == []
 
 

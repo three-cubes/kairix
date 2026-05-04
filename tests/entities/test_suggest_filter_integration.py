@@ -14,8 +14,6 @@ pipeline + the FakeNeo4jClient. No @patch, no monkeypatch.
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 from kairix.knowledge.entities.filters import (
@@ -56,7 +54,7 @@ class _FakeNlp:
 
 
 def _doc_with_entities(text: str, entities: list[tuple[str, str]]) -> _FakeDoc:
-    return _FakeDoc(sents=[_FakeSentence(text=text, ents=[_FakeEntity(t, l) for t, l in entities])])
+    return _FakeDoc(sents=[_FakeSentence(text=text, ents=[_FakeEntity(t, label) for t, label in entities])])
 
 
 @pytest.mark.unit
@@ -86,51 +84,47 @@ def test_real_org_passes_through_default_chain() -> None:
 
 @pytest.mark.unit
 def test_allowlist_promotes_missing_org() -> None:
-    """Avanade isn't in the en_core_web_sm vocabulary; allowlist promotes it."""
-    # NER finds nothing relevant; the chain promotes Avanade because it's in the allowlist
+    """AcmeCorp isn't in the en_core_web_sm vocabulary; allowlist promotes it."""
+    # NER finds nothing relevant; the chain promotes AcmeCorp because it's in the allowlist
     # and substring-matches the input text.
-    nlp = _FakeNlp(_doc_with_entities("Avanade is a Microsoft partner.", []))
+    nlp = _FakeNlp(_doc_with_entities("AcmeCorp is a Microsoft partner.", []))
     neo4j = FakeNeo4jClient(entities=[])
 
     chain = ChainedSuggestionFilter(
         filters=[
             RolePhraseFilter(),
-            KnownEntityAllowlist(entities=[{"text": "Avanade", "label": "ORG"}]),
+            KnownEntityAllowlist(entities=[{"text": "AcmeCorp", "label": "ORG"}]),
             NerLabelFilter(person_overrides=set(), org_overrides=set()),
         ]
     )
 
-    result = suggest_entities(
-        "Avanade is a Microsoft partner.", neo4j, nlp=nlp, filter_chain=chain
-    )
+    result = suggest_entities("AcmeCorp is a Microsoft partner.", neo4j, nlp=nlp, filter_chain=chain)
 
-    assert "Avanade" in [r.text for r in result]
-    avanade = next(r for r in result if r.text == "Avanade")
-    assert avanade.label == "ORG"
+    assert "AcmeCorp" in [r.text for r in result]
+    acme = next(r for r in result if r.text == "AcmeCorp")
+    assert acme.label == "ORG"
     # Allowlist promotions get no NER context sentence
-    assert avanade.context == ""
+    assert acme.context == ""
 
 
 @pytest.mark.unit
 def test_label_override_corrects_mistype() -> None:
-    """NER tagged 'Mitch Tomazic' as ORG; NerLabelFilter overrides to PERSON."""
-    nlp = _FakeNlp(_doc_with_entities("Mitch Tomazic joined the team.", [("Mitch Tomazic", "ORG")]))
+    """NER tagged 'Alex Smith' as ORG; NerLabelFilter overrides to PERSON."""
+    nlp = _FakeNlp(_doc_with_entities("Alex Smith joined the team.", [("Alex Smith", "ORG")]))
     neo4j = FakeNeo4jClient(entities=[])
 
     chain = ChainedSuggestionFilter(
         filters=[
             RolePhraseFilter(),
             KnownEntityAllowlist(entities=[]),
-            NerLabelFilter(person_overrides={"Mitch Tomazic"}, org_overrides=set()),
+            NerLabelFilter(person_overrides={"Alex Smith"}, org_overrides=set()),
         ]
     )
 
-    result = suggest_entities(
-        "Mitch Tomazic joined the team.", neo4j, nlp=nlp, filter_chain=chain
-    )
+    result = suggest_entities("Alex Smith joined the team.", neo4j, nlp=nlp, filter_chain=chain)
 
     assert len(result) == 1
-    assert result[0].text == "Mitch Tomazic"
+    assert result[0].text == "Alex Smith"
     assert result[0].label == "PERSON"
 
 

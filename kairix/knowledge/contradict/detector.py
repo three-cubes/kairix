@@ -45,18 +45,10 @@ class ContradictionResult:
 
 
 # Backwards-compat shim — historical callers and tests imported the private
-# parser; kept as a thin alias around the new public parse_llm_score. Marked
-# for removal in a future sprint.
-def _parse_llm_response(raw: str) -> tuple[float | None, str]:
-    """Deprecated: use kairix.knowledge.contradict.scorers.parse_llm_score."""
-    score, reason = parse_llm_score(raw)
-    if score == 0.0 and reason == "":
-        # Distinguish parse-fail from genuine 0.0 — the historical contract
-        # used None to signal parse fail. Best-effort: if the raw input looks
-        # like JSON-with-explicit-zero, return (0.0, reason); otherwise None.
-        if not raw or "{" not in raw:
-            return None, ""
-    return score, reason
+# parser. parse_llm_score now returns (None, "") on failure so this is a
+# direct alias. Marked for removal once tests/contradict/test_detector.py
+# migrates to the public parse_llm_score.
+_parse_llm_response = parse_llm_score
 
 
 def check_contradiction(
