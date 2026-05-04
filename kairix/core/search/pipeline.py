@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from kairix.core.protocols import (
     BoostStrategy,
+    CollectionResolver,
     FusionStrategy,
     GraphRepository,
     SearchLogger,
@@ -71,6 +72,7 @@ class SearchPipeline:
     fusion: FusionStrategy
     boosts: list[BoostStrategy] = field(default_factory=list)
     logger: SearchLogger | None = None
+    resolver: CollectionResolver | None = None
     config: RetrievalConfig = field(default_factory=RetrievalConfig.defaults)
 
     def search(
@@ -106,7 +108,22 @@ class SearchPipeline:
                 ),
             )
 
-        # 3. Dispatch BM25 + vector search
+        # 3. Resolve collections via the injected CollectionResolver if not
+        # explicitly provided. Callers passing collections=None (the default)
+        # get scope-aware filtering; callers passing an explicit list override.
+        if collections is None and self.resolver is not None:
+            try:
+                collections = self.resolver.resolve(agent, scope)
+            except NotImplementedError as e:
+                # Operator misconfiguration (scope=all-agents without registry).
+                # Surface as a structured search error rather than crashing.
+                return SearchResult(
+                    query=query,
+                    intent=intent,
+                    error=str(e),
+                )
+
+        # 4. Dispatch BM25 + vector search
         cfg = self.config
         bm25_results: list[dict] = []
         vec_results: list[dict] = []

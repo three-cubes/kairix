@@ -135,6 +135,41 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
         query_log_path=query_log_path if enable_query_log else None,
     )
 
+    # CollectionResolver + AgentRegistry — load YAML once at the boundary,
+    # pass typed Adapters through. KAIRIX_EXTRA_COLLECTIONS still honoured
+    # for ad-hoc deployments without a full config file.
+    from kairix.core.search.config_loader import load_collections, _resolve_config_path
+    from kairix.core.search.registry import parse_agent_registry
+    from kairix.core.search.resolver import DefaultCollectionResolver
+
+    collections_config = None
+    agent_registry = None
+    try:
+        collections_config = load_collections()
+    except Exception as e:
+        logger.warning("factory: load_collections failed — %s", e)
+
+    config_path = _resolve_config_path()
+    if config_path is not None:
+        try:
+            import yaml
+
+            with config_path.open(encoding="utf-8") as f:
+                raw_yaml = yaml.safe_load(f) or {}
+            pattern = (collections_config.agent_pattern if collections_config else "{agent}-memory")
+            agent_registry = parse_agent_registry(raw_yaml, default_pattern=pattern)
+        except Exception as e:
+            logger.warning("factory: parse_agent_registry failed — %s", e)
+
+    extra_raw = os.environ.get("KAIRIX_EXTRA_COLLECTIONS", "")
+    extra_collections = [c.strip() for c in extra_raw.split(",") if c.strip()]
+
+    collection_resolver = DefaultCollectionResolver(
+        collections_config=collections_config,
+        extra_collections=extra_collections,
+        agent_registry=agent_registry,
+    )
+
     return SearchPipeline(
         classifier=_RuleClassifier(),
         bm25=bm25,
@@ -143,5 +178,6 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
         fusion=fusion,
         boosts=boosts,
         logger=search_logger,
+        resolver=collection_resolver,
         config=cfg,
     )

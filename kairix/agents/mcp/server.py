@@ -308,6 +308,7 @@ def tool_prep(
     query: str,
     agent: str | None = None,
     tier: Literal["l0", "l1"] = "l0",
+    scope: Scope = DEFAULT_SCOPE,
     *,
     search_fn: Callable[..., Any] | None = None,
     chat_fn: Callable[..., Any] | None = None,
@@ -319,6 +320,8 @@ def tool_prep(
     Retrieves relevant documents first, then summarises from them.
 
     Args:
+        scope:     Search scope — shared, agent, shared+agent, all-agents,
+                   or everything. Default shared+agent.
         search_fn: Injectable search function for testing.
                    Defaults to the production hybrid search.
         chat_fn:   Injectable chat completion function for testing.
@@ -337,7 +340,7 @@ def tool_prep(
 
         # Retrieve context first — prep is grounded, not hallucinated
         budget = 1500 if tier == "l0" else 3000
-        sr = search_fn(query, agent=agent, scope=DEFAULT_SCOPE, budget=budget)
+        sr = search_fn(query, agent=agent, scope=scope, budget=budget)
         context_parts = []
         for r in sr.results[:5]:
             context_parts.append(f"[{r.result.title or r.result.path}]\n{r.content[:500]}")
@@ -732,9 +735,14 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
 
     @server.tool()
     @wrap_tool_errors
-    def prep(query: str, agent: str | None = None, tier: Literal["l0", "l1"] = "l0") -> dict[str, Any]:
+    def prep(
+        query: str,
+        agent: str | None = None,
+        tier: Literal["l0", "l1"] = "l0",
+        scope: Scope = DEFAULT_SCOPE,
+    ) -> dict[str, Any]:
         """Context preparation: tiered L0/L1 summary generation."""
-        return tool_prep(query=query, agent=agent, tier=tier)
+        return tool_prep(query=query, agent=agent, tier=tier, scope=scope)
 
     @server.tool()
     @wrap_tool_errors
