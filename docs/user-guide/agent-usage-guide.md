@@ -47,8 +47,25 @@ kairix search "tell me about Acme Corp" --agent builder
 | Flag | Default | When to use |
 |---|---|---|
 | `--agent <name>` | None | Always — scopes results to your agent's collections + shared |
+| `--scope <value>` | `shared+agent` | Override the default scope. See "Scope" section below. |
 | `--budget <tokens>` | 5000 | Reduce if context window is tight; 2000–3000 is usually enough |
 | `--json` | Off | Machine-readable output — use when parsing results programmatically |
+
+---
+
+## Scope
+
+Every retrieval tool (`search`, `prep`, `timeline`, `contradict`) accepts a `scope` value. It controls which document collections the search reaches.
+
+| Scope | Reaches | When to use |
+|---|---|---|
+| `shared` | Shared collections only (vault content not tied to any agent) | When the agent's own memory shouldn't influence the answer — e.g. fact-checking a claim against curated knowledge. |
+| `agent` | Only the calling agent's own memory | When you specifically want to recall what *this agent* has previously written — e.g. session continuity. |
+| `shared+agent` (default) | Shared + the calling agent's memory | Usual case — the agent has access to organisational knowledge plus its own history. |
+| `all-agents` | Every agent's memory, no shared | Cross-agent synthesis — "what has the team collectively discovered about X?" Requires `agents:` configured in `kairix.config.yaml`. |
+| `everything` | Shared + every agent's memory | Maximum-recall queries; treat as a last resort because it dilutes precision. |
+
+**MCP equivalents:** the same values (as strings) are accepted on the `scope` parameter of `mcp-kairix__search`, `mcp-kairix__prep`, `mcp-kairix__timeline`, and `mcp-kairix__contradict`.
 
 ---
 
