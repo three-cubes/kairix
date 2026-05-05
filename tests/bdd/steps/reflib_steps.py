@@ -31,24 +31,9 @@ def _build_fixture_db(db_path: Path) -> None:
     if db_path.exists():
         return  # already built
     db = sqlite3.connect(str(db_path))
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            collection TEXT NOT NULL,
-            path TEXT NOT NULL,
-            title TEXT,
-            hash TEXT NOT NULL,
-            created_at TEXT,
-            modified_at TEXT,
-            active INTEGER DEFAULT 1,
-            UNIQUE(collection, path)
-        );
-        CREATE TABLE IF NOT EXISTS content (
-            hash TEXT PRIMARY KEY,
-            doc TEXT,
-            created_at TEXT
-        );
-    """)
+    from kairix.core.db.schema import create_schema
+
+    create_schema(db)
 
     scanner = DocumentScanner(db, document_root=FIXTURE_ROOT)
     collections = []

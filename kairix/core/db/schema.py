@@ -46,6 +46,7 @@ def create_schema(db: sqlite3.Connection, *, dims: int = EMBED_VECTOR_DIMS) -> N
             created_at TEXT,
             modified_at TEXT,
             active INTEGER DEFAULT 1,
+            agent_owner TEXT,
             UNIQUE(collection, path)
         );
 
@@ -73,6 +74,7 @@ def create_schema(db: sqlite3.Connection, *, dims: int = EMBED_VECTOR_DIMS) -> N
         CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(hash);
         CREATE INDEX IF NOT EXISTS idx_documents_collection ON documents(collection);
         CREATE INDEX IF NOT EXISTS idx_documents_active ON documents(active);
+        CREATE INDEX IF NOT EXISTS idx_documents_agent_owner ON documents(agent_owner);
         CREATE INDEX IF NOT EXISTS idx_content_vectors_chunk_date ON content_vectors(chunk_date);
     """)
 
@@ -155,13 +157,25 @@ def migrate(db: sqlite3.Connection) -> None:
         db.commit()
         logger.info("db.schema: migration — added chunk_date column to content_vectors")
 
-    # Ensure indexes exist (idempotent) — only if the tables exist
+    # agent_owner migration — per-document agent provenance for #114.
+    # Existing rows get NULL (treated as shared / not agent-owned) until a
+    # `kairix embed --backfill-agent-owner` pass re-applies the path → agent
+    # mapping from the configured AgentRegistry.
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "documents" in tables:
+        existing_doc = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
+        if "agent_owner" not in existing_doc:
+            db.execute("ALTER TABLE documents ADD COLUMN agent_owner TEXT")
+            db.commit()
+            logger.info("db.schema: migration — added agent_owner column to documents")
+
+    # Ensure indexes exist (idempotent) — only if the tables exist
     if "documents" in tables:
         db.executescript("""
             CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(hash);
             CREATE INDEX IF NOT EXISTS idx_documents_collection ON documents(collection);
             CREATE INDEX IF NOT EXISTS idx_documents_active ON documents(active);
+            CREATE INDEX IF NOT EXISTS idx_documents_agent_owner ON documents(agent_owner);
         """)
     if "content_vectors" in tables:
         db.execute("CREATE INDEX IF NOT EXISTS idx_content_vectors_chunk_date ON content_vectors(chunk_date)")

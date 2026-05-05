@@ -20,6 +20,7 @@ Usage::
 
 import logging
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,11 @@ from kairix.knowledge.reflib.dedup import hash_content as _hash_content
 from kairix.text import extract_title
 
 logger = logging.getLogger(__name__)
+
+# Type alias for the per-path agent resolver. Given a (collection, rel_path)
+# pair the resolver returns the agent name that owns the document, or None
+# for documents not under any agent's write_path (treated as shared).
+AgentOwnerResolver = Callable[[str, str], str | None]
 
 
 @dataclass
@@ -71,9 +77,16 @@ class DocumentScanner:
     and only updates modified documents.
     """
 
-    def __init__(self, db: sqlite3.Connection, document_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        db: sqlite3.Connection,
+        document_root: Path | None = None,
+        *,
+        agent_owner_resolver: AgentOwnerResolver | None = None,
+    ) -> None:
         self._db = db
         self._document_root = document_root or Path.home() / "Documents"
+        self._agent_owner_resolver = agent_owner_resolver
 
     def scan(self, collections: list[CollectionConfig]) -> ScanReport:
         """
@@ -134,17 +147,24 @@ class DocumentScanner:
             )
             return
 
+        agent_owner = (
+            self._agent_owner_resolver(config.name, rel_path) if self._agent_owner_resolver is not None else None
+        )
+
         self._db.execute(
             """
-            INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
+            INSERT INTO documents (
+                collection, path, title, hash, created_at, modified_at, active, agent_owner
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
             ON CONFLICT(collection, path) DO UPDATE SET
                 title = excluded.title,
                 hash = excluded.hash,
                 modified_at = excluded.modified_at,
-                active = 1
+                active = 1,
+                agent_owner = excluded.agent_owner
             """,
-            (config.name, rel_path, title, content_hash, now, now),
+            (config.name, rel_path, title, content_hash, now, now, agent_owner),
         )
         self._db.execute(
             "INSERT OR REPLACE INTO content (hash, doc, created_at) VALUES (?, ?, ?)",

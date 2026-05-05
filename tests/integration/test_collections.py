@@ -13,28 +13,10 @@ pytestmark = pytest.mark.integration
 
 
 def _create_scanner_schema(db: sqlite3.Connection) -> None:
-    """Create minimal schema for DocumentScanner."""
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            collection TEXT NOT NULL,
-            path TEXT NOT NULL,
-            title TEXT,
-            hash TEXT NOT NULL,
-            created_at TEXT,
-            modified_at TEXT,
-            active INTEGER DEFAULT 1,
-            UNIQUE(collection, path)
-        );
-        CREATE TABLE IF NOT EXISTS content (
-            hash TEXT PRIMARY KEY,
-            doc TEXT,
-            created_at TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(hash);
-        CREATE INDEX IF NOT EXISTS idx_documents_collection ON documents(collection);
-        CREATE INDEX IF NOT EXISTS idx_documents_active ON documents(active);
-    """)
+    """Create the production schema (single source of truth with kairix.core.db.schema)."""
+    from kairix.core.db.schema import create_schema
+
+    create_schema(db)
 
 
 @pytest.fixture()

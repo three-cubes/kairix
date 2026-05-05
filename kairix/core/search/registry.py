@@ -28,6 +28,7 @@ the misconfiguration is loud, not silent.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -73,6 +74,35 @@ class ConfigDrivenAgentRegistry:
         if not agent.write_path:
             return False
         return path == agent.write_path or path.startswith(agent.write_path.rstrip("/") + "/")
+
+
+def build_agent_owner_resolver(
+    registry: ConfigDrivenAgentRegistry,
+) -> Callable[[str, str], str | None]:
+    """Build the (collection, rel_path) → agent_name resolver for the embed scanner.
+
+    The resolver matches each scanned document against every agent's
+    ``write_path``. The longest-prefix match wins (so ``shared/foo`` doesn't
+    accidentally match an agent whose write_path is ``shared``). Documents
+    not under any agent's write_path return None and land in the database
+    with ``agent_owner=NULL`` (treated as shared).
+
+    Used by ``kairix/core/embed/cli.py`` to wire ``DocumentScanner`` with
+    per-document agent provenance (#114).
+    """
+    # Stable list snapshot at build time so tests / production both bind once.
+    agents = [a for a in registry.list_agents() if a.write_path]
+    # Sort by descending write_path length so longest match wins via "first hit".
+    agents.sort(key=lambda a: len(a.write_path), reverse=True)
+
+    def _resolve(_collection: str, rel_path: str) -> str | None:
+        for agent in agents:
+            wp = agent.write_path.rstrip("/")
+            if rel_path == wp or rel_path.startswith(wp + "/"):
+                return agent.name
+        return None
+
+    return _resolve
 
 
 def parse_agent_registry(data: dict, *, default_pattern: str = "{agent}-memory") -> ConfigDrivenAgentRegistry:
