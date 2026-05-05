@@ -821,3 +821,65 @@ def test_gold_titles_highest_relevance_derives_gold_path(tmp_path: Path) -> None
     suite = load_suite(str(p))
     # gold_path derived from the relevance-2 entry
     assert suite.cases[0].gold_path == "projects"
+
+
+def test_gold_titles_with_unquoted_iso_date_coerces_to_str(tmp_path: Path) -> None:
+    """Regression for #103. PyYAML parses unquoted ISO date titles as datetime.date,
+    which crashes downstream scoring (str.endswith on a date object).
+
+    The suite loader must coerce title/path refs to str at the boundary."""
+    import textwrap
+
+    from kairix.quality.benchmark.suite import load_suite
+
+    content = textwrap.dedent("""\
+        meta:
+          name: dated
+          version: "1.0"
+        cases:
+          - id: D01
+            category: recall
+            query: "what happened on this day"
+            score_method: ndcg
+            gold_titles:
+              - title: 2026-04-07
+                relevance: 2
+              - title: 2026-04-08
+                relevance: 1
+    """)
+    p = tmp_path / "dated-suite.yaml"
+    p.write_text(content)
+
+    suite = load_suite(str(p))
+    case = suite.cases[0]
+    assert case.gold_titles is not None
+    assert all(isinstance(g["title"], str) for g in case.gold_titles)
+    assert case.gold_titles[0]["title"] == "2026-04-07"
+
+
+def test_gold_paths_with_unquoted_iso_date_coerces_to_str(tmp_path: Path) -> None:
+    """Regression for #103. Same coercion guarantee for gold_paths."""
+    import textwrap
+
+    from kairix.quality.benchmark.suite import load_suite
+
+    content = textwrap.dedent("""\
+        meta:
+          name: dated
+          version: "1.0"
+        cases:
+          - id: D02
+            category: recall
+            query: "what happened on this day"
+            score_method: ndcg
+            gold_paths:
+              - path: 2026-04-07
+                relevance: 2
+    """)
+    p = tmp_path / "dated-suite.yaml"
+    p.write_text(content)
+
+    suite = load_suite(str(p))
+    case = suite.cases[0]
+    assert case.gold_paths is not None
+    assert all(isinstance(g["path"], str) for g in case.gold_paths)
