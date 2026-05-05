@@ -365,6 +365,57 @@ def _cmd_tune(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_gate(args: argparse.Namespace) -> int:
+    """Stage 5 of KFEAT-013 onboarding: read a benchmark result and apply
+    the quality gate. Exits 0 on PASS, 2 on HOLD (so wrappers can chain on
+    success). Argument schema mirrors ``eval tune`` deliberately: same
+    --result, same --floor.
+    """
+    import json
+    from pathlib import Path
+
+    from kairix.quality.eval.gate import run_gate
+    from kairix.quality.eval.tune import CorpusHints
+
+    try:
+        with open(args.result) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    summary = data.get("summary", {})
+    scores = summary.get("category_scores", {})
+    weighted_total = float(summary.get("weighted_total", 0.0))
+    if not scores:
+        print("ERROR: No category_scores found in result file.", file=sys.stderr)
+        return 1
+
+    # Best-effort corpus hints from the local index — same approach as tune.
+    hints = CorpusHints()
+    try:
+        from kairix.core.db import get_db_path, open_db
+        from kairix.quality.eval.auto_gold import analyse_corpus
+
+        db_path = get_db_path()
+        db = open_db(Path(db_path))
+        profile = analyse_corpus(db)
+        db.close()
+        hints = CorpusHints(
+            has_date_files=profile.date_filename_count > 0,
+            has_procedural_docs=profile.procedural_count > 0,
+            has_entity_folders=profile.entity_doc_count > 0,
+        )
+    except Exception:
+        # No index available — fall back to no hints. Recommendations stay generic.
+        pass
+
+    result = run_gate(scores, weighted_total=weighted_total, hints=hints, floor=args.floor)
+    print(result.format())
+
+    return 0 if result.passed else 2
+
+
 def _cmd_sweep(args: argparse.Namespace) -> int:
     from pathlib import Path
 
@@ -512,6 +563,19 @@ def main(argv: list[str] | None = None) -> None:
         help="Category floor threshold (default: 0.50)",
     )
 
+    # --- gate ---
+    p_gate = subparsers.add_parser(
+        "gate",
+        help="Stage 5 (KFEAT-013) — apply quality gate to a benchmark result; exit 0 PASS / 2 HOLD",
+    )
+    p_gate.add_argument("--result", required=True, help="Benchmark result JSON file")
+    p_gate.add_argument(
+        "--floor",
+        type=float,
+        default=0.50,
+        help="Category floor threshold (default: 0.50)",
+    )
+
     # --- sweep ---
     p_sweep = subparsers.add_parser("sweep", help="Grid search BM25 column weights and query styles")
     p_sweep.add_argument("--suite", required=True, help="Benchmark suite YAML with gold_titles")
@@ -548,6 +612,7 @@ def main(argv: list[str] | None = None) -> None:
         "build-gold": _cmd_build_gold,
         "auto-gold": _cmd_auto_gold,
         "tune": _cmd_tune,
+        "gate": _cmd_gate,
         "sweep": _cmd_sweep,
         "hybrid-sweep": _cmd_hybrid_sweep,
     }
