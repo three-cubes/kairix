@@ -142,7 +142,8 @@ def _cmd_report(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        # NOSONAR(python:S2083): CLI trust boundary — --output is user-supplied; local process trust model applies.
+        # NOSONAR(python:S2083): CLI trust boundary — --output is
+        # user-supplied; local process trust model applies.
         output_path.write_text(report, encoding="utf-8")
         print(f"Report written to {output_path}")
     else:

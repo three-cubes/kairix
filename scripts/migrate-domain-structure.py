@@ -105,7 +105,8 @@ def rewrite_imports_in_file(filepath: Path, dry_run: bool = False) -> list[str]:
                 new_content = updated
 
     if changes and not dry_run:
-        # NOSONAR(python:S2083): internal one-shot migration script; filepath is from local rglob over the package root, never user input.
+        # NOSONAR(python:S2083): internal one-shot migration script;
+        # filepath is from rglob over the package root, never user input.
         filepath.write_text(new_content, encoding="utf-8")
 
     return changes
