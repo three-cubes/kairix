@@ -95,9 +95,15 @@ def _build_adaptive_queries(db: sqlite3.Connection) -> list[tuple[str, str, str]
 
 
 def _embed_query(query: str) -> np.ndarray | None:
-    """Embed a single query string via the configured embed provider. Returns float32 numpy array or None."""
+    """Embed a single query string via the configured EmbedProvider.
+
+    Returns a normalised float32 numpy array, or None when credentials are
+    missing / the provider call fails. The provider's openai SDK client
+    handles retry, rate-limiting, and backoff internally.
+    """
     try:
         from kairix.credentials import get_credentials
+        from kairix.platform.llm.embed_provider import get_embed_provider
 
         creds = get_credentials("embed")
     except Exception:
@@ -109,22 +115,14 @@ def _embed_query(query: str) -> np.ndarray | None:
         logger.warning("Embed credentials not set — skipping recall check")
         return None
 
-    api_key = creds.api_key
-    endpoint = creds.endpoint.rstrip("/")
     deployment = creds.model or "text-embedding-3-large"
 
     try:
-        import requests
-
-        resp = requests.post(
-            f"{endpoint}/openai/deployments/{deployment}/embeddings?api-version=2024-02-01",
-            headers={"api-key": api_key, "Content-Type": "application/json"},
-            json={"input": [query], "dimensions": EMBED_DIMS},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        vec = resp.json()["data"][0]["embedding"]
-        arr = np.array(vec, dtype=np.float32)
+        provider = get_embed_provider()
+        vectors = provider.embed_batch([query], model=deployment, dims=EMBED_DIMS)
+        if not vectors:
+            return None
+        arr = np.array(vectors[0], dtype=np.float32)
         norm = np.linalg.norm(arr)
         if norm > 0:
             arr /= norm

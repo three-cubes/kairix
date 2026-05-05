@@ -164,3 +164,44 @@ def test_check_recall_counts_hit_when_gold_in_results() -> None:
     assert result["passed"] == 1
     assert result["score"] == pytest.approx(1.0)
     assert result["detail"][0]["hit"] is True
+
+
+@pytest.mark.unit
+def test_embed_query_uses_embed_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: _embed_query must call EmbedProvider.embed_batch, not raw HTTP.
+
+    Closes the last #43 wire-up: removes raw requests.post() in favour of
+    the SDK-backed EmbedProvider so retry/rate-limit/backoff are consistent
+    with the rest of the embed pipeline.
+    """
+
+    from kairix.core.embed import recall_check
+    from kairix.credentials import Credentials
+
+    captured: dict[str, object] = {}
+
+    class _FakeProvider:
+        def embed_batch(self, texts: list[str], *, model: str, dims: int) -> list[list[float]]:
+            captured["texts"] = texts
+            captured["model"] = model
+            captured["dims"] = dims
+            return [[0.0, 0.6, 0.8]]  # un-normalised vector to verify normalisation
+
+    import kairix.credentials as creds_mod
+    import kairix.platform.llm.embed_provider as ep
+
+    monkeypatch.setattr(
+        creds_mod,
+        "get_credentials",
+        lambda _scope: Credentials(api_key="k", endpoint="https://x", model="text-embedding-3-large"),
+    )
+    monkeypatch.setattr(ep, "get_embed_provider", lambda: _FakeProvider())
+
+    arr = recall_check._embed_query("kairix MCP path")
+
+    assert arr is not None
+    # Provider was called with the query and returned dims/model
+    assert captured["texts"] == ["kairix MCP path"]
+    assert captured["model"] == "text-embedding-3-large"
+    # Returned vector is normalised (unit length within float32 tolerance)
+    assert abs(float(np.linalg.norm(arr)) - 1.0) < 1e-5
