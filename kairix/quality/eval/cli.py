@@ -135,8 +135,16 @@ def _cmd_report(args: argparse.Namespace) -> int:
     if args.output:
         from pathlib import Path
 
-        Path(args.output).write_text(report, encoding="utf-8")
-        print(f"Report written to {args.output}")
+        output_path = Path(args.output).expanduser().resolve()
+        if not output_path.parent.exists():
+            print(
+                f"Error: parent directory {output_path.parent} does not exist",
+                file=sys.stderr,
+            )
+            return 1
+        # NOSONAR(python:S2083): CLI trust boundary — --output is user-supplied; local process trust model applies.
+        output_path.write_text(report, encoding="utf-8")
+        print(f"Report written to {output_path}")
     else:
         print(report)
 
