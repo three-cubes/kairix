@@ -28,18 +28,6 @@ from kairix.paths import document_root, workspace_root
 # Injection log path
 _LOG_PATH = str(Path.home() / ".cache" / "kairix" / "wikilinks-log.jsonl")
 
-_DOCUMENT_ROOT = str(document_root())
-_WORKSPACE_ROOT = str(workspace_root())
-
-# Eligible base paths for injection
-_ELIGIBLE_PREFIXES = (
-    f"{_WORKSPACE_ROOT}/",
-    f"{_DOCUMENT_ROOT}/04-Agent-Knowledge/",
-    f"{_DOCUMENT_ROOT}/01-Projects/",
-    f"{_DOCUMENT_ROOT}/02-Areas/",
-    f"{_DOCUMENT_ROOT}/05-Knowledge/",
-)
-
 _INELIGIBLE_SUBSTRINGS = (
     "/archive/",
     "/archived/",
@@ -47,6 +35,25 @@ _INELIGIBLE_SUBSTRINGS = (
 )
 
 MAX_FILE_SIZE = 500 * 1024  # 500 KB
+
+
+def _eligible_prefixes() -> tuple[str, ...]:
+    """Compute the eligible-path prefixes lazily.
+
+    Reads ``document_root()`` and ``workspace_root()`` on each call so
+    operators (or tests) can change the env vars without having to reload
+    this module. Both helpers cache their own resolution; the per-call
+    cost here is a function-call + dict-get for env lookup, not real I/O.
+    """
+    doc_root = str(document_root())
+    ws_root = str(workspace_root())
+    return (
+        f"{ws_root}/",
+        f"{doc_root}/04-Agent-Knowledge/",
+        f"{doc_root}/01-Projects/",
+        f"{doc_root}/02-Areas/",
+        f"{doc_root}/05-Knowledge/",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -85,16 +92,19 @@ def should_inject(path: str) -> bool:
     except OSError:
         pass  # file may not exist yet; defer to caller
 
+    prefixes = _eligible_prefixes()
+    workspace_prefix = prefixes[0]
+
     # workspace memory files: <workspace-root>/*/memory/*.md
-    if path.startswith(f"{_WORKSPACE_ROOT}/"):
-        parts = path[len(f"{_WORKSPACE_ROOT}/") :].split("/")
+    if path.startswith(workspace_prefix):
+        parts = path[len(workspace_prefix) :].split("/")
         # parts[0] = workspace name, parts[1] = 'memory', parts[-1] = filename
         if len(parts) >= 3 and parts[1] == "memory":
             return True
         return False
 
     # Obsidian vault paths
-    for prefix in _ELIGIBLE_PREFIXES[1:]:  # skip /data/workspaces/ already handled
+    for prefix in prefixes[1:]:  # skip <workspace-root>/ already handled
         if path.startswith(prefix):
             return True
 
@@ -160,7 +170,7 @@ def _entities_for_own_page(source_path: str, entities: list[WikiEntity]) -> set[
         return set()
 
     # Normalise source_path to a relative document path for comparison
-    doc_root = f"{_DOCUMENT_ROOT}/"
+    doc_root = f"{document_root()}/"
     if source_path.startswith(doc_root):
         rel = source_path[len(doc_root) :]
     else:
@@ -385,7 +395,7 @@ def inject_file(path: str, entities: list[WikiEntity], dry_run: bool = False) ->
 def _log_injection(file_path: str, injected: list[str], dry_run: bool) -> None:
     """Append an entry to the injection log."""
     # Use relative document path when possible
-    doc_root = f"{_DOCUMENT_ROOT}/"
+    doc_root = f"{document_root()}/"
     rel_path = file_path
     if file_path.startswith(doc_root):
         rel_path = file_path[len(doc_root) :]

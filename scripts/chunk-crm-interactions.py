@@ -231,8 +231,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/tmp/crm-chunks"),
-        help="Output directory for chunk files (default: /tmp/crm-chunks)",
+        default=Path.home() / ".cache" / "kairix" / "crm-chunks",
+        help="Output directory for chunk files (default: ~/.cache/kairix/crm-chunks)",
     )
     parser.add_argument(
         "--vault-root",

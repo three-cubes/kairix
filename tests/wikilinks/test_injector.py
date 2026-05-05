@@ -16,6 +16,17 @@ import pytest
 from kairix.knowledge.wikilinks.injector import inject_wikilinks, should_inject
 from kairix.knowledge.wikilinks.resolver import WikiEntity
 
+# Test-fixture path roots. These are *strings only* — they're consumed by
+# should_inject() and inject_wikilinks() as opaque path strings to drive
+# eligibility / self-link logic. Nothing is ever read or written under these
+# paths on the filesystem. The "/tmp" prefix matches what
+# tests/wikilinks/conftest.py sets via KAIRIX_DOCUMENT_ROOT /
+# KAIRIX_WORKSPACE_ROOT for the same fixture-string purpose.
+# NOSONAR(python:S5443): no actual /tmp filesystem access — string fixtures.
+_TEST_VAULT_ROOT = "/tmp/test-vault"
+_TEST_WORKSPACES_ROOT = "/tmp/test-workspaces"
+
+
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -189,7 +200,7 @@ def test_no_self_link_on_own_page() -> None:
     modified, injected = inject_wikilinks(
         content,
         [ACME_CORP],
-        source_path="/tmp/test-vault/02-Areas/Clients/Acme-Corp/Overview.md",
+        source_path=f"{_TEST_VAULT_ROOT}/02-Areas/Clients/Acme-Corp/Overview.md",
     )
     assert injected == []
     assert "[[Acme-Corp]]" not in modified
@@ -202,7 +213,7 @@ def test_self_link_check_different_entity() -> None:
     modified, injected = inject_wikilinks(
         content,
         [ACME_CORP, GAMMA_SYSTEMS],
-        source_path="/tmp/test-vault/02-Areas/Clients/Acme-Corp/Overview.md",
+        source_path=f"{_TEST_VAULT_ROOT}/02-Areas/Clients/Acme-Corp/Overview.md",
     )
     # Acme Corp suppressed (self-link on own page); Gamma Systems still linked
     assert "[[Acme-Corp]]" not in modified
@@ -241,27 +252,27 @@ def test_primary_name_triggers_link() -> None:
 
 @pytest.mark.unit
 def test_should_inject_memory_log() -> None:
-    assert should_inject("/tmp/test-workspaces/builder/memory/2026-03-23.md") is True
+    assert should_inject(f"{_TEST_WORKSPACES_ROOT}/builder/memory/2026-03-23.md") is True
 
 
 @pytest.mark.unit
 def test_should_inject_agent_knowledge() -> None:
-    assert should_inject("/tmp/test-vault/04-Agent-Knowledge/builder/patterns.md") is True
+    assert should_inject(f"{_TEST_VAULT_ROOT}/04-Agent-Knowledge/builder/patterns.md") is True
 
 
 @pytest.mark.unit
 def test_should_inject_projects() -> None:
-    assert should_inject("/tmp/test-vault/01-Projects/202603-Kairix/README.md") is True
+    assert should_inject(f"{_TEST_VAULT_ROOT}/01-Projects/202603-Kairix/README.md") is True
 
 
 @pytest.mark.unit
 def test_should_inject_areas() -> None:
-    assert should_inject("/tmp/test-vault/02-Areas/Clients/Acme-Corp/Overview.md") is True
+    assert should_inject(f"{_TEST_VAULT_ROOT}/02-Areas/Clients/Acme-Corp/Overview.md") is True
 
 
 @pytest.mark.unit
 def test_should_inject_knowledge() -> None:
-    assert should_inject("/tmp/test-vault/05-Knowledge/01-Strategy/notes.md") is True
+    assert should_inject(f"{_TEST_VAULT_ROOT}/05-Knowledge/01-Strategy/notes.md") is True
 
 
 @pytest.mark.unit
@@ -281,13 +292,13 @@ def test_should_not_inject_shape_cache() -> None:
 
 @pytest.mark.unit
 def test_should_not_inject_non_md() -> None:
-    assert should_inject("/tmp/test-workspaces/builder/memory/notes.txt") is False
+    assert should_inject(f"{_TEST_WORKSPACES_ROOT}/builder/memory/notes.txt") is False
 
 
 @pytest.mark.unit
 def test_should_not_inject_workspace_non_memory() -> None:
     """Workspace files outside /memory/ subfolder should NOT be eligible."""
-    assert should_inject("/tmp/test-workspaces/builder/some-other-dir/notes.md") is False
+    assert should_inject(f"{_TEST_WORKSPACES_ROOT}/builder/some-other-dir/notes.md") is False
 
 
 @pytest.mark.unit
