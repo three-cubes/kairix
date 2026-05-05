@@ -57,6 +57,9 @@ def _make_link(name: str) -> str:
 # Matches table rows like:
 #   | Acme-Corp | `[[Acme-Corp]]` | `02-Areas/Clients/Acme-Corp/` |
 #   | Gamma Systems | `[[Gamma-Systems\|Gamma Systems]]` | `02-Areas/Clients/Gamma-Systems/` |
+# NOSONAR(python:S5852): each capture is bounded by a distinct literal
+# delimiter (`|` or backtick); no nested quantifiers — backtracking is
+# linear in line length. Input is the bootstrap entity-table markdown file.
 _TABLE_ROW_RE = re.compile(r"^\|\s*(?P<entity>[^|]+?)\s*\|\s*`(?P<link>\[\[[^\]]+\]\])`\s*\|\s*`(?P<path>[^`]+)`\s*\|")
 
 
@@ -115,6 +118,8 @@ def load_entities_from_bootstrap(
             continue
         # Skip vault path annotations like "(general reference)" - keep just path part
         # Strip trailing parenthetical notes from vault_path
+        # NOSONAR(python:S5852): non-greedy `.*?` bounded by `)` and end-anchor;
+        # operates on a single short path string (≤ a few hundred chars).
         vault_path = re.sub(r"\s*\(.*?\)\s*$", "", vault_path).strip()
         if not vault_path or not entity_name:
             continue

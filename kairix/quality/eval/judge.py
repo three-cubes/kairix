@@ -325,6 +325,8 @@ def judge_batch(
     indexed = list(enumerate(candidates))  # (original_index, (stem, snippet))
 
     if shuffle:
+        # NOSONAR(python:S2245): non-security shuffle to prevent positional
+        # bias in LLM judge prompts; deterministic via random.seed() in tests.
         random.shuffle(indexed)
 
     shuffle_order = [candidates[i][0] for i, _ in indexed]
