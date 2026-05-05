@@ -21,7 +21,7 @@ def test_fake_registry_satisfies_protocol() -> None:
 
 @pytest.mark.contract
 def test_registry_returns_iterable_of_agent_defs() -> None:
-    registry = ConfigDrivenAgentRegistry(agents=[AgentDef(name="alpha", collection="alpha-mem")])
+    registry = ConfigDrivenAgentRegistry(agents=[AgentDef(name="alpha", legacy_collection_name="alpha-mem")])
     listed = registry.list_agents()
     assert len(listed) == 1
     assert listed[0].name == "alpha"

@@ -49,11 +49,54 @@
 #     #   path: "06-Archive"
 #     #   glob: "**/*.md"
 #
-#   # Per-agent collections — each agent gets its own memory scope
+#   # Per-agent collections — each agent gets its own memory scope.
+#   # Default agent_pattern still applies for legacy single-collection deployments.
 #   agent_pattern: "{agent}-memory"
-#   agent_paths:
-#     builder: "workspaces/builder/memory"
-#     shape: "workspaces/shape/memory"
+#
+# # ── Agents (multi-path schema) ────────────────────────────────────────────
+# # Declare each agent that exists. Each agent has a list of read paths
+# # (the agent's search scope) and a single write_path (the agent's write
+# # zone). Out of the box kairix uses /data/workspaces/{name} when paths
+# # are omitted, so a minimal config just names the agents.
+# #
+# # Three deployment shapes are supported:
+# #
+# #   1. Default (out of the box):
+# #      agents:
+# #        - name: alice
+# #          write_path: /data/workspaces/alice
+# #
+# #   2. Single explicit path:
+# #      agents:
+# #        - name: bob
+# #          paths:
+# #            - /data/workspaces/bob
+# #          write_path: /data/workspaces/bob
+# #
+# #   3. Multi-path (e.g. workspace + curated knowledge + cross-agent shared):
+# #      agents:
+# #        - name: shape
+# #          paths:
+# #            - /data/workspaces/shape          # absolute, primary workspace
+# #            - 04-Agent-Knowledge/shape        # relative to document_root
+# #            - 04-Agent-Knowledge/shared       # cross-agent shared area
+# #          write_path: /data/workspaces/shape
+# #
+# # Legacy schema still parses: a top-level ``collection: <name>`` field is
+# # honoured as the first synthetic collection name so saved benchmarks /
+# # search calls keep resolving without re-pinning.
+# agents:
+#   - name: alpha
+#     paths:
+#       - /data/workspaces/alpha
+#     write_path: /data/workspaces/alpha
+#   - name: beta
+#     paths:
+#       - /data/workspaces/beta
+#       - 04-Agent-Knowledge/beta
+#       - 04-Agent-Knowledge/shared
+#     write_path: /data/workspaces/beta
+#     read_only: false
 
 retrieval:
   # Fusion strategy: how keyword (BM25) and meaning-based (vector) search results are combined.
