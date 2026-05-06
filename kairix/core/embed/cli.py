@@ -74,7 +74,10 @@ def acquire_lock() -> IO[str]:
     lock_fh.close()
     try:
         holder_pid = int(LOCKFILE.read_text().strip())
-        os.kill(holder_pid, 0)  # signal 0 = existence check
+        # NOSONAR(python:S4828): signal 0 is documented as a process-existence
+        # probe — does not deliver a real signal. Used here to detect a stale
+        # lockfile from a dead PID before taking it over.
+        os.kill(holder_pid, 0)
         # Process is alive — genuine contention
         logging.error(
             "Could not acquire lock after %ds — PID %d is still running",

@@ -154,8 +154,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--vault-root", required=True, help="Path to vault root")
     parser.add_argument(
         "--output-dir",
-        default="/tmp/daily-chunks",
-        help="Output directory for chunk files (default: /tmp/daily-chunks)",
+        default=str(Path.home() / ".cache" / "kairix" / "daily-chunks"),
+        help="Output directory for chunk files (default: ~/.cache/kairix/daily-chunks)",
     )
     parser.add_argument(
         "--dry-run",

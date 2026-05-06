@@ -30,6 +30,8 @@ def _make_log_entry(weighted_ndcg: float, days_ago: float = 0.0, regression: boo
     ts = (datetime.now(tz=timezone.utc) - timedelta(days=days_ago)).isoformat()
     return {
         "ts": ts,
+        # NOSONAR(python:S5443): suite_path is an opaque label string in the
+        # monitor log JSON — never used as a real filesystem path in this test.
         "suite_path": "/tmp/canary.yaml",
         "n_cases": 10,
         "ndcg_by_category": {"recall": weighted_ndcg},
