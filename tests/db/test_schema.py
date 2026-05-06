@@ -297,3 +297,64 @@ def test_migrate_idempotent_on_agent_owner() -> None:
     migrate(db)  # second call must not raise
     cols = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
     assert "agent_owner" in cols
+
+
+@pytest.mark.unit
+def test_create_schema_on_legacy_db_runs_migration() -> None:
+    """create_schema() must work on a pre-#114 documents table without agent_owner.
+
+    Regression for VM hotfix 2026-05-06: deploying the WS3-5-114 schema to a
+    running VM with an existing index.sqlite raised
+    `sqlite3.OperationalError: no such column: agent_owner` because the
+    CREATE INDEX for idx_documents_agent_owner ran inside the same
+    executescript as the CREATE TABLE IF NOT EXISTS — the IF NOT EXISTS
+    skipped the table create on legacy DBs (table already there without the
+    column), but the CREATE INDEX still fired.
+
+    Fix: split the executescript so migrate() runs *between* table creation
+    and index creation. This test asserts the upgrade path works.
+    """
+    db = sqlite3.connect(":memory:")
+    # Build a pre-#114 documents schema (no agent_owner column) and seed a row
+    db.executescript(
+        """
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection TEXT NOT NULL,
+            path TEXT NOT NULL,
+            title TEXT,
+            hash TEXT NOT NULL,
+            created_at TEXT,
+            modified_at TEXT,
+            active INTEGER DEFAULT 1,
+            UNIQUE(collection, path)
+        );
+        CREATE TABLE content (hash TEXT PRIMARY KEY, doc TEXT, created_at TEXT);
+        CREATE TABLE content_vectors (
+            hash TEXT NOT NULL, seq INTEGER NOT NULL, pos INTEGER NOT NULL,
+            model TEXT, embedded_at TEXT,
+            PRIMARY KEY (hash, seq)
+        );
+        INSERT INTO documents (collection, path, title, hash, active)
+        VALUES ('areas', '02-Areas/legacy.md', 'Legacy Doc', 'h1', 1);
+        """
+    )
+
+    # Must not raise — this is the bug the hotfix repairs
+    create_schema(db)
+
+    # Both columns are now present
+    doc_cols = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
+    cv_cols = {row[1] for row in db.execute("PRAGMA table_info(content_vectors)")}
+    assert "agent_owner" in doc_cols
+    assert "chunk_date" in cv_cols
+
+    # Indexes for migrated columns are present
+    indexes = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "idx_documents_agent_owner" in indexes
+    assert "idx_content_vectors_chunk_date" in indexes
+
+    # The pre-existing row survived migration with NULL agent_owner
+    row = db.execute("SELECT path, agent_owner FROM documents").fetchone()
+    assert row[0] == "02-Areas/legacy.md"
+    assert row[1] is None

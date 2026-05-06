@@ -36,6 +36,9 @@ def create_schema(db: sqlite3.Connection, *, dims: int = EMBED_VECTOR_DIMS) -> N
         db:   Open sqlite3.Connection.
         dims: Vector embedding dimensions (for metadata only — vectors stored in usearch).
     """
+    # Tables only — indexes that depend on migrated columns (agent_owner,
+    # chunk_date) come after migrate() runs, otherwise legacy DBs that don't
+    # yet have those columns fail with "no such column" on CREATE INDEX.
     db.executescript("""
         CREATE TABLE IF NOT EXISTS documents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,6 +77,16 @@ def create_schema(db: sqlite3.Connection, *, dims: int = EMBED_VECTOR_DIMS) -> N
         CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(hash);
         CREATE INDEX IF NOT EXISTS idx_documents_collection ON documents(collection);
         CREATE INDEX IF NOT EXISTS idx_documents_active ON documents(active);
+    """)
+
+    # Run migrations to bring legacy schemas up to current (adds agent_owner,
+    # chunk_date columns to existing tables). On a fresh DB this is a no-op
+    # because the CREATE TABLE above already declared the columns.
+    migrate(db)
+
+    # Indexes that depend on migrated columns — must come after migrate() so
+    # the columns exist on legacy DBs.
+    db.executescript("""
         CREATE INDEX IF NOT EXISTS idx_documents_agent_owner ON documents(agent_owner);
         CREATE INDEX IF NOT EXISTS idx_content_vectors_chunk_date ON content_vectors(chunk_date);
     """)
