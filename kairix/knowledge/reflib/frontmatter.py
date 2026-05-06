@@ -14,6 +14,8 @@ from kairix.knowledge.reflib.sources import SourceDef
 from kairix.text import extract_title, strip_frontmatter
 
 # YAML frontmatter block — \A anchor ensures match only at string start
+# NOSONAR(python:S5852): non-greedy `.*?` bounded by literal `\n---\s*\n`
+# terminator; input is markdown frontmatter (file-bounded, not user request).
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 # Re-export for backwards compatibility
