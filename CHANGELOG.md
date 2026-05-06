@@ -7,6 +7,63 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
+## [2026.5.6] - 2026-05-06 — Schema, security, onboarding completion, doc hygiene
+
+> **Upgrading?** Drop-in. No client config change, no transport change. The new `agent_owner` column is added via additive ALTER TABLE on container start; existing rows get NULL. The multi-path `AgentDef` schema parses old `collection: <name>` YAML for one release window — migrate at your own pace.
+
+This release consolidates a sprint of work covering schema follow-on (#114, #115), security hardening (BLOCKER + MEDIUM + LOW SonarCloud findings, 51 in total), the trailing EmbedProvider wire (#43), bundled-suite hygiene (#103, #104), the onboarding flow's quality-gate stage 5 (KFEAT-013), and the first batch of public-shaped operator runbooks. Plus the previously-deployed hotfix for reference-library search pollution + MCP timeline result-shape (#119, UAT'd on `:develop` since 2026-05-05).
+
+### Added
+
+- **`agent_owner` column on `documents`** (#114) — first-class per-document agent provenance. Idempotent ALTER TABLE migration; existing rows get NULL. New `idx_documents_agent_owner` index. Embed scanner consults the `AgentRegistry` and tags rows with their owning agent at index time.
+- **Multi-path `AgentDef` schema** (#115) — replaces the single-collection `AgentDef.collection: str` with `AgentDef.paths: list[str]`. Out-of-the-box agents now default to `/data/workspaces/{name}` instead of the historical TC-specific `04-Agent-Knowledge/{agent}` layout. New methods on `AgentDef`: `effective_paths`, `collection_names()`, `resolved_paths()`, `owns_path()`, `claims_write()`. Three deployment shapes supported (paths-omitted, single-path, multi-path TC pattern).
+- **`kairix eval gate`** (KFEAT-013, stage 5) — quality-gate command that consumes a benchmark result + corpus hints and produces a go/hold verdict with concrete parameter-change recommendations. Closes the onboarding flow: `setup → entity seed → eval auto-gold → eval tune → eval gate`. Exits 0 PASS / 2 HOLD / 1 usage error so wrappers can chain.
+- **Bundled-suite load-time validation** (#104) — every YAML in `suites/` is asserted to load cleanly via the test gate `test_all_bundled_suites_load_without_errors`. First-run quick-start can no longer break on a shipped suite.
+- **Public-shaped operational runbooks** (OPS-009 batch 1) — three new runbooks in `docs/operations/runbooks/`:
+  - `runbook-vector-search-failure.md` — `vec=0, vec_failed=True` diagnosis.
+  - `runbook-embedding-lag.md` — new content not appearing in search.
+  - `how-to-rebuild-entity-graph.md` — Neo4j entity graph rebuild via `kairix store crawl --full`.
+  - `how-to-configure-pypi-trusted-publisher.md` (OPS-008) — one-time operator setup for OIDC-based PyPI publishing.
+  All parameterised against `KAIRIX_*` env surface; no operator-specific paths or hostnames.
+
+### Changed
+
+- **`AgentRegistry.collection_for(name)`** is now a legacy single-collection accessor; **new code should call `collections_for(name)`** to handle multi-path agents correctly.
+- **`AgentRegistry.all_collections()`** added — returns dedup-union of every agent's collection names, used by `Scope.ALL_AGENTS` / `EVERYTHING`.
+- **`DocumentScanner`** accepts an optional `agent_owner_resolver` kwarg; default behaviour unchanged.
+- **Wikilinks injector** now reads `document_root()` / `workspace_root()` lazily instead of capturing them at module import. Removes a long-standing `importlib.reload` requirement from the test fixture (#129).
+- **`scripts/chunk-{crm,daily}-files.py`** default `--output-dir` changed from `/tmp/*` to `~/.cache/kairix/*` — safer default, no behaviour change for explicitly-passed paths.
+- **`DefaultCollectionResolver._RESERVED_COLLECTIONS`** excludes `reference-library` from every default scope regardless of yaml. Reflib remains reachable via explicit `--collection reference-library`. (#119)
+- **MCP `error envelope`** — uncaught exceptions inside tool handlers now return `{"error": "<ExceptionClass>: <message>"}` instead of being masked as JSON-RPC `-32602`. (carried forward from earlier work)
+
+### Fixed
+
+- **#103 — Benchmark crash on date-shaped gold titles.** PyYAML parses unquoted ISO dates as `datetime.date`; downstream `endswith()` raised. Coerced at suite-load boundary.
+- **#104 — Bundled `reflib-gold-v1.yaml` unrunnable.** Removed (was a queries-only pre-grading snapshot); v3 is the canonical reflib gold.
+- **OPS-007 (#43 trailing wire) — `recall_check._embed_query` raw HTTP.** Now goes through `EmbedProvider` for retry / rate-limit / backoff parity with the rest of the embed pipeline.
+- **MCP `tool_timeline` returned empty placeholders for non-temporal queries** (#119) — `BudgetedResult` dereference fixed; real path/title/snippet/score now flow through.
+
+### Security
+
+- **2 BLOCKER VULN** (S2083 path-traversal) cleared with documented CLI trust-boundary rationale (#121).
+- **23 MEDIUM hotspots** triaged with explicit per-finding NOSONAR rationale (#128) — 14 ReDoS (all bounded-input regexes), 5 weak-cryptography (non-security `random.*`), 4 permission (Dockerfile glob + root-by-design).
+- **26 LOW hotspots** triaged (#129) — 4 signal-usage NOSONAR, 14 publicly-writable-dirs (split: 2 real script-default fixes, 12 NOSONAR for fixture-string paths), 8 GH Actions SHA-pinning intentionally left for a future supply-chain hardening sprint.
+
+### Tests
+
+- **2,133 unit/bdd/contract/integration tests pass** (was ~2,100 at v2026.5.3).
+- New BDD coverage: `agent_collections.feature` (9 scenarios), `eval_gate.feature` (6 scenarios).
+- New integration coverage: `test_multi_path_agents.py` (6 tests), `test_eval_gate_cli.py` (5 tests against real CLI dispatch).
+- `tests/db/test_scanner.py` and `tests/integration/test_collections.py` refactored to use `create_schema()` from production — single source of truth with the live schema.
+
+### Known incomplete (tracked, deferred)
+
+- **OPS-012** — rebuild user-vault gold suite against current vault structure (#117). Runs against the live VM; deferred until the deploy window.
+- **KFEAT-014** — reference-library storage isolation. Pipeline-level change; deferred to next release.
+- **`kairix onboard` orchestrator** — chain stages 1–5 into one command. Worth a focused PR after this release lands.
+- **GH Actions SHA-pinning** — supply-chain hardening sprint, separate workstream.
+- **Vault runbook migration batch 2** — deployment-specific runbooks (binary-symlink, cron-deploy, KV setup, restart, secrets fetch) stay vault-private; needs operator-overlay design before public migration.
+
 ## [2026.5.3] - 2026-05-04 — MCP availability, agent bug closure, scope semantics
 
 > **Upgrading? Read [`docs/upgrades/v2026.5.3.md`](docs/upgrades/v2026.5.3.md) first.** It tells your agents (or you) exactly what to change. The TL;DR is: **swap `/sse` to `/mcp` in your MCP client config.** No auth changes, no tunnels.
