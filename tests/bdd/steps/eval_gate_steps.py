@@ -47,9 +47,7 @@ def all_categories_at(gate_state: dict, value: float) -> None:
 
 
 @given(
-    parsers.parse(
-        "a benchmark result where temporal is {temporal:f} with date-named corpus and others are {others:f}"
-    )
+    parsers.parse("a benchmark result where temporal is {temporal:f} with date-named corpus and others are {others:f}")
 )
 def temporal_low_with_date_corpus(gate_state: dict, temporal: float, others: float) -> None:
     gate_state["scores"] = _all_categories(others) | {"temporal": temporal}
@@ -201,6 +199,4 @@ def output_contains_recommendation(gate_state: dict, cat: str) -> None:
     formatted = result.format()
     matches = [r for r in result.recommendations if r.parameter == cat]
     assert matches, f"no recommendation for {cat} to verify in output"
-    assert f"{cat}:" in formatted or f"{cat} " in formatted, (
-        f"recommendation for {cat} not visible in formatted output"
-    )
+    assert f"{cat}:" in formatted or f"{cat} " in formatted, f"recommendation for {cat} not visible in formatted output"
