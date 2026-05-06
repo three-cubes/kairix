@@ -217,3 +217,83 @@ def test_create_schema_content_vectors_has_chunk_date() -> None:
     assert "hash" in cols
     assert "seq" in cols
     assert "model" in cols
+
+
+# ---------------------------------------------------------------------------
+# agent_owner column (#114)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_create_schema_includes_agent_owner_column() -> None:
+    """Fresh DB has agent_owner column on documents (default NULL)."""
+    db = sqlite3.connect(":memory:")
+    create_schema(db)
+
+    cols = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
+    assert "agent_owner" in cols
+
+
+@pytest.mark.unit
+def test_create_schema_creates_agent_owner_index() -> None:
+    """Index idx_documents_agent_owner is created for filter performance."""
+    db = sqlite3.connect(":memory:")
+    create_schema(db)
+
+    indexes = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "idx_documents_agent_owner" in indexes
+
+
+@pytest.mark.unit
+def test_migrate_adds_agent_owner_to_legacy_documents_table() -> None:
+    """A pre-#114 documents table without agent_owner gets migrated additively.
+
+    Existing rows survive with agent_owner=NULL.
+    """
+    db = sqlite3.connect(":memory:")
+    # Build the old schema (pre-agent_owner) and seed a row
+    db.executescript(
+        """
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection TEXT NOT NULL,
+            path TEXT NOT NULL,
+            title TEXT,
+            hash TEXT NOT NULL,
+            created_at TEXT,
+            modified_at TEXT,
+            active INTEGER DEFAULT 1,
+            UNIQUE(collection, path)
+        );
+        CREATE TABLE content (hash TEXT PRIMARY KEY, doc TEXT, created_at TEXT);
+        CREATE TABLE content_vectors (
+            hash TEXT NOT NULL, seq INTEGER NOT NULL, pos INTEGER NOT NULL,
+            model TEXT, embedded_at TEXT,
+            PRIMARY KEY (hash, seq)
+        );
+        INSERT INTO documents (collection, path, title, hash, active)
+        VALUES ('areas', '02-Areas/legacy.md', 'Legacy Doc', 'h1', 1);
+        """
+    )
+
+    migrate(db)
+
+    cols = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
+    assert "agent_owner" in cols
+
+    # Existing row preserved with agent_owner=NULL
+    row = db.execute("SELECT path, title, agent_owner FROM documents").fetchone()
+    assert row[0] == "02-Areas/legacy.md"
+    assert row[1] == "Legacy Doc"
+    assert row[2] is None
+
+
+@pytest.mark.unit
+def test_migrate_idempotent_on_agent_owner() -> None:
+    """Running migrate twice doesn't error (idempotent)."""
+    db = sqlite3.connect(":memory:")
+    create_schema(db)
+    migrate(db)
+    migrate(db)  # second call must not raise
+    cols = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
+    assert "agent_owner" in cols
