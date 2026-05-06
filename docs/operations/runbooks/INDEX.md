@@ -36,6 +36,7 @@ Operational procedures and incident runbooks for kairix deployments.
 | [how-to-run-benchmark](how-to-run-benchmark.md) | Run benchmark suite, interpret results, compare before/after |
 | [how-to-debug-search-ranking](how-to-debug-search-ranking.md) | Query intent dispatch, RRF weights, category-specific tuning |
 | [how-to-rebuild-entity-graph](how-to-rebuild-entity-graph.md) | Drop and rebuild the Neo4j entity graph from the document store |
+| [how-to-configure-pypi-trusted-publisher](how-to-configure-pypi-trusted-publisher.md) | One-time PyPI Trusted Publisher setup so GitHub Releases auto-publish without long-lived tokens |
 | [MCP-DEPLOYMENT](../MCP-DEPLOYMENT.md) | Choose a transport (stdio/http/sse), wire `/mcp` and `/sse` mounts, configure agent registry, verify with `/healthz` |
 | [MCP-CLIENT-MIGRATION](../MCP-CLIENT-MIGRATION.md) | Migrate Claude Desktop / Claude Code / OpenClaw / custom Python or Node clients from `/sse` to `/mcp` |
 
