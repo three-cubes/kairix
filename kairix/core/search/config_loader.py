@@ -180,23 +180,90 @@ def _parse_config(data: dict) -> RetrievalConfig:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class CollectionDef:
-    """A configured document collection for search scoping."""
+    """A configured document collection for search scoping.
+
+    ``in_default`` controls whether this collection participates in the
+    *default* search scopes (SHARED, SHARED_AGENT, ALL_AGENTS, EVERYTHING).
+    Collections with ``in_default=False`` are still scanned, indexed, and
+    reachable via an explicit ``--collection <name>`` lookup — they simply
+    don't auto-join the default mix. The intended use is large or noisy
+    corpora (reference libraries, archives) that should be opt-in.
+    """
 
     name: str
     path: str  # relative to document_root
     glob: str = "**/*.md"
+    in_default: bool = True
     retrieval_overrides: dict | None = None  # per-collection retrieval config (raw YAML dict)
 
 
-@dataclass
+@dataclass(frozen=True)
 class CollectionsConfig:
-    """Parsed collections configuration."""
+    """Parsed collections configuration.
 
-    shared: list[CollectionDef]
+    ``shared`` is stored as a tuple — frozen at construction — so callers
+    cannot mutate the collection list after the boundary parses YAML.
+    Predicates (:meth:`default_collection_names`, :meth:`all_collection_names`)
+    are the only public surface for membership questions; consumers should
+    not iterate ``shared`` directly to filter on ``in_default``.
+    """
+
+    shared: tuple[CollectionDef, ...]
     agent_pattern: str = "{agent}-memory"
     agent_paths: dict[str, str] = field(default_factory=dict)
+
+    def default_collection_names(self) -> list[str]:
+        """Names of shared collections eligible for default search scopes.
+
+        Excludes any collection whose ``in_default`` flag is False. This is
+        the predicate the resolver consults — it is intentionally the only
+        ``in_default``-aware code path in the codebase, so the policy lives
+        with the data it describes.
+        """
+        return [c.name for c in self.shared if c.in_default]
+
+    def all_collection_names(self) -> list[str]:
+        """Names of every configured shared collection.
+
+        Used for diagnostics and for callers that need to enumerate every
+        configured collection regardless of default-scope eligibility (e.g.,
+        validation that warns about unknown ``--collection`` arguments).
+        """
+        return [c.name for c in self.shared]
+
+
+def _coerce_bool(value: object, *, key: str, default: bool) -> bool:
+    """Strict bool coercion for YAML scalar fields.
+
+    YAML's native scalar parser already produces ``True``/``False`` for
+    canonical boolean keywords (``true``, ``false``, ``yes``, ``no``,
+    ``on``, ``off``). Anything outside that set — for example an explicit
+    string ``"false"`` — is rejected with :class:`ConfigValidationError`.
+
+    Without this strictness, ``bool("false")`` evaluates to ``True``,
+    which would silently route a collection into the *opposite* scope of
+    the operator's intent. Better to raise at config-load than to ship a
+    misconfigured search surface to production.
+
+    Args:
+        value:   The raw YAML value (may be missing, in which case the
+                 caller passes ``None``).
+        key:     The dotted yaml key for the error message (e.g. ``"collections.shared[3].in_default"``).
+        default: Value to return when ``value is None``.
+
+    Raises:
+        ConfigValidationError: ``value`` is neither ``None`` nor ``bool``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise ConfigValidationError(
+        f"kairix.config.yaml: {key}={value!r} must be a boolean (true/false), "
+        f"not {type(value).__name__}. Use unquoted true or false in YAML."
+    )
 
 
 def parse_collections(data: dict) -> CollectionsConfig | None:
@@ -206,20 +273,27 @@ def parse_collections(data: dict) -> CollectionsConfig | None:
         return None
 
     shared_raw = collections.get("shared", [])
-    shared = []
-    for item in shared_raw:
-        if isinstance(item, dict) and "name" in item:
-            shared.append(
-                CollectionDef(
-                    name=item["name"],
-                    path=item.get("path", "."),
-                    glob=item.get("glob", "**/*.md"),
-                    retrieval_overrides=item.get("retrieval"),
-                )
+    shared: list[CollectionDef] = []
+    for index, item in enumerate(shared_raw):
+        if not (isinstance(item, dict) and "name" in item):
+            continue
+        in_default = _coerce_bool(
+            item.get("in_default"),
+            key=f"collections.shared[{index}].in_default",
+            default=True,
+        )
+        shared.append(
+            CollectionDef(
+                name=item["name"],
+                path=item.get("path", "."),
+                glob=item.get("glob", "**/*.md"),
+                in_default=in_default,
+                retrieval_overrides=item.get("retrieval"),
             )
+        )
 
     return CollectionsConfig(
-        shared=shared,
+        shared=tuple(shared),
         agent_pattern=collections.get("agent_pattern", "{agent}-memory"),
         agent_paths=collections.get("agent_paths", {}),
     )
@@ -356,15 +430,34 @@ def resolve_retrieval_config(
     collections: list[str] | None = None,
     explicit_config: RetrievalConfig | None = None,
     config_fn: Callable[[], RetrievalConfig] | None = None,
+    overrides_fn: Callable[[], dict[str, dict]] | None = None,
 ) -> RetrievalConfig:
     """Resolve the retrieval config for a search request.
 
     Priority:
       1. explicit_config (passed by caller, e.g. sweep override) — use as-is
-      2. Single collection "reference-library" — hardcoded baseline
-      3. Single collection with per-collection YAML config — merge over global
-      4. Multi-collection or no collection — global config
-      5. No config file — RetrievalConfig.defaults()
+      2. Single collection with per-collection YAML config — merge over global
+      3. Multi-collection or no collection — global config
+      4. No config file — RetrievalConfig.defaults()
+
+    The reference-library baseline is no longer baked into this function.
+    The shipped example yaml carries an explicit ``retrieval:`` block on
+    the reference-library entry whose values match the historical
+    ``REFLIB_RETRIEVAL_CONFIG`` baseline; operators who deviate are taking
+    deliberate ownership of that retrieval shape. The constant remains in
+    ``kairix/core/search/config.py`` for code that wants to compare against
+    the known-good baseline.
+
+    Args:
+        collection:      Single collection name (legacy parameter shape).
+        collections:     List of collection names; per-collection override
+                         applies only when this list is length 1.
+        explicit_config: Direct override; bypasses all other lookup.
+        config_fn:       Injection seam for the global config loader. Tests
+                         pass a no-arg callable returning a known RetrievalConfig.
+        overrides_fn:    Injection seam for per-collection overrides lookup.
+                         Tests pass a no-arg callable returning the override
+                         dict directly. Defaults to ``_get_collection_overrides``.
     """
     if explicit_config is not None:
         return explicit_config
@@ -380,14 +473,9 @@ def resolve_retrieval_config(
     if target is None:
         return global_cfg
 
-    # Hardcoded reference library baseline
-    if target == "reference-library":
-        from kairix.core.search.config import REFLIB_RETRIEVAL_CONFIG
-
-        return REFLIB_RETRIEVAL_CONFIG
-
     # Per-collection YAML overrides
-    overrides = _get_collection_overrides().get(target)
+    _overrides = overrides_fn or _get_collection_overrides
+    overrides = _overrides().get(target)
     if overrides:
         return _merge_retrieval_config(global_cfg, overrides)
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from kairix.core.search.config import RetrievalConfig
@@ -80,30 +78,58 @@ class TestResolveRetrievalConfig:
         assert result is explicit
 
     @pytest.mark.unit
-    def test_reflib_returns_hardcoded(self) -> None:
-        from kairix.knowledge.reflib.retrieval_config import REFLIB_RETRIEVAL_CONFIG
+    def test_reflib_uses_per_collection_overrides(self) -> None:
+        """reference-library now reaches its baseline via per-collection retrieval overrides.
 
-        result = resolve_retrieval_config(collections=["reference-library"])
-        assert result is REFLIB_RETRIEVAL_CONFIG
-        assert result.vec_limit == 5
-        assert result.fusion_strategy == "bm25_primary"
-
-    @pytest.mark.unit
-    def test_single_collection_from_list(self) -> None:
-        from kairix.knowledge.reflib.retrieval_config import REFLIB_RETRIEVAL_CONFIG
-
-        result = resolve_retrieval_config(collections=["reference-library"])
-        assert result is REFLIB_RETRIEVAL_CONFIG
-
-    @pytest.mark.unit
-    @patch("kairix.core.search.config_loader._get_collection_overrides")
-    def test_single_collection_with_yaml_config(self, mock_overrides) -> None:
-        mock_overrides.return_value = {
-            "my-docs": {"fusion_strategy": "rrf", "vec_limit": 30},
+        The example yaml ships an explicit ``retrieval:`` block on the
+        reference-library entry whose values match the historical
+        ``REFLIB_RETRIEVAL_CONFIG`` baseline. This test simulates that yaml
+        shape via the ``overrides_fn`` injection seam.
+        """
+        baseline_overrides = {
+            "reference-library": {
+                "fusion_strategy": "bm25_primary",
+                "bm25_limit": 20,
+                "vec_limit": 5,
+                "boosts": {
+                    "entity": {"enabled": True, "factor": 0.20, "cap": 2.0},
+                    "procedural": {"enabled": True, "factor": 1.4},
+                },
+            }
         }
+        result = resolve_retrieval_config(
+            collections=["reference-library"],
+            config_fn=RetrievalConfig.defaults,
+            overrides_fn=lambda: baseline_overrides,
+        )
+        assert result.fusion_strategy == "bm25_primary"
+        assert result.vec_limit == 5
+        assert result.bm25_limit == 20
+        assert result.entity.factor == pytest.approx(0.20)
+        assert result.procedural.factor == pytest.approx(1.4)
+
+    @pytest.mark.unit
+    def test_reflib_without_override_uses_global(self) -> None:
+        """When no per-collection block is set, reflib gets the global config like any other collection.
+
+        The hardcoded ``if target == "reference-library":`` branch was deleted
+        in v2026.5.4 — reflib's retrieval shape now lives in operator yaml
+        (or in a shipped example), not in source.
+        """
+        global_cfg = RetrievalConfig.defaults()
+        result = resolve_retrieval_config(
+            collections=["reference-library"],
+            config_fn=lambda: global_cfg,
+            overrides_fn=lambda: {},
+        )
+        assert result is global_cfg
+
+    @pytest.mark.unit
+    def test_single_collection_with_yaml_config(self) -> None:
         result = resolve_retrieval_config(
             collections=["my-docs"],
             config_fn=RetrievalConfig.defaults,
+            overrides_fn=lambda: {"my-docs": {"fusion_strategy": "rrf", "vec_limit": 30}},
         )
         assert result.fusion_strategy == "rrf"
         assert result.vec_limit == 30
@@ -121,11 +147,13 @@ class TestResolveRetrievalConfig:
         assert result is global_cfg
 
     @pytest.mark.unit
-    @patch("kairix.core.search.config_loader._get_collection_overrides")
-    def test_unknown_collection_uses_global(self, mock_overrides) -> None:
+    def test_unknown_collection_uses_global(self) -> None:
         global_cfg = RetrievalConfig.defaults()
-        mock_overrides.return_value = {}
-        result = resolve_retrieval_config(collections=["unknown"], config_fn=lambda: global_cfg)
+        result = resolve_retrieval_config(
+            collections=["unknown"],
+            config_fn=lambda: global_cfg,
+            overrides_fn=lambda: {},
+        )
         assert result is global_cfg
 
 

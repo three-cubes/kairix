@@ -37,6 +37,19 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT_WORKSPACE_TEMPLATE = "/data/workspaces/{name}"
 
+# Collection names that are reserved at the structural layer because the
+# embed harness auto-injects a collection with that exact name (see
+# ``kairix/core/embed/cli.py``). An agent that also claims one of these
+# names via the legacy ``collection:`` field would shadow the auto-injected
+# collection in search routing, producing incorrect results. We therefore
+# refuse to honour the override at parse time and substitute the agent's
+# synthetic ``{name}-{i}`` naming, with a logged warning.
+#
+# This is *not* a policy reserve (which would belong in the operator's
+# yaml as ``in_default: false``) — it is a name-collision guard against
+# collections the runtime creates outside the YAML config surface.
+RESERVED_AGENT_COLLECTION_NAMES: frozenset[str] = frozenset({"reference-library"})
+
 
 @dataclass
 class AgentDef:
@@ -316,10 +329,23 @@ def parse_agent_registry(data: dict, *, default_pattern: str = "{agent}-memory")
 
         # Legacy collection: keep the operator-chosen name on the first synthetic
         # collection. ``collection`` is no longer a structural field; it's a label
-        # override.
+        # override. Names that clash with an auto-injected collection (see
+        # ``RESERVED_AGENT_COLLECTION_NAMES``) are dropped so the agent gets the
+        # synthetic ``{name}-{i}`` shape and the auto-injected collection keeps
+        # routing correctly.
         legacy_name = ""
         if "collection" in item:
-            legacy_name = str(item["collection"])
+            candidate = str(item["collection"])
+            if candidate in RESERVED_AGENT_COLLECTION_NAMES:
+                logger.warning(
+                    "agent %r: legacy collection name %r clashes with an "
+                    "auto-injected collection — ignoring override; the agent "
+                    "will use synthetic collection naming instead.",
+                    name,
+                    candidate,
+                )
+            else:
+                legacy_name = candidate
         elif not paths:
             # Fully-default agent: the legacy default_pattern still applies as a
             # label so existing benchmarks pinned to ``{agent}-memory`` keep working.

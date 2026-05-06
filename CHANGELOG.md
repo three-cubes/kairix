@@ -7,6 +7,29 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
+### Added
+
+- **Configurable default search scope** — `kairix.config.yaml` collections now accept an optional `in_default: bool` flag (default `true`) controlling whether each collection participates in the *default* search scopes (`shared`, `shared+agent`, `all-agents`, `everything`). Collections with `in_default: false` remain scanned, indexed, and reachable via an explicit `--collection <name>` lookup, but no longer auto-join the default mix. Two predicates added to `CollectionsConfig` (`default_collection_names()`, `all_collection_names()`) for callers that need membership queries without iterating internals. Backwards compatible: yamls that don't set the flag behave identically to prior releases.
+- **Per-collection `retrieval:` block on `reference-library` in shipped example** — the example `kairix.config.yaml` now ships an explicit `retrieval:` block on the `reference-library` entry whose values match the historical `REFLIB_RETRIEVAL_CONFIG` baseline. New operators get the known-good baseline by default; operators who deviate are taking deliberate ownership.
+- **Design doc** — `docs/architecture/configurable-default-scope.md` captures the data-model change, the resolver refactor, the code-smell audit performed upfront, and the phased rollout (Phase 1 + Phase 3 shipped here; Phase 2 named-scopes design-tracked, uncommitted).
+
+### Changed
+
+- **`DefaultCollectionResolver` refactored** — the historical 5-branch elif chain in `resolve()` collapsed to a `match` dispatch with single-purpose helpers; cyclomatic complexity dropped from ~5 to ≤3 per method. The "is this collection in default scope?" predicate moved off the resolver onto `CollectionsConfig`, removing the feature-envy pattern of the resolver iterating `c.name for c in config.shared` and re-applying its own filter.
+- **`CollectionsConfig` is now frozen** (`@dataclass(frozen=True)`) with `shared: tuple[CollectionDef, ...]`. Callers cannot mutate the parsed collection list after the boundary; the only public surface for membership is the two predicate methods above.
+- **Strict bool coercion for `in_default`** — `_coerce_bool()` rejects non-boolean YAML values (e.g. `"false"` as a string) at parse time with a `ConfigValidationError` naming the offending key. Without this, `bool("false")` would evaluate to `True` and silently route a collection into the wrong scope.
+- **Agent registry guards against name-collision with auto-injected collections** — `RESERVED_AGENT_COLLECTION_NAMES` in `kairix/core/search/registry.py` (single-element set, name-collision only — no policy intent) blocks an operator's legacy `collection: reference-library` field from shadowing the embed-harness-injected reflib collection. The check is structural and lives next to the auto-injection it defends.
+- **`resolve_retrieval_config` accepts an `overrides_fn` injection seam** — replaces `@patch("..._get_collection_overrides")` in tests; production callers see no change since the parameter defaults to the existing module-level function.
+
+### Removed
+
+- **Hardcoded `_RESERVED_COLLECTIONS = {"reference-library"}` constant in `kairix/core/search/resolver.py`**, along with its 22-line policy comment. Reflib's exclusion from default scopes now lives in operator yaml as `in_default: false` on the reference-library collection. The shipped example yaml ships this hint.
+- **Hardcoded `if target == "reference-library":` branch in `kairix/core/search/config_loader.py`** — `resolve_retrieval_config` no longer special-cases reflib. The reference-library retrieval baseline is reached via the existing per-collection `retrieval_overrides` path. The `REFLIB_RETRIEVAL_CONFIG` constant remains in `kairix/core/search/config.py` as a known-good comparison baseline.
+
+### Migration
+
+Drop-in upgrade. No yaml changes required; the absent `in_default` field defaults to `true` (today's behaviour). To benefit from the feature, operators set `in_default: false` on the collections they want excluded from default scopes — typically `reference-library` and any `archive`-style collection — and restart the worker + serve containers so both pick up the new config.
+
 ## [2026.5.6] - 2026-05-06 — Schema, security, onboarding completion, doc hygiene
 
 > **Upgrading?** Drop-in. No client config change, no transport change. The new `agent_owner` column is added via additive ALTER TABLE on container start; existing rows get NULL. The multi-path `AgentDef` schema parses old `collection: <name>` YAML for one release window — migrate at your own pace.

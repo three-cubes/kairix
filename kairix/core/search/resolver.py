@@ -10,6 +10,13 @@ Protocol surface and tests inject ``FakeCollectionResolver`` from
 Closes the TEST-INFRA-AUDIT #6 private-import debt and implements
 KFEAT-GAP-8 ``scope=all-agents`` semantics via the injected
 AgentRegistry (WS3-3).
+
+Default-scope membership is governed by ``CollectionsConfig`` itself,
+not by a hardcoded reserved set in this module. Operators control which
+collections participate in default search via the ``in_default: bool``
+flag on each collection in ``kairix.config.yaml``. Reflib auto-injection
+(handled by ``kairix/core/embed/cli.py``) creates a structural reserve
+on the agent-side, enforced at registry parse time in ``registry.py``.
 """
 
 from __future__ import annotations
@@ -23,6 +30,17 @@ from kairix.core.search.scope import Scope
 logger = logging.getLogger(__name__)
 
 
+def _dedupe_preserving_order(items: list[str]) -> list[str]:
+    """Return ``items`` with duplicates removed, keeping first-seen order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
 class DefaultCollectionResolver:
     """Production CollectionResolver Adapter.
 
@@ -33,32 +51,16 @@ class DefaultCollectionResolver:
       - Pass the instance into SearchPipeline (or any other caller) as a
         CollectionResolver.
 
-    Scope semantics (matches the historical _collections_for behaviour for
-    SHARED, AGENT, SHARED_AGENT — the three values the existing code path
-    supported — and explicitly raises NotImplementedError for ALL_AGENTS
-    and EVERYTHING which need an AgentRegistry to know which agents exist):
+    Scope semantics:
 
-      SHARED        — only the shared collections (no agent appended)
-      AGENT         — only the agent's own collection (no shared)
-      SHARED_AGENT  — shared collections plus the agent's collection
-      ALL_AGENTS    — every agent's collection (no shared) — needs AgentRegistry
-      EVERYTHING    — shared + every agent's collection — needs AgentRegistry
+      SHARED        — only the default-eligible shared collections
+      AGENT         — only the agent's own collections
+      SHARED_AGENT  — default-eligible shared plus the agent's collections
+      ALL_AGENTS    — every agent's collections (no shared) — needs AgentRegistry
+      EVERYTHING    — default-eligible shared + every agent's collections — needs AgentRegistry
     """
 
     _DEFAULT_AGENT_PATTERN = "{agent}-memory"
-
-    # Reserved collections that must never appear in default user-facing
-    # search scopes (SHARED, AGENT, SHARED_AGENT, ALL_AGENTS). These are
-    # corpora that ride alongside the user's documents in the same SQLite
-    # index but are an order of magnitude larger and would dominate result
-    # mix on common terms. Callers that explicitly want them must pass
-    # ``collections=[...]`` to SearchPipeline.search or use Scope.EVERYTHING.
-    #
-    # Why baked in: an operator misconfig (listing reference-library in
-    # collections.shared) shipped to production on 2026-05-05 and polluted
-    # every user search until detected. Defending in code means the foot-gun
-    # can't be re-armed by editing yaml.
-    _RESERVED_COLLECTIONS: frozenset[str] = frozenset({"reference-library"})
 
     def __init__(
         self,
@@ -78,35 +80,36 @@ class DefaultCollectionResolver:
         # which is the correct signal.
         scope_enum = scope if isinstance(scope, Scope) else Scope.parse(str(scope))
 
-        pattern = self._config.agent_pattern if self._config else self._DEFAULT_AGENT_PATTERN
-
-        if scope_enum is Scope.SHARED:
-            cols = self._shared_collections()
-        elif scope_enum is Scope.AGENT:
-            if not agent:
-                return None  # No agent → no scope filter
-            cols = self._collections_for_agent(agent, pattern)
-        elif scope_enum is Scope.SHARED_AGENT:
-            cols = list(self._shared_collections())
-            if agent:
-                cols.extend(self._collections_for_agent(agent, pattern))
-        elif scope_enum is Scope.ALL_AGENTS:
-            cols = self._all_agent_collections()
-        elif scope_enum is Scope.EVERYTHING:
-            # Dedupe across the union — an agent path that overlaps a shared
-            # collection name should appear once.
-            seen: set[str] = set()
-            cols = []
-            for c in list(self._shared_collections()) + self._all_agent_collections():
-                if c not in seen:
-                    seen.add(c)
-                    cols.append(c)
-        else:  # pragma: no cover — defensive; Scope.parse rejects unknowns
-            cols = []
+        match scope_enum:
+            case Scope.SHARED:
+                cols = self._default_shared()
+            case Scope.AGENT:
+                cols = self._collections_for_agent(agent)
+            case Scope.SHARED_AGENT:
+                cols = self._default_shared() + self._collections_for_agent(agent)
+            case Scope.ALL_AGENTS:
+                cols = self._all_agent_collections()
+            case Scope.EVERYTHING:
+                cols = _dedupe_preserving_order(self._default_shared() + self._all_agent_collections())
+            case _:  # pragma: no cover — defensive; Scope.parse rejects unknowns
+                cols = []
 
         return cols or None
 
-    def _collections_for_agent(self, agent: str, pattern: str) -> list[str]:
+    # ------------------------------------------------------------------
+    # Helpers — each one has a single responsibility and reads from the
+    # data class predicates rather than reaching into config internals.
+    # ------------------------------------------------------------------
+
+    def _default_shared(self) -> list[str]:
+        """Default-scope shared collections plus operator extras."""
+        cols: list[str] = []
+        if self._config is not None:
+            cols.extend(self._config.default_collection_names())
+        cols.extend(self._extra)
+        return cols
+
+    def _collections_for_agent(self, agent: str | None) -> list[str]:
         """Resolve the agent's read collections.
 
         With a registry, returns the agent's full multi-path collection list.
@@ -114,51 +117,42 @@ class DefaultCollectionResolver:
         single-collection ``pattern.format(agent=agent)`` shape so the search
         contract stays backwards-compatible.
         """
+        if not agent:
+            return []
         if self._registry is not None:
             try:
-                cols = self._registry.collections_for(agent)
-                return [c for c in cols if c not in self._RESERVED_COLLECTIONS]
+                return list(self._registry.collections_for(agent))
             except KeyError:
                 # Agent not registered — fall through to pattern fallback.
                 logger.debug("resolver: agent %r not in registry, using legacy pattern", agent)
+        pattern = self._config.agent_pattern if self._config else self._DEFAULT_AGENT_PATTERN
         return [pattern.format(agent=agent)]
-
-    def _shared_collections(self) -> list[str]:
-        cols: list[str] = []
-        if self._config:
-            cols.extend(c.name for c in self._config.shared if c.name not in self._RESERVED_COLLECTIONS)
-        cols.extend(c for c in self._extra if c not in self._RESERVED_COLLECTIONS)
-        return cols
 
     def _all_agent_collections(self) -> list[str]:
         """Concrete agent collections from the AgentRegistry.
 
-        Returns the dedup-union of every agent's collection_names() so that
+        Returns the dedup-union of every agent's ``collection_names()`` so
         cross-agent shared paths (e.g. ``04-Agent-Knowledge/shared``) are
         never duplicated in the resolver's output.
 
         Raises ``NotImplementedError`` when no registry is configured — the
-        misconfiguration is loud rather than silent (returns empty list →
-        "search nothing" would mask bad ops).
+        misconfiguration is loud rather than silent (returning an empty list
+        would mask bad ops as "search nothing").
         """
         if self._registry is None:
             raise NotImplementedError(
-                "scope=all-agents / everything requires an AgentRegistry. "
-                "Configure agents: in kairix.config.yaml or pass agent_registry "
-                "to DefaultCollectionResolver."
+                "scope=all-agents / scope=everything requires an AgentRegistry. "
+                "Add an `agents:` section to kairix.config.yaml — minimum: "
+                "`agents: [{name: <agent>, write_path: <path>}]` — or pass "
+                "agent_registry= to DefaultCollectionResolver in the factory."
             )
         # Prefer the registry-level method when available (production registry);
         # fall back to per-agent iteration for fakes that only implement
         # ``list_agents()``.
         if hasattr(self._registry, "all_collections"):
-            cols = self._registry.all_collections()
-        else:
-            seen: set[str] = set()
-            cols = []
-            for agent in self._registry.list_agents():
-                names = agent.collection_names() if hasattr(agent, "collection_names") else [agent.collection]
-                for name in names:
-                    if name not in seen:
-                        seen.add(name)
-                        cols.append(name)
-        return [c for c in cols if c not in self._RESERVED_COLLECTIONS]
+            return list(self._registry.all_collections())
+        cols: list[str] = []
+        for agent in self._registry.list_agents():
+            names = agent.collection_names() if hasattr(agent, "collection_names") else [agent.collection]
+            cols.extend(names)
+        return _dedupe_preserving_order(cols)

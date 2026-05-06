@@ -20,7 +20,7 @@ def _registry_with(*names: str) -> ConfigDrivenAgentRegistry:
 
 def _config(*shared: str) -> CollectionsConfig:
     return CollectionsConfig(
-        shared=[CollectionDef(name=s, path=s, glob="*.md") for s in shared],
+        shared=tuple(CollectionDef(name=s, path=s, glob="*.md") for s in shared),
         agent_pattern="{agent}-memory",
         agent_paths={},
     )

@@ -131,11 +131,20 @@ def test_relative_paths_resolve_against_document_root(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
-def test_resolver_excludes_reflib_from_agent_collections() -> None:
-    """Reserved-collections invariant from v2026.5.4 still applies under the multi-path schema.
+def test_registry_drops_legacy_name_clashing_with_auto_injected_collection() -> None:
+    """Auto-injected collection names cannot be claimed by an agent's legacy ``collection:`` field.
 
-    Even if an operator names an agent's collection ``reference-library``,
-    the resolver strips it from non-explicit scopes.
+    The embed harness injects a ``reference-library`` collection outside of
+    the YAML config (see ``kairix/core/embed/cli.py``). An agent that also
+    claims that name in YAML would shadow the injected collection in search
+    routing. ``parse_agent_registry`` rejects the override at parse time and
+    falls through to synthetic ``{name}-{i}`` naming so the auto-injected
+    collection keeps routing correctly.
+
+    Replaces the historical resolver-side carve-out (deleted 2026-05-07) —
+    the protection is now structural (name-collision against runtime-created
+    collections) rather than policy (which collections appear in default
+    scope is operator-controlled via ``in_default``).
     """
     yaml_text = textwrap.dedent("""
         agents:
@@ -148,4 +157,7 @@ def test_resolver_excludes_reflib_from_agent_collections() -> None:
     resolver = DefaultCollectionResolver(collections_config=None, agent_registry=registry)
 
     cols = resolver.resolve("rogue", Scope.AGENT)
-    assert cols is None or "reference-library" not in cols
+    assert cols is not None
+    assert "reference-library" not in cols
+    # The agent gets the synthetic naming since the legacy override was dropped.
+    assert cols == ["rogue-0"]
