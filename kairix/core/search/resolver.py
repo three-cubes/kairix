@@ -14,10 +14,13 @@ AgentRegistry (WS3-3).
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from kairix.core.search.config_loader import CollectionsConfig
 from kairix.core.search.scope import Scope
+
+logger = logging.getLogger(__name__)
 
 
 class DefaultCollectionResolver:
@@ -82,19 +85,43 @@ class DefaultCollectionResolver:
         elif scope_enum is Scope.AGENT:
             if not agent:
                 return None  # No agent → no scope filter
-            cols = [pattern.format(agent=agent)]
+            cols = self._collections_for_agent(agent, pattern)
         elif scope_enum is Scope.SHARED_AGENT:
             cols = list(self._shared_collections())
             if agent:
-                cols.append(pattern.format(agent=agent))
+                cols.extend(self._collections_for_agent(agent, pattern))
         elif scope_enum is Scope.ALL_AGENTS:
             cols = self._all_agent_collections()
         elif scope_enum is Scope.EVERYTHING:
-            cols = list(self._shared_collections()) + self._all_agent_collections()
+            # Dedupe across the union — an agent path that overlaps a shared
+            # collection name should appear once.
+            seen: set[str] = set()
+            cols = []
+            for c in list(self._shared_collections()) + self._all_agent_collections():
+                if c not in seen:
+                    seen.add(c)
+                    cols.append(c)
         else:  # pragma: no cover — defensive; Scope.parse rejects unknowns
             cols = []
 
         return cols or None
+
+    def _collections_for_agent(self, agent: str, pattern: str) -> list[str]:
+        """Resolve the agent's read collections.
+
+        With a registry, returns the agent's full multi-path collection list.
+        Without a registry (legacy deployments), falls back to the historical
+        single-collection ``pattern.format(agent=agent)`` shape so the search
+        contract stays backwards-compatible.
+        """
+        if self._registry is not None:
+            try:
+                cols = self._registry.collections_for(agent)
+                return [c for c in cols if c not in self._RESERVED_COLLECTIONS]
+            except KeyError:
+                # Agent not registered — fall through to pattern fallback.
+                logger.debug("resolver: agent %r not in registry, using legacy pattern", agent)
+        return [pattern.format(agent=agent)]
 
     def _shared_collections(self) -> list[str]:
         cols: list[str] = []
@@ -106,7 +133,11 @@ class DefaultCollectionResolver:
     def _all_agent_collections(self) -> list[str]:
         """Concrete agent collections from the AgentRegistry.
 
-        Raises NotImplementedError when no registry is configured — the
+        Returns the dedup-union of every agent's collection_names() so that
+        cross-agent shared paths (e.g. ``04-Agent-Knowledge/shared``) are
+        never duplicated in the resolver's output.
+
+        Raises ``NotImplementedError`` when no registry is configured — the
         misconfiguration is loud rather than silent (returns empty list →
         "search nothing" would mask bad ops).
         """
@@ -116,4 +147,18 @@ class DefaultCollectionResolver:
                 "Configure agents: in kairix.config.yaml or pass agent_registry "
                 "to DefaultCollectionResolver."
             )
-        return [agent.collection for agent in self._registry.list_agents()]
+        # Prefer the registry-level method when available (production registry);
+        # fall back to per-agent iteration for fakes that only implement
+        # ``list_agents()``.
+        if hasattr(self._registry, "all_collections"):
+            cols = self._registry.all_collections()
+        else:
+            seen: set[str] = set()
+            cols = []
+            for agent in self._registry.list_agents():
+                names = agent.collection_names() if hasattr(agent, "collection_names") else [agent.collection]
+                for name in names:
+                    if name not in seen:
+                        seen.add(name)
+                        cols.append(name)
+        return [c for c in cols if c not in self._RESERVED_COLLECTIONS]

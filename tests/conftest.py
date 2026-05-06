@@ -35,6 +35,7 @@ pytest_plugins = [
     "tests.bdd.steps.chunk_date_steps",
     "tests.bdd.steps.research_synthesis_steps",
     "tests.bdd.steps.search_dedup_steps",
+    "tests.bdd.steps.agent_collections_steps",
 ]
 
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
