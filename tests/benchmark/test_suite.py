@@ -883,3 +883,33 @@ def test_gold_paths_with_unquoted_iso_date_coerces_to_str(tmp_path: Path) -> Non
     case = suite.cases[0]
     assert case.gold_paths is not None
     assert all(isinstance(g["path"], str) for g in case.gold_paths)
+
+
+def test_all_bundled_suites_load_without_errors() -> None:
+    """Every YAML in suites/ must load via load_suite — guards against the
+    #104 footgun where a bundled suite fails schema validation only at runtime.
+
+    Adds a CI gate that catches missing gold fields, type errors, and other
+    structural issues at load-time so first-run quick-start can never break
+    on a shipped suite.
+    """
+    from pathlib import Path
+
+    from kairix.quality.benchmark.suite import load_suite
+
+    repo_root = Path(__file__).resolve().parents[2]
+    suites_dir = repo_root / "suites"
+    assert suites_dir.is_dir(), f"expected bundled suites dir at {suites_dir}"
+
+    yaml_files = sorted(suites_dir.glob("*.yaml")) + sorted(suites_dir.glob("*.yml"))
+    assert yaml_files, "no bundled suites found — has the suites/ dir moved?"
+
+    failures: list[str] = []
+    for suite_path in yaml_files:
+        try:
+            suite = load_suite(str(suite_path))
+            assert suite.cases, f"{suite_path.name} loaded with zero cases"
+        except Exception as exc:
+            failures.append(f"{suite_path.name}: {type(exc).__name__}: {exc}")
+
+    assert not failures, "Bundled suites failed to load:\n  " + "\n  ".join(failures)
