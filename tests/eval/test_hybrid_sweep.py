@@ -284,7 +284,7 @@ def test_sweep_report_defaults() -> None:
 
 
 @pytest.mark.unit
-def testsweep_config_to_retrieval_config_hybrid() -> None:
+def test_sweep_config_to_retrieval_config_hybrid() -> None:
     """Hybrid mode produces RRF fusion strategy."""
     cfg = HybridSweepConfig(name="test", mode="hybrid", rrf_k=40, entity_enabled=False)
     rc = sweep_config_to_retrieval_config(cfg)
@@ -294,7 +294,7 @@ def testsweep_config_to_retrieval_config_hybrid() -> None:
 
 
 @pytest.mark.unit
-def testsweep_config_to_retrieval_config_bm25_only() -> None:
+def test_sweep_config_to_retrieval_config_bm25_only() -> None:
     """BM25-only mode sets skip_vector and bm25_primary fusion."""
     cfg = HybridSweepConfig(name="test", mode="bm25_only")
     rc = sweep_config_to_retrieval_config(cfg)
@@ -303,7 +303,7 @@ def testsweep_config_to_retrieval_config_bm25_only() -> None:
 
 
 @pytest.mark.unit
-def testsweep_config_to_retrieval_config_bm25_primary() -> None:
+def test_sweep_config_to_retrieval_config_bm25_primary() -> None:
     """BM25-primary mode sets bm25_primary fusion without skip_vector."""
     cfg = HybridSweepConfig(name="test", mode="bm25_primary")
     rc = sweep_config_to_retrieval_config(cfg)
@@ -312,7 +312,7 @@ def testsweep_config_to_retrieval_config_bm25_primary() -> None:
 
 
 @pytest.mark.unit
-def testsweep_config_to_retrieval_config_preserves_boost_params() -> None:
+def test_sweep_config_to_retrieval_config_preserves_boost_params() -> None:
     """Boost parameters are forwarded to RetrievalConfig."""
     cfg = HybridSweepConfig(
         name="test",

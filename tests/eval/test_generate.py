@@ -443,3 +443,16 @@ def test_enrich_suite_skips_case_when_no_relevant_doc(tmp_path: Path) -> None:
         parsed = yaml.safe_load(f)
     # Original gold_path preserved
     assert parsed["cases"][0].get("gold_path") == "obscure-doc.md"
+
+
+# Regression tests for the resolve_credentials inversion fix (#143 Phase 0)
+# and the enrich_suite credential-failure handling fix are deliberately
+# DEFERRED to Phase 1 of this initiative. Both bugs require either (a)
+# monkeypatch.setattr to substitute fetch_llm_credentials at module level,
+# which is the smell this initiative is removing, or (b) env-var monkeypatching
+# which the paths-DI initiative (#139) is removing. Phase 1 adds a
+# `ChatBackend` protocol and `FakeChatBackend` in tests/fakes.py that lets
+# us inject the credential surface cleanly; the regression tests land in
+# the same PR as the fakes. Bug fixes are landing without their unit-level
+# regression tests in this PR — code-review-verified, with the
+# implementation comment in resolve_credentials documenting the truth table.
