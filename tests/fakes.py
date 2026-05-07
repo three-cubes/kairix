@@ -11,9 +11,50 @@ These fakes are the canonical test doubles for contract and unit tests.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from kairix.core.search.intent import QueryIntent
+from kairix.paths import KairixPaths
+
+
+def FakePaths(  # noqa: N802 — factory function returning KairixPaths; named like a class for call-site clarity
+    *,
+    document_root: Path | str = "/fake/document_root",
+    db_path: Path | str = "/fake/index.sqlite",
+    log_dir: Path | str = "/fake/logs",
+    workspace_root: Path | str = "/fake/workspaces",
+) -> KairixPaths:
+    """Construct a real ``KairixPaths`` from explicit arguments — no env-var I/O.
+
+    The canonical replacement for ``monkeypatch.setenv("KAIRIX_*")`` +
+    ``_resolve_cached.cache_clear()``. Tests construct a paths object with
+    whatever values they need and pass it through the production code's
+    ``paths: KairixPaths`` parameter.
+
+    Returns a ``KairixPaths`` instance (not a separate Fake type) so the
+    production type surface stays narrow — there is one paths shape, used
+    in both production and tests.
+
+    Defaults are sentinel ``/fake/...`` paths that won't accidentally match
+    real filesystem locations; tests should pass concrete ``tmp_path``
+    values when path semantics matter for the test.
+
+    Example:
+        >>> from pathlib import Path
+        >>> from tests.fakes import FakePaths
+        >>> paths = FakePaths(
+        ...     document_root=tmp_path / "vault",
+        ...     workspace_root=tmp_path / "workspaces",
+        ... )
+        >>> result = should_inject(f"{paths.document_root}/01-Projects/x.md", paths=paths)
+    """
+    return KairixPaths(
+        document_root=Path(document_root),
+        db_path=Path(db_path),
+        log_dir=Path(log_dir),
+        workspace_root=Path(workspace_root),
+    )
 
 
 class FakeClassifier:

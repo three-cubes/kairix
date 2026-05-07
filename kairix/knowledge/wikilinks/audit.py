@@ -20,6 +20,7 @@ from typing import Any
 from kairix.knowledge.wikilinks import WIKILINK_RE
 from kairix.knowledge.wikilinks.injector import MAX_FILE_SIZE, should_inject
 from kairix.knowledge.wikilinks.resolver import WikiEntity
+from kairix.paths import KairixPaths
 
 _LOG_PATH = str(Path.home() / ".cache" / "kairix" / "wikilinks-log.jsonl")
 
@@ -98,28 +99,38 @@ def find_unlinked_mentions(
     document_root: str,
     entities: list[WikiEntity],
     sample_size: int = 50,
+    *,
+    paths: KairixPaths | None = None,
 ) -> list[dict[str, Any]]:
     """
     Sample eligible files and find entity mentions that are NOT wikilinked.
 
     Returns list of dicts: {file, entity_name, mention_count}.
     Used to estimate injection backlog.
+
+    Args:
+        document_root: Path to the document store root (string).
+        entities:      Entities eligible for injection.
+        sample_size:   Maximum number of files to sample.
+        paths:         Injected ``KairixPaths`` controlling workspace
+                       discovery and ``should_inject`` eligibility. When
+                       ``None``, falls back to ``KairixPaths.resolve()``.
     """
+    paths = paths or KairixPaths.resolve()
+
     doc_path = Path(document_root)
 
     # Gather eligible files
     eligible: list[Path] = []
     for md_file in doc_path.rglob("*.md"):
-        if should_inject(str(md_file)):
+        if should_inject(str(md_file), paths=paths):
             eligible.append(md_file)
 
     # Also check workspace memory files
-    from kairix.paths import workspace_root as _ws_root
-
-    workspaces_root = _ws_root()
+    workspaces_root = paths.workspace_root
     if workspaces_root.exists():
         for md_file in workspaces_root.rglob("*.md"):
-            if should_inject(str(md_file)):
+            if should_inject(str(md_file), paths=paths):
                 eligible.append(md_file)
 
     # Sample
@@ -183,14 +194,28 @@ def find_unlinked_mentions(
 # ---------------------------------------------------------------------------
 
 
-def weekly_report(document_root: str, entities: list[WikiEntity]) -> str:
+def weekly_report(
+    document_root: str,
+    entities: list[WikiEntity],
+    *,
+    paths: KairixPaths | None = None,
+) -> str:
     """
     Generate markdown weekly audit report covering:
     - Total entities in ontology (with/without vault_path)
     - Broken links found
     - Sample of unlinked mentions
     - Files injected since last report (from injection log)
+
+    Args:
+        document_root: Path to the document store root (string).
+        entities:      Entities eligible for injection.
+        paths:         Injected ``KairixPaths`` for workspace discovery in
+                       unlinked-mention sampling. When ``None``, falls back
+                       to ``KairixPaths.resolve()``.
     """
+    paths = paths or KairixPaths.resolve()
+
     now = datetime.now(timezone.utc)
     report_date = now.strftime("%Y-%m-%d")
 
@@ -203,7 +228,7 @@ def weekly_report(document_root: str, entities: list[WikiEntity]) -> str:
     broken = find_broken_links(document_root)
 
     # Unlinked mentions sample
-    unlinked = find_unlinked_mentions(document_root, entities, sample_size=50)
+    unlinked = find_unlinked_mentions(document_root, entities, sample_size=50, paths=paths)
 
     # Injection log stats (last 7 days)
     recent_injections = _read_recent_log(days=7)
