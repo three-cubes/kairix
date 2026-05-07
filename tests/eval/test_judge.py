@@ -337,7 +337,7 @@ def test_llm_judge_grade_uses_configured_deployment() -> None:
     result = judge.grade(
         _QUERY,
         _CANDIDATES,
-        api_key="key",
+        api_key="key",  # pragma: allowlist secret
         endpoint="https://endpoint",
         shuffle=False,
     )
@@ -355,7 +355,7 @@ def test_llm_judge_grade_returns_zeros_on_backend_error() -> None:
     result = judge.grade(
         _QUERY,
         _CANDIDATES,
-        api_key="key",
+        api_key="key",  # pragma: allowlist secret
         endpoint="https://endpoint",
         shuffle=False,
     )
@@ -371,7 +371,7 @@ def test_llm_judge_calibrate_passes_when_all_anchors_correct() -> None:
     backend = FakeChatBackend(responses=responses)
 
     judge = LLMJudge(chat_backend=backend)
-    assert judge.calibrate(api_key="key", endpoint="https://endpoint") is True
+    assert judge.calibrate(api_key="key", endpoint="https://endpoint") is True  # pragma: allowlist secret
 
 
 @pytest.mark.unit
@@ -384,4 +384,4 @@ def test_llm_judge_calibrate_raises_when_too_many_anchors_wrong() -> None:
 
     judge = LLMJudge(chat_backend=backend)
     with pytest.raises(JudgeCalibrationError):
-        judge.calibrate(api_key="key", endpoint="https://endpoint")
+        judge.calibrate(api_key="key", endpoint="https://endpoint")  # pragma: allowlist secret

@@ -712,7 +712,7 @@ def test_query_generator_handles_credential_rejection_via_chat_backend() -> None
         body="y",
         n=2,
         categories=["recall"],
-        api_key="bogus-key",
+        api_key="bogus-key",  # pragma: allowlist secret
         endpoint="https://e",
     )
 

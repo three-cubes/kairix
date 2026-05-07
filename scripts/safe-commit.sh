@@ -63,9 +63,16 @@ fi
 PASSED=$(echo "$TEST_OUT" | grep -oE '[0-9]+ passed')
 echo -e "${GREEN}OK${NC} ($PASSED)"
 
-# 5. Secret detection
+# 5. Secret detection — pre-commit hook mirrors CI; do not invoke `detect-secrets scan`
+# directly here (it overwrites the baseline and only scans the path you pass it).
 echo -n "  secrets... "
-detect-secrets scan kairix/ --exclude-files '\.pyc$' --baseline .secrets.baseline 2>/dev/null || { echo -e "${RED}FAIL${NC}"; exit 1; }
+SECRETS_OUT=$(pre-commit run detect-secrets --all-files 2>&1) || true
+if echo "$SECRETS_OUT" | grep -q "Failed"; then
+    echo -e "${RED}FAIL${NC}"
+    echo "$SECRETS_OUT" | tail -20
+    echo "If a test fixture is a false positive, mark with: # pragma: allowlist secret"
+    exit 1
+fi
 echo -e "${GREEN}OK${NC}"
 
 # 6. Confidential check
