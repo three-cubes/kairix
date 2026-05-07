@@ -7,34 +7,11 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
-### Added
+## [2026.5.7] - 2026-05-07 — Schema, security, onboarding completion, configurable scope, doc hygiene
 
-- **Configurable default search scope** — `kairix.config.yaml` collections now accept an optional `in_default: bool` flag (default `true`) controlling whether each collection participates in the *default* search scopes (`shared`, `shared+agent`, `all-agents`, `everything`). Collections with `in_default: false` remain scanned, indexed, and reachable via an explicit `--collection <name>` lookup, but no longer auto-join the default mix. Two predicates added to `CollectionsConfig` (`default_collection_names()`, `all_collection_names()`) for callers that need membership queries without iterating internals. Backwards compatible: yamls that don't set the flag behave identically to prior releases.
-- **Per-collection `retrieval:` block on `reference-library` in shipped example** — the example `kairix.config.yaml` now ships an explicit `retrieval:` block on the `reference-library` entry whose values match the historical `REFLIB_RETRIEVAL_CONFIG` baseline. New operators get the known-good baseline by default; operators who deviate are taking deliberate ownership.
-- **Design doc** — `docs/architecture/configurable-default-scope.md` captures the data-model change, the resolver refactor, the code-smell audit performed upfront, and the phased rollout (Phase 1 + Phase 3 shipped here; Phase 2 named-scopes design-tracked, uncommitted).
+> **Upgrading?** Drop-in. No client config change, no transport change. The new `agent_owner` column is added via additive ALTER TABLE on container start; existing rows get NULL. The multi-path `AgentDef` schema parses old `collection: <name>` YAML for one release window — migrate at your own pace. The new `in_default: bool` flag on collections defaults to `true` (today's behaviour); operators set it on opt-in collections to exclude them from default search.
 
-### Changed
-
-- **`DefaultCollectionResolver` refactored** — the historical 5-branch elif chain in `resolve()` collapsed to a `match` dispatch with single-purpose helpers; cyclomatic complexity dropped from ~5 to ≤3 per method. The "is this collection in default scope?" predicate moved off the resolver onto `CollectionsConfig`, removing the feature-envy pattern of the resolver iterating `c.name for c in config.shared` and re-applying its own filter.
-- **`CollectionsConfig` is now frozen** (`@dataclass(frozen=True)`) with `shared: tuple[CollectionDef, ...]`. Callers cannot mutate the parsed collection list after the boundary; the only public surface for membership is the two predicate methods above.
-- **Strict bool coercion for `in_default`** — `_coerce_bool()` rejects non-boolean YAML values (e.g. `"false"` as a string) at parse time with a `ConfigValidationError` naming the offending key. Without this, `bool("false")` would evaluate to `True` and silently route a collection into the wrong scope.
-- **Agent registry guards against name-collision with auto-injected collections** — `RESERVED_AGENT_COLLECTION_NAMES` in `kairix/core/search/registry.py` (single-element set, name-collision only — no policy intent) blocks an operator's legacy `collection: reference-library` field from shadowing the embed-harness-injected reflib collection. The check is structural and lives next to the auto-injection it defends.
-- **`resolve_retrieval_config` accepts an `overrides_fn` injection seam** — replaces `@patch("..._get_collection_overrides")` in tests; production callers see no change since the parameter defaults to the existing module-level function.
-
-### Removed
-
-- **Hardcoded `_RESERVED_COLLECTIONS = {"reference-library"}` constant in `kairix/core/search/resolver.py`**, along with its 22-line policy comment. Reflib's exclusion from default scopes now lives in operator yaml as `in_default: false` on the reference-library collection. The shipped example yaml ships this hint.
-- **Hardcoded `if target == "reference-library":` branch in `kairix/core/search/config_loader.py`** — `resolve_retrieval_config` no longer special-cases reflib. The reference-library retrieval baseline is reached via the existing per-collection `retrieval_overrides` path. The `REFLIB_RETRIEVAL_CONFIG` constant remains in `kairix/core/search/config.py` as a known-good comparison baseline.
-
-### Migration
-
-Drop-in upgrade. No yaml changes required; the absent `in_default` field defaults to `true` (today's behaviour). To benefit from the feature, operators set `in_default: false` on the collections they want excluded from default scopes — typically `reference-library` and any `archive`-style collection — and restart the worker + serve containers so both pick up the new config.
-
-## [2026.5.6] - 2026-05-06 — Schema, security, onboarding completion, doc hygiene
-
-> **Upgrading?** Drop-in. No client config change, no transport change. The new `agent_owner` column is added via additive ALTER TABLE on container start; existing rows get NULL. The multi-path `AgentDef` schema parses old `collection: <name>` YAML for one release window — migrate at your own pace.
-
-This release consolidates a sprint of work covering schema follow-on (#114, #115), security hardening (BLOCKER + MEDIUM + LOW SonarCloud findings, 51 in total), the trailing EmbedProvider wire (#43), bundled-suite hygiene (#103, #104), the onboarding flow's quality-gate stage 5 (KFEAT-013), and the first batch of public-shaped operator runbooks. Plus the previously-deployed hotfix for reference-library search pollution + MCP timeline result-shape (#119, UAT'd on `:develop` since 2026-05-05).
+This release consolidates a sprint of work covering schema follow-on (#114, #115), security hardening (51 SonarCloud findings: BLOCKER + MEDIUM + LOW), the trailing EmbedProvider wire (#43), bundled-suite hygiene (#103, #104), the onboarding flow's quality-gate stage 5 (KFEAT-013), the first batch of public-shaped operator runbooks, and the configurable default-scope feature (#135) that lifts the historical `_RESERVED_COLLECTIONS = {"reference-library"}` carve-out into operator yaml. Plus the previously-deployed hotfix for reference-library search pollution + MCP timeline result-shape (#119, UAT'd on `:develop` since 2026-05-05) and the schema-migration deploy-time bug (#133).
 
 ### Added
 
@@ -48,6 +25,9 @@ This release consolidates a sprint of work covering schema follow-on (#114, #115
   - `how-to-rebuild-entity-graph.md` — Neo4j entity graph rebuild via `kairix store crawl --full`.
   - `how-to-configure-pypi-trusted-publisher.md` (OPS-008) — one-time operator setup for OIDC-based PyPI publishing.
   All parameterised against `KAIRIX_*` env surface; no operator-specific paths or hostnames.
+- **Configurable default search scope** (#135) — `kairix.config.yaml` collections now accept an optional `in_default: bool` flag (default `true`) controlling whether each collection participates in the *default* search scopes (`shared`, `shared+agent`, `all-agents`, `everything`). Collections with `in_default: false` remain scanned, indexed, and reachable via an explicit `--collection <name>` lookup, but no longer auto-join the default mix. Two predicates added to `CollectionsConfig` (`default_collection_names()`, `all_collection_names()`) for callers that need membership queries without iterating internals.
+- **Per-collection `retrieval:` block on `reference-library` in shipped example** (#135) — the example `kairix.config.yaml` now ships an explicit `retrieval:` block on the `reference-library` entry whose values match the historical `REFLIB_RETRIEVAL_CONFIG` baseline. New operators get the known-good baseline by default; operators who deviate are taking deliberate ownership.
+- **Design doc** (#135) — `docs/architecture/configurable-default-scope.md` captures the data-model change, the resolver refactor, the code-smell audit performed upfront, and the phased rollout (Phase 1 + Phase 3 shipped here; Phase 2 named-scopes design-tracked, uncommitted).
 
 ### Changed
 
@@ -56,8 +36,17 @@ This release consolidates a sprint of work covering schema follow-on (#114, #115
 - **`DocumentScanner`** accepts an optional `agent_owner_resolver` kwarg; default behaviour unchanged.
 - **Wikilinks injector** now reads `document_root()` / `workspace_root()` lazily instead of capturing them at module import. Removes a long-standing `importlib.reload` requirement from the test fixture (#129).
 - **`scripts/chunk-{crm,daily}-files.py`** default `--output-dir` changed from `/tmp/*` to `~/.cache/kairix/*` — safer default, no behaviour change for explicitly-passed paths.
-- **`DefaultCollectionResolver._RESERVED_COLLECTIONS`** excludes `reference-library` from every default scope regardless of yaml. Reflib remains reachable via explicit `--collection reference-library`. (#119)
 - **MCP `error envelope`** — uncaught exceptions inside tool handlers now return `{"error": "<ExceptionClass>: <message>"}` instead of being masked as JSON-RPC `-32602`. (carried forward from earlier work)
+- **`DefaultCollectionResolver` refactored** (#135) — the historical 5-branch elif chain in `resolve()` collapsed to a `match` dispatch with single-purpose helpers; cyclomatic complexity dropped from ~5 to ≤3 per method. The "is this collection in default scope?" predicate moved off the resolver onto `CollectionsConfig`, removing the feature-envy pattern of the resolver iterating `c.name for c in config.shared` and re-applying its own filter.
+- **`CollectionsConfig` is now frozen** (#135) — `@dataclass(frozen=True)` with `shared: tuple[CollectionDef, ...]`. Callers cannot mutate the parsed collection list after the boundary; the only public surface for membership is the two predicate methods above.
+- **Strict bool coercion for `in_default`** (#135) — `_coerce_bool()` rejects non-boolean YAML values (e.g. `"false"` as a string) at parse time with a `ConfigValidationError` naming the offending key. Without this, `bool("false")` would evaluate to `True` and silently route a collection into the wrong scope.
+- **Agent registry guards against name-collision with auto-injected collections** (#135) — `RESERVED_AGENT_COLLECTION_NAMES` in `kairix/core/search/registry.py` (single-element set, name-collision only — no policy intent) blocks an operator's legacy `collection: reference-library` field from shadowing the embed-harness-injected reflib collection. The check is structural and lives next to the auto-injection it defends.
+- **`resolve_retrieval_config` accepts an `overrides_fn` injection seam** (#135) — replaces `@patch("..._get_collection_overrides")` in tests; production callers see no change since the parameter defaults to the existing module-level function.
+
+### Removed
+
+- **Hardcoded `_RESERVED_COLLECTIONS = {"reference-library"}` constant in `kairix/core/search/resolver.py`** (#135), along with its 22-line policy comment. Reflib's exclusion from default scopes now lives in operator yaml as `in_default: false` on the reference-library collection. The shipped example yaml ships this hint. Replaces the temporary hardcoded carve-out introduced at v2026.5.4 in response to the 2026-05-05 reflib-pollution incident.
+- **Hardcoded `if target == "reference-library":` branch in `kairix/core/search/config_loader.py`** (#135) — `resolve_retrieval_config` no longer special-cases reflib. The reference-library retrieval baseline is reached via the existing per-collection `retrieval_overrides` path. The `REFLIB_RETRIEVAL_CONFIG` constant remains in `kairix/core/search/config.py` as a known-good comparison baseline.
 
 ### Fixed
 
@@ -65,6 +54,7 @@ This release consolidates a sprint of work covering schema follow-on (#114, #115
 - **#104 — Bundled `reflib-gold-v1.yaml` unrunnable.** Removed (was a queries-only pre-grading snapshot); v3 is the canonical reflib gold.
 - **OPS-007 (#43 trailing wire) — `recall_check._embed_query` raw HTTP.** Now goes through `EmbedProvider` for retry / rate-limit / backoff parity with the rest of the embed pipeline.
 - **MCP `tool_timeline` returned empty placeholders for non-temporal queries** (#119) — `BudgetedResult` dereference fixed; real path/title/snippet/score now flow through.
+- **Schema migration on legacy DBs** (#133, hotfix caught at deploy time) — `create_schema()` now runs `migrate()` between table-creation and index-creation so `CREATE INDEX idx_documents_agent_owner` doesn't fire before the column exists. Regression test added.
 
 ### Security
 
@@ -74,15 +64,21 @@ This release consolidates a sprint of work covering schema follow-on (#114, #115
 
 ### Tests
 
-- **2,133 unit/bdd/contract/integration tests pass** (was ~2,100 at v2026.5.3).
-- New BDD coverage: `agent_collections.feature` (9 scenarios), `eval_gate.feature` (6 scenarios).
-- New integration coverage: `test_multi_path_agents.py` (6 tests), `test_eval_gate_cli.py` (5 tests against real CLI dispatch).
+- **2,150 unit/bdd/contract/integration tests pass** (was ~2,100 at v2026.5.3).
+- New BDD coverage: `agent_collections.feature` (9 scenarios), `eval_gate.feature` (6 scenarios), `configurable_default_scope.feature` (5 scenarios incl. non-bool rejection).
+- New contract coverage: `test_collection_defaults.py` (predicate semantics), `test_no_reflib_resolver_hardcode.py` (source-string regression guard against the hardcode coming back).
+- New integration coverage: `test_multi_path_agents.py` (6 tests, with the registry-level reserved-name guard replacing the resolver-level filter), `test_eval_gate_cli.py` (5 tests against real CLI dispatch).
 - `tests/db/test_scanner.py` and `tests/integration/test_collections.py` refactored to use `create_schema()` from production — single source of truth with the live schema.
+
+### Migration
+
+Drop-in upgrade. No yaml changes required; the absent `in_default` field defaults to `true` (today's behaviour). To benefit from the configurable-scope feature, operators set `in_default: false` on the collections they want excluded from default scopes — typically `reference-library` and any `archive`-style collection — and restart the worker + serve containers so both pick up the new config. Live VM verification (2026-05-07) confirmed: default search excludes archive + reflib; explicit `--collection archive` and `--collection reference-library` still return their respective docs.
 
 ### Known incomplete (tracked, deferred)
 
 - **OPS-012** — rebuild user-vault gold suite against current vault structure (#117). Runs against the live VM; deferred until the deploy window.
 - **KFEAT-014** — reference-library storage isolation. Pipeline-level change; deferred to next release.
+- **Phase 2 of configurable scope** — composable named scopes (`scopes.research`, `scopes.with-history`). Design-tracked in `docs/architecture/configurable-default-scope.md`; held until a second concrete use case lands.
 - **`kairix onboard` orchestrator** — chain stages 1–5 into one command. Worth a focused PR after this release lands.
 - **GH Actions SHA-pinning** — supply-chain hardening sprint, separate workstream.
 - **Vault runbook migration batch 2** — deployment-specific runbooks (binary-symlink, cron-deploy, KV setup, restart, secrets fetch) stay vault-private; needs operator-overlay design before public migration.
