@@ -296,3 +296,177 @@ class FakeAgentRegistry:
                     return False
                 return path == wp or path.startswith(wp.rstrip("/") + "/")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Eval-module fakes (#143 Phase 1)
+#
+# Paired with the eval protocols in kairix/core/protocols.py — together they
+# replace the *_fn=None test-substitution kwargs scattered through the eval
+# module. Tests inject these via the constructor of the LLMJudge / GoldBuilder /
+# QueryGenerator / SuiteGenerator classes that Phase 2a/2b add.
+# ---------------------------------------------------------------------------
+
+
+class FakeChatBackend:
+    """Configurable ChatBackend that returns canned responses or raises a configured error.
+
+    Usage:
+        backend = FakeChatBackend(responses=['{"A": 2, "B": 1}'])
+        ...
+        backend = FakeChatBackend(raise_on_call=ValueError("No API credentials"))
+
+    `responses` is consumed in order; once exhausted, subsequent calls raise
+    `IndexError` (a deliberate explicit failure rather than silently looping
+    or returning empty — silent fallback is the smell this protocol replaces).
+    """
+
+    def __init__(
+        self,
+        *,
+        responses: list[str] | None = None,
+        raise_on_call: Exception | None = None,
+    ) -> None:
+        self._responses: list[str] = list(responses or [])
+        self._raise_on_call = raise_on_call
+        self.calls: list[dict[str, Any]] = []  # for test inspection
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        api_key: str,
+        endpoint: str,
+        deployment: str,
+        system: str | None = None,
+        temperature: float = 0.0,
+        timeout_s: float = 30.0,
+    ) -> str:
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "api_key": api_key,
+                "endpoint": endpoint,
+                "deployment": deployment,
+                "system": system,
+                "temperature": temperature,
+                "timeout_s": timeout_s,
+            }
+        )
+        if self._raise_on_call is not None:
+            raise self._raise_on_call
+        if not self._responses:
+            raise IndexError(
+                f"FakeChatBackend: ran out of canned responses on call {len(self.calls)} (prompt[:60]={prompt[:60]!r})"
+            )
+        return self._responses.pop(0)
+
+
+class FakeLLMJudge:
+    """Configurable LLMJudge returning fixed grades per query.
+
+    Usage:
+        judge = FakeLLMJudge(
+            grades_by_query={"deploy docker": {"docker-guide": 2, "ci-cd": 1}},
+            calibration_passed=True,
+        )
+
+    `grade()` returns a JudgeResult-shaped object using the configured grades
+    for the given query, defaulting to all-zero for unknown queries. The fake
+    returns a `_StubJudgeResult` (a small namespace) rather than importing
+    the real `JudgeResult` class to keep the fake import-free of judge.py
+    internals — judge.py's tests can construct real JudgeResults explicitly.
+    """
+
+    def __init__(
+        self,
+        *,
+        grades_by_query: dict[str, dict[str, int]] | None = None,
+        calibration_passed: bool = True,
+    ) -> None:
+        self._grades_by_query = dict(grades_by_query or {})
+        self._calibration_passed = calibration_passed
+        self.grade_calls: list[tuple[str, list[tuple[str, str]]]] = []
+        self.calibrate_calls: int = 0
+
+    def grade(
+        self,
+        query: str,
+        candidates: list[tuple[str, str]],
+        *,
+        runs: int = 1,
+    ) -> Any:
+        self.grade_calls.append((query, candidates))
+        configured = self._grades_by_query.get(query, {})
+        # Build a minimal namespace mimicking JudgeResult — judge_model / shuffle_order
+        # default to deterministic test values.
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            query=query,
+            grades={stem: configured.get(stem, 0) for stem, _ in candidates},
+            shuffle_order=tuple(stem for stem, _ in candidates),
+            judge_model="fake-llm",
+            calibration_passed=self._calibration_passed,
+        )
+
+    def calibrate(self) -> bool:
+        self.calibrate_calls += 1
+        return self._calibration_passed
+
+
+class FakeQueryGenerator:
+    """Configurable QueryGenerator returning fixed queries per (title, body) call.
+
+    Usage:
+        gen = FakeQueryGenerator(
+            queries_by_title={"deploy.md": [GeneratedQuery(...)]},
+        )
+    """
+
+    def __init__(self, *, queries_by_title: dict[str, list[Any]] | None = None) -> None:
+        self._queries_by_title = dict(queries_by_title or {})
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(
+        self,
+        title: str,
+        body: str,
+        *,
+        n: int,
+        categories: list[str],
+    ) -> list[Any]:
+        self.calls.append({"title": title, "body": body[:50], "n": n, "categories": list(categories)})
+        return list(self._queries_by_title.get(title, []))[:n]
+
+
+class FakeRetriever:
+    """Configurable Retriever returning fixed results per query.
+
+    Usage:
+        retriever = FakeRetriever(
+            results_by_query={"deploy docker": _build_retrieval_result([...])},
+        )
+
+    Default empty result is a SimpleNamespace with `results=[]` and
+    `vec_failed=False` — callers that need richer surface should construct
+    a typed RetrievalResult and pass it in via `results_by_query`.
+    """
+
+    def __init__(self, *, results_by_query: dict[str, Any] | None = None) -> None:
+        self._results_by_query = dict(results_by_query or {})
+        self.calls: list[dict[str, Any]] = []
+
+    def retrieve(
+        self,
+        query: str,
+        *,
+        collections: list[str] | None = None,
+        cfg: Any = None,
+    ) -> Any:
+        self.calls.append({"query": query, "collections": collections, "cfg": cfg})
+        if query in self._results_by_query:
+            return self._results_by_query[query]
+        from types import SimpleNamespace
+
+        return SimpleNamespace(results=[], vec_failed=False)
