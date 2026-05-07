@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,47 @@ def _populate_fts(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def _roll_memory_dates_to_today(tmp_root: Path) -> None:
+    """Shift date-named memory fixture files so the most recent file lands today.
+
+    The synthetic-agent fixture ships with hardcoded date stems (e.g.
+    ``2026-04-28.md``). The briefing source fetcher reads ``today - 7d``
+    onwards by literal filename, so as the calendar advances the fixture's
+    most recent file falls outside the read window and the integration
+    test ``test_briefing_fetches_memory_logs`` flips to FAIL on the day
+    that happens.
+
+    This shifts every date-named file in every ``*/memory/`` directory by
+    ``today - max(fixture_dates)`` so the relative spacing is preserved
+    and the most recent fixture file is always dated today. Non-date
+    filenames are left alone.
+    """
+    today = date.today()
+    for memory_dir in tmp_root.rglob("memory"):
+        if not memory_dir.is_dir():
+            continue
+        dated: list[tuple[date, Path]] = []
+        for f in memory_dir.glob("*.md"):
+            try:
+                dated.append((date.fromisoformat(f.stem), f))
+            except ValueError:
+                continue
+        if not dated:
+            continue
+        latest = max(d for d, _ in dated)
+        shift = today - latest
+        if shift == timedelta(0):
+            continue
+        # Two-pass rename via temp suffix to avoid name collisions when the
+        # shift produces a date that's already used by another fixture file.
+        for _, path in dated:
+            path.rename(path.with_suffix(".md.rolling"))
+        for original_date, path in dated:
+            tmp = path.with_suffix(".md.rolling")
+            new_name = (original_date + shift).isoformat() + ".md"
+            tmp.rename(path.with_name(new_name))
+
+
 @pytest.fixture(scope="session")
 def _integration_env(
     tmp_path_factory: pytest.TempPathFactory,
@@ -66,6 +108,9 @@ def _integration_env(
                 shutil.copytree(child, tmp_root / child.name)
             elif child.name.endswith(".md"):
                 shutil.copy2(child, tmp_root / child.name)
+
+    # Shift date-named memory files so the most recent one is today (see helper).
+    _roll_memory_dates_to_today(tmp_root)
 
     # Create real SQLite database
     db_path = tmp_root / "test_index.sqlite"
