@@ -37,7 +37,10 @@ import random
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kairix.core.protocols import ChatBackend
 
 logger = logging.getLogger(__name__)
 
@@ -297,6 +300,7 @@ def judge_batch(
     deployment: str = JUDGE_DEPLOYMENT,
     shuffle: bool = True,
     chat_fn: Callable[..., str] | None = None,
+    chat_backend: ChatBackend | None = None,
 ) -> JudgeResult:
     """
     Grade relevance of each candidate document for the given query.
@@ -305,12 +309,17 @@ def judge_batch(
     before presentation to mitigate position bias (Arabzadeh et al. 2024).
 
     Args:
-        query:       The search query to judge against.
-        candidates:  List of (title_stem, snippet) pairs — snippet ≤150 chars shown.
-        api_key:     Azure OpenAI API key.
-        endpoint:    Azure OpenAI endpoint URL.
-        deployment:  Model deployment name (default: gpt-4o-mini).
-        shuffle:     Shuffle candidates before presenting to judge (default: True).
+        query:        The search query to judge against.
+        candidates:   List of (title_stem, snippet) pairs — snippet ≤150 chars shown.
+        api_key:      Azure OpenAI API key.
+        endpoint:     Azure OpenAI endpoint URL.
+        deployment:   Model deployment name (default: gpt-4o-mini).
+        shuffle:      Shuffle candidates before presenting to judge (default: True).
+        chat_fn:      DEPRECATED (Phase 4 removes). Legacy callable substitute
+                      for ``chat_completion``; prefer ``chat_backend``.
+        chat_backend: ``ChatBackend`` protocol implementation. When supplied
+                      takes precedence over ``chat_fn``. Defaults to
+                      ``AzureChatBackend()`` constructed lazily.
 
     Returns:
         JudgeResult with grades dict {title_stem: int}. On any failure, all
@@ -367,7 +376,15 @@ def judge_batch(
     try:
         if not api_key or not endpoint:
             raise ValueError("No API credentials")
-        content = _call_llm(prompt, api_key, endpoint, deployment, chat_fn=chat_fn)
+        if chat_backend is not None:
+            content = chat_backend.complete(
+                prompt,
+                api_key=api_key,
+                endpoint=endpoint,
+                deployment=deployment,
+            )
+        else:
+            content = _call_llm(prompt, api_key, endpoint, deployment, chat_fn=chat_fn)
         label_grades = _parse_grade_response(content, list(labels))
     except Exception as e:
         logger.warning("judge_batch: API error for query %r — %s", query[:60], e)
@@ -396,6 +413,7 @@ def calibrate(
     endpoint: str,
     deployment: str = JUDGE_DEPLOYMENT,
     chat_fn: Callable[..., str] | None = None,
+    chat_backend: ChatBackend | None = None,
 ) -> bool:
     """
     Run the 15 frozen calibration anchors and verify judge accuracy.
@@ -404,9 +422,13 @@ def calibrate(
     per-document grading behaviour).
 
     Args:
-        api_key:    Azure OpenAI API key.
-        endpoint:   Azure OpenAI endpoint URL.
-        deployment: Model deployment name.
+        api_key:      Azure OpenAI API key.
+        endpoint:     Azure OpenAI endpoint URL.
+        deployment:   Model deployment name.
+        chat_fn:      DEPRECATED (Phase 4 removes). Legacy callable substitute
+                      for ``chat_completion``; prefer ``chat_backend``.
+        chat_backend: ``ChatBackend`` protocol implementation. Takes precedence
+                      over ``chat_fn`` when both are supplied.
 
     Returns:
         True if calibration passed (≤ CALIBRATION_MAX_ERRORS wrong).
@@ -426,6 +448,7 @@ def calibrate(
             deployment=deployment,
             shuffle=False,  # single candidate, no shuffle needed
             chat_fn=chat_fn,
+            chat_backend=chat_backend,
         )
         actual = result.grades.get(anchor["title"], 0)
         expected = anchor["expected"]
@@ -448,3 +471,77 @@ def calibrate(
         )
 
     return True
+
+
+# ---------------------------------------------------------------------------
+# LLMJudge — protocol-conforming class wrapper (#143 Phase 2a)
+#
+# Wraps the free functions ``judge_batch`` and ``calibrate`` in a class that
+# satisfies ``kairix.core.protocols.LLMJudge``. Production callers construct
+# ``LLMJudge(chat_backend=AzureChatBackend())`` once and inject it into the
+# eval pipeline; tests construct ``LLMJudge(chat_backend=FakeChatBackend(...))``.
+#
+# The free functions are preserved for backwards compatibility — they are
+# called by ``generate.py`` and ``gold_builder.py`` directly. Phase 2b
+# routes those callers through the class as well.
+# ---------------------------------------------------------------------------
+
+
+class LLMJudge:
+    """ChatBackend-injected LLM judge implementing the ``LLMJudge`` protocol.
+
+    Constructor takes a ``ChatBackend`` (production: ``AzureChatBackend``,
+    tests: ``FakeChatBackend``) and an optional deployment name. The
+    ``grade()`` and ``calibrate()`` methods delegate to ``judge_batch`` and
+    ``calibrate`` with the configured backend, accepting credentials per
+    call so callers can plumb them from their own credential resolution.
+    """
+
+    def __init__(
+        self,
+        *,
+        chat_backend: ChatBackend,
+        deployment: str = JUDGE_DEPLOYMENT,
+    ) -> None:
+        self._chat_backend = chat_backend
+        self._deployment = deployment
+
+    def grade(
+        self,
+        query: str,
+        candidates: list[tuple[str, str]],
+        *,
+        runs: int = 1,
+        api_key: str = "",
+        endpoint: str = "",
+        shuffle: bool = True,
+    ) -> JudgeResult:
+        """Grade ``candidates`` against ``query`` using the injected backend.
+
+        ``runs`` is accepted for protocol conformance — the current
+        implementation runs once. Multi-run aggregation is a Phase 4 follow-up.
+        """
+        del runs  # accepted for protocol conformance; multi-run is future work
+        return judge_batch(
+            query=query,
+            candidates=candidates,
+            api_key=api_key,
+            endpoint=endpoint,
+            deployment=self._deployment,
+            shuffle=shuffle,
+            chat_backend=self._chat_backend,
+        )
+
+    def calibrate(
+        self,
+        *,
+        api_key: str = "",
+        endpoint: str = "",
+    ) -> bool:
+        """Run the calibration anchor sweep using the injected backend."""
+        return calibrate(
+            api_key=api_key,
+            endpoint=endpoint,
+            deployment=self._deployment,
+            chat_backend=self._chat_backend,
+        )

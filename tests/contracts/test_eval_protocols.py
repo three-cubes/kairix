@@ -53,6 +53,16 @@ class TestChatBackendContract:
         with pytest.raises(ValueError, match="No API credentials"):
             backend.complete("p", api_key="k", endpoint="e", deployment="d")
 
+    def test_azure_chat_backend_satisfies_protocol(self) -> None:
+        """The production ``AzureChatBackend`` adapter satisfies the protocol.
+
+        Phase 2a adds the adapter class so production callers can inject a
+        ``ChatBackend`` rather than calling ``chat_completion`` directly.
+        """
+        from kairix._azure import AzureChatBackend
+
+        assert isinstance(AzureChatBackend(), ChatBackend)
+
 
 @pytest.mark.contract
 class TestLLMJudgeContract:
@@ -73,6 +83,18 @@ class TestLLMJudgeContract:
     def test_fake_llm_judge_calibrate_returns_configured_pass(self) -> None:
         assert FakeLLMJudge(calibration_passed=True).calibrate() is True
         assert FakeLLMJudge(calibration_passed=False).calibrate() is False
+
+    def test_production_llm_judge_satisfies_protocol(self) -> None:
+        """The production ``LLMJudge`` class in judge.py satisfies the protocol.
+
+        Phase 2a wraps the free functions ``judge_batch`` / ``calibrate`` in a
+        class injected with a ``ChatBackend``. This test asserts the class is
+        a structural match for the ``LLMJudge`` protocol.
+        """
+        from kairix.quality.eval.judge import LLMJudge as ProductionLLMJudge
+
+        production = ProductionLLMJudge(chat_backend=FakeChatBackend())
+        assert isinstance(production, LLMJudge)
 
 
 @pytest.mark.contract
