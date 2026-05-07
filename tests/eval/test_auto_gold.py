@@ -147,7 +147,7 @@ class TestBuildSuite:
         output = tmp_path / "test-suite.yaml"
         build_suite(queries, str(output))
 
-        with open(output) as f:
+        with open(output, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         assert "meta" in data
         assert "cases" in data
@@ -157,3 +157,66 @@ class TestBuildSuite:
             assert "query" in case
             assert "category" in case
             assert "score_method" in case
+
+    def test_writes_utf8_for_non_ascii_titles(self, tmp_path: Path) -> None:
+        """Regression for #143 Phase 0: build_suite previously opened the
+        output file without encoding= so non-ASCII titles were mangled or
+        raised UnicodeEncodeError on non-UTF-8 hosts."""
+        import yaml
+
+        from kairix.quality.eval.auto_gold import build_suite
+
+        queries = [
+            {"id": "T1", "category": "recall", "query": "café résumé naïve", "score_method": "ndcg"},
+            {"id": "T2", "category": "recall", "query": "数据 explorers 🌐", "score_method": "ndcg"},
+        ]
+        output = tmp_path / "non-ascii-suite.yaml"
+        build_suite(queries, str(output))
+
+        with open(output, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        assert data["cases"][0]["query"] == "café résumé naïve"
+        assert data["cases"][1]["query"] == "数据 explorers 🌐"
+
+
+class TestProceduralTitleClassification:
+    """Regression for #143 Phase 0: _PROCEDURAL_PATTERNS was applied to titles
+    in generate_template_queries, but the regex anchors on path separators
+    (`(?:^|/)how-to-|runbook|...`). Titles never contain '/', so the filter
+    was permanently empty and the procedural-query fallback (titles[:n_procedural])
+    always ran — mislabelling recall queries as procedural."""
+
+    def test_analyse_corpus_classifies_procedural_titles_by_path(self) -> None:
+        from kairix.quality.eval.auto_gold import analyse_corpus
+
+        db = _make_corpus_db()
+        profile = analyse_corpus(db)
+        # The fixture has paths matching how-to and runbook-* under /areas/.
+        assert "how-to-deploy" in profile.procedural_titles
+        assert "runbook-incidents" in profile.procedural_titles
+        # Non-procedural titles are absent.
+        assert "alpha" not in profile.procedural_titles
+        assert "microservices" not in profile.procedural_titles
+
+    def test_generate_template_queries_uses_procedural_titles(self) -> None:
+        from kairix.quality.eval.auto_gold import (
+            CorpusProfile,
+            generate_template_queries,
+        )
+
+        profile = CorpusProfile(
+            total_docs=20,
+            collections={"areas": 20},
+            procedural_count=3,
+            date_filename_count=0,
+            entity_doc_count=0,
+            titles=["alpha", "beta", "gamma", "how-to-deploy", "runbook-incidents"],
+            procedural_titles=["how-to-deploy", "runbook-incidents"],
+        )
+        queries = generate_template_queries(profile, n=20)
+        proc_queries = [q for q in queries if q["category"] == "procedural"]
+        # Procedural queries are constructed from real procedural titles, not
+        # from arbitrary recall titles.
+        assert len(proc_queries) > 0
+        for q in proc_queries:
+            assert any(title in q["query"] for title in ["how to deploy", "runbook incidents"])

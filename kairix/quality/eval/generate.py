@@ -34,6 +34,7 @@ from typing import Any
 import yaml
 
 from kairix.quality.eval.judge import (
+    JUDGE_DEPLOYMENT,
     JudgeCalibrationError,
     JudgeResult,
     _call_llm,
@@ -460,12 +461,26 @@ def resolve_credentials(
 ) -> tuple[str, str, str]:
     """Fetch credentials from env/Key Vault when not provided.
 
-    Returns (api_key, endpoint, deployment). Raises on failure.
+    Caller-wins semantic:
+      - If ``api_key`` is None or empty, use the fetched key.
+      - If ``endpoint`` is None or empty, use the fetched endpoint.
+      - If ``deployment`` equals the default sentinel ``JUDGE_DEPLOYMENT``
+        and the vault has a different non-empty value, use the vault's.
+        Otherwise the caller's deployment wins.
+
+    The original logic (``fetched_dep != "gpt-4o-mini" or deployment == "gpt-4o-mini"``)
+    overrode the caller whenever the vault returned anything non-default —
+    inverting the intuitive "caller wins unless they didn't care" semantic.
+    Bug fix from #143 Phase 0.
+
+    Returns (api_key, endpoint, deployment). Raises on credential-fetch failure.
     """
     fetched_key, fetched_ep, fetched_dep = fetch_llm_credentials()
     api_key = api_key or fetched_key
     endpoint = endpoint or fetched_ep
-    if fetched_dep != "gpt-4o-mini" or deployment == "gpt-4o-mini":
+    # Caller's deployment wins unless they passed the default sentinel and
+    # the vault offers a non-default override.
+    if deployment == JUDGE_DEPLOYMENT and fetched_dep and fetched_dep != JUDGE_DEPLOYMENT:
         deployment = fetched_dep
     return api_key, endpoint, deployment
 
@@ -797,9 +812,23 @@ def enrich_suite(
     """
     errors: list[str] = []
 
-    # Credential resolution
+    # Credential resolution — wrap in try/except so a credential-fetch failure
+    # is surfaced via the result.errors list rather than propagating as an
+    # uncaught exception. enrich_suite is documented "never raises"; mirrors
+    # the same shape generate_suite already uses (#143 Phase 0).
     if api_key is None or endpoint is None:
-        api_key, endpoint, deployment = resolve_credentials(api_key, endpoint, deployment)
+        try:
+            api_key, endpoint, deployment = resolve_credentials(api_key, endpoint, deployment)
+        except Exception as e:
+            errors.append(f"Failed to fetch credentials: {e}")
+            return EnrichmentResult(
+                output_path=output_path,
+                n_cases=0,
+                n_enriched=0,
+                n_skipped=0,
+                n_failed=0,
+                errors=errors,
+            )
 
     # Load input suite as raw YAML (preserve all fields)
     try:

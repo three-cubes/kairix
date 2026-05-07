@@ -111,69 +111,75 @@ def _bm25_search_with_weights(
     try:
         db_path = get_db_path()
         db = open_db(Path(db_path))
-        db.row_factory = sqlite3.Row
     except Exception as e:
         logger.warning("gold_builder: cannot open DB — %s", e)
         return []
 
-    w_fp, w_title, w_doc = weights
-    try:
-        if collections:
-            placeholders = ",".join("?" * len(collections))
-            # safe: float() cast on bm25 weights, no ? binding available for bm25 args
-            sql = f"""
-                SELECT d.collection, d.path, d.title, c.doc,
-                       bm25(documents_fts, {float(w_fp)}, {float(w_title)}, {float(w_doc)}) AS score
-                FROM documents_fts
-                JOIN documents d ON d.id = documents_fts.rowid
-                JOIN content c ON c.hash = d.hash
-                WHERE documents_fts MATCH ?
-                  AND d.collection IN ({placeholders})
-                  AND d.active = 1
-                ORDER BY score ASC
-                LIMIT ?
-            """
-            params: list[Any] = [fts_query, *collections, limit]
-        else:
-            # safe: float() cast on bm25 weights, no ? binding available for bm25 args
-            sql = f"""
-                SELECT d.collection, d.path, d.title, c.doc,
-                       bm25(documents_fts, {float(w_fp)}, {float(w_title)}, {float(w_doc)}) AS score
-                FROM documents_fts
-                JOIN documents d ON d.id = documents_fts.rowid
-                JOIN content c ON c.hash = d.hash
-                WHERE documents_fts MATCH ?
-                  AND d.active = 1
-                ORDER BY score ASC
-                LIMIT ?
-            """
-            params = [fts_query, limit]
+    # contextlib.closing guarantees the connection closes on every exit path,
+    # including exceptions raised inside the result loop. Previously the
+    # connection was leaked when fetchall() succeeded but row processing then
+    # raised on a malformed row, since the only db.close() calls were on the
+    # FTS-failure path and after the result loop completed normally (#143 Phase 0).
+    from contextlib import closing
 
-        rows = db.execute(sql, params).fetchall()
-    except Exception as e:
-        logger.warning("gold_builder: FTS query failed — %s", e)
-        db.close()
-        return []
+    with closing(db) as conn:
+        conn.row_factory = sqlite3.Row
+        w_fp, w_title, w_doc = weights
+        try:
+            if collections:
+                placeholders = ",".join("?" * len(collections))
+                # safe: float() cast on bm25 weights, no ? binding available for bm25 args
+                sql = f"""
+                    SELECT d.collection, d.path, d.title, c.doc,
+                           bm25(documents_fts, {float(w_fp)}, {float(w_title)}, {float(w_doc)}) AS score
+                    FROM documents_fts
+                    JOIN documents d ON d.id = documents_fts.rowid
+                    JOIN content c ON c.hash = d.hash
+                    WHERE documents_fts MATCH ?
+                      AND d.collection IN ({placeholders})
+                      AND d.active = 1
+                    ORDER BY score ASC
+                    LIMIT ?
+                """
+                params: list[Any] = [fts_query, *collections, limit]
+            else:
+                # safe: float() cast on bm25 weights, no ? binding available for bm25 args
+                sql = f"""
+                    SELECT d.collection, d.path, d.title, c.doc,
+                           bm25(documents_fts, {float(w_fp)}, {float(w_title)}, {float(w_doc)}) AS score
+                    FROM documents_fts
+                    JOIN documents d ON d.id = documents_fts.rowid
+                    JOIN content c ON c.hash = d.hash
+                    WHERE documents_fts MATCH ?
+                      AND d.active = 1
+                    ORDER BY score ASC
+                    LIMIT ?
+                """
+                params = [fts_query, limit]
 
-    results = []
-    for row in rows:
-        doc_text = row["doc"] or ""
-        if doc_text.startswith("---"):
-            parts = doc_text.split("---", 2)
-            snippet = parts[2].strip()[:300] if len(parts) >= 3 else doc_text[:300]
-        else:
-            snippet = doc_text[:300]
-        results.append(
-            {
-                "path": str(row["path"]),
-                "title": str(row["title"] or ""),
-                "snippet": snippet,
-                "collection": str(row["collection"]),
-            }
-        )
+            rows = conn.execute(sql, params).fetchall()
+        except Exception as e:
+            logger.warning("gold_builder: FTS query failed — %s", e)
+            return []
 
-    db.close()
-    return results
+        results = []
+        for row in rows:
+            doc_text = row["doc"] or ""
+            if doc_text.startswith("---"):
+                parts = doc_text.split("---", 2)
+                snippet = parts[2].strip()[:300] if len(parts) >= 3 else doc_text[:300]
+            else:
+                snippet = doc_text[:300]
+            results.append(
+                {
+                    "path": str(row["path"]),
+                    "title": str(row["title"] or ""),
+                    "snippet": snippet,
+                    "collection": str(row["collection"]),
+                }
+            )
+
+        return results
 
 
 def _vector_search(
