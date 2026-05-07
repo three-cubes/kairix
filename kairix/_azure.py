@@ -162,3 +162,47 @@ def chat_completion(messages: list[dict[str, str]], max_tokens: int = 800) -> st
     except Exception as e:
         logger.warning("chat_completion: %s", e)
         return ""
+
+
+# ---------------------------------------------------------------------------
+# ChatBackend protocol adapter (#143 Phase 2a)
+#
+# Wraps the legacy ``chat_completion`` function in the ``ChatBackend`` protocol
+# shape used by the eval module's LLMJudge / QueryGenerator. Production code
+# constructs ``AzureChatBackend()`` once and injects it into the eval classes;
+# tests inject ``FakeChatBackend`` instead.
+#
+# Note: ``chat_completion`` resolves credentials internally via the
+# ``kairix.credentials`` module — the ``api_key`` / ``endpoint`` args on
+# ``complete()`` are accepted for protocol conformance but ignored by this
+# adapter. Phase 4 may rework that once all callers route through the protocol.
+# ---------------------------------------------------------------------------
+
+
+class AzureChatBackend:
+    """ChatBackend implementation that delegates to ``chat_completion``.
+
+    Translates the protocol's ``(prompt, *, system, ...)`` shape into the
+    ``messages=[...]`` shape expected by the Azure / OpenAI chat-completions
+    SDK call inside ``chat_completion``. Credentials are resolved by the
+    underlying function (vault-agent / env / Key Vault); the ``api_key`` and
+    ``endpoint`` kwargs on ``complete()`` are accepted for protocol
+    conformance but ignored here — see module-level note.
+    """
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        api_key: str,
+        endpoint: str,
+        deployment: str,
+        system: str | None = None,
+        temperature: float = 0.0,
+        timeout_s: float = 30.0,
+    ) -> str:
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        return chat_completion(messages)
