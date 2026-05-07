@@ -30,7 +30,7 @@ from kairix.quality.eval.judge import JudgeResult
 _JUDGE_RESULT_WITH_GRADE2 = JudgeResult(
     query="What is the deployment process?",
     grades={"docker-deployment-guide": 2, "ci-cd-pipeline": 1, "readme": 0},
-    shuffle_order=["docker-deployment-guide", "ci-cd-pipeline", "readme"],
+    shuffle_order=("docker-deployment-guide", "ci-cd-pipeline", "readme"),
     judge_model="gpt-4o-mini",
     calibration_passed=True,
 )
@@ -38,7 +38,7 @@ _JUDGE_RESULT_WITH_GRADE2 = JudgeResult(
 _JUDGE_RESULT_NO_GRADE2 = JudgeResult(
     query="What is the deployment process?",
     grades={"ci-cd-pipeline": 1, "readme": 0},
-    shuffle_order=["ci-cd-pipeline", "readme"],
+    shuffle_order=("ci-cd-pipeline", "readme"),
     judge_model="gpt-4o-mini",
     calibration_passed=True,
 )
@@ -46,7 +46,7 @@ _JUDGE_RESULT_NO_GRADE2 = JudgeResult(
 _JUDGE_RESULT_ALL_ZERO = JudgeResult(
     query="What is the deployment process?",
     grades={"readme": 0, "changelog": 0},
-    shuffle_order=["readme", "changelog"],
+    shuffle_order=("readme", "changelog"),
     judge_model="gpt-4o-mini",
     calibration_passed=True,
 )
@@ -391,7 +391,7 @@ def test_enrich_suite_preserves_existing_fields(tmp_path: Path) -> None:
         judge_fn=lambda **_kw: JudgeResult(
             query="q",
             grades={"daily-log": 2},
-            shuffle_order=["daily-log"],
+            shuffle_order=("daily-log",),
             judge_model="gpt-4o-mini",
         ),
     )

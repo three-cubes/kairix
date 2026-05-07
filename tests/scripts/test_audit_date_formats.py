@@ -158,4 +158,4 @@ def test_extractable_pct_correct(tmp_path: Path) -> None:
     (vault / "no.md").write_text("# no date\n")
 
     result = run_audit(vault)
-    assert result["extractable_pct"] == 50.0
+    assert result["extractable_pct"] == pytest.approx(50.0)

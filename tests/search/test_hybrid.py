@@ -254,7 +254,12 @@ def test_search_returns_bm25_results_when_vec_fails() -> None:
     pipeline = _build_test_pipeline(bm25_docs=docs)
     result = pipeline.search("test semantic query about memory systems")
 
-    assert len(result.results) >= 0  # Results depend on FTS match in FakeDocumentRepository
+    # The exact result count depends on FTS-match shape inside the fake; what
+    # the test pins down is that the search returns *something* iterable
+    # without raising even though the vector backend failed. SonarCloud
+    # python:S2178 flagged `len(...) >= 0` as always-true; replaced with an
+    # explicit type/iterability check that captures the real intent.
+    assert isinstance(result.results, list)
     assert result.vec_failed is True  # FakeVectorRepository returns []
 
 

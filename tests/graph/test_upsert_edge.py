@@ -29,7 +29,7 @@ def mock_neo4j_client() -> MagicMock:
 
         from kairix.knowledge.graph.client import Neo4jClient
 
-        client = Neo4jClient(uri="bolt://test:7687", user="test", password="test")
+        client = Neo4jClient(uri="bolt://test:7687", user="test", password="test")  # pragma: allowlist secret
         assert client.available
         return client
 
@@ -111,7 +111,7 @@ class TestDocumentMentionsEdge:
         with patch("kairix.knowledge.graph.client._try_import_neo4j", return_value=None):
             from kairix.knowledge.graph.client import Neo4jClient
 
-            client = Neo4jClient(uri="bolt://test:7687", user="test", password="test")
+            client = Neo4jClient(uri="bolt://test:7687", user="test", password="test")  # pragma: allowlist secret
             assert not client.available
 
             edge = GraphEdge(

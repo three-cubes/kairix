@@ -325,10 +325,10 @@ def test_sweep_config_to_retrieval_config_preserves_boost_params() -> None:
     )
     rc = sweep_config_to_retrieval_config(cfg)
     assert rc.entity.enabled is True
-    assert rc.entity.factor == 1.5
-    assert rc.entity.cap == 3
+    assert rc.entity.factor == pytest.approx(1.5)
+    assert rc.entity.cap == pytest.approx(3.0)
     assert rc.procedural.enabled is True
-    assert rc.procedural.factor == 2.0
+    assert rc.procedural.factor == pytest.approx(2.0)
 
 
 # ---------------------------------------------------------------------------

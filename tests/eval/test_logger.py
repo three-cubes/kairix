@@ -115,7 +115,7 @@ def test_logger_entry_contains_all_fields(tmp_path):
     assert row["top_path"] == "docs/arch.md"
     assert row["vec_failed"] is True
     assert row["error"] == "dim mismatch"
-    assert row["latency_ms"] == 55.5
+    assert row["latency_ms"] == pytest.approx(55.5)
 
 
 @pytest.mark.unit
