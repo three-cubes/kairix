@@ -94,6 +94,23 @@ jobs:
           pytest tests/ -m contract -v --tb=short --timeout=30 \
             --junitxml=results-contracts.xml
 
+      - name: "paths-DI deprecation: count remaining monkeypatch.setenv(KAIRIX_*)"
+        # Tracks progress of the paths-DI refactor (see docs/architecture/paths-di-refactor.md
+        # and umbrella issue #139). Phase 0 ships warn-only. Phase 4 flips to fail.
+        # Operates only on checked-out repo files; no untrusted GitHub-event input.
+        run: |
+          set +e
+          MATCHES=$(grep -rln 'monkeypatch.setenv("KAIRIX_' tests/ --include='*.py' 2>/dev/null | sort -u)
+          COUNT=$(printf '%s\n' "$MATCHES" | grep -c .)
+          echo "::notice::paths-DI: ${COUNT} test files still call monkeypatch.setenv(KAIRIX_*) -- see docs/architecture/paths-di-refactor.md"
+          if [ "$COUNT" -gt 0 ]; then
+            echo "Files using monkeypatch.setenv(KAIRIX_*):"
+            printf '  %s\n' $MATCHES
+          fi
+          # WARN-ONLY in Phase 0 -- exit 0 regardless. Phase 4 will switch to:
+          #   if [ "$COUNT" -gt 0 ]; then exit 1; fi
+          exit 0
+
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()

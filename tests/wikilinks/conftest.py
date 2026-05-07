@@ -1,29 +1,45 @@
-"""Fixtures for wikilinks tests."""
+"""Fixtures for wikilinks tests.
+
+Provides ``paths`` and matching path-string fixtures so wikilinks tests
+construct a real ``KairixPaths`` (via ``tests.fakes.FakePaths``) and inject
+it through the production code's ``paths=`` parameter — no env-var
+monkeypatching, no ``_resolve_cached.cache_clear()``.
+
+Tests that don't need path injection don't have to consume these fixtures;
+tests that do should declare ``paths`` (and ``test_vault_root`` /
+``test_workspaces_root`` for path-string concatenation in scenario data).
+"""
+
+from __future__ import annotations
 
 import pytest
 
-from kairix.paths import _resolve_cached
+from kairix.paths import KairixPaths
+from tests.fakes import FakePaths
 
 
-@pytest.fixture(autouse=True)
-def _set_test_roots(monkeypatch):
-    """Set document store/workspace roots for wikilinks tests.
+@pytest.fixture
+def paths() -> KairixPaths:
+    """A ``KairixPaths`` with sentinel test roots — no filesystem I/O.
 
-    The injector reads these via ``document_root()`` / ``workspace_root()``
-    helpers in ``kairix.paths``, which are ``@lru_cache``-d. We use
-    ``monkeypatch.setenv`` (environment fixturing — the only mutation
-    primitive kairix tests should use) plus ``cache_clear()`` on the
-    paths-resolution cache so the new env vars take effect immediately.
-
-    No ``importlib.reload`` and no kairix-code patching — the injector
-    refactor (`_eligible_prefixes()` is lazy now) means the env override
-    propagates naturally on the next call.
-
-    NOSONAR(python:S5443): /tmp paths are string fixtures used to drive
-    path-resolution logic under test — never touched on the filesystem.
+    The ``/var/lib/kairix-test/`` prefix is a non-publicly-writable
+    sentinel: the strings exercise prefix-matching logic in
+    ``should_inject`` and ``inject_wikilinks``, but nothing under these
+    paths is ever read or written.
     """
-    monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/tmp/test-vault")
-    monkeypatch.setenv("KAIRIX_WORKSPACE_ROOT", "/tmp/test-workspaces")
-    _resolve_cached.cache_clear()
-    yield
-    _resolve_cached.cache_clear()
+    return FakePaths(
+        document_root="/var/lib/kairix-test/vault",
+        workspace_root="/var/lib/kairix-test/workspaces",
+    )
+
+
+@pytest.fixture
+def test_vault_root(paths: KairixPaths) -> str:
+    """String form of ``paths.document_root`` for f-string path construction in tests."""
+    return str(paths.document_root)
+
+
+@pytest.fixture
+def test_workspaces_root(paths: KairixPaths) -> str:
+    """String form of ``paths.workspace_root`` for f-string path construction in tests."""
+    return str(paths.workspace_root)
