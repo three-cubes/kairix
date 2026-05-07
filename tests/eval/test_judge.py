@@ -129,7 +129,7 @@ def test_judge_batch_records_shuffle_order() -> None:
         chat_fn=chat_fn,
     )
 
-    assert result.shuffle_order == [stem for stem, _ in _CANDIDATES]
+    assert result.shuffle_order == tuple(stem for stem, _ in _CANDIDATES)
 
 
 @pytest.mark.unit
@@ -142,7 +142,7 @@ def test_judge_batch_empty_candidates() -> None:
         endpoint="https://test.openai.azure.com",
     )
     assert result.grades == {}
-    assert result.shuffle_order == []
+    assert result.shuffle_order == ()
 
 
 # ---------------------------------------------------------------------------

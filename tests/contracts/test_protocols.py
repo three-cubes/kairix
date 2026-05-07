@@ -516,7 +516,10 @@ class TestFakeBoost:
     def test_boost_returns_unmodified(self):
         b = FakeBoost()
         items = [{"score": 1.0}]
-        assert b.boost(items, "q", {}) is items
+        # `is` is intentional — the contract is that no-op boost returns the
+        # same list object, not just an equal one. SonarCloud python:S6738
+        # flags this; rule is a false positive in this case.
+        assert b.boost(items, "q", {}) is items  # NOSONAR(python:S6738) — identity check is the contract
 
 
 @pytest.mark.contract
@@ -524,12 +527,12 @@ class TestFakeScorer:
     @pytest.mark.contract
     def test_returns_configured_score(self):
         s = FakeScorer(score=0.75)
-        assert s.score(["a.md"], [{"path": "a.md"}]) == 0.75
+        assert s.score(["a.md"], [{"path": "a.md"}]) == pytest.approx(0.75)
 
     @pytest.mark.contract
     def test_default_score_is_one(self):
         s = FakeScorer()
-        assert s.score([], []) == 1.0
+        assert s.score([], []) == pytest.approx(1.0)
 
 
 @pytest.mark.contract
@@ -664,33 +667,33 @@ class TestScoringStrategyImplementations:
     @pytest.mark.contract
     def test_exact_match_scorer_empty_gold(self):
         s = ExactMatchScorer()
-        assert s.score(["a.md"], []) == 0.0
+        assert s.score(["a.md"], []) == pytest.approx(0.0)
 
     @pytest.mark.contract
     def test_fuzzy_match_scorer_empty_gold(self):
         s = FuzzyMatchScorer()
-        assert s.score(["a.md"], []) == 0.0
+        assert s.score(["a.md"], []) == pytest.approx(0.0)
 
     @pytest.mark.contract
     def test_ndcg_scorer_empty_gold(self):
         s = NDCGScorer()
-        assert s.score(["a.md"], []) == 0.0
+        assert s.score(["a.md"], []) == pytest.approx(0.0)
 
     @pytest.mark.contract
     def test_exact_match_scorer_hit(self):
         s = ExactMatchScorer(top_k=5)
-        assert s.score(["docs/readme.md"], [{"path": "readme.md"}]) == 1.0
+        assert s.score(["docs/readme.md"], [{"path": "readme.md"}]) == pytest.approx(1.0)
 
     @pytest.mark.contract
     def test_fuzzy_match_scorer_hit(self):
         s = FuzzyMatchScorer(top_k=10)
-        assert s.score(["docs/readme.md"], [{"path": "readme.md"}]) == 1.0
+        assert s.score(["docs/readme.md"], [{"path": "readme.md"}]) == pytest.approx(1.0)
 
     @pytest.mark.contract
     def test_ndcg_scorer_perfect(self):
         s = NDCGScorer(k=5)
         gold = [{"path": "a.md", "relevance": 2}]
-        assert s.score(["a.md"], gold) == 1.0
+        assert s.score(["a.md"], gold) == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------

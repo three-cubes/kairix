@@ -18,6 +18,7 @@ Methodology: TREC pooling (Voorhees & Harman, 2005) adapted for LLM judges.
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -125,6 +126,18 @@ def _bm25_search_with_weights(
     with closing(db) as conn:
         conn.row_factory = sqlite3.Row
         w_fp, w_title, w_doc = weights
+        # SQLite's bm25() function does not support bound parameters for the
+        # weight arguments — they have to be interpolated. float() prevents
+        # SQL string injection but doesn't guard nan or inf, both of which
+        # are valid Python floats and produce undefined SQLite behaviour.
+        # Reject them explicitly so a misconfigured weight tuple fails fast
+        # with a clear message rather than silently corrupting BM25 scores.
+        for label, w in (("filepath", w_fp), ("title", w_title), ("doc", w_doc)):
+            if not math.isfinite(w) or w <= 0:
+                raise ValueError(
+                    f"gold_builder: BM25 weight {label}={w!r} must be finite and positive; "
+                    f"weights tuple = (filepath, title, doc)"
+                )
         try:
             if collections:
                 placeholders = ",".join("?" * len(collections))
