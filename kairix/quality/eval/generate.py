@@ -17,6 +17,18 @@ Reference:
 
 Also provides enrich_suite() for converting existing BM25-biased suites to
 title-based graded relevance without regenerating all queries from scratch.
+
+Reading order (Phase 2b refactor #143):
+  - SAMPLING: query_documents_from_db, filter_and_process_sampled_rows, sample_documents
+  - QUERY GENERATION: build_generation_prompt, parse_llm_query_response,
+    generate_queries, QueryGenerator
+  - PIPELINE: build_case, process_sampled_docs, generate_suite, enrich_suite,
+    SuiteGenerator
+  - CREDENTIALS: resolve_credentials
+
+A future Phase 5 follow-up may split this module into a sub-package
+(generate/sampling.py, generate/query_gen.py, generate/pipeline.py); the
+section markers below indicate the intended split boundaries.
 """
 
 from __future__ import annotations
@@ -29,7 +41,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -37,11 +49,14 @@ from kairix.quality.eval.judge import (
     JUDGE_DEPLOYMENT,
     JudgeCalibrationError,
     JudgeResult,
-    _call_llm,
     calibrate,
     fetch_llm_credentials,
     judge_batch,
 )
+
+if TYPE_CHECKING:
+    from kairix.core.protocols import ChatBackend, Retriever
+    from kairix.core.protocols import LLMJudge as LLMJudgeProto
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +122,11 @@ class EnrichmentResult:
     errors: list[str] = field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# Document sampling helpers (extracted to reduce cognitive complexity)
-# ---------------------------------------------------------------------------
+# === SAMPLING =============================================================
+# Document sampling helpers (extracted to reduce cognitive complexity).
+# Talk-to-the-DB layer; no LLM dependency. Phase 5 candidate for
+# extraction into generate/sampling.py.
+# ==========================================================================
 
 
 def query_documents_from_db(
@@ -195,11 +212,6 @@ def filter_and_process_sampled_rows(
     return docs
 
 
-# ---------------------------------------------------------------------------
-# Document sampling
-# ---------------------------------------------------------------------------
-
-
 def sample_documents(
     db_path: str = _get_db_path_str(),
     n: int = 200,
@@ -235,9 +247,11 @@ def sample_documents(
     return docs[:n]
 
 
-# ---------------------------------------------------------------------------
-# Query generation helpers (extracted to reduce cognitive complexity)
-# ---------------------------------------------------------------------------
+# === QUERY GENERATION =====================================================
+# LLM-driven query synthesis from a source document. Phase 2b: routed
+# through ChatBackend protocol (no more `_call_llm` private import). Phase 5
+# candidate for extraction into generate/query_gen.py.
+# ==========================================================================
 
 
 def build_generation_prompt(title: str, body: str, n: int, cats: list[str]) -> str:
@@ -301,9 +315,66 @@ def parse_llm_query_response(
     return queries
 
 
-# ---------------------------------------------------------------------------
-# Query generation
-# ---------------------------------------------------------------------------
+def _call_via_backend(
+    prompt: str,
+    api_key: str,
+    endpoint: str,
+    deployment: str,
+    chat_backend: ChatBackend,
+) -> str:
+    """Thin wrapper that calls the injected ``ChatBackend.complete``.
+
+    Replaces the legacy ``_call_llm`` cross-module private import (#143
+    Phase 2b). The wrapper exists so that the synchronous one-shot prompt /
+    response shape used by query generation matches the protocol's keyword
+    surface — callers don't have to rebuild the kwargs dict at every call site.
+    """
+    return chat_backend.complete(
+        prompt,
+        api_key=api_key,
+        endpoint=endpoint,
+        deployment=deployment,
+    )
+
+
+def _default_chat_backend() -> ChatBackend:
+    """Construct the production ChatBackend lazily.
+
+    Production callers that don't inject a backend get the Azure adapter.
+    Tests inject ``FakeChatBackend`` via the ``chat_backend`` kwarg or the
+    ``QueryGenerator`` constructor; the deprecated ``llm_fn`` shim builds
+    its own ad-hoc backend (see ``_LegacyLLMFnBackend``).
+    """
+    from kairix._azure import AzureChatBackend
+
+    return AzureChatBackend()
+
+
+class _LegacyLLMFnBackend:
+    """Adapter that wraps the deprecated ``llm_fn`` callable as a ChatBackend.
+
+    The original ``generate_queries`` accepted ``llm_fn(prompt, api_key, endpoint, deployment)``
+    as a test hook. Phase 2b removes that hook in favour of
+    ``chat_backend: ChatBackend``, but we preserve the kwarg for backwards
+    compat by adapting the callable into the protocol surface here. New
+    tests should use ``chat_backend=FakeChatBackend(...)`` directly.
+    """
+
+    def __init__(self, llm_fn: Callable[..., str]) -> None:
+        self._llm_fn = llm_fn
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        api_key: str,
+        endpoint: str,
+        deployment: str,
+        system: str | None = None,
+        temperature: float = 0.0,
+        timeout_s: float = 30.0,
+    ) -> str:
+        return self._llm_fn(prompt, api_key, endpoint, deployment)
 
 
 def generate_queries(
@@ -316,6 +387,7 @@ def generate_queries(
     deployment: str = "gpt-4o-mini",
     source_doc_path: str = "",
     llm_fn: Callable[[str, str, str, str], str] | None = None,
+    chat_backend: ChatBackend | None = None,
 ) -> list[GeneratedQuery]:
     """
     Generate n retrieval queries that the given document would primarily answer.
@@ -334,19 +406,31 @@ def generate_queries(
         endpoint:        Azure OpenAI endpoint URL.
         deployment:      Model deployment name.
         source_doc_path: Original path of the document.
+        llm_fn:          DEPRECATED (Phase 4 removes). Legacy callable substitute
+                         for the LLM call; prefer ``chat_backend``. When supplied
+                         it is wrapped in a ``ChatBackend`` adapter internally.
+        chat_backend:    ``ChatBackend`` protocol implementation. Takes precedence
+                         over ``llm_fn``. Defaults to ``AzureChatBackend()``
+                         constructed lazily.
 
     Returns:
         List of GeneratedQuery. Returns [] on any failure (no raise).
     """
     allowed_cats = categories or list(_TARGET_DISTRIBUTION.keys())
     prompt = build_generation_prompt(doc_title, doc_body, n, allowed_cats)
-    _llm = llm_fn or _call_llm
+
+    if chat_backend is not None:
+        backend: ChatBackend = chat_backend
+    elif llm_fn is not None:
+        backend = _LegacyLLMFnBackend(llm_fn)
+    else:
+        backend = _default_chat_backend()
 
     for attempt in range(2):
         try:
             if not api_key or not endpoint:
                 raise ValueError("No API credentials")
-            content = _llm(prompt, api_key, endpoint, deployment)
+            content = _call_via_backend(prompt, api_key, endpoint, deployment, backend)
             return parse_llm_query_response(content, allowed_cats, source_doc_path, doc_title)
         except Exception as e:
             if attempt == 0:
@@ -365,9 +449,68 @@ def generate_queries(
     return []
 
 
-# ---------------------------------------------------------------------------
-# Retrieval — delegates to shared retrieval module
-# ---------------------------------------------------------------------------
+class QueryGenerator:
+    """ChatBackend-injected query generator implementing the ``QueryGenerator`` protocol.
+
+    Constructor takes a ``ChatBackend`` (production: ``AzureChatBackend``,
+    tests: ``FakeChatBackend``) and an optional deployment name. The
+    ``generate()`` method delegates to the free ``generate_queries`` with
+    the configured backend, accepting credentials per call so callers can
+    plumb them from their own credential resolution.
+
+    Example:
+        >>> from tests.fakes import FakeChatBackend
+        >>> backend = FakeChatBackend(responses=['[{"query":"q","intent":"recall"}]'])
+        >>> gen = QueryGenerator(chat_backend=backend)
+        >>> queries = gen.generate("title", "body", n=1, categories=["recall"],
+        ...                        api_key="k", endpoint="https://e")
+    """
+
+    def __init__(
+        self,
+        *,
+        chat_backend: ChatBackend | None = None,
+        deployment: str = JUDGE_DEPLOYMENT,
+    ) -> None:
+        self._chat_backend = chat_backend
+        self._deployment = deployment
+
+    def generate(
+        self,
+        title: str,
+        body: str,
+        *,
+        n: int,
+        categories: list[str],
+        api_key: str = "",
+        endpoint: str = "",
+        source_doc_path: str = "",
+    ) -> list[GeneratedQuery]:
+        """Generate ``n`` queries for the given document via the injected backend.
+
+        Returns ``[]`` on any failure (mirrors the free function's never-raise
+        contract). Credentials are passed per call rather than baked into the
+        constructor so test code can keep them out of fixture state.
+        """
+        return generate_queries(
+            doc_title=title,
+            doc_body=body,
+            n=n,
+            categories=categories,
+            api_key=api_key,
+            endpoint=endpoint,
+            deployment=self._deployment,
+            source_doc_path=source_doc_path,
+            chat_backend=self._chat_backend,
+        )
+
+
+# === PIPELINE =============================================================
+# Retrieval, judging, and orchestration of the GPL-style suite generation
+# pipeline. Phase 2b: SuiteGenerator class wraps the free functions with
+# constructor-injected QueryGenerator / LLMJudge / Retriever. Phase 5
+# candidate for extraction into generate/pipeline.py.
+# ==========================================================================
 
 
 def _retrieve(query: str, intent: str, agent: str = "shape") -> tuple[list[str], list[str]]:
@@ -385,11 +528,6 @@ def _retrieve(query: str, intent: str, agent: str = "shape") -> tuple[list[str],
     except Exception as e:
         logger.warning("_retrieve: error for query %r — %s", query[:60], e)
         return [], []
-
-
-# ---------------------------------------------------------------------------
-# Case builder
-# ---------------------------------------------------------------------------
 
 
 def build_case(
@@ -438,11 +576,6 @@ def build_case(
         "score_method": "ndcg",
         "gold_titles": gold_titles,
     }
-
-
-# ---------------------------------------------------------------------------
-# Suite generation helpers (extracted to reduce cognitive complexity)
-# ---------------------------------------------------------------------------
 
 
 def _empty_generation_result(
@@ -623,11 +756,6 @@ def write_generated_suite(
         errors.append(f"Failed to write {output_path}: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Suite generation
-# ---------------------------------------------------------------------------
-
-
 def generate_suite(
     db_path: str = _get_db_path_str(),
     output_path: str = "suites/generated.yaml",
@@ -723,11 +851,6 @@ def generate_suite(
     )
 
 
-# ---------------------------------------------------------------------------
-# Suite enrichment helpers (extracted to reduce cognitive complexity)
-# ---------------------------------------------------------------------------
-
-
 def enrich_single_case(
     case: dict[str, Any],
     query: str,
@@ -778,11 +901,6 @@ def enrich_single_case(
     updated["score_method"] = "ndcg"
     updated.pop("gold_paths", None)
     return updated, "enriched"
-
-
-# ---------------------------------------------------------------------------
-# Suite enrichment
-# ---------------------------------------------------------------------------
 
 
 def enrich_suite(
@@ -912,3 +1030,228 @@ def enrich_suite(
         n_failed=n_failed,
         errors=errors,
     )
+
+
+# ---------------------------------------------------------------------------
+# SuiteGenerator — DI-class wrapper for the GPL pipeline (#143 Phase 2b)
+#
+# Wraps `generate_suite` / `enrich_suite` / `process_sampled_docs` in a class
+# that consumes the eval protocols (`QueryGenerator`, `LLMJudge`, `Retriever`)
+# via constructor injection, replacing the legacy `query_fn` / `judge_fn` /
+# `retrieve_fn` test-substitution kwargs at the class boundary.
+#
+# Free functions are preserved for cli.py / gold_builder.py backwards compat;
+# Phase 3 routes those callers through the class as well.
+# ---------------------------------------------------------------------------
+
+
+class SuiteGenerator:
+    """Protocol-conforming wrapper around the GPL suite-generation pipeline.
+
+    Constructor takes the four eval protocol implementations:
+
+      - ``query_generator``: synthesises queries for each sampled doc.
+      - ``llm_judge``: grades retrieved candidates against the query.
+      - ``retriever``: hybrid-search facade returning paths + snippets.
+
+    Each is optional — if ``None``, the methods fall back to the production
+    free functions (``generate_queries`` / ``judge_batch`` / ``_retrieve``)
+    so existing callers see identical behaviour.
+
+    Tests inject ``FakeQueryGenerator`` / ``FakeLLMJudge`` / ``FakeRetriever``
+    via the constructor; the legacy ``query_fn`` / ``judge_fn`` / ``retrieve_fn``
+    kwargs on the free functions remain available for backwards compat but
+    are slated for Phase 4 removal.
+
+    Example:
+        >>> from tests.fakes import FakeChatBackend, FakeLLMJudge, FakeQueryGenerator
+        >>> qg = FakeQueryGenerator(queries_by_title={"deploy.md": [...]})
+        >>> jg = FakeLLMJudge(grades_by_query={"how to deploy": {"deploy": 2}})
+        >>> retriever = FakeRetriever(...)
+        >>> suite_gen = SuiteGenerator(query_generator=qg, llm_judge=jg, retriever=retriever)
+        >>> result = suite_gen.generate_suite(...)
+    """
+
+    def __init__(
+        self,
+        *,
+        query_generator: QueryGenerator | None = None,
+        llm_judge: LLMJudgeProto | None = None,
+        retriever: Retriever | None = None,
+    ) -> None:
+        self._query_generator = query_generator
+        self._llm_judge = llm_judge
+        self._retriever = retriever
+
+    # --- internal adapters from protocol surface to free-function shape -----
+
+    def _query_fn_adapter(self) -> Callable[..., list[GeneratedQuery]] | None:
+        """Adapt the injected QueryGenerator to the legacy ``query_fn`` shape.
+
+        The free ``process_sampled_docs`` consumes a ``query_fn(**kwargs)``
+        callable; this adapter routes the call through the protocol's
+        ``generate(title, body, *, n, categories, ...)`` shape.
+        """
+        if self._query_generator is None:
+            return None
+        qg = self._query_generator
+
+        def _adapter(
+            *,
+            doc_title: str,
+            doc_body: str,
+            n: int,
+            categories: list[str],
+            api_key: str = "",
+            endpoint: str = "",
+            deployment: str = "gpt-4o-mini",
+            source_doc_path: str = "",
+        ) -> list[GeneratedQuery]:
+            del deployment  # owned by the QueryGenerator instance, not the call
+            return qg.generate(
+                doc_title,
+                doc_body,
+                n=n,
+                categories=categories,
+            )
+
+        return _adapter
+
+    def _judge_fn_adapter(self) -> Callable[..., JudgeResult] | None:
+        """Adapt the injected LLMJudge to the legacy ``judge_fn`` shape."""
+        if self._llm_judge is None:
+            return None
+        jg = self._llm_judge
+
+        def _adapter(
+            *,
+            query: str,
+            candidates: list[tuple[str, str]],
+            api_key: str = "",
+            endpoint: str = "",
+            deployment: str = "gpt-4o-mini",
+        ) -> JudgeResult:
+            del api_key, endpoint, deployment  # owned by the LLMJudge instance
+            # Protocol declares grade() returning Any so fakes can return a
+            # SimpleNamespace; cast back to JudgeResult for the strict-typed
+            # legacy `judge_fn` shape consumed by `process_sampled_docs`.
+            result: JudgeResult = jg.grade(query, candidates)
+            return result
+
+        return _adapter
+
+    def _retrieve_fn_adapter(self) -> Callable[..., tuple[list[str], list[str]]] | None:
+        """Adapt the injected Retriever to the legacy ``retrieve_fn`` shape.
+
+        The free ``_retrieve`` returns ``(paths, snippets)``; the protocol
+        returns a richer object with ``paths`` / ``snippets`` attributes.
+        Adapter normalises the two so existing pipeline code keeps working.
+        """
+        if self._retriever is None:
+            return None
+        rt = self._retriever
+
+        def _adapter(
+            query: str,
+            intent: str,
+            *,
+            agent: str = "shape",
+        ) -> tuple[list[str], list[str]]:
+            del intent, agent  # protocol surface owns scope/intent context
+            result = rt.retrieve(query)
+            paths = list(getattr(result, "paths", []) or [])
+            snippets = list(getattr(result, "snippets", []) or [])
+            return paths, snippets
+
+        return _adapter
+
+    # --- public methods ----------------------------------------------------
+
+    def process_sampled_docs(
+        self,
+        docs: list[dict[str, Any]],
+        n_cases: int,
+        active_cats: list[str],
+        api_key: str = "",
+        endpoint: str = "",
+        deployment: str = "gpt-4o-mini",
+        agent: str = "shape",
+    ) -> tuple[list[dict[str, Any]], int, int, dict[str, int]]:
+        """Process sampled docs through the GPL pipeline using injected protocols."""
+        return process_sampled_docs(
+            docs,
+            n_cases,
+            active_cats,
+            api_key,
+            endpoint,
+            deployment,
+            agent,
+            self._query_fn_adapter(),
+            self._retrieve_fn_adapter(),
+            self._judge_fn_adapter(),
+        )
+
+    def generate_suite(
+        self,
+        db_path: str = "",
+        output_path: str = "suites/generated.yaml",
+        n_cases: int = 100,
+        categories: list[str] | None = None,
+        api_key: str | None = None,
+        endpoint: str | None = None,
+        deployment: str = "gpt-4o-mini",
+        calibrate_first: bool = True,
+        seed: int | None = None,
+        agent: str = "shape",
+        collections: list[str] | None = None,
+        sample_fn: Callable[..., list[dict[str, Any]]] | None = None,
+    ) -> GenerationResult:
+        """Generate a benchmark suite using injected protocols.
+
+        Mirrors ``generate_suite``; substitutes the protocol-adapter callables
+        for the legacy ``*_fn`` kwargs.
+        """
+        if not db_path:
+            db_path = _get_db_path_str()
+        return generate_suite(
+            db_path=db_path,
+            output_path=output_path,
+            n_cases=n_cases,
+            categories=categories,
+            api_key=api_key,
+            endpoint=endpoint,
+            deployment=deployment,
+            calibrate_first=calibrate_first,
+            seed=seed,
+            agent=agent,
+            collections=collections,
+            sample_fn=sample_fn,
+            query_fn=self._query_fn_adapter(),
+            retrieve_fn=self._retrieve_fn_adapter(),
+            judge_fn=self._judge_fn_adapter(),
+        )
+
+    def enrich_suite(
+        self,
+        suite_path: str,
+        output_path: str,
+        db_path: str = "",
+        api_key: str | None = None,
+        endpoint: str | None = None,
+        deployment: str = "gpt-4o-mini",
+        agent: str = "shape",
+    ) -> EnrichmentResult:
+        """Enrich an existing suite using injected protocols."""
+        if not db_path:
+            db_path = _get_db_path_str()
+        return enrich_suite(
+            suite_path=suite_path,
+            output_path=output_path,
+            db_path=db_path,
+            api_key=api_key,
+            endpoint=endpoint,
+            deployment=deployment,
+            agent=agent,
+            retrieve_fn=self._retrieve_fn_adapter(),
+            judge_fn=self._judge_fn_adapter(),
+        )
