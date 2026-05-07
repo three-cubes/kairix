@@ -22,9 +22,8 @@ from kairix.knowledge.wikilinks.resolver import WikiEntity
 # paths on the filesystem. The "/tmp" prefix matches what
 # tests/wikilinks/conftest.py sets via KAIRIX_DOCUMENT_ROOT /
 # KAIRIX_WORKSPACE_ROOT for the same fixture-string purpose.
-# NOSONAR(python:S5443): no actual /tmp filesystem access — string fixtures.
-_TEST_VAULT_ROOT = "/tmp/test-vault"
-_TEST_WORKSPACES_ROOT = "/tmp/test-workspaces"
+_TEST_VAULT_ROOT = "/tmp/test-vault"  # NOSONAR(python:S5443) — fixture string, not used as a path
+_TEST_WORKSPACES_ROOT = "/tmp/test-workspaces"  # NOSONAR(python:S5443) — fixture string, not used as a path
 
 
 # ---------------------------------------------------------------------------
