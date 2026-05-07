@@ -1,8 +1,12 @@
 """
 Integration tests: temporal index retrieval against synthetic agent memory logs.
+
+Memory fixture dates are rolled forward to today by the integration conftest
+(see ``_roll_memory_dates_to_today``), so the date range below is computed
+relative to today rather than pinned to the original fixture stems.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -14,10 +18,11 @@ def test_timeline_finds_memory_logs(real_db, real_document_root):
     """Timeline retrieval finds agent memory logs within date range."""
     from kairix.core.temporal.index import query_temporal_chunks
 
+    today = date.today()
     results = query_temporal_chunks(
         "session update",
-        start=date(2026, 4, 28),
-        end=date(2026, 4, 30),
+        start=today - timedelta(days=2),
+        end=today,
     )
     assert len(results) > 0
 

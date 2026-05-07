@@ -74,7 +74,10 @@ def acquire_lock() -> IO[str]:
     lock_fh.close()
     try:
         holder_pid = int(LOCKFILE.read_text().strip())
-        os.kill(holder_pid, 0)  # signal 0 = existence check
+        # signal 0 is documented as a process-existence probe — does not
+        # deliver a real signal. Used here to detect a stale lockfile from a
+        # dead PID before taking it over.
+        os.kill(holder_pid, 0)  # NOSONAR(python:S4828) — signal 0 is a process-existence probe, not a delivered signal
         # Process is alive — genuine contention
         logging.error(
             "Could not acquire lock after %ds — PID %d is still running",
@@ -126,11 +129,30 @@ def cmd_embed(args: argparse.Namespace) -> int:
             # Scan document store for new/changed documents before embedding.
             # This ensures first-run embed works without a separate scan step.
             from kairix.core.db.scanner import CollectionConfig, DocumentScanner
-            from kairix.core.search.config_loader import load_collections
+            from kairix.core.search.config_loader import _resolve_config_path, load_collections
+            from kairix.core.search.registry import build_agent_owner_resolver, parse_agent_registry
             from kairix.paths import document_root
 
             droot = document_root()
-            scanner = DocumentScanner(db, document_root=droot)
+
+            # Build agent_owner resolver from the agents: section of kairix.config.yaml
+            # so each scanned document is tagged with its owning agent (#114).
+            # Documents not under any agent's write_path get agent_owner=NULL.
+            agent_resolver = None
+            try:
+                config_path = _resolve_config_path()
+                if config_path is not None:
+                    import yaml as _yaml
+
+                    with config_path.open(encoding="utf-8") as _f:
+                        _raw_yaml = _yaml.safe_load(_f) or {}
+                    _registry = parse_agent_registry(_raw_yaml)
+                    if _registry.list_agents():
+                        agent_resolver = build_agent_owner_resolver(_registry)
+            except Exception as _exc:
+                logging.warning("embed: agent_owner resolver unavailable — %s", _exc)
+
+            scanner = DocumentScanner(db, document_root=droot, agent_owner_resolver=agent_resolver)
 
             # Load collections from config; fall back to scanning entire document root
             collections_cfg = load_collections()

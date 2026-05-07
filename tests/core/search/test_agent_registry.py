@@ -20,7 +20,7 @@ def test_empty_registry_lists_no_agents() -> None:
 @pytest.mark.unit
 def test_collection_for_returns_declared_collection() -> None:
     registry = ConfigDrivenAgentRegistry(
-        agents=[AgentDef(name="alpha", collection="alpha-memory", write_path="agents/alpha")]
+        agents=[AgentDef(name="alpha", legacy_collection_name="alpha-memory", write_path="agents/alpha")]
     )
     assert registry.collection_for("alpha") == "alpha-memory"
 
@@ -35,7 +35,7 @@ def test_collection_for_raises_on_unknown_agent() -> None:
 @pytest.mark.unit
 def test_validate_write_accepts_path_under_write_path() -> None:
     registry = ConfigDrivenAgentRegistry(
-        agents=[AgentDef(name="alpha", collection="alpha-memory", write_path="agents/alpha")]
+        agents=[AgentDef(name="alpha", legacy_collection_name="alpha-memory", write_path="agents/alpha")]
     )
     assert registry.validate_write("alpha", "agents/alpha/memory/2026-05-04.md") is True
     assert registry.validate_write("alpha", "agents/alpha") is True
@@ -44,7 +44,7 @@ def test_validate_write_accepts_path_under_write_path() -> None:
 @pytest.mark.unit
 def test_validate_write_rejects_path_outside_write_path() -> None:
     registry = ConfigDrivenAgentRegistry(
-        agents=[AgentDef(name="alpha", collection="alpha-memory", write_path="agents/alpha")]
+        agents=[AgentDef(name="alpha", legacy_collection_name="alpha-memory", write_path="agents/alpha")]
     )
     assert registry.validate_write("alpha", "agents/beta/notes.md") is False
 
@@ -52,7 +52,9 @@ def test_validate_write_rejects_path_outside_write_path() -> None:
 @pytest.mark.unit
 def test_validate_write_rejects_read_only_agent() -> None:
     registry = ConfigDrivenAgentRegistry(
-        agents=[AgentDef(name="alpha", collection="alpha-memory", write_path="agents/alpha", read_only=True)]
+        agents=[
+            AgentDef(name="alpha", legacy_collection_name="alpha-memory", write_path="agents/alpha", read_only=True)
+        ]
     )
     assert registry.validate_write("alpha", "agents/alpha/anything.md") is False
 
@@ -105,3 +107,116 @@ def test_parse_agent_registry_skips_malformed_entries() -> None:
     }
     registry = parse_agent_registry(data)
     assert {a.name for a in registry.list_agents()} == {"alpha", "beta"}
+
+
+# ---------------------------------------------------------------------------
+# build_agent_owner_resolver — used by embed scanner for #114 tagging
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolver_returns_agent_for_path_under_write_path() -> None:
+    """A doc under an agent's write_path resolves to that agent's name."""
+    from kairix.core.search.registry import (
+        AgentDef,
+        ConfigDrivenAgentRegistry,
+        build_agent_owner_resolver,
+    )
+
+    registry = ConfigDrivenAgentRegistry(
+        agents=[
+            AgentDef(name="shape", legacy_collection_name="shape-memory", write_path="04-Agent-Knowledge/shape/memory"),
+            AgentDef(
+                name="builder", legacy_collection_name="builder-memory", write_path="04-Agent-Knowledge/builder/memory"
+            ),
+        ]
+    )
+    resolver = build_agent_owner_resolver(registry)
+
+    assert resolver("agent-knowledge", "04-Agent-Knowledge/shape/memory/note.md") == "shape"
+    assert resolver("agent-knowledge", "04-Agent-Knowledge/builder/memory/log.md") == "builder"
+
+
+@pytest.mark.unit
+def test_resolver_returns_none_for_path_outside_any_write_path() -> None:
+    """Docs not under any agent's write_path resolve to None (shared)."""
+    from kairix.core.search.registry import (
+        AgentDef,
+        ConfigDrivenAgentRegistry,
+        build_agent_owner_resolver,
+    )
+
+    registry = ConfigDrivenAgentRegistry(
+        agents=[
+            AgentDef(name="shape", legacy_collection_name="shape-memory", write_path="04-Agent-Knowledge/shape/memory")
+        ]
+    )
+    resolver = build_agent_owner_resolver(registry)
+    assert resolver("areas", "02-Areas/doc.md") is None
+    assert resolver("knowledge", "05-Knowledge/methods/method.md") is None
+
+
+@pytest.mark.unit
+def test_resolver_longest_prefix_wins() -> None:
+    """If two agents have nested write_paths, the longest prefix wins.
+
+    Prevents ``shared/foo`` accidentally matching agent whose write_path
+    is ``shared`` when a more specific agent owns ``shared/foo``.
+    """
+    from kairix.core.search.registry import (
+        AgentDef,
+        ConfigDrivenAgentRegistry,
+        build_agent_owner_resolver,
+    )
+
+    registry = ConfigDrivenAgentRegistry(
+        agents=[
+            AgentDef(name="general", legacy_collection_name="g", write_path="shared"),
+            AgentDef(name="specific", legacy_collection_name="s", write_path="shared/team-a"),
+        ]
+    )
+    resolver = build_agent_owner_resolver(registry)
+    assert resolver("c", "shared/team-a/note.md") == "specific"
+    assert resolver("c", "shared/team-b/note.md") == "general"
+
+
+@pytest.mark.unit
+def test_resolver_skips_agents_without_write_path() -> None:
+    """Agents with empty write_path are skipped — they own no specific docs."""
+    from kairix.core.search.registry import (
+        AgentDef,
+        ConfigDrivenAgentRegistry,
+        build_agent_owner_resolver,
+    )
+
+    registry = ConfigDrivenAgentRegistry(
+        agents=[
+            AgentDef(name="ghost", legacy_collection_name="g", write_path=""),
+            AgentDef(name="real", legacy_collection_name="r", write_path="memory/real"),
+        ]
+    )
+    resolver = build_agent_owner_resolver(registry)
+    assert resolver("c", "memory/real/log.md") == "real"
+    # The ghost agent doesn't claim anything; this matches no agent
+    assert resolver("c", "anything/else.md") is None
+
+
+@pytest.mark.unit
+def test_resolver_exact_path_match() -> None:
+    """A document at exactly the write_path itself (no trailing component) matches."""
+    from kairix.core.search.registry import (
+        AgentDef,
+        ConfigDrivenAgentRegistry,
+        build_agent_owner_resolver,
+    )
+
+    registry = ConfigDrivenAgentRegistry(
+        agents=[AgentDef(name="shape", legacy_collection_name="s", write_path="shape-area")]
+    )
+    resolver = build_agent_owner_resolver(registry)
+    # Normally a directory, but support the edge case of write_path-as-file
+    assert resolver("c", "shape-area") == "shape"
+    # And the prefix case
+    assert resolver("c", "shape-area/sub/doc.md") == "shape"
+    # But not a sibling directory with the same prefix string
+    assert resolver("c", "shape-area-other/doc.md") is None

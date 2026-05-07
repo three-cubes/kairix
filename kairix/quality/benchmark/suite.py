@@ -166,6 +166,28 @@ def derive_gold_path_from_gold_lists(
     return None
 
 
+def _coerce_gold_list(items: list[dict] | None, ref_field: str) -> list[dict] | None:
+    """Coerce the ref-field of each item in a gold list to ``str``.
+
+    PyYAML parses unquoted ISO-shaped values like ``2026-04-07`` as
+    ``datetime.date`` objects. Downstream scoring calls ``.endswith(".md")``
+    on these refs, which raises AttributeError on date objects. Coerce here
+    at the suite-load boundary so scoring sees only strings.
+    """
+    if not isinstance(items, list):
+        return None
+    coerced: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            coerced.append(item)
+            continue
+        new_item = dict(item)
+        if ref_field in new_item and new_item[ref_field] is not None:
+            new_item[ref_field] = str(new_item[ref_field])
+        coerced.append(new_item)
+    return coerced
+
+
 def build_benchmark_case(
     i: int,
     case_id: str | None,
@@ -189,9 +211,9 @@ def build_benchmark_case(
         score_method=str(score_method) if score_method else "",
         notes=str(notes) if notes else None,
         expected_type=str(expected_type) if expected_type else None,
-        gold_paths=gold_paths if isinstance(gold_paths, list) else None,
+        gold_paths=_coerce_gold_list(gold_paths, "path"),
         gold_title=str(gold_title) if gold_title else None,
-        gold_titles=gold_titles if isinstance(gold_titles, list) else None,
+        gold_titles=_coerce_gold_list(gold_titles, "title"),
         agent=str(case_agent) if case_agent else None,
     )
 

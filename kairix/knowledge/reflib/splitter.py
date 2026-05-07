@@ -13,6 +13,8 @@ MAX_FILE_SIZE: int = 50_000  # 50KB
 MIN_FILE_SIZE: int = 500  # 500 bytes
 
 # Match h1 and h2 headings
+# NOSONAR(python:S5852): bounded `{1,2}` repetition; line-anchored via
+# re.MULTILINE — backtracking is linear in line length.
 _HEADING_RE = re.compile(r"^(#{1,2})\s+(.+)$", re.MULTILINE)
 
 

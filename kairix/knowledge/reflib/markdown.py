@@ -16,15 +16,20 @@ _BADGE_RE = re.compile(
 )
 
 # HTML block tags to strip (but preserve content between them)
+# NOSONAR(python:S5852): bounded by `>` terminator and a fixed alternation
+# of well-known tag names; input is reflib markdown (file-bounded).
 _HTML_BLOCK_STRIP_RE = re.compile(
     r"</?(?:div|span|center|font|b|i|u|em|strong|br|hr)\s*[^>]*?>",
     re.IGNORECASE,
 )
 
 # HTML img tags — strip entirely (content is in the tag, not between)
+# NOSONAR(python:S5852): bounded by `>` terminator; reflib input.
 _HTML_IMG_RE = re.compile(r"<img\s[^>]*?>", re.IGNORECASE)
 
 # HTML anchor tags — convert to markdown links
+# NOSONAR(python:S5852): all `?` quantifiers are non-greedy and bounded by
+# literal terminators (`["\']`, `>`, `</a>`); reflib input.
 _HTML_ANCHOR_RE = re.compile(
     r'<a\s+(?:[^>]*?\s+)?href=["\']([^"\']*)["\'][^>]*?>(.*?)</a>',
     re.IGNORECASE | re.DOTALL,
