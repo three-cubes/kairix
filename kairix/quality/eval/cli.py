@@ -27,13 +27,17 @@ _AGENT_HELP = "Agent for retrieval scoping (default: shape)"
 
 
 def _cmd_generate(args: argparse.Namespace) -> int:
-    from kairix.quality.eval.generate import generate_suite
+    from kairix.quality.eval.generate import SuiteGenerator
 
     print(f"Generating {args.count} benchmark cases → {args.output}")
     if not args.no_calibrate:
         print("Running calibration anchors...")
 
-    result = generate_suite(
+    # Construct SuiteGenerator with default protocol implementations
+    # (LLMJudge wrapping AzureChatBackend; default Retriever; default
+    # QueryGenerator). Tests construct SuiteGenerator with FakeXxx fakes.
+    suite_gen = SuiteGenerator()
+    result = suite_gen.generate_suite(
         db_path=args.db,
         output_path=args.output,
         n_cases=args.count,
@@ -68,12 +72,13 @@ def _cmd_generate(args: argparse.Namespace) -> int:
 
 
 def _cmd_enrich(args: argparse.Namespace) -> int:
-    from kairix.quality.eval.generate import enrich_suite
+    from kairix.quality.eval.generate import SuiteGenerator
 
     print(f"Enriching {args.suite} → {args.output}")
     print("Running hybrid search + LLM judge for each case...")
 
-    result = enrich_suite(
+    suite_gen = SuiteGenerator()
+    result = suite_gen.enrich_suite(
         suite_path=args.suite,
         output_path=args.output,
         db_path=args.db,
@@ -160,14 +165,19 @@ def _cmd_report(args: argparse.Namespace) -> int:
 def _cmd_build_gold(args: argparse.Namespace) -> int:
     from pathlib import Path
 
-    from kairix.quality.eval.gold_builder import build_independent_gold
+    from kairix.quality.eval.gold_builder import GoldBuilder
 
     systems = [s.strip() for s in args.systems.split(",")]
     print(f"Building independent gold suite: {args.suite} → {args.output}")
     print(f"Systems: {systems}")
     print(f"Judge runs: {args.judge_runs}")
 
-    report = build_independent_gold(
+    # Construct GoldBuilder with default protocol implementations
+    # (LLMJudge wrapping AzureChatBackend; default Retriever wrapping
+    # the production hybrid-search pipeline). Tests construct GoldBuilder
+    # with FakeLLMJudge / FakeRetriever for isolation.
+    gold_builder = GoldBuilder()
+    report = gold_builder.build_independent_gold(
         suite_path=Path(args.suite),
         output_path=Path(args.output),
         systems=systems,
