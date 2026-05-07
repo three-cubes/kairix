@@ -26,7 +26,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -34,6 +34,10 @@ from kairix.quality.eval.constants import CATEGORY_ALIASES, CATEGORY_WEIGHTS
 from kairix.quality.eval.metrics import hit_at_k_graded as compute_hit_at_k
 from kairix.quality.eval.metrics import ndcg_graded as compute_ndcg
 from kairix.quality.eval.metrics import reciprocal_rank_graded as compute_mrr
+
+if TYPE_CHECKING:
+    from kairix.core.protocols import Retriever
+    from kairix.core.search.config import RetrievalConfig
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +276,7 @@ class HybridSweepReport:
 # ---------------------------------------------------------------------------
 
 
-def sweep_config_to_retrieval_config(cfg: HybridSweepConfig) -> Any:
+def sweep_config_to_retrieval_config(cfg: HybridSweepConfig) -> RetrievalConfig:
     """Convert a sweep config to a RetrievalConfig for the main search pipeline."""
     from kairix.core.search.config import (
         EntityBoostConfig,
@@ -302,21 +306,45 @@ def sweep_config_to_retrieval_config(cfg: HybridSweepConfig) -> Any:
     )
 
 
+class _DefaultHybridRetriever:
+    """Production Retriever for the hybrid sweep — delegates to the shared
+    eval retrieval module's `retrieve(system="hybrid", ...)` entry point.
+
+    Conforms to ``kairix.core.protocols.Retriever``. Wrapping the
+    module-level call as an injectable object lets tests substitute a
+    `FakeRetriever` via the `retriever=` kwarg on `evaluate_single_config`
+    and `sweep_hybrid_params` without monkeypatching module state.
+    """
+
+    def retrieve(
+        self,
+        query: str,
+        *,
+        collections: list[str] | None = None,
+        cfg: Any = None,
+    ) -> Any:
+        from kairix.quality.eval.retrieval import retrieve
+
+        return retrieve(
+            query=query,
+            system="hybrid",
+            config=cfg,
+            collections=collections,
+        )
+
+
+# DEPRECATED — retained as a thin module-level shim for one release window
+# so any external callers / scripts that imported `_retrieve` directly do
+# not break. Phase 4 of #143 removes this entirely; new code should depend
+# on the `Retriever` protocol via constructor / kwarg injection instead.
 def _retrieve(
     query: str,
     collections: list[str] | None,
     cfg: HybridSweepConfig,
 ) -> tuple[list[str], dict[str, Any]]:
-    """Run retrieval via the shared retrieval module."""
-    from kairix.quality.eval.retrieval import retrieve
-
+    """Run retrieval via the shared retrieval module (deprecated shim)."""
     config = sweep_config_to_retrieval_config(cfg)
-    result = retrieve(
-        query=query,
-        system="hybrid",
-        config=config,
-        collections=collections,
-    )
+    result = _DefaultHybridRetriever().retrieve(query, collections=collections, cfg=config)
     return result.paths, {
         "bm25_count": result.meta.get("bm25_count", 0),
         "vec_count": result.meta.get("vec_count", 0),
@@ -345,24 +373,53 @@ def load_and_validate_suite(
     return cases, ndcg_cases
 
 
+@dataclass
+class _RetrievalAccumulator:
+    """Running counter state for a single-config sweep pass.
+
+    Carries the per-query metric / metadata totals through `evaluate_single_config`
+    so the aggregator (`aggregate_ndcg_for_config`) takes one struct rather
+    than 11 positional arguments. The dataclass is module-private — production
+    callers don't construct it directly.
+    """
+
+    scores: list[float] = field(default_factory=list)
+    hits: list[bool] = field(default_factory=list)
+    mrrs: list[float] = field(default_factory=list)
+    category_ndcg: dict[str, list[float]] = field(default_factory=dict)
+    total_bm25: int = 0
+    total_vec: int = 0
+    total_fused: int = 0
+    total_latency: float = 0.0
+    n_vec_failed: int = 0
+
+
 def evaluate_single_config(
     cfg: HybridSweepConfig,
     ndcg_cases: list[dict[str, Any]],
     collections: list[str] | None,
     category_weights: dict[str, float],
+    *,
+    retriever: Retriever | None = None,
 ) -> HybridSweepResult:
-    """Run all queries for one config and return the result."""
-    t_start = time.monotonic()
+    """Run all queries for one config and return the result.
 
-    ndcg_scores: list[float] = []
-    hit_scores: list[bool] = []
-    mrr_scores: list[float] = []
-    category_ndcg: dict[str, list[float]] = {}
-    total_bm25 = 0
-    total_vec = 0
-    total_fused = 0
-    total_latency = 0.0
-    n_vec_failed = 0
+    Args:
+        cfg:               Sweep configuration to evaluate.
+        ndcg_cases:        Filtered NDCG-scored suite cases.
+        collections:       Collection-name filter passed to the retriever.
+        category_weights:  Category → weight mapping for the weighted total.
+        retriever:         Optional `Retriever` protocol implementation. Defaults
+                           to the production `_DefaultHybridRetriever` when None.
+                           Tests inject a `FakeRetriever` here to avoid spinning
+                           up the real search pipeline.
+    """
+    t_start = time.monotonic()
+    if retriever is None:
+        retriever = _DefaultHybridRetriever()
+
+    retrieval_config = sweep_config_to_retrieval_config(cfg)
+    acc = _RetrievalAccumulator()
 
     for case in ndcg_cases:
         query = case["query"]
@@ -371,76 +428,66 @@ def evaluate_single_config(
         category = CATEGORY_ALIASES.get(raw_category, raw_category)
 
         t_q_start = time.monotonic()
-        paths, meta = _retrieve(query, collections, cfg)
+        result = retriever.retrieve(query, collections=collections, cfg=retrieval_config)
         t_q_end = time.monotonic()
-        total_latency += (t_q_end - t_q_start) * 1000.0
+        acc.total_latency += (t_q_end - t_q_start) * 1000.0
 
-        total_bm25 += meta.get("bm25_count", 0)
-        total_vec += meta.get("vec_count", 0)
-        total_fused += meta.get("fused_count", 0)
+        paths = list(result.paths)
+        meta = result.meta if hasattr(result, "meta") else {}
+        acc.total_bm25 += meta.get("bm25_count", 0)
+        acc.total_vec += meta.get("vec_count", 0)
+        acc.total_fused += meta.get("fused_count", 0)
         if meta.get("vec_failed"):
-            n_vec_failed += 1
+            acc.n_vec_failed += 1
 
         ndcg = compute_ndcg(paths, gold)
         hit = compute_hit_at_k(paths, gold)
         mrr = compute_mrr(paths, gold)
 
-        ndcg_scores.append(ndcg)
-        hit_scores.append(hit)
-        mrr_scores.append(mrr)
+        acc.scores.append(ndcg)
+        acc.hits.append(hit)
+        acc.mrrs.append(mrr)
 
-        if category not in category_ndcg:
-            category_ndcg[category] = []
-        category_ndcg[category].append(ndcg)
+        if category not in acc.category_ndcg:
+            acc.category_ndcg[category] = []
+        acc.category_ndcg[category].append(ndcg)
 
     return aggregate_ndcg_for_config(
-        ndcg_scores,
-        hit_scores,
-        mrr_scores,
-        category_ndcg,
+        acc,
         len(ndcg_cases),
         cfg,
-        n_vec_failed,
-        total_bm25,
-        total_vec,
-        total_fused,
-        total_latency,
         t_start,
         category_weights,
     )
 
 
 def aggregate_ndcg_for_config(
-    scores: list[float],
-    hits: list[bool],
-    mrrs: list[float],
-    category_ndcg: dict[str, list[float]],
+    acc: _RetrievalAccumulator,
     n: int,
     cfg: HybridSweepConfig,
-    n_vec_failed: int,
-    total_bm25: int,
-    total_vec: int,
-    total_fused: int,
-    total_latency: float,
     t_start: float,
     category_weights: dict[str, float],
 ) -> HybridSweepResult:
-    """Compute averages and build a HybridSweepResult for one config."""
-    cat_scores = {cat: sum(s) / len(s) if s else 0.0 for cat, s in category_ndcg.items()}
+    """Compute averages and build a HybridSweepResult for one config.
+
+    Takes the running `_RetrievalAccumulator` instead of 11 positional totals
+    to keep the parameter count manageable. (#143 Phase 2b refactor.)
+    """
+    cat_scores = {cat: sum(s) / len(s) if s else 0.0 for cat, s in acc.category_ndcg.items()}
     weighted_total = sum(cat_scores.get(cat, 0.0) * weight for cat, weight in category_weights.items())
     return HybridSweepResult(
         config=cfg,
         weighted_total=weighted_total,
-        ndcg_at_10=sum(scores) / n if n else 0.0,
-        hit_at_5=sum(hits) / n if n else 0.0,
-        mrr_at_10=sum(mrrs) / n if n else 0.0,
+        ndcg_at_10=sum(acc.scores) / n if n else 0.0,
+        hit_at_5=sum(acc.hits) / n if n else 0.0,
+        mrr_at_10=sum(acc.mrrs) / n if n else 0.0,
         category_scores=cat_scores,
         n_cases=n,
-        n_vec_failed=n_vec_failed,
-        avg_bm25_count=total_bm25 / n if n else 0.0,
-        avg_vec_count=total_vec / n if n else 0.0,
-        avg_fused_count=total_fused / n if n else 0.0,
-        avg_latency_ms=total_latency / n if n else 0.0,
+        n_vec_failed=acc.n_vec_failed,
+        avg_bm25_count=acc.total_bm25 / n if n else 0.0,
+        avg_vec_count=acc.total_vec / n if n else 0.0,
+        avg_fused_count=acc.total_fused / n if n else 0.0,
+        avg_latency_ms=acc.total_latency / n if n else 0.0,
         duration_s=time.monotonic() - t_start,
     )
 
@@ -455,6 +502,8 @@ def sweep_hybrid_params(
     output_path: Path | None = None,
     configs: list[HybridSweepConfig] | None = None,
     collections_override: list[str] | None = None,
+    *,
+    retriever: Retriever | None = None,
 ) -> HybridSweepReport:
     """
     Grid search over hybrid pipeline configurations.
@@ -467,6 +516,10 @@ def sweep_hybrid_params(
         output_path:           Optional CSV output for results.
         configs:               Configurations to evaluate. Defaults to build_default_configs().
         collections_override:  Explicit collection list. Overrides suite metadata when set.
+        retriever:             Optional `Retriever` protocol implementation. Defaults
+                               to the production `_DefaultHybridRetriever` when None.
+                               Tests inject a `FakeRetriever` to bypass the real
+                               search pipeline.
 
     Returns:
         HybridSweepReport with results sorted by weighted_total descending.
@@ -499,7 +552,13 @@ def sweep_hybrid_params(
     t_total_start = time.monotonic()
 
     for cfg in configs:
-        result = evaluate_single_config(cfg, ndcg_cases, collections, CATEGORY_WEIGHTS)
+        result = evaluate_single_config(
+            cfg,
+            ndcg_cases,
+            collections,
+            CATEGORY_WEIGHTS,
+            retriever=retriever,
+        )
         report.results.append(result)
 
         logger.info(

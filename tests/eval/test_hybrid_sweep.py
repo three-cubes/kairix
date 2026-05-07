@@ -339,9 +339,10 @@ def test_sweep_config_to_retrieval_config_preserves_boost_params() -> None:
 @pytest.mark.unit
 def test_sweep_hybrid_params_with_mock(tmp_path: Path) -> None:
     """Sweep runs against a minimal suite and produces sorted results."""
-    from unittest.mock import patch
-
     import yaml
+
+    from kairix.quality.eval.retrieval import RetrievalResult
+    from tests.fakes import FakeRetriever
 
     suite = {
         "meta": {"version": "1.0"},
@@ -358,21 +359,23 @@ def test_sweep_hybrid_params_with_mock(tmp_path: Path) -> None:
     with open(suite_path, "w") as f:
         yaml.dump(suite, f)
 
-    def mock_retrieve(query, collections, cfg):
-        return ["test-doc.md", "other.md"], {
+    canned = RetrievalResult(
+        paths=["test-doc.md", "other.md"],
+        meta={
             "bm25_count": 5,
             "vec_count": 3,
             "fused_count": 8,
             "vec_failed": False,
-        }
+        },
+    )
+    retriever = FakeRetriever(results_by_query={"test query": canned})
 
     configs = [
         HybridSweepConfig(name="config-a", mode="hybrid", rrf_k=20),
         HybridSweepConfig(name="config-b", mode="hybrid", rrf_k=60),
     ]
 
-    with patch("kairix.quality.eval.hybrid_sweep._retrieve", side_effect=mock_retrieve):
-        report = sweep_hybrid_params(suite_path, configs=configs)
+    report = sweep_hybrid_params(suite_path, configs=configs, retriever=retriever)
 
     assert report.total_configs == 2
     assert len(report.results) == 2
@@ -419,9 +422,10 @@ def test_sweep_hybrid_params_no_ndcg_cases(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_sweep_hybrid_params_writes_csv(tmp_path: Path) -> None:
     """Sweep writes CSV when output_path is provided."""
-    from unittest.mock import patch
-
     import yaml
+
+    from kairix.quality.eval.retrieval import RetrievalResult
+    from tests.fakes import FakeRetriever
 
     suite = {
         "meta": {"version": "1.0"},
@@ -441,16 +445,13 @@ def test_sweep_hybrid_params_writes_csv(tmp_path: Path) -> None:
     csv_path = tmp_path / "results.csv"
     configs = [HybridSweepConfig(name="only", mode="hybrid")]
 
-    def mock_retrieve(query, collections, cfg):
-        return ["test-doc.md"], {
-            "bm25_count": 1,
-            "vec_count": 1,
-            "fused_count": 2,
-            "vec_failed": False,
-        }
+    canned = RetrievalResult(
+        paths=["test-doc.md"],
+        meta={"bm25_count": 1, "vec_count": 1, "fused_count": 2, "vec_failed": False},
+    )
+    retriever = FakeRetriever(results_by_query={"test query": canned})
 
-    with patch("kairix.quality.eval.hybrid_sweep._retrieve", side_effect=mock_retrieve):
-        sweep_hybrid_params(suite_path, output_path=csv_path, configs=configs)
+    sweep_hybrid_params(suite_path, output_path=csv_path, configs=configs, retriever=retriever)
 
     assert csv_path.exists()
     lines = csv_path.read_text().splitlines()
