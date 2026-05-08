@@ -1,29 +1,33 @@
-"""End-to-end integration test for the GPL suite-generation pipeline.
+"""End-to-end integration tests for the GPL suite-generation pipeline.
 
-Exercises sample_documents → process_sampled_docs → write_generated_suite
-against a real SQLite database with the production schema. Closes the
-integration-coverage gap on query_documents_from_db / sample_documents
-left by the unit tests in tests/eval/test_generate.py.
+Exercises every public method on QueryGenerator and SuiteGenerator end-to-end:
+- sample_documents → process_sampled_docs → write_generated_suite
+- QueryGenerator.generate via FakeChatBackend
+- SuiteGenerator.enrich_suite against a real YAML file
+- SuiteGenerator.generate_suite against a real SQLite database
 
-The LLM-judge and retrieval surfaces are still injected via the existing
-FakeQueryGenerator / FakeLLMJudge / FakeRetriever from tests/fakes.py —
-this test verifies the SQLite I/O glue, not the chat completion logic.
+The chat / retrieval / judge surfaces inject FakeXxx from tests/fakes.py — no
+monkeypatch. Production credential resolution is bypassed by passing api_key
+/ endpoint explicitly so resolve_credentials() is never called.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from kairix.core.db.schema import create_schema
 from kairix.quality.eval.generate import (
+    QueryGenerator,
     SuiteGenerator,
     sample_documents,
 )
-from tests.fakes import FakeLLMJudge, FakeQueryGenerator, FakeRetriever
+from tests.fakes import FakeChatBackend, FakeLLMJudge, FakeQueryGenerator, FakeRetriever
 
 pytestmark = pytest.mark.integration
 
@@ -139,3 +143,101 @@ def test_suite_generator_pipeline_against_real_sqlite(tmp_path: Path) -> None:
 
     assert result.n_accepted >= 1
     assert output_path.exists()
+
+
+@pytest.mark.integration
+def test_query_generator_full_cycle_against_fake_chat_backend() -> None:
+    """QueryGenerator.generate runs the full prompt-build → backend → parse cycle."""
+    payload = json.dumps(
+        [
+            {"query": "How do I deploy a Docker container?", "intent": "procedural"},
+            {"query": "What is the Docker deployment process?", "intent": "recall"},
+        ]
+    )
+    backend = FakeChatBackend(responses=[payload])
+    gen = QueryGenerator(chat_backend=backend)
+
+    queries = gen.generate(
+        title="docker-guide",
+        body="Deploy with docker build, tag, push, run -d." * 20,
+        n=2,
+        categories=["recall", "procedural"],
+        api_key="integration-key",  # pragma: allowlist secret
+        endpoint="https://integration-endpoint",
+        source_doc_path="/notes/docker-guide.md",
+    )
+
+    assert len(queries) == 2
+    assert queries[0].intent == "procedural"
+    assert queries[1].intent == "recall"
+    assert all(q.source_doc_path == "/notes/docker-guide.md" for q in queries)
+    # Backend call carried the credentials and the assembled prompt.
+    assert backend.calls[0]["api_key"] == "integration-key"  # pragma: allowlist secret
+    assert "docker-guide" in backend.calls[0]["prompt"] or "Docker" in backend.calls[0]["prompt"]
+
+
+@pytest.mark.integration
+def test_suite_generator_enrich_suite_full_cycle_against_real_yaml(tmp_path: Path) -> None:
+    """SuiteGenerator.enrich_suite reads/writes real YAML and regrades cases via fakes."""
+    input_suite = {
+        "meta": {"version": "1.0", "score_method": "exact"},
+        "cases": [
+            {
+                "id": "R001",
+                "category": "recall",
+                "query": "What is the deployment process?",
+                "gold_path": "docker-guide.md",
+                "score_method": "exact",
+            },
+            {
+                "id": "R002",
+                "category": "recall",
+                "query": "",  # empty — should be skipped
+            },
+        ],
+    }
+    input_path = tmp_path / "input.yaml"
+    output_path = tmp_path / "enriched.yaml"
+    yaml.safe_dump(input_suite, input_path.open("w", encoding="utf-8"))
+
+    jg = FakeLLMJudge(
+        grades_by_query={
+            "What is the deployment process?": {
+                "docker-deployment-guide": 2,
+                "ci-cd-pipeline": 1,
+            }
+        }
+    )
+    rt = FakeRetriever(
+        results_by_query={
+            "What is the deployment process?": SimpleNamespace(
+                paths=["docker-deployment-guide.md", "ci-cd-pipeline.md"],
+                snippets=["s1", "s2"],
+                results=[],
+                vec_failed=False,
+            )
+        }
+    )
+    suite_gen = SuiteGenerator(llm_judge=jg, retriever=rt)
+    result = suite_gen.enrich_suite(
+        suite_path=str(input_path),
+        output_path=str(output_path),
+        api_key="k",  # pragma: allowlist secret
+        endpoint="https://ep",
+    )
+
+    assert result.n_cases == 2
+    assert result.n_enriched == 1
+    assert result.n_skipped == 1
+    assert output_path.exists()
+
+    parsed = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    enriched_case = next(c for c in parsed["cases"] if c["id"] == "R001")
+    assert enriched_case["score_method"] == "ndcg"
+    assert enriched_case["gold_titles"]
+    # Gold titles sorted by relevance descending.
+    relevances = [int(t["relevance"]) for t in enriched_case["gold_titles"]]
+    assert relevances == sorted(relevances, reverse=True)
+    # Skipped case is preserved unchanged.
+    skipped_case = next(c for c in parsed["cases"] if c["id"] == "R002")
+    assert "gold_titles" not in skipped_case

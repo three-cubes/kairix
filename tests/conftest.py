@@ -39,6 +39,8 @@ pytest_plugins = [
     "tests.bdd.steps.eval_gate_steps",
     "tests.bdd.steps.configurable_default_scope_steps",
     "tests.bdd.steps.wikilinks_injection_steps",
+    "tests.bdd.steps.eval_judge_steps",
+    "tests.bdd.steps.eval_generate_steps",
 ]
 
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
