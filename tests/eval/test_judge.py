@@ -13,12 +13,14 @@ import json
 import pytest
 
 from kairix.quality.eval.judge import (
+    CALIBRATION_ANCHORS,
     JUDGE_DEPLOYMENT,
     JudgeCalibrationError,
     JudgeResult,
     LLMJudge,
     _parse_grade_response,
     calibrate,
+    fetch_llm_credentials,
     judge_batch,
 )
 from tests.fakes import FakeChatBackend
@@ -189,30 +191,6 @@ def test_judge_batch_returns_zeros_when_no_credentials() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Backwards compat: legacy ``chat_fn=`` kwarg still works (Phase 4 removes it)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_judge_batch_legacy_chat_fn_still_works() -> None:
-    """The deprecated ``chat_fn`` kwarg keeps working until Phase 4 removes it."""
-
-    def _legacy_chat_fn(messages: list[dict[str, str]], max_tokens: int = 200) -> str:
-        del messages, max_tokens
-        return _grade_response({"A": 2, "B": 1, "C": 0})
-
-    result = judge_batch(
-        query=_QUERY,
-        candidates=_CANDIDATES,
-        api_key="test-key",
-        endpoint="https://test.openai.azure.com",
-        shuffle=False,
-        chat_fn=_legacy_chat_fn,
-    )
-    assert result.grades["docker-deployment-guide"] == 2
-
-
-# ---------------------------------------------------------------------------
 # _parse_grade_response
 # ---------------------------------------------------------------------------
 
@@ -247,6 +225,25 @@ def test_parse_grade_response_ignores_extra_labels() -> None:
     result = _parse_grade_response(content, ["A", "B"])
     assert "Z" not in result
     assert result["A"] == 2
+
+
+@pytest.mark.unit
+def test_parse_grade_response_returns_empty_on_invalid_json_inside_braces() -> None:
+    """A {...} block whose body is not valid JSON returns {}."""
+    # Brace block exists (regex matches) but the body fails json.loads.
+    content = "{A: 2, B: 0}"  # missing quotes — invalid JSON
+    result = _parse_grade_response(content, ["A", "B"])
+    assert result == {}
+
+
+@pytest.mark.unit
+def test_parse_grade_response_clamps_non_int_grade_to_zero() -> None:
+    """A label with a non-integer-coercible value is clamped to 0, not skipped."""
+    content = '{"A": "high", "B": 1, "C": null}'
+    result = _parse_grade_response(content, ["A", "B", "C"])
+    assert result["A"] == 0  # ValueError on int("high") → 0
+    assert result["B"] == 1  # int conversion ok
+    assert result["C"] == 0  # TypeError on int(None) → 0
 
 
 # ---------------------------------------------------------------------------
@@ -385,3 +382,56 @@ def test_llm_judge_calibrate_raises_when_too_many_anchors_wrong() -> None:
     judge = LLMJudge(chat_backend=backend)
     with pytest.raises(JudgeCalibrationError):
         judge.calibrate(api_key="key", endpoint="https://endpoint")  # pragma: allowlist secret
+
+
+@pytest.mark.unit
+def test_llm_judge_calibrate_logs_when_errors_within_threshold() -> None:
+    """When 1..CALIBRATION_MAX_ERRORS anchors are wrong, calibrate returns True and logs."""
+    # Build responses where the first two anchors return a wrong grade and the rest are correct.
+    # That gives us 2 errors total, within the threshold (3), so calibrate returns True
+    # but exercises the warning-log branch.
+    responses = []
+    for i, anchor in enumerate(CALIBRATION_ANCHORS):
+        wrong = anchor["expected"] - 1 if anchor["expected"] > 0 else 1
+        responses.append(_grade_response({"A": wrong if i < 2 else anchor["expected"]}))
+    backend = FakeChatBackend(responses=responses)
+
+    judge = LLMJudge(chat_backend=backend)
+    assert judge.calibrate(api_key="key", endpoint="https://endpoint") is True  # pragma: allowlist secret
+
+
+# ---------------------------------------------------------------------------
+# fetch_llm_credentials — DEPRECATED legacy helper
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_fetch_llm_credentials_returns_empties_when_secrets_unavailable() -> None:
+    """When LLM secrets are not configured, returns empty strings + default deployment.
+
+    Exercises the ``except Exception`` fallback so callers in legacy free-function
+    paths get all-zero grades from the judge rather than a raised error.
+    """
+    api_key, endpoint, deployment = fetch_llm_credentials()
+    # In the test environment kairix.secrets cannot resolve LLM creds — the
+    # OSError raised by get_secret(required=True) is caught by fetch_llm_credentials.
+    assert api_key == ""
+    assert endpoint == ""
+    assert deployment == JUDGE_DEPLOYMENT
+
+
+# ---------------------------------------------------------------------------
+# calibrate (free-function shim) — exercises the AzureChatBackend default branch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_calibrate_shim_constructs_default_backend_when_chat_backend_omitted() -> None:
+    """The free-function ``calibrate`` shim constructs an AzureChatBackend on its own.
+
+    With empty credentials the inner ``LLMJudge.grade`` raises ValueError before
+    any network call, so each anchor returns grade 0 — for grade-2 / grade-1
+    anchors that's wrong, exceeding CALIBRATION_MAX_ERRORS=3.
+    """
+    with pytest.raises(JudgeCalibrationError):
+        calibrate(api_key="", endpoint="")
