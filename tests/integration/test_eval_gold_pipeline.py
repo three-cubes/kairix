@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from kairix.core.db.fts import rebuild_fts
 from kairix.core.db.schema import create_schema
 from kairix.quality.eval.gold_builder import GoldBuilder, PooledCandidate
 from tests.fakes import FakeLLMJudge, FakeRetriever
@@ -28,9 +29,12 @@ pytestmark = pytest.mark.integration
 
 
 def _seed_db(db_path: Path, docs: list[tuple[str, str, str, str]]) -> None:
-    """Create the kairix schema and populate documents.
+    """Create the kairix schema, populate documents + content, and rebuild the FTS index.
 
-    Each ``docs`` tuple is (path, title, collection, body).
+    Each ``docs`` tuple is (path, title, collection, body). The FTS index
+    rebuild at the end is mandatory — without it ``documents_fts`` stays empty
+    and any BM25 query returns nothing, which silently passes ``if results:``-
+    style assertions.
     """
     db = sqlite3.connect(str(db_path))
     create_schema(db)
@@ -39,10 +43,12 @@ def _seed_db(db_path: Path, docs: list[tuple[str, str, str, str]]) -> None:
         digest = f"hash-{i}"
         cur.execute("INSERT INTO content (hash, doc) VALUES (?, ?)", (digest, body))
         cur.execute(
-            "INSERT INTO documents (path, title, collection, hash, created_at, modified_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO documents (path, title, collection, hash, created_at, modified_at, active) "
+            "VALUES (?, ?, ?, ?, ?, ?, 1)",
             (path, title, collection, digest, "2026-05-01", "2026-05-01"),
         )
     db.commit()
+    rebuild_fts(db)
     db.close()
 
 
@@ -84,7 +90,7 @@ def kairix_db(tmp_path: Path) -> Path:
 
 @pytest.mark.integration
 def test_bm25_search_with_weights_returns_results_against_real_fts(kairix_db: Path) -> None:
-    """``_bm25_search_with_weights`` runs the FTS5 query against the production schema."""
+    """BM25 search must return the docker-deployment-guide for the query 'docker deployment'."""
     builder = GoldBuilder()
     results = builder._bm25_search_with_weights(
         "docker deployment",
@@ -92,23 +98,26 @@ def test_bm25_search_with_weights_returns_results_against_real_fts(kairix_db: Pa
         collections=None,
         limit=5,
     )
-    assert isinstance(results, list)
-    if results:
-        first = results[0]
-        assert {"path", "title", "snippet", "collection"}.issubset(first.keys())
+    paths = [r["path"] for r in results]
+    assert "/eng/docker-deployment-guide.md" in paths, (
+        f"BM25 search did not return the docker-deployment-guide; got: {paths}"
+    )
+    # Result rows expose the dict keys the pool code consumes.
+    first = results[0]
+    assert {"path", "title", "snippet", "collection"}.issubset(first.keys())
 
 
 @pytest.mark.integration
 def test_pool_combines_bm25_variants_with_vector_retrieval(kairix_db: Path) -> None:
-    """``GoldBuilder.pool`` aggregates BM25 weighted variants and the injected retriever."""
+    """``GoldBuilder.pool`` aggregates BM25 results AND the injected retriever's vector hit."""
     retriever = FakeRetriever(
         results_by_query={
             "docker": SimpleNamespace(
                 results=[
                     {
-                        "path": "/eng/docker-deployment-guide.md",
-                        "title": "Docker Deployment Guide",
-                        "snippet": "Deploy Docker containers...",
+                        "path": "/notes/api-guidelines.md",
+                        "title": "API Guidelines",
+                        "snippet": "Public APIs require...",
                         "collection": "engineering",
                     }
                 ],
@@ -123,23 +132,44 @@ def test_pool_combines_bm25_variants_with_vector_retrieval(kairix_db: Path) -> N
         collections=None,
         limit_per_system=10,
     )
-    assert any(c.path == "/eng/docker-deployment-guide.md" for c in candidates) or all(
-        isinstance(c, PooledCandidate) for c in candidates
+    paths = {c.path for c in candidates}
+    # BM25 must hit docker-deployment-guide for "docker"; the vector retriever
+    # contributes /notes/api-guidelines.md. Both ought to be in the pool.
+    assert "/eng/docker-deployment-guide.md" in paths, (
+        f"BM25 contribution missing; got: {paths}"
     )
+    assert "/notes/api-guidelines.md" in paths, (
+        f"Vector contribution missing; got: {paths}"
+    )
+    # The docker-deployment-guide should be sourced by at least one BM25 system.
+    docker_candidate = next(c for c in candidates if c.path == "/eng/docker-deployment-guide.md")
+    assert any(s.startswith("bm25-") for s in docker_candidate.sources)
+    # The api-guidelines came from the vector retriever only.
+    api_candidate = next(c for c in candidates if c.path == "/notes/api-guidelines.md")
+    assert "vector" in api_candidate.sources
     assert len(retriever.calls) == 1
 
 
 @pytest.mark.integration
 def test_pool_skips_unknown_system_with_warning(kairix_db: Path) -> None:
-    """Unknown system names log a warning and skip."""
+    """Unknown system names are skipped; pool result is identical to the known-system call."""
     builder = GoldBuilder(retriever=FakeRetriever())
-    candidates = builder.pool(
-        "anything",
+    with_unknown = builder.pool(
+        "docker",
         systems=["bm25-equal", "noooo-not-a-real-system"],
         collections=None,
         limit_per_system=5,
     )
-    assert isinstance(candidates, list)
+    only_known = builder.pool(
+        "docker",
+        systems=["bm25-equal"],
+        collections=None,
+        limit_per_system=5,
+    )
+    # Skipping the unknown system must not change the pooled paths.
+    assert {c.path for c in with_unknown} == {c.path for c in only_known}
+    # The known BM25 system must have actually contributed.
+    assert any(c.sources and "bm25-equal" in c.sources for c in with_unknown)
 
 
 @pytest.mark.integration

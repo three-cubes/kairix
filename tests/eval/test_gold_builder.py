@@ -635,32 +635,45 @@ def test_build_independent_gold_handles_legacy_gold_paths_field(tmp_path: Path) 
 
 @pytest.mark.unit
 def test_bm25_search_with_collections_filter(kairix_db_path: Path) -> None:
-    """``_bm25_search_with_weights`` honours the collections filter when supplied."""
+    """``_bm25_search_with_weights`` returns the indexed doc when its collection is in the filter."""
     builder = GoldBuilder()
-    # Both branches: query with collections=[...] (covers the placeholder-binding branch),
-    # and query with collections=None (covers the no-filter branch).
     with_filter = builder._bm25_search_with_weights(
         "docker", weights=(1.0, 1.0, 1.0), collections=["engineering"], limit=5
     )
-    without_filter = builder._bm25_search_with_weights("docker", weights=(1.0, 1.0, 1.0), collections=None, limit=5)
-    # FTS may or may not return rows depending on schema setup; we assert structure only.
-    assert isinstance(with_filter, list)
-    assert isinstance(without_filter, list)
+    without_filter = builder._bm25_search_with_weights(
+        "docker", weights=(1.0, 1.0, 1.0), collections=None, limit=5
+    )
+    excluded_filter = builder._bm25_search_with_weights(
+        "docker", weights=(1.0, 1.0, 1.0), collections=["non-existent-collection"], limit=5
+    )
+    # The seeded doc must appear when the filter matches its collection AND when no filter is set.
+    assert any(r["path"] == "/eng/docker.md" for r in with_filter), (
+        f"Expected /eng/docker.md in with_filter results; got: {[r['path'] for r in with_filter]}"
+    )
+    assert any(r["path"] == "/eng/docker.md" for r in without_filter), (
+        f"Expected /eng/docker.md in without_filter results; got: {[r['path'] for r in without_filter]}"
+    )
+    # Excluded collection must filter the doc out.
+    assert excluded_filter == [], f"Expected empty results for excluded collection; got: {excluded_filter}"
 
 
 @pytest.fixture
 def kairix_db_path(tmp_path: Path) -> Path:
-    """Production-schema SQLite + KAIRIX_DB_PATH override for unit tests that need real DB."""
+    """Production-schema SQLite with FTS5 populated; KAIRIX_DB_PATH overridden."""
+    from kairix.core.db.fts import rebuild_fts
+
     db_path = tmp_path / "kairix.sqlite"
     db = sqlite3.connect(str(db_path))
     create_schema(db)
     cur = db.cursor()
     cur.execute("INSERT INTO content (hash, doc) VALUES (?, ?)", ("h0", "Docker deployment guide content. " * 20))
     cur.execute(
-        "INSERT INTO documents (path, title, collection, hash, created_at, modified_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO documents (path, title, collection, hash, created_at, modified_at, active) "
+        "VALUES (?, ?, ?, ?, ?, ?, 1)",
         ("/eng/docker.md", "Docker", "engineering", "h0", "2026-05-01", "2026-05-01"),
     )
     db.commit()
+    rebuild_fts(db)
     db.close()
     prev = os.environ.get("KAIRIX_DB_PATH")
     os.environ["KAIRIX_DB_PATH"] = str(db_path)

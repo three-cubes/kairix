@@ -12,6 +12,7 @@ import pytest
 import yaml
 from pytest_bdd import given, parsers, then, when
 
+from kairix.core.db.fts import rebuild_fts
 from kairix.core.db.schema import create_schema
 from kairix.quality.eval.gold_builder import GoldBuilder
 from tests.fakes import FakeLLMJudge, FakeRetriever
@@ -48,10 +49,12 @@ def _seed_db(db_path: Path) -> None:
         digest = f"hash-{i}"
         cur.execute("INSERT INTO content (hash, doc) VALUES (?, ?)", (digest, body))
         cur.execute(
-            "INSERT INTO documents (path, title, collection, hash, created_at, modified_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO documents (path, title, collection, hash, created_at, modified_at, active) "
+            "VALUES (?, ?, ?, ?, ?, ?, 1)",
             (path, title, collection, digest, "2026-05-01", "2026-05-01"),
         )
     db.commit()
+    rebuild_fts(db)
     db.close()
 
 

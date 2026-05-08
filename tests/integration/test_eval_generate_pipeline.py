@@ -173,7 +173,9 @@ def test_query_generator_full_cycle_against_fake_chat_backend() -> None:
     assert all(q.source_doc_path == "/notes/docker-guide.md" for q in queries)
     # Backend call carried the credentials and the assembled prompt.
     assert backend.calls[0]["api_key"] == "integration-key"  # pragma: allowlist secret
-    assert "docker-guide" in backend.calls[0]["prompt"] or "Docker" in backend.calls[0]["prompt"]
+    # The literal title we passed in must appear inside the <title>...</title> delimiter.
+    prompt = backend.calls[0]["prompt"]
+    assert "<title>docker-guide</title>" in prompt, f"Title not delimited as expected; got: {prompt[:300]}"
 
 
 @pytest.mark.integration
