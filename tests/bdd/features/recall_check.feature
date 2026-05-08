@@ -15,8 +15,17 @@ Feature: Adaptive recall quality check
     Then the default recall queries are used
     And at least 5 queries are returned
 
-  Scenario: Degradation threshold triggers alert
-    Given a previous recall score of 0.90
-    And a current recall score of 0.70
-    When the recall gate compares scores
-    Then degradation is detected
+  Scenario: Recall gate alerts the operator when score drops more than 10 percent
+    Given a previous recall log file recording a score of 0.90
+    And a recall checker configured to return a current score of 0.70
+    When the operator runs the recall gate
+    Then the gate reports the run as failed
+    And the alert callback is invoked exactly once
+    And the alert message names the previous and current scores
+
+  Scenario: Recall gate passes when score drops within 10 percent
+    Given a previous recall log file recording a score of 0.90
+    And a recall checker configured to return a current score of 0.85
+    When the operator runs the recall gate
+    Then the gate reports the run as passed
+    And the alert callback is not invoked

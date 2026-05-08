@@ -22,7 +22,7 @@ import yaml
 
 from kairix.core.db.fts import rebuild_fts
 from kairix.core.db.schema import create_schema
-from kairix.quality.eval.gold_builder import GoldBuilder, PooledCandidate
+from kairix.quality.eval.gold_builder import GoldBuilder
 from tests.fakes import FakeLLMJudge, FakeRetriever
 
 pytestmark = pytest.mark.integration
@@ -135,12 +135,8 @@ def test_pool_combines_bm25_variants_with_vector_retrieval(kairix_db: Path) -> N
     paths = {c.path for c in candidates}
     # BM25 must hit docker-deployment-guide for "docker"; the vector retriever
     # contributes /notes/api-guidelines.md. Both ought to be in the pool.
-    assert "/eng/docker-deployment-guide.md" in paths, (
-        f"BM25 contribution missing; got: {paths}"
-    )
-    assert "/notes/api-guidelines.md" in paths, (
-        f"Vector contribution missing; got: {paths}"
-    )
+    assert "/eng/docker-deployment-guide.md" in paths, f"BM25 contribution missing; got: {paths}"
+    assert "/notes/api-guidelines.md" in paths, f"Vector contribution missing; got: {paths}"
     # The docker-deployment-guide should be sourced by at least one BM25 system.
     docker_candidate = next(c for c in candidates if c.path == "/eng/docker-deployment-guide.md")
     assert any(s.startswith("bm25-") for s in docker_candidate.sources)

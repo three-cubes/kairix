@@ -640,9 +640,7 @@ def test_bm25_search_with_collections_filter(kairix_db_path: Path) -> None:
     with_filter = builder._bm25_search_with_weights(
         "docker", weights=(1.0, 1.0, 1.0), collections=["engineering"], limit=5
     )
-    without_filter = builder._bm25_search_with_weights(
-        "docker", weights=(1.0, 1.0, 1.0), collections=None, limit=5
-    )
+    without_filter = builder._bm25_search_with_weights("docker", weights=(1.0, 1.0, 1.0), collections=None, limit=5)
     excluded_filter = builder._bm25_search_with_weights(
         "docker", weights=(1.0, 1.0, 1.0), collections=["non-existent-collection"], limit=5
     )

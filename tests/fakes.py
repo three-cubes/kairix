@@ -206,6 +206,26 @@ class FakeEmbedProvider:
         return [list(self._vector) for _ in texts]
 
 
+class FakeVectorSearcher:
+    """Deterministic VectorSearcher for ``RecallChecker``.
+
+    Implements ``kairix.core.embed.recall_check.VectorSearcher``:
+    ``search_vectors(vector, *, limit) -> list[str]``.
+
+    Returns the configured paths for any input vector. Captures the
+    ``(vector, limit)`` of every call so tests can assert what the recall
+    gate fed into the index.
+    """
+
+    def __init__(self, paths: list[str] | None = None) -> None:
+        self._paths = list(paths or [])
+        self.calls: list[dict[str, Any]] = []
+
+    def search_vectors(self, vector: Any, *, limit: int) -> list[str]:
+        self.calls.append({"limit": limit, "vec_norm": float(getattr(vector, "size", 0))})
+        return list(self._paths[:limit])
+
+
 class FakeFusion:
     """Pass-through fusion: concatenates BM25 and vector results."""
 
