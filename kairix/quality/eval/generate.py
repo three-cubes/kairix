@@ -38,7 +38,6 @@ import logging
 import random
 import re
 import sqlite3
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -342,39 +341,11 @@ def _default_chat_backend() -> ChatBackend:
 
     Production callers that don't inject a backend get the Azure adapter.
     Tests inject ``FakeChatBackend`` via the ``chat_backend`` kwarg or the
-    ``QueryGenerator`` constructor; the deprecated ``llm_fn`` shim builds
-    its own ad-hoc backend (see ``_LegacyLLMFnBackend``).
+    ``QueryGenerator`` constructor.
     """
     from kairix._azure import AzureChatBackend
 
     return AzureChatBackend()
-
-
-class _LegacyLLMFnBackend:
-    """Adapter that wraps the deprecated ``llm_fn`` callable as a ChatBackend.
-
-    The original ``generate_queries`` accepted ``llm_fn(prompt, api_key, endpoint, deployment)``
-    as a test hook. Phase 2b removes that hook in favour of
-    ``chat_backend: ChatBackend``, but we preserve the kwarg for backwards
-    compat by adapting the callable into the protocol surface here. New
-    tests should use ``chat_backend=FakeChatBackend(...)`` directly.
-    """
-
-    def __init__(self, llm_fn: Callable[..., str]) -> None:
-        self._llm_fn = llm_fn
-
-    def complete(
-        self,
-        prompt: str,
-        *,
-        api_key: str,
-        endpoint: str,
-        deployment: str,
-        system: str | None = None,
-        temperature: float = 0.0,
-        timeout_s: float = 30.0,
-    ) -> str:
-        return self._llm_fn(prompt, api_key, endpoint, deployment)
 
 
 def generate_queries(
@@ -386,7 +357,6 @@ def generate_queries(
     endpoint: str = "",
     deployment: str = "gpt-4o-mini",
     source_doc_path: str = "",
-    llm_fn: Callable[[str, str, str, str], str] | None = None,
     chat_backend: ChatBackend | None = None,
 ) -> list[GeneratedQuery]:
     """
@@ -406,25 +376,15 @@ def generate_queries(
         endpoint:        Azure OpenAI endpoint URL.
         deployment:      Model deployment name.
         source_doc_path: Original path of the document.
-        llm_fn:          DEPRECATED (Phase 4 removes). Legacy callable substitute
-                         for the LLM call; prefer ``chat_backend``. When supplied
-                         it is wrapped in a ``ChatBackend`` adapter internally.
-        chat_backend:    ``ChatBackend`` protocol implementation. Takes precedence
-                         over ``llm_fn``. Defaults to ``AzureChatBackend()``
-                         constructed lazily.
+        chat_backend:    ``ChatBackend`` protocol implementation. Defaults to
+                         ``AzureChatBackend()`` constructed lazily.
 
     Returns:
         List of GeneratedQuery. Returns [] on any failure (no raise).
     """
     allowed_cats = categories or list(_TARGET_DISTRIBUTION.keys())
     prompt = build_generation_prompt(doc_title, doc_body, n, allowed_cats)
-
-    if chat_backend is not None:
-        backend: ChatBackend = chat_backend
-    elif llm_fn is not None:
-        backend = _LegacyLLMFnBackend(llm_fn)
-    else:
-        backend = _default_chat_backend()
+    backend: ChatBackend = chat_backend if chat_backend is not None else _default_chat_backend()
 
     for attempt in range(2):
         try:
@@ -627,6 +587,16 @@ def resolve_credentials(
     return api_key, endpoint, deployment
 
 
+_CATEGORY_PREFIX: dict[str, str] = {
+    "recall": "GEN-R",
+    "temporal": "GEN-T",
+    "entity": "GEN-E",
+    "conceptual": "GEN-C",
+    "multi_hop": "GEN-M",
+    "procedural": "GEN-P",
+}
+
+
 def process_sampled_docs(
     docs: list[dict[str, Any]],
     n_cases: int,
@@ -635,91 +605,23 @@ def process_sampled_docs(
     endpoint: str,
     deployment: str,
     agent: str,
-    query_fn: Callable[..., list[GeneratedQuery]] | None,
-    retrieve_fn: Callable[..., tuple[list[str], list[str]]] | None,
-    judge_fn: Callable[..., JudgeResult] | None,
 ) -> tuple[list[dict[str, Any]], int, int, dict[str, int]]:
-    """Process sampled docs through the GPL pipeline (generate, retrieve, judge).
+    """Production-default shim — see ``SuiteGenerator.process_sampled_docs``.
 
-    Returns (accepted_cases, n_rejected, n_failed, category_counts).
+    Constructs a SuiteGenerator with no injected protocols (so each step uses
+    the production free functions: ``generate_queries``, ``_retrieve``,
+    ``judge_batch``) and delegates. Test code constructs SuiteGenerator
+    explicitly with FakeXxx implementations rather than calling here.
     """
-    accepted_cases: list[dict[str, Any]] = []
-    n_rejected = 0
-    n_failed = 0
-    category_counts: dict[str, int] = {cat: 0 for cat in active_cats}
-    id_counters: dict[str, int] = {cat: 0 for cat in active_cats}
-    _cat_prefix = {
-        "recall": "GEN-R",
-        "temporal": "GEN-T",
-        "entity": "GEN-E",
-        "conceptual": "GEN-C",
-        "multi_hop": "GEN-M",
-        "procedural": "GEN-P",
-    }
-
-    for doc in docs:
-        if len(accepted_cases) >= n_cases:
-            break
-
-        _gen_queries = query_fn or generate_queries
-        queries = _gen_queries(
-            doc_title=doc["title"],
-            doc_body=doc["body"],
-            n=2,
-            categories=active_cats,
-            api_key=api_key,
-            endpoint=endpoint,
-            deployment=deployment,
-            source_doc_path=doc["path"],
-        )
-
-        for gq in queries:
-            if len(accepted_cases) >= n_cases:
-                break
-
-            _retr = retrieve_fn or _retrieve
-            paths, snippets = _retr(gq.query, gq.intent, agent=agent)
-            if not paths:
-                n_failed += 1
-                continue
-
-            candidates = list(
-                zip(
-                    [Path(p).stem for p in paths[:10]],
-                    [s[:300] for s in snippets[:10]],
-                    strict=False,
-                )
-            )
-
-            _judge = judge_fn or judge_batch
-            result = _judge(
-                query=gq.query,
-                candidates=candidates,
-                api_key=api_key,
-                endpoint=endpoint,
-                deployment=deployment,
-            )
-
-            id_counters[gq.intent] = id_counters.get(gq.intent, 0) + 1
-            prefix = _cat_prefix.get(gq.intent, "GEN-X")
-            case_id = f"{prefix}{id_counters[gq.intent]:03d}"
-
-            case = build_case(
-                query=gq.query,
-                intent=gq.intent,
-                judge_result=result,
-                paths=paths,
-                snippets=snippets,
-                case_id=case_id,
-            )
-            if case is None:
-                n_rejected += 1
-                continue
-
-            accepted_cases.append(case)
-            category_counts[gq.intent] = category_counts.get(gq.intent, 0) + 1
-
-    return accepted_cases, n_rejected, n_failed, category_counts
+    return SuiteGenerator().process_sampled_docs(
+        docs,
+        n_cases,
+        active_cats,
+        api_key=api_key,
+        endpoint=endpoint,
+        deployment=deployment,
+        agent=agent,
+    )
 
 
 def write_generated_suite(
@@ -768,139 +670,21 @@ def generate_suite(
     seed: int | None = None,
     agent: str = "shape",
     collections: list[str] | None = None,
-    sample_fn: Callable[..., list[dict[str, Any]]] | None = None,
-    query_fn: Callable[..., list[GeneratedQuery]] | None = None,
-    retrieve_fn: Callable[..., tuple[list[str], list[str]]] | None = None,
-    judge_fn: Callable[..., JudgeResult] | None = None,
 ) -> GenerationResult:
-    """
-    Generate a benchmark suite using the GPL pipeline.
-
-    Pipeline: sample docs → generate queries → hybrid retrieve → LLM judge → YAML.
-
-    Args:
-        db_path:        Path to kairix SQLite database.
-        output_path:    Output YAML file path.
-        n_cases:        Target number of accepted cases.
-        categories:     Categories to include (None = all). Controls doc sampling
-                        and query generation intent labels.
-        api_key:        Azure OpenAI API key (None = auto-fetch from env/Key Vault).
-        endpoint:       Azure OpenAI endpoint URL (None = auto-fetch).
-        deployment:     Model deployment name.
-        calibrate_first: Run calibration anchors before generation (default: True).
-        seed:           Random seed for reproducibility.
-        agent:          Agent name for hybrid search scoping.
-
-    Returns:
-        GenerationResult. Never raises — returns partial results on failure.
-    """
-    errors: list[str] = []
-
-    # Credential resolution
-    if api_key is None or endpoint is None:
-        try:
-            api_key, endpoint, deployment = resolve_credentials(api_key, endpoint, deployment)
-        except Exception as e:
-            errors.append(f"Failed to fetch credentials: {e}")
-            return _empty_generation_result(output_path, False, errors)
-
-    calibration_passed = False
-    if calibrate_first:
-        try:
-            calibration_passed = calibrate(api_key, endpoint, deployment)
-        except JudgeCalibrationError as e:
-            errors.append(f"Calibration failed: {e}")
-            return _empty_generation_result(output_path, False, errors)
-    else:
-        calibration_passed = True
-
-    active_cats = categories or list(_TARGET_DISTRIBUTION.keys())
-
-    # Sample documents — oversample to allow for rejection
-    _sample = sample_fn or sample_documents
-    docs = _sample(db_path=db_path, n=n_cases * 10, collections=collections, seed=seed)
-    if not docs:
-        errors.append("sample_documents: no documents returned — check db_path")
-        return _empty_generation_result(output_path, calibration_passed, errors)
-
-    accepted_cases, n_rejected, n_failed, category_counts = process_sampled_docs(
-        docs,
-        n_cases,
-        active_cats,
-        api_key,
-        endpoint,
-        deployment,
-        agent,
-        query_fn,
-        retrieve_fn,
-        judge_fn,
-    )
-    n_generated = len(accepted_cases) + n_rejected + n_failed
-
-    write_generated_suite(output_path, accepted_cases, active_cats, errors)
-
-    return GenerationResult(
+    """Production-default shim — see ``SuiteGenerator.generate_suite``."""
+    return SuiteGenerator().generate_suite(
+        db_path=db_path,
         output_path=output_path,
-        n_generated=n_generated,
-        n_accepted=len(accepted_cases),
-        n_rejected=n_rejected,
-        n_failed=n_failed,
-        category_counts=category_counts,
-        calibration_passed=calibration_passed,
-        errors=errors,
-    )
-
-
-def enrich_single_case(
-    case: dict[str, Any],
-    query: str,
-    api_key: str,
-    endpoint: str,
-    deployment: str,
-    agent: str,
-    retrieve_fn: Callable[..., tuple[list[str], list[str]]] | None,
-    judge_fn: Callable[..., JudgeResult] | None,
-) -> tuple[dict[str, Any], str]:
-    """Process one case for enrichment.
-
-    Returns (updated_case, status) where status is 'enriched', 'skipped', or 'failed'.
-    """
-    _retr = retrieve_fn or _retrieve
-    paths, snippets = _retr(query, case.get("category", "recall"), agent=agent)
-    if not paths:
-        return case, "failed"
-
-    candidates = list(
-        zip(
-            [Path(p).stem for p in paths[:10]],
-            [s[:300] for s in snippets[:10]],
-            strict=False,
-        )
-    )
-
-    _judge = judge_fn or judge_batch
-    result = _judge(
-        query=query,
-        candidates=candidates,
+        n_cases=n_cases,
+        categories=categories,
         api_key=api_key,
         endpoint=endpoint,
         deployment=deployment,
+        calibrate_first=calibrate_first,
+        seed=seed,
+        agent=agent,
+        collections=collections,
     )
-
-    has_relevant = any(g >= 1 for g in result.grades.values())
-    if not has_relevant:
-        return case, "skipped"
-
-    gold_titles: list[dict[str, Any]] = [
-        {"title": stem, "relevance": grade} for stem, grade in result.grades.items() if grade >= 1
-    ]
-    gold_titles.sort(key=lambda x: -int(x["relevance"]))
-
-    updated = dict(case)
-    updated["gold_titles"] = gold_titles
-    updated["score_method"] = "ndcg"
-    updated.pop("gold_paths", None)
-    return updated, "enriched"
 
 
 def enrich_suite(
@@ -911,124 +695,16 @@ def enrich_suite(
     endpoint: str | None = None,
     deployment: str = "gpt-4o-mini",
     agent: str = "shape",
-    retrieve_fn: Callable[..., tuple[list[str], list[str]]] | None = None,
-    judge_fn: Callable[..., JudgeResult] | None = None,
 ) -> EnrichmentResult:
-    """
-    Enrich an existing suite's cases with graded gold_titles.
-
-    For each case in the input suite:
-    1. Run hybrid_search for the case's query
-    2. Judge the top-10 retrieved docs with gpt-4o-mini
-    3. Replace gold_path with gold_titles (graded 0/1/2)
-    4. Preserve all other case fields unchanged
-
-    Cases where no grade-1+ doc is found retain their existing gold information.
-
-    Args:
-        suite_path:  Input suite YAML path.
-        output_path: Output YAML path (may equal suite_path for in-place update).
-        db_path:     kairix SQLite path (not used directly; hybrid_search handles DB).
-        api_key:     Azure OpenAI API key (None = auto-fetch).
-        endpoint:    Azure OpenAI endpoint URL (None = auto-fetch).
-        deployment:  Model deployment name.
-        agent:       Agent name for hybrid search scoping.
-
-    Returns:
-        EnrichmentResult. Never raises.
-    """
-    errors: list[str] = []
-
-    # Credential resolution — wrap in try/except so a credential-fetch failure
-    # is surfaced via the result.errors list rather than propagating as an
-    # uncaught exception. enrich_suite is documented "never raises"; mirrors
-    # the same shape generate_suite already uses (#143 Phase 0).
-    if api_key is None or endpoint is None:
-        try:
-            api_key, endpoint, deployment = resolve_credentials(api_key, endpoint, deployment)
-        except Exception as e:
-            errors.append(f"Failed to fetch credentials: {e}")
-            return EnrichmentResult(
-                output_path=output_path,
-                n_cases=0,
-                n_enriched=0,
-                n_skipped=0,
-                n_failed=0,
-                errors=errors,
-            )
-
-    # Load input suite as raw YAML (preserve all fields)
-    try:
-        with open(suite_path, encoding="utf-8") as f:
-            raw = yaml.safe_load(f)
-    except Exception as e:
-        errors.append(f"Failed to load {suite_path}: {e}")
-        return EnrichmentResult(
-            output_path=output_path,
-            n_cases=0,
-            n_enriched=0,
-            n_skipped=0,
-            n_failed=0,
-            errors=errors,
-        )
-
-    raw_cases: list[dict[str, Any]] = raw.get("cases", [])
-    n_enriched = 0
-    n_skipped = 0
-    n_failed = 0
-
-    enriched_cases = []
-    for case in raw_cases:
-        query = case.get("query", "")
-        if not query:
-            enriched_cases.append(case)
-            n_skipped += 1
-            continue
-
-        updated_case, status = enrich_single_case(
-            case,
-            query,
-            api_key,
-            endpoint,
-            deployment,
-            agent,
-            retrieve_fn,
-            judge_fn,
-        )
-        enriched_cases.append(updated_case)
-        if status == "enriched":
-            n_enriched += 1
-        elif status == "failed":
-            n_failed += 1
-        else:
-            n_skipped += 1
-
-    # Write output
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    out_doc = dict(raw)
-    out_doc["cases"] = enriched_cases
-
-    try:
-        with output.open("w", encoding="utf-8") as f:
-            yaml.dump(
-                out_doc,
-                f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-    except Exception as e:
-        errors.append(f"Failed to write {output_path}: {e}")
-
-    return EnrichmentResult(
+    """Production-default shim — see ``SuiteGenerator.enrich_suite``."""
+    return SuiteGenerator().enrich_suite(
+        suite_path=suite_path,
         output_path=output_path,
-        n_cases=len(raw_cases),
-        n_enriched=n_enriched,
-        n_skipped=n_skipped,
-        n_failed=n_failed,
-        errors=errors,
+        db_path=db_path,
+        api_key=api_key,
+        endpoint=endpoint,
+        deployment=deployment,
+        agent=agent,
     )
 
 
@@ -1046,30 +722,18 @@ def enrich_suite(
 
 
 class SuiteGenerator:
-    """Protocol-conforming wrapper around the GPL suite-generation pipeline.
+    """GPL-style benchmark-suite generator.
 
-    Constructor takes the four eval protocol implementations:
-
-      - ``query_generator``: synthesises queries for each sampled doc.
-      - ``llm_judge``: grades retrieved candidates against the query.
-      - ``retriever``: hybrid-search facade returning paths + snippets.
-
-    Each is optional — if ``None``, the methods fall back to the production
-    free functions (``generate_queries`` / ``judge_batch`` / ``_retrieve``)
-    so existing callers see identical behaviour.
+    Owns the pipeline body for ``process_sampled_docs`` / ``generate_suite`` /
+    ``enrich_suite``. When a protocol implementation is injected via the
+    constructor, it is called directly; when omitted (``None``), the method
+    falls back to the production free functions (``generate_queries``,
+    ``_retrieve``, ``judge_batch``) so a bare ``SuiteGenerator()`` runs
+    against real Azure / SQLite / hybrid-search.
 
     Tests inject ``FakeQueryGenerator`` / ``FakeLLMJudge`` / ``FakeRetriever``
-    via the constructor; the legacy ``query_fn`` / ``judge_fn`` / ``retrieve_fn``
-    kwargs on the free functions remain available for backwards compat but
-    are slated for Phase 4 removal.
-
-    Example:
-        >>> from tests.fakes import FakeChatBackend, FakeLLMJudge, FakeQueryGenerator
-        >>> qg = FakeQueryGenerator(queries_by_title={"deploy.md": [...]})
-        >>> jg = FakeLLMJudge(grades_by_query={"how to deploy": {"deploy": 2}})
-        >>> retriever = FakeRetriever(...)
-        >>> suite_gen = SuiteGenerator(query_generator=qg, llm_judge=jg, retriever=retriever)
-        >>> result = suite_gen.generate_suite(...)
+    from ``tests/fakes.py``. There are no ``*_fn=`` substitution kwargs on
+    the public surface — the constructor is the only DI seam.
     """
 
     def __init__(
@@ -1083,87 +747,66 @@ class SuiteGenerator:
         self._llm_judge = llm_judge
         self._retriever = retriever
 
-    # --- internal adapters from protocol surface to free-function shape -----
+    # --- internal protocol-or-fallback helpers ------------------------------
 
-    def _query_fn_adapter(self) -> Callable[..., list[GeneratedQuery]] | None:
-        """Adapt the injected QueryGenerator to the legacy ``query_fn`` shape.
-
-        The free ``process_sampled_docs`` consumes a ``query_fn(**kwargs)``
-        callable; this adapter routes the call through the protocol's
-        ``generate(title, body, *, n, categories, ...)`` shape.
-        """
-        if self._query_generator is None:
-            return None
-        qg = self._query_generator
-
-        def _adapter(
-            *,
-            doc_title: str,
-            doc_body: str,
-            n: int,
-            categories: list[str],
-            api_key: str = "",
-            endpoint: str = "",
-            deployment: str = "gpt-4o-mini",
-            source_doc_path: str = "",
-        ) -> list[GeneratedQuery]:
-            del deployment  # owned by the QueryGenerator instance, not the call
-            return qg.generate(
-                doc_title,
-                doc_body,
-                n=n,
-                categories=categories,
+    def _generate_queries(
+        self,
+        doc: dict[str, Any],
+        active_cats: list[str],
+        api_key: str,
+        endpoint: str,
+        deployment: str,
+    ) -> list[GeneratedQuery]:
+        if self._query_generator is not None:
+            return self._query_generator.generate(
+                doc["title"],
+                doc["body"],
+                n=2,
+                categories=active_cats,
             )
+        return generate_queries(
+            doc_title=doc["title"],
+            doc_body=doc["body"],
+            n=2,
+            categories=active_cats,
+            api_key=api_key,
+            endpoint=endpoint,
+            deployment=deployment,
+            source_doc_path=doc["path"],
+        )
 
-        return _adapter
+    def _retrieve_for(
+        self,
+        query: str,
+        intent: str,
+        agent: str,
+    ) -> tuple[list[str], list[str]]:
+        if self._retriever is not None:
+            result = self._retriever.retrieve(query)
+            return (
+                list(getattr(result, "paths", []) or []),
+                list(getattr(result, "snippets", []) or []),
+            )
+        return _retrieve(query, intent, agent=agent)
 
-    def _judge_fn_adapter(self) -> Callable[..., JudgeResult] | None:
-        """Adapt the injected LLMJudge to the legacy ``judge_fn`` shape."""
-        if self._llm_judge is None:
-            return None
-        jg = self._llm_judge
-
-        def _adapter(
-            *,
-            query: str,
-            candidates: list[tuple[str, str]],
-            api_key: str = "",
-            endpoint: str = "",
-            deployment: str = "gpt-4o-mini",
-        ) -> JudgeResult:
-            del api_key, endpoint, deployment  # owned by the LLMJudge instance
-            # Protocol declares grade() returning Any so fakes can return a
-            # SimpleNamespace; cast back to JudgeResult for the strict-typed
-            # legacy `judge_fn` shape consumed by `process_sampled_docs`.
-            result: JudgeResult = jg.grade(query, candidates)
+    def _judge(
+        self,
+        query: str,
+        candidates: list[tuple[str, str]],
+        api_key: str,
+        endpoint: str,
+        deployment: str,
+    ) -> JudgeResult:
+        if self._llm_judge is not None:
+            result: JudgeResult = self._llm_judge.grade(query, candidates)
             return result
-
-        return _adapter
-
-    def _retrieve_fn_adapter(self) -> Callable[..., tuple[list[str], list[str]]] | None:
-        """Adapt the injected Retriever to the legacy ``retrieve_fn`` shape.
-
-        The free ``_retrieve`` returns ``(paths, snippets)``; the protocol
-        returns a richer object with ``paths`` / ``snippets`` attributes.
-        Adapter normalises the two so existing pipeline code keeps working.
-        """
-        if self._retriever is None:
-            return None
-        rt = self._retriever
-
-        def _adapter(
-            query: str,
-            intent: str,
-            *,
-            agent: str = "shape",
-        ) -> tuple[list[str], list[str]]:
-            del intent, agent  # protocol surface owns scope/intent context
-            result = rt.retrieve(query)
-            paths = list(getattr(result, "paths", []) or [])
-            snippets = list(getattr(result, "snippets", []) or [])
-            return paths, snippets
-
-        return _adapter
+        return judge_batch(
+            query=query,
+            candidates=candidates,
+            api_key=api_key,
+            endpoint=endpoint,
+            deployment=deployment,
+        )
 
     # --- public methods ----------------------------------------------------
 
@@ -1172,24 +815,65 @@ class SuiteGenerator:
         docs: list[dict[str, Any]],
         n_cases: int,
         active_cats: list[str],
+        *,
         api_key: str = "",
         endpoint: str = "",
         deployment: str = "gpt-4o-mini",
         agent: str = "shape",
     ) -> tuple[list[dict[str, Any]], int, int, dict[str, int]]:
-        """Process sampled docs through the GPL pipeline using injected protocols."""
-        return process_sampled_docs(
-            docs,
-            n_cases,
-            active_cats,
-            api_key,
-            endpoint,
-            deployment,
-            agent,
-            self._query_fn_adapter(),
-            self._retrieve_fn_adapter(),
-            self._judge_fn_adapter(),
-        )
+        """Run the GPL pipeline over sampled docs.
+
+        For each doc: generate queries → retrieve candidates → judge them →
+        accept cases that have at least one grade-2 doc. Returns a tuple of
+        (accepted_cases, n_rejected, n_failed, category_counts).
+        """
+        accepted_cases: list[dict[str, Any]] = []
+        n_rejected = 0
+        n_failed = 0
+        category_counts: dict[str, int] = {cat: 0 for cat in active_cats}
+        id_counters: dict[str, int] = {cat: 0 for cat in active_cats}
+
+        for doc in docs:
+            if len(accepted_cases) >= n_cases:
+                break
+            queries = self._generate_queries(doc, active_cats, api_key, endpoint, deployment)
+            for gq in queries:
+                if len(accepted_cases) >= n_cases:
+                    break
+                paths, snippets = self._retrieve_for(gq.query, gq.intent, agent)
+                if not paths:
+                    n_failed += 1
+                    continue
+
+                candidates = list(
+                    zip(
+                        [Path(p).stem for p in paths[:10]],
+                        [s[:300] for s in snippets[:10]],
+                        strict=False,
+                    )
+                )
+                result = self._judge(gq.query, candidates, api_key, endpoint, deployment)
+
+                id_counters[gq.intent] = id_counters.get(gq.intent, 0) + 1
+                prefix = _CATEGORY_PREFIX.get(gq.intent, "GEN-X")
+                case_id = f"{prefix}{id_counters[gq.intent]:03d}"
+
+                case = build_case(
+                    query=gq.query,
+                    intent=gq.intent,
+                    judge_result=result,
+                    paths=paths,
+                    snippets=snippets,
+                    case_id=case_id,
+                )
+                if case is None:
+                    n_rejected += 1
+                    continue
+
+                accepted_cases.append(case)
+                category_counts[gq.intent] = category_counts.get(gq.intent, 0) + 1
+
+        return accepted_cases, n_rejected, n_failed, category_counts
 
     def generate_suite(
         self,
@@ -1204,31 +888,56 @@ class SuiteGenerator:
         seed: int | None = None,
         agent: str = "shape",
         collections: list[str] | None = None,
-        sample_fn: Callable[..., list[dict[str, Any]]] | None = None,
     ) -> GenerationResult:
-        """Generate a benchmark suite using injected protocols.
-
-        Mirrors ``generate_suite``; substitutes the protocol-adapter callables
-        for the legacy ``*_fn`` kwargs.
-        """
+        """Sample docs from the index and run the GPL pipeline to produce a suite YAML."""
         if not db_path:
             db_path = _get_db_path_str()
-        return generate_suite(
-            db_path=db_path,
-            output_path=output_path,
-            n_cases=n_cases,
-            categories=categories,
+        errors: list[str] = []
+
+        if api_key is None or endpoint is None:
+            try:
+                api_key, endpoint, deployment = resolve_credentials(api_key, endpoint, deployment)
+            except Exception as e:
+                errors.append(f"Failed to fetch credentials: {e}")
+                return _empty_generation_result(output_path, False, errors)
+
+        calibration_passed = False
+        if calibrate_first:
+            try:
+                calibration_passed = self._calibrate(api_key, endpoint, deployment)
+            except JudgeCalibrationError as e:
+                errors.append(f"Calibration failed: {e}")
+                return _empty_generation_result(output_path, False, errors)
+        else:
+            calibration_passed = True
+
+        active_cats = categories or list(_TARGET_DISTRIBUTION.keys())
+        docs = sample_documents(db_path=db_path, n=n_cases * 10, collections=collections, seed=seed)
+        if not docs:
+            errors.append("sample_documents: no documents returned — check db_path")
+            return _empty_generation_result(output_path, calibration_passed, errors)
+
+        accepted_cases, n_rejected, n_failed, category_counts = self.process_sampled_docs(
+            docs,
+            n_cases,
+            active_cats,
             api_key=api_key,
             endpoint=endpoint,
             deployment=deployment,
-            calibrate_first=calibrate_first,
-            seed=seed,
             agent=agent,
-            collections=collections,
-            sample_fn=sample_fn,
-            query_fn=self._query_fn_adapter(),
-            retrieve_fn=self._retrieve_fn_adapter(),
-            judge_fn=self._judge_fn_adapter(),
+        )
+        n_generated = len(accepted_cases) + n_rejected + n_failed
+        write_generated_suite(output_path, accepted_cases, active_cats, errors)
+
+        return GenerationResult(
+            output_path=output_path,
+            n_generated=n_generated,
+            n_accepted=len(accepted_cases),
+            n_rejected=n_rejected,
+            n_failed=n_failed,
+            category_counts=category_counts,
+            calibration_passed=calibration_passed,
+            errors=errors,
         )
 
     def enrich_suite(
@@ -1241,17 +950,122 @@ class SuiteGenerator:
         deployment: str = "gpt-4o-mini",
         agent: str = "shape",
     ) -> EnrichmentResult:
-        """Enrich an existing suite using injected protocols."""
+        """Re-judge an existing suite's cases to produce graded gold_titles."""
         if not db_path:
             db_path = _get_db_path_str()
-        return enrich_suite(
-            suite_path=suite_path,
+        errors: list[str] = []
+
+        if api_key is None or endpoint is None:
+            try:
+                api_key, endpoint, deployment = resolve_credentials(api_key, endpoint, deployment)
+            except Exception as e:
+                errors.append(f"Failed to fetch credentials: {e}")
+                return EnrichmentResult(
+                    output_path=output_path,
+                    n_cases=0,
+                    n_enriched=0,
+                    n_skipped=0,
+                    n_failed=0,
+                    errors=errors,
+                )
+
+        try:
+            with open(suite_path, encoding="utf-8") as f:
+                raw = yaml.safe_load(f)
+        except Exception as e:
+            errors.append(f"Failed to load {suite_path}: {e}")
+            return EnrichmentResult(
+                output_path=output_path,
+                n_cases=0,
+                n_enriched=0,
+                n_skipped=0,
+                n_failed=0,
+                errors=errors,
+            )
+
+        raw_cases: list[dict[str, Any]] = raw.get("cases", [])
+        n_enriched = 0
+        n_skipped = 0
+        n_failed = 0
+        enriched_cases: list[dict[str, Any]] = []
+
+        for case in raw_cases:
+            query = case.get("query", "")
+            if not query:
+                enriched_cases.append(case)
+                n_skipped += 1
+                continue
+            updated_case, status = self._enrich_one(case, query, api_key, endpoint, deployment, agent)
+            enriched_cases.append(updated_case)
+            if status == "enriched":
+                n_enriched += 1
+            elif status == "failed":
+                n_failed += 1
+            else:
+                n_skipped += 1
+
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        out_doc = dict(raw)
+        out_doc["cases"] = enriched_cases
+        try:
+            with output.open("w", encoding="utf-8") as f:
+                yaml.dump(
+                    out_doc,
+                    f,
+                    allow_unicode=True,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+        except Exception as e:
+            errors.append(f"Failed to write {output_path}: {e}")
+
+        return EnrichmentResult(
             output_path=output_path,
-            db_path=db_path,
-            api_key=api_key,
-            endpoint=endpoint,
-            deployment=deployment,
-            agent=agent,
-            retrieve_fn=self._retrieve_fn_adapter(),
-            judge_fn=self._judge_fn_adapter(),
+            n_cases=len(raw_cases),
+            n_enriched=n_enriched,
+            n_skipped=n_skipped,
+            n_failed=n_failed,
+            errors=errors,
         )
+
+    def _enrich_one(
+        self,
+        case: dict[str, Any],
+        query: str,
+        api_key: str,
+        endpoint: str,
+        deployment: str,
+        agent: str,
+    ) -> tuple[dict[str, Any], str]:
+        paths, snippets = self._retrieve_for(query, case.get("category", "recall"), agent)
+        if not paths:
+            return case, "failed"
+
+        candidates = list(
+            zip(
+                [Path(p).stem for p in paths[:10]],
+                [s[:300] for s in snippets[:10]],
+                strict=False,
+            )
+        )
+        result = self._judge(query, candidates, api_key, endpoint, deployment)
+        has_relevant = any(g >= 1 for g in result.grades.values())
+        if not has_relevant:
+            return case, "skipped"
+
+        gold_titles: list[dict[str, Any]] = [
+            {"title": stem, "relevance": grade} for stem, grade in result.grades.items() if grade >= 1
+        ]
+        gold_titles.sort(key=lambda x: -int(x["relevance"]))
+
+        updated = dict(case)
+        updated["gold_titles"] = gold_titles
+        updated["score_method"] = "ndcg"
+        updated.pop("gold_paths", None)
+        return updated, "enriched"
+
+    def _calibrate(self, api_key: str, endpoint: str, deployment: str) -> bool:
+        if self._llm_judge is not None:
+            return bool(self._llm_judge.calibrate())
+        return calibrate(api_key, endpoint, deployment)

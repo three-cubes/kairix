@@ -23,7 +23,6 @@ from kairix.quality.eval.generate import (
     SuiteGenerator,
     _default_chat_backend,
     _empty_generation_result,
-    _LegacyLLMFnBackend,
     build_case,
     build_generation_prompt,
     enrich_suite,
@@ -316,10 +315,13 @@ def test_build_case_gold_titles_sorted_by_relevance_desc() -> None:
 
 
 @pytest.mark.unit
-def test_suite_generator_writes_valid_yaml(tmp_path: Path) -> None:
-    """SuiteGenerator.generate_suite writes a YAML file via injected protocol fakes."""
-    output = tmp_path / "test-suite.yaml"
+def test_suite_generator_process_sampled_docs_runs_pipeline_on_mock_docs() -> None:
+    """SuiteGenerator.process_sampled_docs runs the full GPL pipeline against in-memory docs.
 
+    Skips the DB-sampling step (no `sample_fn` injection seam) by handing
+    pre-built doc dicts straight to the pipeline method. Verifies the
+    protocol-injected QueryGenerator / LLMJudge / Retriever drive the loop.
+    """
     mock_docs = [
         {
             "path": "docs/docker-guide.md",
@@ -347,96 +349,350 @@ def test_suite_generator_writes_valid_yaml(tmp_path: Path) -> None:
     )
     suite_gen = SuiteGenerator(query_generator=qg, llm_judge=jg, retriever=retriever)
 
-    result = suite_gen.generate_suite(
-        output_path=str(output),
-        n_cases=5,
-        calibrate_first=False,
-        api_key="key",
+    accepted, rejected, failed, counts = suite_gen.process_sampled_docs(
+        mock_docs,
+        5,
+        ["procedural"],
+        api_key="key",  # pragma: allowlist secret
         endpoint="https://ep",
-        deployment="gpt-4o-mini",
-        sample_fn=lambda **_kw: mock_docs,
     )
 
-    assert isinstance(result, GenerationResult)
-    assert output.exists()
-    with open(output, encoding="utf-8") as f:
-        parsed = yaml.safe_load(f)
-
-    assert "cases" in parsed
-    assert isinstance(parsed["cases"], list)
-    # The case should have been accepted (grade-2 present)
-    assert len(parsed["cases"]) >= 1
-    # FakeQueryGenerator was actually invoked
+    assert len(accepted) >= 1
+    assert counts["procedural"] >= 1
     assert len(qg.calls) >= 1
     assert len(jg.grade_calls) >= 1
     assert len(retriever.calls) >= 1
 
 
 @pytest.mark.unit
-def test_suite_generator_returns_result_on_empty_docs(tmp_path: Path) -> None:
-    """SuiteGenerator.generate_suite returns a GenerationResult when no docs sampled."""
-    output = tmp_path / "empty-suite.yaml"
-
+def test_suite_generator_process_sampled_docs_with_no_docs_returns_zero() -> None:
+    """SuiteGenerator.process_sampled_docs returns zero counts when given no docs."""
     suite_gen = SuiteGenerator()
-
-    result = suite_gen.generate_suite(
-        output_path=str(output),
-        n_cases=10,
-        calibrate_first=False,
-        api_key="key",
+    accepted, rejected, failed, counts = suite_gen.process_sampled_docs(
+        [],
+        10,
+        ["recall"],
+        api_key="key",  # pragma: allowlist secret
         endpoint="https://ep",
-        deployment="gpt-4o-mini",
-        sample_fn=lambda **_kw: [],
     )
-
-    assert isinstance(result, GenerationResult)
-    assert result.n_accepted == 0
-    assert len(result.errors) > 0
-
-
-# ---------------------------------------------------------------------------
-# Backwards-compat: free generate_suite still honours legacy *_fn kwargs
-# ---------------------------------------------------------------------------
+    assert accepted == []
+    assert rejected == 0
+    assert failed == 0
+    assert counts == {"recall": 0}
 
 
 @pytest.mark.unit
-def test_generate_suite_free_function_legacy_kwargs(tmp_path: Path) -> None:
-    """Legacy `*_fn` kwargs on `generate_suite` are preserved for backwards compat.
+def test_suite_generator_falls_back_to_free_judge_batch_when_no_llm_judge_injected() -> None:
+    """When llm_judge is None, SuiteGenerator routes judging through ``judge_batch``.
 
-    cli.py / gold_builder.py keep calling `generate_suite(...)` directly;
-    Phase 3 routes them through `SuiteGenerator`. This regression test ensures
-    Phase 2b doesn't break the existing call shape.
+    Empty credentials force judge_batch's never-raise contract to return all-zero
+    grades, so the case is rejected — exercising the n_rejected branch and the
+    free-function fallback inside SuiteGenerator._judge.
     """
-    output = tmp_path / "legacy-suite.yaml"
     mock_query = GeneratedQuery(
-        query="legacy q",
+        query="q1",
         intent="recall",
         source_doc_path="docs/x.md",
         source_doc_title="x",
     )
+    qg = FakeQueryGenerator(queries_by_title={"Doc": [mock_query]})
+    retriever = FakeRetriever(results_by_query={"q1": _retrieval_result(["doc.md"], ["snip"])})
+    suite_gen = SuiteGenerator(query_generator=qg, llm_judge=None, retriever=retriever)
+    docs = [{"path": "docs/x.md", "title": "Doc", "collection": "shared", "body": "x" * 500}]
 
-    result = generate_suite(
+    accepted, rejected, failed, _ = suite_gen.process_sampled_docs(docs, 5, ["recall"], api_key="", endpoint="")
+    # Empty creds → judge_batch returns all-zero grades → no grade-2 → rejected
+    assert accepted == []
+    assert rejected == 1
+    assert failed == 0
+
+
+@pytest.mark.unit
+def test_suite_generator_falls_back_to_free_retrieve_when_no_retriever_injected() -> None:
+    """When retriever is None, SuiteGenerator routes retrieval through ``_retrieve``.
+
+    In the test environment _retrieve fails (no FTS table) and returns ([], []),
+    so each query is counted as n_failed — exercising the fallback branch.
+    """
+    mock_query = GeneratedQuery(
+        query="q1",
+        intent="recall",
+        source_doc_path="docs/x.md",
+        source_doc_title="x",
+    )
+    qg = FakeQueryGenerator(queries_by_title={"Doc": [mock_query]})
+    jg = FakeLLMJudge(grades_by_query={})
+    suite_gen = SuiteGenerator(query_generator=qg, llm_judge=jg, retriever=None)
+    docs = [{"path": "docs/x.md", "title": "Doc", "collection": "shared", "body": "x" * 500}]
+
+    accepted, rejected, failed, _ = suite_gen.process_sampled_docs(docs, 5, ["recall"], api_key="", endpoint="")
+    assert accepted == []
+    assert failed == 1
+
+
+@pytest.mark.unit
+def test_suite_generator_falls_back_to_free_generate_queries_when_no_query_generator() -> None:
+    """When query_generator is None, SuiteGenerator routes to ``generate_queries``.
+
+    Empty creds make generate_queries return [] (never-raise contract), so the
+    pipeline produces no cases — exercising the fallback branch in _generate_queries.
+    """
+    suite_gen = SuiteGenerator(query_generator=None)
+    docs = [{"path": "docs/x.md", "title": "Doc", "collection": "shared", "body": "x" * 500}]
+
+    accepted, rejected, failed, _ = suite_gen.process_sampled_docs(docs, 5, ["recall"], api_key="", endpoint="")
+    assert accepted == []
+
+
+@pytest.mark.unit
+def test_suite_generator_generate_suite_returns_error_on_credential_failure(tmp_path: Path) -> None:
+    """generate_suite catches credential-fetch failures and returns errors=[...] result."""
+    output = tmp_path / "out.yaml"
+    suite_gen = SuiteGenerator()
+    # api_key=None and endpoint=None forces resolve_credentials. The test env has no
+    # secrets configured, so resolve_credentials raises — we expect generate_suite
+    # to capture it via _empty_generation_result rather than raising.
+    result = suite_gen.generate_suite(
         output_path=str(output),
         n_cases=1,
+        api_key=None,
+        endpoint=None,
         calibrate_first=False,
-        api_key="key",
+        db_path="/this/path/does-not-exist.sqlite",
+    )
+    assert result.n_accepted == 0
+
+
+@pytest.mark.unit
+def test_suite_generator_generate_suite_returns_error_on_calibration_failure(tmp_path: Path) -> None:
+    """When calibrate_first=True and the judge fails calibration, errors are captured."""
+    from kairix.quality.eval.judge import JudgeCalibrationError
+
+    class _FailingJudge:
+        def grade(self, query: str, candidates: list[tuple[str, str]], *, runs: int = 1) -> JudgeResult:
+            del query, candidates, runs
+            raise AssertionError("not used in this test")
+
+        def calibrate(self) -> bool:
+            raise JudgeCalibrationError("calibration failed for the test")
+
+    output = tmp_path / "out.yaml"
+    suite_gen = SuiteGenerator(llm_judge=_FailingJudge())  # type: ignore[arg-type]
+    result = suite_gen.generate_suite(
+        output_path=str(output),
+        n_cases=1,
+        api_key="key",  # pragma: allowlist secret
         endpoint="https://ep",
-        deployment="gpt-4o-mini",
-        sample_fn=lambda **_kw: [
-            {"path": "docs/x.md", "title": "x", "collection": "k", "body": "x" * 500},
-        ],
-        query_fn=lambda **_kw: [mock_query],
-        retrieve_fn=lambda *_a, **_kw: (["doc.md"], ["snippet"]),
-        judge_fn=lambda **_kw: JudgeResult(
-            query="legacy q",
-            grades={"doc": 2},
-            shuffle_order=("doc",),
-            judge_model="x",
-        ),
+        calibrate_first=True,
+    )
+    assert result.n_accepted == 0
+    assert any("calibration" in err.lower() for err in result.errors)
+
+
+@pytest.mark.unit
+def test_suite_generator_generate_suite_falls_back_to_default_db_path_when_empty(tmp_path: Path) -> None:
+    """db_path='' triggers the lazy default-db-path lookup branch."""
+    output = tmp_path / "out.yaml"
+    suite_gen = SuiteGenerator()
+    # An empty db_path string forces the `if not db_path: db_path = _get_db_path_str()`
+    # branch. We expect it to return an empty result without raising.
+    result = suite_gen.generate_suite(
+        db_path="",
+        output_path=str(output),
+        n_cases=1,
+        api_key="key",  # pragma: allowlist secret
+        endpoint="https://ep",
+        calibrate_first=False,
+    )
+    assert isinstance(result, GenerationResult)
+
+
+@pytest.mark.unit
+def test_suite_generator_enrich_suite_handles_load_failure(tmp_path: Path) -> None:
+    """enrich_suite catches yaml-load failures and returns an EnrichmentResult with errors."""
+    suite_gen = SuiteGenerator()
+    result = suite_gen.enrich_suite(
+        suite_path=str(tmp_path / "does-not-exist.yaml"),
+        output_path=str(tmp_path / "out.yaml"),
+        api_key="k",  # pragma: allowlist secret
+        endpoint="https://ep",
+    )
+    assert result.n_cases == 0
+    assert any("Failed to load" in err for err in result.errors)
+
+
+@pytest.mark.unit
+def test_suite_generator_enrich_suite_skips_case_with_empty_query(tmp_path: Path) -> None:
+    """A case missing or with empty 'query' is skipped without invoking the judge."""
+    input_path = tmp_path / "in.yaml"
+    output_path = tmp_path / "out.yaml"
+    yaml.safe_dump(
+        {"meta": {"version": "1.0"}, "cases": [{"id": "X1", "query": "", "category": "recall"}]},
+        input_path.open("w", encoding="utf-8"),
     )
 
+    jg = FakeLLMJudge(grades_by_query={})
+    rt = FakeRetriever(results_by_query={})
+    suite_gen = SuiteGenerator(llm_judge=jg, retriever=rt)
+    result = suite_gen.enrich_suite(
+        suite_path=str(input_path),
+        output_path=str(output_path),
+        api_key="k",  # pragma: allowlist secret
+        endpoint="https://ep",
+    )
+    assert result.n_cases == 1
+    assert result.n_skipped == 1
+    assert len(jg.grade_calls) == 0
+
+
+@pytest.mark.unit
+def test_suite_generator_enrich_suite_returns_error_on_credential_failure(tmp_path: Path) -> None:
+    """Missing credentials surface as errors in the EnrichmentResult, not a raise."""
+    suite_gen = SuiteGenerator()
+    result = suite_gen.enrich_suite(
+        suite_path=str(tmp_path / "ignored.yaml"),
+        output_path=str(tmp_path / "out.yaml"),
+        api_key=None,
+        endpoint=None,
+    )
+    assert result.n_cases == 0
+
+
+# resolve_credentials' deployment-from-vault override branch (line 587) requires
+# a FakeCredentials helper to exercise without monkeypatching. Deferred to the
+# credentials-DI initiative — the branch is honest dead code under current test
+# infrastructure (see feedback_quality_gate_no_overrides.md).
+
+
+# ---------------------------------------------------------------------------
+# Free-function shim coverage (production defaults)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_free_process_sampled_docs_shim_delegates_to_suite_generator() -> None:
+    """The free ``process_sampled_docs`` shim runs against the production defaults."""
+    from kairix.quality.eval.generate import process_sampled_docs as free_psd
+
+    accepted, _, _, _ = free_psd(
+        docs=[],
+        n_cases=1,
+        active_cats=["recall"],
+        api_key="",
+        endpoint="",
+        deployment=JUDGE_DEPLOYMENT,
+        agent="shape",
+    )
+    assert accepted == []
+
+
+@pytest.mark.unit
+def test_free_generate_suite_shim_delegates_to_suite_generator(tmp_path: Path) -> None:
+    """The free ``generate_suite`` shim returns a result without raising."""
+    output = tmp_path / "out.yaml"
+    result = generate_suite(
+        db_path=str(tmp_path / "noop.sqlite"),
+        output_path=str(output),
+        n_cases=1,
+        api_key="key",  # pragma: allowlist secret
+        endpoint="https://ep",
+        calibrate_first=False,
+    )
     assert isinstance(result, GenerationResult)
-    assert output.exists()
+
+
+@pytest.mark.unit
+def test_free_enrich_suite_shim_delegates_to_suite_generator(tmp_path: Path) -> None:
+    """The free ``enrich_suite`` shim returns an EnrichmentResult without raising."""
+    result = enrich_suite(
+        suite_path=str(tmp_path / "missing.yaml"),
+        output_path=str(tmp_path / "out.yaml"),
+        api_key="key",  # pragma: allowlist secret
+        endpoint="https://ep",
+    )
+    assert isinstance(result, EnrichmentResult)
+
+
+@pytest.mark.unit
+def test_suite_generator_process_sampled_docs_breaks_when_n_cases_already_hit() -> None:
+    """Outer doc-loop break fires when accepted_cases already meets n_cases (n_cases=0)."""
+    suite_gen = SuiteGenerator()
+    docs = [{"path": "x.md", "title": "X", "collection": "k", "body": "x" * 500}]
+    accepted, rejected, failed, _ = suite_gen.process_sampled_docs(
+        docs, n_cases=0, active_cats=["recall"], api_key="", endpoint=""
+    )
+    assert accepted == []
+    assert rejected == 0
+    assert failed == 0
+
+
+@pytest.mark.unit
+def test_suite_generator_process_sampled_docs_inner_break_after_target_hit() -> None:
+    """Inner query-loop break fires when n_cases is hit mid-doc.
+
+    Two queries per doc; after the first case is accepted, the second query
+    triggers the inner break instead of being processed.
+    """
+    q1 = GeneratedQuery(query="q1", intent="recall", source_doc_path="x.md", source_doc_title="X")
+    q2 = GeneratedQuery(query="q2", intent="recall", source_doc_path="x.md", source_doc_title="X")
+    qg = FakeQueryGenerator(queries_by_title={"X": [q1, q2]})
+    jg = FakeLLMJudge(grades_by_query={"q1": {"d": 2}})
+    rt = FakeRetriever(
+        results_by_query={
+            "q1": _retrieval_result(["d.md"], ["s"]),
+            "q2": _retrieval_result(["d.md"], ["s"]),
+        }
+    )
+    suite_gen = SuiteGenerator(query_generator=qg, llm_judge=jg, retriever=rt)
+    docs = [{"path": "x.md", "title": "X", "collection": "k", "body": "x" * 500}]
+
+    accepted, _, _, _ = suite_gen.process_sampled_docs(docs, n_cases=1, active_cats=["recall"], api_key="", endpoint="")
+    assert len(accepted) == 1
+    # Second query never made it through the judge — only one grade call recorded.
+    assert len(jg.grade_calls) == 1
+
+
+@pytest.mark.unit
+def test_suite_generator_enrich_suite_appends_error_on_unwritable_output(tmp_path: Path) -> None:
+    """Output path that is a directory triggers the write-failure except branch."""
+    input_path = tmp_path / "in.yaml"
+    yaml.safe_dump(
+        {"meta": {}, "cases": [{"id": "X1", "query": "q", "category": "recall"}]},
+        input_path.open("w", encoding="utf-8"),
+    )
+    output_dir = tmp_path / "out_dir"
+    output_dir.mkdir()  # treating a directory as the output file → write fails
+
+    jg = FakeLLMJudge(grades_by_query={})
+    rt = FakeRetriever(results_by_query={})
+    suite_gen = SuiteGenerator(llm_judge=jg, retriever=rt)
+    result = suite_gen.enrich_suite(
+        suite_path=str(input_path),
+        output_path=str(output_dir),
+        api_key="k",  # pragma: allowlist secret
+        endpoint="https://ep",
+    )
+    assert any("Failed to write" in err for err in result.errors)
+
+
+@pytest.mark.unit
+def test_suite_generator_calibrate_falls_back_to_free_calibrate_when_no_judge(tmp_path: Path) -> None:
+    """When llm_judge=None and calibrate_first=True, _calibrate falls through to ``calibrate``.
+
+    Empty creds make calibrate's anchors all return 0 → JudgeCalibrationError is
+    raised → captured by generate_suite as an error in the result.
+    """
+    output = tmp_path / "out.yaml"
+    suite_gen = SuiteGenerator(llm_judge=None)
+    result = suite_gen.generate_suite(
+        db_path=str(tmp_path / "noop.sqlite"),
+        output_path=str(output),
+        n_cases=1,
+        api_key="k",  # pragma: allowlist secret
+        endpoint="https://ep",
+        calibrate_first=True,
+    )
+    assert any("calibration" in err.lower() for err in result.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -589,50 +845,6 @@ def test_suite_generator_enrich_skips_case_when_no_relevant_doc(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
-# Backwards-compat: free enrich_suite still honours legacy *_fn kwargs
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_enrich_suite_free_function_legacy_kwargs(tmp_path: Path) -> None:
-    """Legacy `retrieve_fn` / `judge_fn` kwargs on `enrich_suite` work for backwards compat."""
-    input_suite = {
-        "meta": {"version": "1.0"},
-        "cases": [
-            {
-                "id": "L001",
-                "category": "recall",
-                "query": "legacy",
-                "gold_path": "x.md",
-                "score_method": "exact",
-            }
-        ],
-    }
-    input_path = tmp_path / "input.yaml"
-    output_path = tmp_path / "output.yaml"
-    with open(input_path, "w", encoding="utf-8") as f:
-        yaml.dump(input_suite, f)
-
-    result = enrich_suite(
-        suite_path=str(input_path),
-        output_path=str(output_path),
-        api_key="k",
-        endpoint="https://ep",
-        deployment="gpt-4o-mini",
-        retrieve_fn=lambda *_a, **_kw: (["x.md"], ["s"]),
-        judge_fn=lambda **_kw: JudgeResult(
-            query="legacy",
-            grades={"x": 2},
-            shuffle_order=("x",),
-            judge_model="x",
-        ),
-    )
-
-    assert result.n_cases == 1
-    assert result.n_enriched == 1
-    assert output_path.exists()
-
-
 # ---------------------------------------------------------------------------
 # Phase 0-deferred regression tests
 #
@@ -880,7 +1092,7 @@ def test_empty_generation_result_returns_zero_counts() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _default_chat_backend + _LegacyLLMFnBackend
+# _default_chat_backend
 # ---------------------------------------------------------------------------
 
 
@@ -891,47 +1103,6 @@ def test_default_chat_backend_returns_azure_adapter() -> None:
 
     backend = _default_chat_backend()
     assert isinstance(backend, AzureChatBackend)
-
-
-@pytest.mark.unit
-def test_legacy_llm_fn_backend_routes_call_through_supplied_callable() -> None:
-    """The deprecated llm_fn= shim adapts the callable into the ChatBackend protocol."""
-    captured: dict[str, str] = {}
-
-    def _fn(prompt: str, api_key: str, endpoint: str, deployment: str) -> str:
-        captured["prompt"] = prompt
-        captured["api_key"] = api_key
-        return '[{"query": "from-legacy", "intent": "recall"}]'
-
-    backend = _LegacyLLMFnBackend(_fn)
-    out = backend.complete(
-        "the-prompt",
-        api_key="k",  # pragma: allowlist secret
-        endpoint="https://e",
-        deployment="depl",
-    )
-    assert "from-legacy" in out
-    assert captured["prompt"] == "the-prompt"
-    assert captured["api_key"] == "k"
-
-
-@pytest.mark.unit
-def test_generate_queries_legacy_llm_fn_kwarg_still_works() -> None:
-    """The deprecated llm_fn= kwarg routes through the legacy adapter to produce queries."""
-
-    def _fn(prompt: str, api_key: str, endpoint: str, deployment: str) -> str:
-        return '[{"query": "via-legacy", "intent": "recall"}]'
-
-    queries = generate_queries(
-        doc_title="t",
-        doc_body="b" * 100,
-        n=1,
-        categories=["recall"],
-        api_key="k",  # pragma: allowlist secret
-        endpoint="https://e",
-        llm_fn=_fn,
-    )
-    assert [q.query for q in queries] == ["via-legacy"]
 
 
 # ---------------------------------------------------------------------------
