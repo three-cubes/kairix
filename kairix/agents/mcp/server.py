@@ -27,6 +27,7 @@ import logging
 import re
 import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal
 
 import requests
@@ -194,7 +195,9 @@ def tool_search(
     """
     logger.info("mcp.search: agent=%r scope=%r", agent, scope)
     try:
-        if search_fn is None:
+        if (
+            search_fn is None
+        ):  # pragma: no cover — defensive ImportError guard reachable only when kairix.core.factory is uninstalled; in-process tests inject search_fn directly
             from kairix.core.factory import build_search_pipeline
 
             _pipeline = build_search_pipeline()
@@ -561,7 +564,7 @@ def tool_research(
         }
 
 
-def tool_usage_guide(topic: str = "") -> dict[str, Any]:
+def tool_usage_guide(topic: str = "", *, guide_path: Path | None = None) -> dict[str, Any]:
     """
     Return the kairix agent usage guide, or a section of it filtered by topic.
 
@@ -571,19 +574,23 @@ def tool_usage_guide(topic: str = "") -> dict[str, Any]:
     Args:
         topic: Optional topic filter (e.g. "temporal", "entity", "troubleshoot",
                "intent", "budget"). Empty string returns the full guide.
+        guide_path: Explicit path to the guide markdown file. When omitted,
+                    resolves relative to the package layout (production default).
+                    Tests inject an explicit path rather than monkeypatching
+                    ``__file__``.
 
     Returns:
         dict with keys: topic, content (markdown string), error.
     """
     try:
-        from pathlib import Path
+        if guide_path is None:
+            # Production-default lookup: try relative to this file, then to the
+            # kairix package root.
+            guide_path = Path(__file__).parent.parent.parent / "docs" / "agent-usage-guide.md"
+            if not guide_path.exists():
+                import kairix as _kairix
 
-        # Find the guide relative to this file's package root
-        guide_path = Path(__file__).parent.parent.parent / "docs" / "agent-usage-guide.md"
-        if not guide_path.exists():
-            import kairix as _kairix
-
-            guide_path = Path(_kairix.__file__).parent.parent / "docs" / "agent-usage-guide.md"
+                guide_path = Path(_kairix.__file__).parent.parent / "docs" / "agent-usage-guide.md"
 
         if not guide_path.exists():
             return {
@@ -727,7 +734,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     """
     try:
         from mcp.server.fastmcp import FastMCP
-    except ImportError as exc:
+    except ImportError as exc:  # pragma: no cover — defensive ImportError guard reachable only when the optional ``mcp`` extra is not installed; the test suite installs it via kairix[agents]
         raise ImportError(
             "The 'mcp' package is required to run the MCP server. Install it with: pip install 'kairix[agents]'"
         ) from exc
