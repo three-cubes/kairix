@@ -21,7 +21,7 @@ def _grade_response(grades: dict[str, int]) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _reset_state() -> None:
+def _reset_judge_state() -> None:
     _state.clear()
 
 

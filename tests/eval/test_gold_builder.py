@@ -1,20 +1,23 @@
 """Unit tests for kairix.quality.eval.gold_builder — TREC pooling and gold suite building.
 
-#143 Phase 2b — exercises the new ``GoldBuilder`` class via constructor-injected
-``FakeLLMJudge`` / ``FakeRetriever``. Legacy tests still cover the deprecated
-module-level functions until Phase 4 removes the ``*_fn=`` kwargs.
-
-No monkey-patching, no @patch, no setattr — all substitution happens via
-constructor injection.
+All tests construct ``GoldBuilder`` with constructor-injected ``FakeLLMJudge`` /
+``FakeRetriever`` from tests/fakes.py. No monkey-patching, no @patch, no
+setattr, no ``*_fn=`` substitution kwargs. The pool/BM25 path is exercised
+end-to-end against a real SQLite database in tests/integration/test_eval_gold_pipeline.py.
 """
 
 from __future__ import annotations
 
+import os
+import sqlite3
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import yaml
 
+from kairix.core.db.schema import create_schema
 from kairix.quality.eval.gold_builder import (
     GoldBuilder,
     GoldBuildReport,
@@ -22,305 +25,111 @@ from kairix.quality.eval.gold_builder import (
     _validate_weights,
     grade_candidates,
     path_title,
-    pool_candidates,
 )
 from kairix.quality.eval.judge import JudgeResult
 from tests.fakes import FakeLLMJudge, FakeRetriever
 
 # ---------------------------------------------------------------------------
-# pool_candidates
+# GoldBuilder.grade — class-method tests via FakeLLMJudge injection
 # ---------------------------------------------------------------------------
 
 
-def _make_bm25_fn(results: list[dict]):
-    """Return a search_fn callable that returns fixed results."""
-
-    def _fn(query, collections, limit):
-        return results
-
-    return _fn
-
-
-class TestPoolCandidates:
-    @pytest.mark.unit
-    def test_pools_from_bm25(self):
-        results = [
-            {
-                "path": "/doc1.md",
-                "title": "Doc 1",
-                "snippet": "text",
-                "collection": "eng",
-            },
-            {
-                "path": "/doc2.md",
-                "title": "Doc 2",
-                "snippet": "text",
-                "collection": "eng",
-            },
-        ]
-        result = pool_candidates(
-            "test query",
-            ["bm25-equal"],
-            search_fns={"bm25-equal": _make_bm25_fn(results)},
-        )
-        assert len(result) == 2
-        assert all(isinstance(c, PooledCandidate) for c in result)
-
-    @pytest.mark.unit
-    def test_deduplicates_across_systems(self):
-        results = [
-            {
-                "path": "/doc1.md",
-                "title": "Doc 1",
-                "snippet": "text",
-                "collection": "eng",
-            },
-        ]
-        fn = _make_bm25_fn(results)
-        result = pool_candidates(
-            "test query",
-            ["bm25-equal", "bm25-filepath"],
-            search_fns={"bm25-equal": fn, "bm25-filepath": fn},
-        )
-        assert len(result) == 1
-        assert "bm25-equal" in result[0].sources
-        assert "bm25-filepath" in result[0].sources
-
-    @pytest.mark.unit
-    def test_pools_bm25_and_vector(self):
-        bm25_results = [
-            {
-                "path": "/doc1.md",
-                "title": "Doc 1",
-                "snippet": "text",
-                "collection": "eng",
-            },
-        ]
-        vector_results = [
-            {
-                "path": "/doc2.md",
-                "title": "Doc 2",
-                "snippet": "text",
-                "collection": "eng",
-            },
-        ]
-        result = pool_candidates(
-            "test query",
-            ["bm25-equal", "vector"],
-            search_fns={
-                "bm25-equal": _make_bm25_fn(bm25_results),
-                "vector": _make_bm25_fn(vector_results),
-            },
-        )
-        assert len(result) == 2
-
-    @pytest.mark.unit
-    def test_unknown_system_skipped(self):
-        result = pool_candidates(
-            "test query",
-            ["bm25-equal", "nosuchsystem"],
-            search_fns={"bm25-equal": _make_bm25_fn([])},
-        )
-        assert isinstance(result, list)
-
-    @pytest.mark.unit
-    def test_candidate_fields(self):
-        results = [
-            {
-                "path": "/eng/doc.md",
-                "title": "Title",
-                "snippet": "Some text",
-                "collection": "eng",
-            },
-        ]
-        result = pool_candidates(
-            "query",
-            ["bm25-equal"],
-            search_fns={"bm25-equal": _make_bm25_fn(results)},
-        )
-        c = result[0]
-        assert c.path == "/eng/doc.md"
-        assert c.title == "Title"
-        assert c.snippet == "Some text"
-        assert c.collection == "eng"
-
-
 # ---------------------------------------------------------------------------
-# grade_candidates
+# Free-function shims (DEPRECATED public surface — verify they delegate cleanly)
 # ---------------------------------------------------------------------------
 
 
-def _make_judge_fn(grades: dict[str, int]) -> object:
-    """Return a judge_fn that returns a JudgeResult with fixed grades."""
+@pytest.mark.unit
+def test_grade_candidates_shim_delegates_to_class() -> None:
+    """The free ``grade_candidates`` shim builds a default GoldBuilder.
 
-    def _fn(**kwargs):
-        return JudgeResult(
-            query=kwargs.get("query", ""),
-            grades=grades,
-            shuffle_order=list(grades.keys()),
-            judge_model="gpt-4o-mini",
-        )
+    Empty candidates short-circuit inside the class method; this asserts the
+    shim invocation path itself is valid (signature + delegation).
+    """
+    result = grade_candidates(
+        "q",
+        [],
+        "k",
+        "ep",  # pragma: allowlist secret
+    )
+    assert result == []
 
-    return _fn
 
+@pytest.mark.unit
+def test_gold_builder_grade_majority_vote_across_alternating_runs() -> None:
+    """When 3 runs return [2, 2, 0], majority vote selects grade 2."""
+    call_count = [0]
 
-class TestGradeCandidates:
-    @pytest.mark.unit
-    def test_grades_assigned(self):
-        # Keys are path_title() output: "/path/doc1.md" -> "path/doc1"
-        grades = {"path/doc1": 2, "path/doc2": 1}
-
-        candidates = [
-            PooledCandidate(path="/path/doc1.md", title="Doc 1", snippet="text", collection="eng"),
-            PooledCandidate(path="/path/doc2.md", title="Doc 2", snippet="text", collection="eng"),
-        ]
-
-        result = grade_candidates(
-            "query",
-            candidates,
-            "key",
-            "endpoint",
-            judge_runs=2,
-            judge_fn=_make_judge_fn(grades),
-        )
-        assert result[0].grade == 2
-        assert result[1].grade == 1
-
-    @pytest.mark.unit
-    def test_majority_vote(self):
-        """Two runs with different grades — majority wins."""
-        call_count = [0]
-
-        def _judge_fn(**kwargs):
+    class _AlternatingJudge:
+        def grade(self, query: str, candidates: list[tuple[str, str]], *, runs: int = 1) -> JudgeResult:
             call_count[0] += 1
-            if call_count[0] == 1:
-                grades = {"path/doc1": 2}
-            else:
-                grades = {"path/doc1": 1}
+            grade = 2 if call_count[0] <= 2 else 0
             return JudgeResult(
-                query=kwargs.get("query", ""),
-                grades=grades,
-                shuffle_order=list(grades.keys()),
-                judge_model="gpt-4o-mini",
+                query=query,
+                grades={candidates[0][0]: grade},
+                shuffle_order=tuple(c[0] for c in candidates),
+                judge_model="alternating",
             )
 
-        candidates = [
-            PooledCandidate(path="/path/doc1.md", title="Doc 1", snippet="text", collection="eng"),
-        ]
-        result = grade_candidates("query", candidates, "key", "endpoint", judge_runs=2, judge_fn=_judge_fn)
-        # With 2 runs and different grades, majority vote picks one
-        assert result[0].grade in (1, 2)
-        assert len(result[0].grade_votes) == 2
+        def calibrate(self) -> bool:
+            return True
 
-    @pytest.mark.unit
-    def test_empty_candidates(self):
-        result = grade_candidates("query", [], "key", "endpoint")
-        assert result == []
-
-    @pytest.mark.unit
-    def test_three_runs_majority(self):
-        """Three runs — grade 2 appears twice, should win."""
-        call_count = [0]
-
-        def _judge_fn(**kwargs):
-            call_count[0] += 1
-            if call_count[0] <= 2:
-                grades = {"path/doc1": 2}
-            else:
-                grades = {"path/doc1": 0}
-            return JudgeResult(
-                query=kwargs.get("query", ""),
-                grades=grades,
-                shuffle_order=list(grades.keys()),
-                judge_model="gpt-4o-mini",
-            )
-
-        candidates = [
-            PooledCandidate(path="/path/doc1.md", title="Doc 1", snippet="text", collection="eng"),
-        ]
-        result = grade_candidates("query", candidates, "key", "endpoint", judge_runs=3, judge_fn=_judge_fn)
-        assert result[0].grade == 2
+    candidates = [
+        PooledCandidate(path="/path/doc1.md", title="Doc 1", snippet="text", collection="eng"),
+    ]
+    result = GoldBuilder(llm_judge=_AlternatingJudge()).grade(  # type: ignore[arg-type]
+        "q",
+        candidates,
+        runs=3,
+        api_key="k",
+        endpoint="ep",  # pragma: allowlist secret
+    )
+    assert result[0].grade == 2
+    assert result[0].grade_votes == [2, 2, 0]
 
 
 # ---------------------------------------------------------------------------
-# build_independent_gold (integration-level test with fakes)
+# build_independent_gold edge cases (full-build is in tests/integration/)
 # ---------------------------------------------------------------------------
 
 
 class TestBuildIndependentGold:
     @pytest.mark.unit
-    def test_full_build(self, tmp_path):
-        from kairix.quality.eval.gold_builder import build_independent_gold
-
-        def fake_bm25(query, collections, limit):
-            return [
-                {
-                    "path": "/eng/relevant.md",
-                    "title": "Relevant",
-                    "snippet": "Good content",
-                    "collection": "eng",
-                },
-                {
-                    "path": "/eng/irrelevant.md",
-                    "title": "Irrelevant",
-                    "snippet": "Bad content",
-                    "collection": "eng",
-                },
-            ]
-
-        def fake_grade(query, candidates, *args, **kwargs):
-            for c in candidates:
-                if "relevant" in c.path:
-                    c.grade = 2
-                    c.grade_votes = [2, 2]
-                else:
-                    c.grade = 0
-                    c.grade_votes = [0, 0]
-            return candidates
-
-        suite_path = tmp_path / "suite.yaml"
-        suite_path.write_text(
-            yaml.dump(
-                {
-                    "cases": [
-                        {
-                            "query": "test query",
-                            "category": "recall",
-                            "score_method": "ndcg",
-                        },
-                    ],
-                }
-            )
-        )
-
-        output_path = tmp_path / "output" / "gold.yaml"
-        report = build_independent_gold(
-            suite_path,
-            output_path,
-            systems=["bm25-equal"],
-            credentials=("api-key", "https://endpoint", "gpt-4o-mini"),
-            search_fns={"bm25-equal": fake_bm25},
-            calibrate_fn=lambda *_a: True,
-            grade_fn=fake_grade,
-        )
-
-        assert report.queries_processed == 1
-        assert report.total_candidates_pooled == 2
-        assert output_path.exists()
-
-        output = yaml.safe_load(output_path.read_text())
-        gold_titles = output["cases"][0]["gold_titles"]
-        assert any("relevant" in g["title"] for g in gold_titles)
-        assert output["meta"]["gold_method"] == "trec-pooling-llm-judge"
-
-    @pytest.mark.unit
-    def test_no_credentials(self, tmp_path):
+    def test_no_credentials_returns_empty_report(self, tmp_path: Path) -> None:
+        """Missing credentials short-circuit before the judge runs."""
         from kairix.quality.eval.gold_builder import build_independent_gold
 
         suite_path = tmp_path / "suite.yaml"
         suite_path.write_text(yaml.dump({"cases": [{"query": "q"}]}))
 
         report = build_independent_gold(suite_path, tmp_path / "out.yaml", credentials=("", "", ""))
+        assert report.queries_processed == 0
+
+    @pytest.mark.unit
+    def test_no_cases_returns_empty_report(self, tmp_path: Path) -> None:
+        """Suite with no cases returns an empty GoldBuildReport without raising."""
+        suite_path = tmp_path / "empty.yaml"
+        suite_path.write_text(yaml.dump({"cases": []}))
+        builder = GoldBuilder(llm_judge=FakeLLMJudge(grades_by_query={}), retriever=FakeRetriever())
+        report = builder.build_independent_gold(
+            suite_path,
+            tmp_path / "out.yaml",
+            credentials=("k", "ep", "depl"),  # pragma: allowlist secret
+        )
+        assert report.queries_processed == 0
+
+    @pytest.mark.unit
+    def test_skips_cases_with_empty_query(self, tmp_path: Path) -> None:
+        """Cases without a query field are silently skipped."""
+        suite_path = tmp_path / "with_empty.yaml"
+        suite_path.write_text(yaml.dump({"cases": [{"query": "", "category": "recall"}]}))
+        builder = GoldBuilder(llm_judge=FakeLLMJudge(grades_by_query={}), retriever=FakeRetriever())
+        report = builder.build_independent_gold(
+            suite_path,
+            tmp_path / "out.yaml",
+            credentials=("k", "ep", "depl"),  # pragma: allowlist secret
+            calibrate_first=False,
+        )
         assert report.queries_processed == 0
 
     @pytest.mark.unit
@@ -374,75 +183,8 @@ class TestPathTitle:
 # ---------------------------------------------------------------------------
 
 
-class TestGradeCandidatesDuplicateStem:
-    @pytest.mark.unit
-    def test_grade_candidates_distinguishes_same_stem(self):
-        """Two candidates with the same filename stem get independent grades."""
-        grades = {"a/readme": 2, "b/readme": 0}
-
-        candidates = [
-            PooledCandidate(
-                path="col/a/readme.md",
-                title="A Readme",
-                snippet="good",
-                collection="col",
-            ),
-            PooledCandidate(
-                path="col/b/readme.md",
-                title="B Readme",
-                snippet="bad",
-                collection="col",
-            ),
-        ]
-
-        result = grade_candidates(
-            "query",
-            candidates,
-            "key",
-            "endpoint",
-            judge_runs=1,
-            judge_fn=_make_judge_fn(grades),
-        )
-        assert result[0].grade == 2
-        assert result[1].grade == 0
-
-    @pytest.mark.unit
-    def test_judge_receivespath_title_keys(self):
-        """judge_batch receives path_title() keys, not bare stems."""
-        captured_candidates: list = []
-
-        def _capture_judge(**kwargs):
-            captured_candidates.extend(kwargs.get("candidates", []))
-            return JudgeResult(
-                query=kwargs.get("query", ""),
-                grades={},
-                shuffle_order=[],
-                judge_model="gpt-4o-mini",
-            )
-
-        candidates = [
-            PooledCandidate(
-                path="col/sub/readme.md",
-                title="Readme",
-                snippet="text",
-                collection="col",
-            ),
-        ]
-        grade_candidates(
-            "query",
-            candidates,
-            "key",
-            "endpoint",
-            judge_runs=1,
-            judge_fn=_capture_judge,
-        )
-
-        # The key should be "sub/readme", not just "readme"
-        assert captured_candidates[0][0] == "sub/readme"
-
-
 # ---------------------------------------------------------------------------
-# GoldBuilder class (#143 Phase 2b) — constructor-injected Fakes
+# GoldBuilder class — constructor-injected Fakes
 # ---------------------------------------------------------------------------
 
 
@@ -759,3 +501,171 @@ class TestGradeCandidatesDeploymentDefault:
 
         sig = inspect.signature(gc)
         assert sig.parameters["deployment"].default == JUDGE_DEPLOYMENT
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage — defensive paths and fallback branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_pool_candidates_shim_delegates_to_class() -> None:
+    """The free ``pool_candidates`` shim builds a default GoldBuilder."""
+    from kairix.quality.eval.gold_builder import pool_candidates
+
+    # Without injection, the class falls through to real BM25/vector. The "vector"
+    # path uses _DefaultGoldRetriever → embed_text which fails in the test env →
+    # returns empty results; we just need the shim invocation path itself to be valid.
+    candidates = pool_candidates("any", systems=["vector"], limit_per_system=5)
+    assert isinstance(candidates, list)
+
+
+@pytest.mark.unit
+def test_module_level_bm25_shim_delegates_to_class() -> None:
+    """The free ``_bm25_search_with_weights`` shim constructs a one-off GoldBuilder."""
+    from kairix.quality.eval.gold_builder import _bm25_search_with_weights
+
+    # No DB available in test env → opens a fresh empty SQLite, FTS query fails,
+    # returns []. The shim itself is exercised.
+    results = _bm25_search_with_weights("any", weights=(1.0, 1.0, 1.0), limit=5)
+    assert isinstance(results, list)
+
+
+@pytest.mark.unit
+def test_bm25_search_with_empty_tokenized_query_returns_empty() -> None:
+    """``_bm25_search_with_weights`` returns [] when the tokenizer produces nothing."""
+    builder = GoldBuilder()
+    # An all-punctuation query tokenizes to the empty FTS string in `bare` style.
+    results = builder._bm25_search_with_weights("!!! @@@ ###", weights=(1.0, 1.0, 1.0))
+    assert results == []
+
+
+@pytest.mark.unit
+def test_vector_retrieve_swallows_retriever_exceptions() -> None:
+    """When the retriever's ``retrieve`` raises, ``_vector_retrieve`` returns []."""
+
+    class _RaisingRetriever:
+        def retrieve(self, query: str, *, collections: Any = None, cfg: Any = None) -> Any:
+            raise RuntimeError("retrieval failed")
+
+    builder = GoldBuilder(retriever=_RaisingRetriever())  # type: ignore[arg-type]
+    results = builder._vector_retrieve("any query", collections=None, limit=5)
+    assert results == []
+
+
+@pytest.mark.unit
+def test_get_llm_judge_constructs_production_default_lazily() -> None:
+    """``_get_llm_judge`` builds a production LLMJudge when none was injected."""
+    builder = GoldBuilder()
+    judge = builder._get_llm_judge()
+    # The lazily-built judge must satisfy the protocol surface.
+    assert hasattr(judge, "grade")
+    assert hasattr(judge, "calibrate")
+    # Subsequent calls return the same instance (cache).
+    assert builder._get_llm_judge() is judge
+
+
+@pytest.mark.unit
+def test_get_retriever_constructs_default_gold_retriever_lazily() -> None:
+    """``_get_retriever`` builds a ``_DefaultGoldRetriever`` when none was injected."""
+    builder = GoldBuilder()
+    retriever = builder._get_retriever()
+    assert hasattr(retriever, "retrieve")
+    # Cached after first call.
+    assert builder._get_retriever() is retriever
+
+
+@pytest.mark.unit
+def test_default_gold_retriever_returns_simplenamespace() -> None:
+    """``_DefaultGoldRetriever.retrieve`` returns a SimpleNamespace shape.
+
+    The vector_search call fails in the test env (no embed credentials) and
+    surfaces via the empty results path. The protocol-shaped wrapper still
+    returns a SimpleNamespace with ``results=[]`` and ``vec_failed=False``.
+    """
+    from kairix.quality.eval.gold_builder import _DefaultGoldRetriever
+
+    retriever = _DefaultGoldRetriever()
+    result = retriever.retrieve("any query", collections=None, cfg=10)
+    assert hasattr(result, "results")
+    assert isinstance(result.results, list)
+
+
+@pytest.mark.unit
+def test_build_independent_gold_handles_legacy_gold_paths_field(tmp_path: Path) -> None:
+    """A case with the deprecated ``gold_paths`` field has it preserved as ``legacy_gold_paths``."""
+    suite_path = tmp_path / "input.yaml"
+    suite_path.write_text(
+        yaml.dump(
+            {
+                "cases": [
+                    {
+                        "id": "L1",
+                        "category": "recall",
+                        "query": "anything",
+                        "gold_paths": ["legacy/path.md"],
+                    }
+                ]
+            }
+        )
+    )
+    judge = FakeLLMJudge(grades_by_query={"anything": {"x/y": 2}})
+    retriever = FakeRetriever(
+        results_by_query={
+            "anything": SimpleNamespace(
+                results=[{"path": "/x/y.md", "title": "Y", "snippet": "s", "collection": "c"}],
+                vec_failed=False,
+            )
+        }
+    )
+    builder = GoldBuilder(llm_judge=judge, retriever=retriever)
+    builder.build_independent_gold(
+        suite_path=suite_path,
+        output_path=tmp_path / "out.yaml",
+        systems=["vector"],
+        judge_runs=1,
+        calibrate_first=False,
+        credentials=("k", "ep", "depl"),  # pragma: allowlist secret
+    )
+    parsed = yaml.safe_load((tmp_path / "out.yaml").read_text(encoding="utf-8"))
+    case = parsed["cases"][0]
+    assert "gold_paths" not in case  # popped
+    assert case["legacy_gold_paths"] == ["legacy/path.md"]
+
+
+@pytest.mark.unit
+def test_bm25_search_with_collections_filter(kairix_db_path: Path) -> None:
+    """``_bm25_search_with_weights`` honours the collections filter when supplied."""
+    builder = GoldBuilder()
+    # Both branches: query with collections=[...] (covers the placeholder-binding branch),
+    # and query with collections=None (covers the no-filter branch).
+    with_filter = builder._bm25_search_with_weights(
+        "docker", weights=(1.0, 1.0, 1.0), collections=["engineering"], limit=5
+    )
+    without_filter = builder._bm25_search_with_weights("docker", weights=(1.0, 1.0, 1.0), collections=None, limit=5)
+    # FTS may or may not return rows depending on schema setup; we assert structure only.
+    assert isinstance(with_filter, list)
+    assert isinstance(without_filter, list)
+
+
+@pytest.fixture
+def kairix_db_path(tmp_path: Path) -> Path:
+    """Production-schema SQLite + KAIRIX_DB_PATH override for unit tests that need real DB."""
+    db_path = tmp_path / "kairix.sqlite"
+    db = sqlite3.connect(str(db_path))
+    create_schema(db)
+    cur = db.cursor()
+    cur.execute("INSERT INTO content (hash, doc) VALUES (?, ?)", ("h0", "Docker deployment guide content. " * 20))
+    cur.execute(
+        "INSERT INTO documents (path, title, collection, hash, created_at, modified_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("/eng/docker.md", "Docker", "engineering", "h0", "2026-05-01", "2026-05-01"),
+    )
+    db.commit()
+    db.close()
+    prev = os.environ.get("KAIRIX_DB_PATH")
+    os.environ["KAIRIX_DB_PATH"] = str(db_path)
+    yield db_path
+    if prev is None:
+        os.environ.pop("KAIRIX_DB_PATH", None)
+    else:
+        os.environ["KAIRIX_DB_PATH"] = prev

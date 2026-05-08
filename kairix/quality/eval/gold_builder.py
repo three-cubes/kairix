@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 import math
 import sqlite3
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -33,8 +32,6 @@ import yaml
 
 from kairix.quality.eval.judge import (
     JUDGE_DEPLOYMENT,
-    JudgeResult,
-    calibrate,
     fetch_llm_credentials,
 )
 
@@ -162,19 +159,12 @@ def _vector_search(
 
 
 # ---------------------------------------------------------------------------
-# GoldBuilder — class with LLMJudge + Retriever constructor injection
-# (#143 Phase 2b)
+# GoldBuilder — LLMJudge + Retriever constructor injection
 #
-# Wraps the free functions ``pool_candidates``, ``grade_candidates``,
-# ``build_independent_gold`` in a class that takes ``LLMJudge`` and
-# ``Retriever`` via the constructor. Tests construct
-# ``GoldBuilder(llm_judge=FakeLLMJudge(...), retriever=FakeRetriever(...))``
-# rather than substituting via the legacy ``*_fn=`` kwargs.
-#
-# The free functions are preserved for backwards compatibility — they
-# instantiate a ``GoldBuilder`` with default deps and delegate. The
-# ``*_fn=None`` kwargs stay on those wrappers; Phase 4 removes them once
-# all callers route through the class.
+# Tests construct ``GoldBuilder(llm_judge=FakeLLMJudge(...), retriever=FakeRetriever(...))``.
+# The free functions ``pool_candidates`` / ``grade_candidates`` /
+# ``build_independent_gold`` below are thin shims to ``GoldBuilder()`` for
+# legacy import-by-name callers.
 # ---------------------------------------------------------------------------
 
 
@@ -660,52 +650,8 @@ def pool_candidates(
     systems: list[str],
     collections: list[str] | None = None,
     limit_per_system: int = 10,
-    search_fns: dict[str, Callable[..., list[dict[str, str]]]] | None = None,
 ) -> list[PooledCandidate]:
-    """DEPRECATED — use ``GoldBuilder(...).pool(...)`` instead.
-
-    Pool top-k results from multiple retrieval systems for a single query.
-
-    Deduplicates by path. Records which systems retrieved each document.
-
-    Args:
-        search_fns: DEPRECATED (Phase 4 removes). Optional mapping of system
-                    name to search callable. Each callable receives
-                    (query, collections, limit) and returns list of
-                    {path, title, snippet, collection} dicts. Production
-                    defaults to internal BM25/vector functions.
-    """
-    # Backwards-compat fast path — when ``search_fns`` is supplied, honour
-    # the legacy injection semantics directly (tests still rely on this).
-    _fns = search_fns or {}
-    if _fns:
-        candidates: dict[str, PooledCandidate] = {}
-        for system in systems:
-            if system in _fns:
-                results = _fns[system](query, collections, limit_per_system)
-            elif system == "vector":
-                results = _vector_search(query, collections, limit_per_system)
-            elif system in _WEIGHT_PRESETS:
-                # Use a builder so the validate-weights guard still fires.
-                results = GoldBuilder()._bm25_search_with_weights(
-                    query, _WEIGHT_PRESETS[system], collections, limit_per_system
-                )
-            else:
-                logger.warning("gold_builder: unknown system %r — skipping", system)
-                continue
-
-            for r in results:
-                path = r["path"]
-                if path not in candidates:
-                    candidates[path] = PooledCandidate(
-                        path=path,
-                        title=r["title"],
-                        snippet=r["snippet"],
-                        collection=r["collection"],
-                    )
-                candidates[path].sources.append(system)
-        return list(candidates.values())
-
+    """Production-default shim — see ``GoldBuilder.pool``."""
     return GoldBuilder().pool(query, systems, collections, limit_per_system)
 
 
@@ -716,48 +662,16 @@ def grade_candidates(
     endpoint: str,
     deployment: str = JUDGE_DEPLOYMENT,
     judge_runs: int = 2,
-    judge_fn: Callable[..., JudgeResult] | None = None,
 ) -> list[PooledCandidate]:
-    """DEPRECATED — use ``GoldBuilder(...).grade(...)`` instead.
-
-    Grade each candidate using the LLM judge.
-
-    Runs judge_runs times and uses majority vote for final grade.
-
-    Args:
-        judge_fn: DEPRECATED (Phase 4 removes). Legacy callable substitute
-                  for ``judge_batch``. New code should construct
-                  ``GoldBuilder(llm_judge=LLMJudge(chat_backend=...))``.
-    """
-    if not candidates:
-        return []
-
-    if judge_fn is None:
-        return GoldBuilder().grade(query, candidates, runs=judge_runs, api_key=api_key, endpoint=endpoint)
-
-    # Backwards-compat path — preserve legacy ``judge_fn`` semantics so any
-    # caller still using the kwarg keeps working until Phase 4.
-    judge_candidates = [(path_title(c.path), c.snippet[:150]) for c in candidates]
-    graded_candidates: list[PooledCandidate] = list(candidates)
-
-    for _run in range(judge_runs):
-        result: JudgeResult = judge_fn(
-            query=query,
-            candidates=judge_candidates,
-            api_key=api_key,
-            endpoint=endpoint,
-            deployment=deployment,
-            shuffle=True,
-        )
-        for c in graded_candidates:
-            doc_key = path_title(c.path)
-            c.grade_votes.append(result.grades.get(doc_key, 0))
-
-    for c in graded_candidates:
-        if c.grade_votes:
-            c.grade = max(set(c.grade_votes), key=c.grade_votes.count)
-
-    return graded_candidates
+    """Production-default shim — see ``GoldBuilder.grade``."""
+    del deployment  # owned by the LLMJudge instance constructed inside GoldBuilder
+    return GoldBuilder().grade(
+        query,
+        candidates,
+        runs=judge_runs,
+        api_key=api_key,
+        endpoint=endpoint,
+    )
 
 
 def build_independent_gold(
@@ -768,129 +682,17 @@ def build_independent_gold(
     calibrate_first: bool = True,
     limit_per_system: int = 10,
     credentials: tuple[str, str, str] | None = None,
-    search_fns: dict[str, Callable[..., list[dict[str, str]]]] | None = None,
-    calibrate_fn: Callable[[str, str, str], bool] | None = None,
-    grade_fn: Callable[..., list[PooledCandidate]] | None = None,
 ) -> GoldBuildReport:
-    """DEPRECATED — use ``GoldBuilder(...).build_independent_gold(...)`` instead.
-
-    Build an independent gold suite using TREC-style pooling + LLM judge.
-
-    1. Load queries from existing suite
-    2. For each query, pool candidates from multiple retrieval systems
-    3. Grade each candidate with LLM judge (majority vote)
-    4. Output enriched suite with system-independent gold_titles
-
-    Args:
-        suite_path:        Path to input suite YAML (queries + categories).
-        output_path:       Path to write enriched suite YAML.
-        systems:           List of retrieval system names to pool from.
-        judge_runs:        Number of judge runs per query (default: 2).
-        calibrate_first:   Run calibration anchors before judging (default: True).
-        limit_per_system:  Top-k results per system per query (default: 10).
-        search_fns:    DEPRECATED (Phase 4 removes). Legacy per-system search
-                       callable substitution.
-        calibrate_fn:  DEPRECATED (Phase 4 removes). Legacy calibration
-                       callable substitution.
-        grade_fn:      DEPRECATED (Phase 4 removes). Legacy grade callable
-                       substitution.
-
-    Returns:
-        GoldBuildReport with statistics.
-    """
-    # When no legacy substitution kwargs are supplied, route through the
-    # class — production callers and most tests land here.
-    if search_fns is None and calibrate_fn is None and grade_fn is None:
-        return GoldBuilder().build_independent_gold(
-            suite_path=suite_path,
-            output_path=output_path,
-            systems=systems,
-            judge_runs=judge_runs,
-            calibrate_first=calibrate_first,
-            limit_per_system=limit_per_system,
-            credentials=credentials,
-        )
-
-    # Legacy injection path — preserved verbatim so existing tests / callers
-    # that still pass *_fn kwargs continue to work until Phase 4.
-    if systems is None:
-        systems = ["bm25-equal", "bm25-filepath", "bm25-title", "vector"]
-
-    with open(suite_path) as f:
-        suite_data = yaml.safe_load(f)
-
-    cases = suite_data.get("cases", [])
-    if not cases:
-        logger.error("gold_builder: no cases found in suite %s", suite_path)
-        return GoldBuildReport()
-
-    if credentials is not None:
-        api_key, endpoint, deployment = credentials
-    else:
-        api_key, endpoint, deployment = fetch_llm_credentials()
-    if not api_key or not endpoint:
-        logger.error("gold_builder: no API credentials — cannot run judge")
-        return GoldBuildReport()
-
-    _calibrate = calibrate_fn or calibrate
-    if calibrate_first:
-        logger.info("gold_builder: running calibration...")
-        _calibrate(api_key, endpoint, deployment)
-        logger.info("gold_builder: calibration passed")
-
-    report = GoldBuildReport()
-
-    for i, case in enumerate(cases):
-        query = case.get("query", "")
-        if not query:
-            continue
-
-        logger.info("gold_builder: [%d/%d] %s", i + 1, len(cases), query[:60])
-
-        candidates = pool_candidates(query, systems, limit_per_system=limit_per_system, search_fns=search_fns)
-        report.total_candidates_pooled += len(candidates)
-
-        if not candidates:
-            logger.warning("gold_builder: no candidates for query %r", query[:60])
-            continue
-
-        _grade = grade_fn or grade_candidates
-        candidates = _grade(query, candidates, api_key, endpoint, deployment, judge_runs)
-        report.total_judge_calls += len(candidates) * judge_runs
-
-        gold_titles = []
-        for c in sorted(candidates, key=lambda x: x.grade, reverse=True):
-            report.grade_distribution[c.grade] = report.grade_distribution.get(c.grade, 0) + 1
-            if c.grade >= 1:
-                gold_titles.append(
-                    {
-                        "title": path_title(c.path),
-                        "relevance": c.grade,
-                    }
-                )
-
-        case["gold_titles"] = gold_titles
-        case["score_method"] = "ndcg"
-        if "gold_paths" in case:
-            case["legacy_gold_paths"] = case.pop("gold_paths")
-
-        report.queries_processed += 1
-
-    suite_data.setdefault("meta", {})["gold_method"] = "trec-pooling-llm-judge"
-    suite_data["meta"]["gold_systems"] = systems
-    suite_data["meta"]["judge_runs"] = judge_runs
-    suite_data["meta"]["n_cases"] = report.queries_processed
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
-        yaml.dump(suite_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-
-    report.avg_candidates_per_query = (
-        report.total_candidates_pooled / report.queries_processed if report.queries_processed > 0 else 0
+    """Production-default shim — see ``GoldBuilder.build_independent_gold``."""
+    return GoldBuilder().build_independent_gold(
+        suite_path=suite_path,
+        output_path=output_path,
+        systems=systems,
+        judge_runs=judge_runs,
+        calibrate_first=calibrate_first,
+        limit_per_system=limit_per_system,
+        credentials=credentials,
     )
-
-    logger.info("gold_builder: %s", report)
-    return report
 
 
 # Re-export the module-level _bm25_search_with_weights as a thin wrapper that

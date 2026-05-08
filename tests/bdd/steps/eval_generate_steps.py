@@ -30,12 +30,9 @@ _state: dict[str, Any] = {}
 
 
 @pytest.fixture(autouse=True)
-def _reset_state() -> None:
+def _generate_scenario_state(tmp_path: Path) -> None:
+    """Clear state and seed tmp_path at the start of each scenario."""
     _state.clear()
-
-
-@pytest.fixture(autouse=True)
-def _provide_tmp_path(tmp_path: Path) -> None:
     _state["tmp_path"] = tmp_path
 
 
