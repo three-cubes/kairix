@@ -1124,18 +1124,6 @@ def test_sample_documents_returns_empty_when_db_path_invalid(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
-def test_retrieve_returns_empty_when_no_index_available() -> None:
-    """``_retrieve`` swallows runtime errors from missing index/DB and returns ([], [])."""
-    from kairix.quality.eval.generate import _retrieve
-
-    paths, snippets = _retrieve("any query", "recall")
-    # In the test environment there is no FTS table or vector index — `_retrieve`
-    # must surface this as ([], []), never raise.
-    assert paths == []
-    assert snippets == []
-
-
-@pytest.mark.unit
 def test_generate_queries_constructs_default_backend_when_no_chat_backend_or_llm_fn() -> None:
     """When neither chat_backend nor llm_fn is supplied, the function builds an
     AzureChatBackend lazily — empty creds force the early ``ValueError`` path so

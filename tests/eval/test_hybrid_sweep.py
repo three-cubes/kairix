@@ -19,7 +19,7 @@ from kairix.quality.eval.hybrid_sweep import (
     sweep_config_to_retrieval_config,
     sweep_hybrid_params,
 )
-from kairix.quality.eval.metrics import relevance_for_path as _match_relevance
+from kairix.quality.eval.metrics import relevance_for_path
 
 # ---------------------------------------------------------------------------
 # HybridSweepConfig
@@ -114,7 +114,7 @@ class TestBuildDefaultConfigs:
 
 
 # ---------------------------------------------------------------------------
-# Metrics: _match_relevance (path-based gold matching)
+# Metrics: relevance_for_path (path-based gold matching)
 # ---------------------------------------------------------------------------
 
 
@@ -123,31 +123,31 @@ class TestMatchRelevance:
     @pytest.mark.unit
     def test_stem_only_match(self) -> None:
         gold = [{"title": "patterns", "relevance": 2}]
-        assert _match_relevance("vault/knowledge/patterns.md", gold) == 2
+        assert relevance_for_path("vault/knowledge/patterns.md", gold) == 2
 
     @pytest.mark.unit
     def test_path_based_match(self) -> None:
         gold = [{"title": "engineering/adr-examples/readme", "relevance": 2}]
-        assert _match_relevance("reference-library/engineering/adr-examples/readme.md", gold) == 2
+        assert relevance_for_path("reference-library/engineering/adr-examples/readme.md", gold) == 2
 
     @pytest.mark.unit
     def test_path_based_rejects_different_stem(self) -> None:
         gold = [{"title": "engineering/adr-examples/readme", "relevance": 2}]
-        assert _match_relevance("data-and-analysis/dbt-docs/readme.md", gold) == 0
+        assert relevance_for_path("data-and-analysis/dbt-docs/readme.md", gold) == 0
 
     @pytest.mark.unit
     def test_no_match(self) -> None:
         gold = [{"title": "other-doc", "relevance": 1}]
-        assert _match_relevance("areas/kairix.md", gold) == 0
+        assert relevance_for_path("areas/kairix.md", gold) == 0
 
     @pytest.mark.unit
     def test_empty_gold(self) -> None:
-        assert _match_relevance("any/path.md", []) == 0
+        assert relevance_for_path("any/path.md", []) == 0
 
     @pytest.mark.unit
     def test_gold_paths_format(self) -> None:
         gold = [{"path": "areas/kairix.md", "relevance": 1}]
-        assert _match_relevance("vault/areas/kairix.md", gold) == 1
+        assert relevance_for_path("vault/areas/kairix.md", gold) == 1
 
 
 # ---------------------------------------------------------------------------

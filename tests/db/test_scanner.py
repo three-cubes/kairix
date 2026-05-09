@@ -8,10 +8,10 @@ from kairix.core.db.scanner import (
     CollectionConfig,
     DocumentScanner,
     ScanReport,
-    _hash_content,
 )
 from kairix.core.db.schema import create_schema
-from kairix.knowledge.reflib.frontmatter import extract_title as _extract_title
+from kairix.knowledge.reflib.dedup import hash_content
+from kairix.knowledge.reflib.frontmatter import extract_title
 
 
 def _setup_schema(db: sqlite3.Connection) -> None:
@@ -27,34 +27,34 @@ def _setup_schema(db: sqlite3.Connection) -> None:
 @pytest.mark.unit
 def test_hash_content_deterministic() -> None:
     """Same content produces same hash."""
-    assert _hash_content("hello world") == _hash_content("hello world")
+    assert hash_content("hello world") == hash_content("hello world")
 
 
 @pytest.mark.unit
 def test_hash_content_different_for_different_text() -> None:
     """Different content produces different hashes."""
-    assert _hash_content("hello") != _hash_content("world")
+    assert hash_content("hello") != hash_content("world")
 
 
 @pytest.mark.unit
 def test_extract_title_from_frontmatter() -> None:
     """Extracts title from YAML frontmatter."""
     text = "---\ntitle: My Document\ntype: note\n---\n\nBody text here."
-    assert _extract_title(text, __import__("pathlib").Path("test.md")) == "My Document"
+    assert extract_title(text, __import__("pathlib").Path("test.md")) == "My Document"
 
 
 @pytest.mark.unit
 def test_extract_title_from_heading() -> None:
     """Falls back to first # heading when no frontmatter title."""
     text = "# Hello World\n\nSome content."
-    assert _extract_title(text, __import__("pathlib").Path("test.md")) == "Hello World"
+    assert extract_title(text, __import__("pathlib").Path("test.md")) == "Hello World"
 
 
 @pytest.mark.unit
 def test_extract_title_from_filename() -> None:
     """Falls back to filename when no frontmatter or heading."""
     text = "Just plain text with no heading."
-    assert _extract_title(text, __import__("pathlib").Path("my-document.md")) == "My Document"
+    assert extract_title(text, __import__("pathlib").Path("my-document.md")) == "My Document"
 
 
 @pytest.mark.unit

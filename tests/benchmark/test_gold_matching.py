@@ -5,8 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kairix.quality.eval.gold_builder import path_title
-from kairix.quality.eval.metrics import match_gold_to_path
-from kairix.quality.eval.metrics import relevance_for_path as _relevance_for_path
+from kairix.quality.eval.metrics import match_gold_to_path, relevance_for_path
 
 pytestmark = pytest.mark.unit
 
@@ -65,12 +64,12 @@ class TestRelevanceForPath:
             {"title": "engineering/adr-examples/readme", "relevance": 2},
             {"title": "data-and-analysis/dbt-docs/readme", "relevance": 1},
         ]
-        assert _relevance_for_path("reference-library/engineering/adr-examples/readme.md", gold) == 2
+        assert relevance_for_path("reference-library/engineering/adr-examples/readme.md", gold) == 2
 
     def test_returns_zero_for_non_matching(self) -> None:
         gold = [{"title": "engineering/adr-examples/readme", "relevance": 2}]
-        assert _relevance_for_path("totally-different/file.md", gold) == 0
+        assert relevance_for_path("totally-different/file.md", gold) == 0
 
     def test_stem_only_backwards_compat(self) -> None:
         gold = [{"title": "patterns", "relevance": 2}]
-        assert _relevance_for_path("vault/knowledge/patterns.md", gold) == 2
+        assert relevance_for_path("vault/knowledge/patterns.md", gold) == 2
