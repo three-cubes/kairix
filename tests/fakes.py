@@ -169,7 +169,18 @@ class FakeDocumentRepository:
                 continue
             content = doc.get("content", "") + " " + doc.get("title", "")
             if query_lower in content.lower():
-                results.append(doc)
+                # Match BM25Result TypedDict shape — production bm25_search
+                # emits ``file``, not ``path``. Without this normalisation
+                # downstream RRF swallows KeyError into [] and integration
+                # tests "pass" against no-op fusion (#162).
+                row = dict(doc)
+                if "file" not in row:
+                    row["file"] = row.get("path", "")
+                if "score" not in row:
+                    row["score"] = 1.0
+                if "snippet" not in row:
+                    row["snippet"] = row.get("content", "")[:300]
+                results.append(row)
             if len(results) >= limit:
                 break
         return results
@@ -259,7 +270,6 @@ class FakeGraphRepository:
         if self._cypher_rows:
             return list(self._cypher_rows)
         return list(self._all_entities)
-
 
 
 class FakePlannerGraphClient:
