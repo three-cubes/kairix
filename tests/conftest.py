@@ -47,6 +47,7 @@ pytest_plugins = [
     "tests.bdd.steps.search_logging_steps",
     "tests.bdd.steps.search_backends_steps",
     "tests.bdd.steps.search_boosts_steps",
+    "tests.bdd.steps.search_config_validation_steps",
 ]
 
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
