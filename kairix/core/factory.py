@@ -63,7 +63,7 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
 
     vector_repo: Any
     try:
-        from kairix.core.search.hybrid import get_vector_index
+        from kairix.core.search.vec_index import get_vector_index
 
         index = get_vector_index()
         if index is not None:

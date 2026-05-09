@@ -50,7 +50,7 @@ class QueryLogger:
         """
         Factory: construct a logger and immediately log a search result.
 
-        Accepts a kairix.core.search.hybrid.SearchResult-like object.
+        Accepts a kairix.core.search.pipeline.SearchResult-like object.
         Returns the logger for further use.
         """
         instance = cls(log_path)

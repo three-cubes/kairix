@@ -127,7 +127,7 @@ def _vector_search(
         import numpy as np
 
         from kairix._azure import embed_text
-        from kairix.core.search.hybrid import get_vector_index
+        from kairix.core.search.vec_index import get_vector_index
 
         vec = embed_text(query)
         if not vec:

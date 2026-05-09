@@ -259,3 +259,39 @@ class VectorIndex:
             "ndim": self._ndim,
         }
         self._meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Process-singleton accessor
+# ---------------------------------------------------------------------------
+
+_VECTOR_INDEX: Any = None
+
+
+def get_vector_index() -> Any:
+    """Lazily load the usearch VectorIndex singleton from the canonical paths.
+
+    Returns the loaded index, or None if the index is empty/missing/unloadable.
+    Subsequent calls return the cached instance.
+    Never raises — returns None on any failure.
+    """
+    global _VECTOR_INDEX
+    if _VECTOR_INDEX is not None:
+        return _VECTOR_INDEX
+    try:
+        from kairix.paths import db_path as get_db_path
+
+        db_p = get_db_path()
+        index_path = db_p.parent / "vectors.usearch"
+        meta_path = db_p.parent / "vectors.meta.json"
+        idx = VectorIndex(index_path=index_path, meta_path=meta_path, db_path=db_p)
+        count = idx.load()
+        if count > 0:
+            logger.info("vec_index: loaded usearch index (%d vectors)", count)
+            _VECTOR_INDEX = idx
+            return idx
+        logger.warning("vec_index: usearch index empty or missing at %s", index_path)
+        return None
+    except Exception as e:
+        logger.warning("vec_index: failed to load usearch index — %s", e)
+        return None

@@ -159,7 +159,7 @@ class _UsearchVectorSearcher:  # pragma: no cover
 
     def search_vectors(self, vector: np.ndarray, *, limit: int) -> list[str]:
         try:
-            from kairix.core.search.hybrid import get_vector_index
+            from kairix.core.search.vec_index import get_vector_index
 
             index = get_vector_index()
             if index is None:
