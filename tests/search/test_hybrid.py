@@ -23,7 +23,7 @@ Tests construct SearchPipeline with fakes from tests.fakes:
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -371,8 +371,7 @@ def test_cli_formats_output(capsys: pytest.CaptureFixture) -> None:
         fused_count=0,
     )
 
-    with patch("kairix.core.search.cli.load_config", return_value=RetrievalConfig.defaults()):
-        search_cli(["test query"], pipeline=mock_pipeline)
+    search_cli(["test query"], pipeline=mock_pipeline)
 
     captured = capsys.readouterr()
     assert "test query" in captured.out
@@ -394,8 +393,7 @@ def test_cli_json_flag(capsys: pytest.CaptureFixture) -> None:
         fused_count=0,
     )
 
-    with patch("kairix.core.search.cli.load_config", return_value=RetrievalConfig.defaults()):
-        search_cli(["test", "--json"], pipeline=mock_pipeline)
+    search_cli(["test", "--json"], pipeline=mock_pipeline)
 
     captured = capsys.readouterr()
     data = json.loads(captured.out)
@@ -418,8 +416,7 @@ def test_cli_agent_flag_passed_to_search(capsys: pytest.CaptureFixture) -> None:
         fused_count=0,
     )
 
-    with patch("kairix.core.search.cli.load_config", return_value=RetrievalConfig.defaults()):
-        search_cli(["test", "--agent", "shape"], pipeline=mock_pipeline)
+    search_cli(["test", "--agent", "shape"], pipeline=mock_pipeline)
 
     assert mock_pipeline.search.call_count == 1
     call_kwargs = mock_pipeline.search.call_args.kwargs
@@ -468,77 +465,6 @@ def test_search_result_has_fallback_used_field() -> None:
     result = pipeline.search("anything")
     assert hasattr(result, "fallback_used")
     assert isinstance(result.fallback_used, bool)
-
-
-# ---------------------------------------------------------------------------
-# Additional coverage: logging, DB open, temporal rewriting, keyword fallback
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_rotate_query_log_moves_file(tmp_path: Path) -> None:
-    """_rotate_query_log() moves path -> path.1 and removes older rotated file."""
-
-    import kairix.core.search.hybrid as hybrid_mod
-
-    log_file = tmp_path / "queries.jsonl"
-    log_file.write_text('{"q": "test"}\n')
-
-    rotated = tmp_path / "queries.jsonl.1"
-    rotated.write_text("old rotated\n")
-
-    hybrid_mod._rotate_query_log(log_file)
-
-    assert not log_file.exists()
-    assert rotated.exists()
-    assert rotated.read_text() != "old rotated\n"
-
-
-@pytest.mark.unit
-def test_log_query_event_writes_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """_log_query_event() appends to JSONL log when _LOG_QUERIES is True."""
-    import kairix.core.search.hybrid as hybrid_mod
-
-    log_path = tmp_path / "queries.jsonl"
-    monkeypatch.setattr(hybrid_mod, "_LOG_QUERIES", True)
-    monkeypatch.setattr(hybrid_mod, "_QUERY_LOG_PATH", log_path)
-
-    hybrid_mod._log_query_event({"q": "test query", "t": 123})
-
-    assert log_path.exists()
-    event = json.loads(log_path.read_text().strip())
-    assert event["q"] == "test query"
-
-
-@pytest.mark.unit
-def test_log_query_event_noop_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """_log_query_event() is a no-op when _LOG_QUERIES is False."""
-    import kairix.core.search.hybrid as hybrid_mod
-
-    log_path = tmp_path / "queries.jsonl"
-    monkeypatch.setattr(hybrid_mod, "_LOG_QUERIES", False)
-    monkeypatch.setattr(hybrid_mod, "_QUERY_LOG_PATH", log_path)
-
-    hybrid_mod._log_query_event({"q": "test"})
-    assert not log_path.exists()
-
-
-@pytest.mark.unit
-def test_log_query_event_rotates_large_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """_log_query_event() rotates the file when it exceeds the size threshold."""
-    import kairix.core.search.hybrid as hybrid_mod
-
-    log_path = tmp_path / "queries.jsonl"
-    log_path.write_text("x" * 100)
-
-    monkeypatch.setattr(hybrid_mod, "_LOG_QUERIES", True)
-    monkeypatch.setattr(hybrid_mod, "_QUERY_LOG_PATH", log_path)
-    monkeypatch.setattr(hybrid_mod, "_QUERY_LOG_MAX_BYTES", 10)  # Very small threshold
-
-    hybrid_mod._log_query_event({"q": "trigger rotation"})
-
-    rotated = Path(str(log_path) + ".1")
-    assert rotated.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -591,9 +517,8 @@ def test_cli_entity_error_exits_nonzero(capsys: pytest.CaptureFixture) -> None:
         error="Neo4j is required for entity queries but is unavailable.",
     )
 
-    with patch("kairix.core.search.cli.load_config", return_value=RetrievalConfig.defaults()):
-        with pytest.raises(SystemExit) as exc_info:
-            search_cli(["tell me about Acme"], pipeline=mock_pipeline)
+    with pytest.raises(SystemExit) as exc_info:
+        search_cli(["tell me about Acme"], pipeline=mock_pipeline)
 
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
@@ -615,9 +540,8 @@ def test_cli_entity_error_json_includes_error_field(
         error="Neo4j is required for entity queries but is unavailable.",
     )
 
-    with patch("kairix.core.search.cli.load_config", return_value=RetrievalConfig.defaults()):
-        with pytest.raises(SystemExit) as exc_info:
-            search_cli(["tell me about Acme", "--json"], pipeline=mock_pipeline)
+    with pytest.raises(SystemExit) as exc_info:
+        search_cli(["tell me about Acme", "--json"], pipeline=mock_pipeline)
 
     assert exc_info.value.code == 1
     captured = capsys.readouterr()

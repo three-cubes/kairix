@@ -22,13 +22,8 @@ Never raises — returns SearchResult with empty results on any failure.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-import os
-import shutil
 import sqlite3
-import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +31,6 @@ from typing import Any
 
 from kairix.core.db import get_db_path, open_db
 from kairix.core.search.bm25 import BM25Result
-from kairix.core.search.budget import apply_budget
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.intent import QueryIntent
 from kairix.core.search.rrf import (
@@ -67,31 +61,6 @@ def _get_llm():  # type: ignore[return]
 
 
 # ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-SEARCH_LOG_PATH = Path(
-    os.environ.get(
-        "KAIRIX_SEARCH_LOG",
-        str(Path.home() / ".cache" / "kairix" / "logs" / "search.jsonl"),
-    )
-)
-
-# Query logging (privacy-sensitive — disabled by default)
-_LOG_QUERIES: bool = os.getenv("KAIRIX_LOG_QUERIES", "0") == "1"
-_QUERY_LOG_PATH: Path = Path(
-    os.getenv(
-        "KAIRIX_QUERY_LOG",
-        str(Path.home() / ".cache" / "kairix" / "logs" / "queries.jsonl"),
-    )
-)
-
-# Rotate when file exceeds this size
-_QUERY_LOG_MAX_BYTES: int = 10 * 1024 * 1024  # 10 MB
-
-# Collections — loaded from kairix.config.yaml if configured, otherwise use defaults.
-# Override with KAIRIX_EXTRA_COLLECTIONS env var (comma-separated) for quick additions.
-# ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
 
@@ -100,38 +69,6 @@ _QUERY_LOG_MAX_BYTES: int = 10 * 1024 * 1024  # 10 MB
 # Deprecated: import from kairix.core.search.pipeline instead.
 # Will be removed no sooner than 2 releases after 2026.04.
 from kairix.core.search.pipeline import SearchResult as SearchResult  # noqa: E402
-
-
-def _log_search_event(event: dict) -> None:
-    """Append a search event to the JSONL log. Creates directory if needed."""
-    try:
-        SEARCH_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with SEARCH_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event) + "\n")
-    except OSError as e:
-        logger.warning("hybrid: failed to write search log — %s", e)
-
-
-def _rotate_query_log(path: Path) -> None:
-    """Rotate path → path.1, removing any older rotated file. Simple size-based rotation."""
-    rotated = Path(str(path) + ".1")
-    if rotated.exists():
-        rotated.unlink()
-    shutil.move(str(path), str(rotated))
-
-
-def _log_query_event(event: dict) -> None:
-    """Append a query event to the query JSONL log. Rotates at 10 MB. No-op if logging disabled."""
-    if not _LOG_QUERIES:
-        return
-    try:
-        _QUERY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        if _QUERY_LOG_PATH.exists() and _QUERY_LOG_PATH.stat().st_size >= _QUERY_LOG_MAX_BYTES:
-            _rotate_query_log(_QUERY_LOG_PATH)
-        with _QUERY_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event) + "\n")
-    except OSError as e:
-        logger.warning("hybrid: failed to write query log — %s", e)
 
 
 def _query_has_temporal_marker(query: str) -> bool:
@@ -560,81 +497,6 @@ def _apply_reranking(
     except Exception as _rr_e:
         logger.warning("hybrid: rerank failed — %s — using unmodified order", _rr_e)
     return fused
-
-
-def _build_search_result(state: _SearchPipelineState) -> SearchResult:
-    """Apply token budget, compute diagnostics, build SearchResult, and log.
-
-    This is the final assembly stage of the search pipeline — everything
-    after boosting and re-ranking is done here.
-    """
-    budgeted = apply_budget(state.fused, budget=state.budget)
-
-    total_tokens = sum(r.token_estimate for r in budgeted)
-    tiers_used = sorted({r.tier for r in budgeted})
-
-    t_end = time.monotonic()
-    latency_ms = (t_end - state.t_start) * 1000.0
-
-    result = SearchResult(
-        query=state.query,
-        intent=state.intent,
-        results=budgeted,
-        bm25_count=state.bm25_count,
-        vec_count=state.vec_count,
-        fused_count=len(state.fused),
-        collections=state.collections,
-        tiers_used=tiers_used,
-        total_tokens=total_tokens,
-        latency_ms=latency_ms,
-        vec_failed=state.vec_failed,
-        fallback_used=state.fallback_used,
-    )
-
-    # Attach temporal chunks for TEMPORAL intent (accessible to callers)
-    if state.temporal_chunks:
-        result.error = ""  # ensure no error state masks chunks
-        result._temporal_chunks = state.temporal_chunks
-
-    # Log event
-    _log_fn = _log_search_event
-    _log_q_fn = _log_query_event
-    query_hash = hashlib.sha256(state.query.encode()).hexdigest()[:12]
-    _log_fn(
-        {
-            "query_hash": query_hash,
-            "intent": state.intent.value,
-            "agent": state.agent,
-            "scope": state.scope,
-            "bm25_count": state.bm25_count,
-            "vec_count": state.vec_count,
-            "fused_count": len(state.fused),
-            "collections": state.collections,
-            "tiers_used": tiers_used,
-            "total_tokens": total_tokens,
-            "latency_ms": round(latency_ms, 1),
-            "vec_failed": state.vec_failed,
-            "fallback_used": state.fallback_used,
-            "ts": int(time.time()),
-        }
-    )
-
-    # Optional raw query log (privacy-sensitive — controlled by KAIRIX_LOG_QUERIES)
-    _log_q_fn(
-        {
-            "ts": int(time.time()),
-            "query": state.query,
-            "query_hash": query_hash,
-            "intent": state.intent.value,
-            "agent": state.agent,
-            "fused_count": len(state.fused),
-            "vec_failed": state.vec_failed,
-            "latency_ms": round(latency_ms, 1),
-            "top_paths": [r.result.path for r in budgeted[:3]],
-        }
-    )
-
-    return result
 
 
 def _apply_hyde(
