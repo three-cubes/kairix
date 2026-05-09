@@ -434,10 +434,18 @@ def compute_weighted_total(
     per_category_avg: dict[str, float],
     suite_version: str,
 ) -> float:
-    """Apply category weights (with Phase 3 classification adjustment) and return weighted total."""
+    """Apply category weights (with Phase 3 classification adjustment) and return weighted total.
+
+    The result is in the closed interval [0, 1] — both ``score_tier`` and
+    ``PHASE_GATES`` assume this. The Phase 3 adjustment moves 0.10 from
+    ``temporal`` to ``classification`` so the weights conserve. (A previous
+    revision used 0.15 for classification, which broke the [0, 1] range and
+    let perfect-scoring v1.1 suites report 1.05; surfaced by contract test.)
+    """
     effective_weights = dict(CATEGORY_WEIGHTS)
     if suite_version >= "1.1" and per_category_avg.get("classification", 0.0) > 0:
-        effective_weights["classification"] = 0.15
+        # Conservation: temporal donates 0.10 to classification.
+        effective_weights["classification"] = 0.10
         effective_weights["temporal"] = 0.10
     return round(
         sum(per_category_avg.get(cat, 0.0) * w for cat, w in effective_weights.items()),
@@ -547,6 +555,25 @@ def run_benchmark(
         if cat in category_scores:
             category_scores[cat].append(score)
 
+        # Build the canonical case-result dict first, then layer ndcg_detail
+        # and retrieval_meta on top WITHOUT letting them stomp the canonical
+        # fields. A custom retrieve_fn returning meta with keys like ``id``
+        # or ``score`` would otherwise silently rewrite the case identity —
+        # surfaced by contract test.
+        canonical_keys = {
+            "id",
+            "category",
+            "original_category",
+            "query",
+            "gold_path",
+            "score_method",
+            "score",
+            "retrieved_paths",
+            "elapsed_ms",
+        }
+        safe_extras: dict[str, Any] = {
+            k: v for k, v in {**ndcg_detail, **retrieval_meta}.items() if k not in canonical_keys
+        }
         case_results.append(
             {
                 "id": case.id,
@@ -558,8 +585,7 @@ def run_benchmark(
                 "score": round(score, 4),
                 "retrieved_paths": paths[:10],
                 "elapsed_ms": round(elapsed_ms, 1),
-                **ndcg_detail,
-                **retrieval_meta,
+                **safe_extras,
             }
         )
 

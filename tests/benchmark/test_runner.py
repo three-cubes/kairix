@@ -911,28 +911,32 @@ def test_score_case_fuzzy_with_gold_path_uses_fuzzy_match_helper() -> None:
 
 @pytest.mark.unit
 def test_compute_weighted_total_uses_v1_1_classification_weight_when_classification_present() -> None:
-    """For suite version >= '1.1' with a classification score, the v1.1 weight scheme applies.
+    """For suite version >= '1.1' with a classification score, the v1.1 weight
+    scheme applies — temporal cedes 0.10 of its weight to classification.
 
-    Closes coverage of lines 432-434 — the suite-version branch + reweighting.
-    Without this branch, classification's 0.15 weight and temporal's 0.10
-    reduction would be silently ignored on v1.1 suites.
+    With identical non-classification categories the per-category mix matters:
+    a low temporal + high classification yields a HIGHER v1.1 total than v1.0
+    (because more weight now sits on the high-scoring classification category).
     """
     from kairix.quality.benchmark.runner import compute_weighted_total
 
-    # All categories at 1.0 with a classification entry — v1.0 vs v1.1 produce different weights.
+    # Temporal scores low, classification scores high — the v1.1 reweighting
+    # moves 0.10 of weight from the low-scoring temporal to the high-scoring
+    # classification, raising the total.
     per_cat = {
         "recall": 1.0,
-        "temporal": 1.0,
+        "temporal": 0.0,  # low — losing weight is good for the total
         "entity": 1.0,
         "conceptual": 1.0,
         "multi_hop": 1.0,
         "procedural": 1.0,
-        "classification": 1.0,
+        "classification": 1.0,  # high — gaining weight is good for the total
     }
     v10 = compute_weighted_total(per_cat, "1.0")
     v11 = compute_weighted_total(per_cat, "1.1")
-    # The two scoring schemes differ — proves the v1.1 reweighting actually executes.
-    assert v10 != v11
+    # v1.1 total must be higher because weight shifted from a 0.0 category
+    # to a 1.0 category.
+    assert v11 > v10, f"v1.1 reweighting failed to apply: v10={v10}, v11={v11}"
 
 
 @pytest.mark.unit
