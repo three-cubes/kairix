@@ -33,12 +33,15 @@ def _get_cred(secret_name: str) -> str:
 # Vault doc discovery
 # ---------------------------------------------------------------------------
 
-_DOCUMENT_ROOT = _get_document_root()
-
 
 def _discover_vault_docs() -> list[str]:
-    """Return absolute paths for all .md files in the vault."""
-    return [str(p) for p in _DOCUMENT_ROOT.rglob("*.md") if p.is_file()]
+    """Return absolute paths for all .md files in the vault.
+
+    Reads the document root at call time so KAIRIX_DOCUMENT_ROOT env-var
+    changes between calls take effect (was a module-level capture
+    that broke when tests set the env var post-import).
+    """
+    return [str(p) for p in _get_document_root().rglob("*.md") if p.is_file()]
 
 
 # ---------------------------------------------------------------------------
