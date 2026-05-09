@@ -457,7 +457,7 @@ class TestIsBoardFile:
         assert any(c.chunk_type == "board_card" for c in chunks)
 
     @pytest.mark.unit
-    def test_file_under_Boards_directory_detected_as_board(self, tmp_path: Path) -> None:
+    def test_file_under_boards_directory_detected_as_board(self, tmp_path: Path) -> None:
         """A file two levels under ``/Boards/`` is detected via the parent-directory regex.
 
         The regex ``[/\\\\]Boards?[/\\\\]`` requires slashes on BOTH sides of

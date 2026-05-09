@@ -118,9 +118,9 @@ def _embed_query(
             logger.warning("Embed credentials not set — skipping recall check")
             return None
 
-        if (
-            not isinstance(creds, Credentials) or not creds.api_key or not creds.endpoint
-        ):  # pragma: no cover — reachable only with valid Azure embed credentials; deferred to FakeCredentials in credentials-DI
+        # Reachable only with valid Azure embed credentials; deferred to
+        # FakeCredentials in credentials-DI.
+        if not isinstance(creds, Credentials) or not creds.api_key or not creds.endpoint:  # pragma: no cover
             logger.warning("Embed credentials not set — skipping recall check")
             return None
 
@@ -225,7 +225,10 @@ class RecallChecker:
 
                 db = open_db(Path(get_db_path()))
                 close_db = True
-            except FileNotFoundError:  # pragma: no cover — get_db_path returns a path even when missing; open_db auto-creates parent dirs. Defensive guard for unwritable parent (e.g. read-only fs).
+            # ``get_db_path`` returns a path even when missing and ``open_db``
+            # auto-creates parent dirs; this guard is defensive for unwritable
+            # parents (e.g. read-only fs).
+            except FileNotFoundError:  # pragma: no cover
                 db = None
 
         queries = recall_queries if recall_queries is not None else _get_recall_queries(db)

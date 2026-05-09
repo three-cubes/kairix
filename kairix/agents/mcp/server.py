@@ -195,9 +195,10 @@ def tool_search(
     """
     logger.info("mcp.search: agent=%r scope=%r", agent, scope)
     try:
-        if (
-            search_fn is None
-        ):  # pragma: no cover — defensive ImportError guard reachable only when kairix.core.factory is uninstalled; in-process tests inject search_fn directly
+        # The ``search_fn is None`` branch only fires when ``kairix.core.factory``
+        # is uninstalled; in-process tests always inject ``search_fn`` directly,
+        # so the lazy-import path is unreachable under test.
+        if search_fn is None:  # pragma: no cover
             from kairix.core.factory import build_search_pipeline
 
             _pipeline = build_search_pipeline()
@@ -734,7 +735,9 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     """
     try:
         from mcp.server.fastmcp import FastMCP
-    except ImportError as exc:  # pragma: no cover — defensive ImportError guard reachable only when the optional ``mcp`` extra is not installed; the test suite installs it via kairix[agents]
+    # The ImportError branch is reachable only when the optional ``mcp`` extra
+    # is not installed; the test suite always installs it via ``kairix[agents]``.
+    except ImportError as exc:  # pragma: no cover
         raise ImportError(
             "The 'mcp' package is required to run the MCP server. Install it with: pip install 'kairix[agents]'"
         ) from exc

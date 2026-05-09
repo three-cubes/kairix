@@ -130,7 +130,7 @@ def configured_checker(score: float) -> None:
         ) -> dict[str, object]:
             return {
                 "score": captured_score,
-                "passed": int(round(captured_score * 5)),
+                "passed": round(captured_score * 5),
                 "total": 5,
                 "timestamp": 0,
                 "detail": [],

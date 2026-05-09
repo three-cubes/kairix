@@ -5,7 +5,7 @@ Constructs the real FastMCP server (the production wiring) and verifies:
 - Each tool wrapper dispatches to its underlying ``tool_*`` function and
   returns a JSON-serialisable dict on the happy path.
 
-The wrapper bodies (lines 735–815 of server.py) are otherwise uncovered by
+The wrapper bodies (lines 735-815 of server.py) are otherwise uncovered by
 unit tests because they only exist as inner closures inside ``build_server``.
 This file exercises them through ``call_tool`` so the dispatch glue is
 genuinely tested rather than just the underlying free functions.

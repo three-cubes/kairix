@@ -349,7 +349,7 @@ def test_suite_generator_process_sampled_docs_runs_pipeline_on_mock_docs() -> No
     )
     suite_gen = SuiteGenerator(query_generator=qg, llm_judge=jg, retriever=retriever)
 
-    accepted, rejected, failed, counts = suite_gen.process_sampled_docs(
+    accepted, _rejected, _failed, counts = suite_gen.process_sampled_docs(
         mock_docs,
         5,
         ["procedural"],
@@ -425,7 +425,7 @@ def test_suite_generator_falls_back_to_free_retrieve_when_no_retriever_injected(
     suite_gen = SuiteGenerator(query_generator=qg, llm_judge=jg, retriever=None)
     docs = [{"path": "docs/x.md", "title": "Doc", "collection": "shared", "body": "x" * 500}]
 
-    accepted, rejected, failed, _ = suite_gen.process_sampled_docs(docs, 5, ["recall"], api_key="", endpoint="")
+    accepted, _rejected, failed, _ = suite_gen.process_sampled_docs(docs, 5, ["recall"], api_key="", endpoint="")
     assert accepted == []
     assert failed == 1
 
@@ -440,7 +440,7 @@ def test_suite_generator_falls_back_to_free_generate_queries_when_no_query_gener
     suite_gen = SuiteGenerator(query_generator=None)
     docs = [{"path": "docs/x.md", "title": "Doc", "collection": "shared", "body": "x" * 500}]
 
-    accepted, rejected, failed, _ = suite_gen.process_sampled_docs(docs, 5, ["recall"], api_key="", endpoint="")
+    accepted, _rejected, _failed, _ = suite_gen.process_sampled_docs(docs, 5, ["recall"], api_key="", endpoint="")
     assert accepted == []
 
 
