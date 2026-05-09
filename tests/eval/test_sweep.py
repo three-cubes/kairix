@@ -182,6 +182,49 @@ class TestSweepBm25Params:
         assert report.best is None
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "bad_weights",
+        [
+            (float("nan"), 1.0, 1.0),
+            (1.0, float("inf"), 1.0),
+            (1.0, 1.0, float("-inf")),
+            (0.0, 1.0, 1.0),
+            (1.0, -1.0, 1.0),
+        ],
+    )
+    def test_non_finite_or_non_positive_weights_rejected_at_entry(self, tmp_path, bad_weights):
+        """Non-finite or non-positive weights raise ValueError before any SQL runs.
+
+        Closes #143 Phase 0b: ``ORDER BY bm25(documents_fts, {float(w)}, ...)``
+        previously injected nan/inf into SQLite's bm25() with no guard. The
+        validator now refuses non-finite or non-positive weights up front so
+        the sweep never produces nondeterministic ordering.
+        """
+        import yaml
+
+        from kairix.quality.eval.sweep import sweep_bm25_params
+
+        # Suite with at least one ndcg case so the validator is reached
+        # (empty/no-ndcg suites short-circuit before validation).
+        suite = {
+            "meta": {"version": "1.0"},
+            "cases": [
+                {
+                    "query": "test",
+                    "category": "recall",
+                    "score_method": "ndcg",
+                    "gold_titles": [{"title": "x", "relevance": 2}],
+                }
+            ],
+        }
+        suite_path = tmp_path / "suite.yaml"
+        with open(suite_path, "w") as f:
+            yaml.dump(suite, f)
+
+        with pytest.raises(ValueError, match="must be finite and positive"):
+            sweep_bm25_params(suite_path, weight_configs=[bad_weights])
+
+    @pytest.mark.unit
     def test_no_ndcg_cases_returns_empty_report(self, tmp_path):
         """Sweep returns empty report when no ndcg-scored cases exist."""
         import yaml
