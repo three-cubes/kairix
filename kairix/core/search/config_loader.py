@@ -101,9 +101,11 @@ def _load_cached(config_path: Path | None) -> RetrievalConfig:
     """Load and cache RetrievalConfig from path. Returns defaults if path is None."""
     if config_path is None:
         return RetrievalConfig.defaults()
+    # PyYAML is a hard dependency in pyproject.toml; the ImportError fallback
+    # only fires in production builds where the optional extras are stripped.
     try:
         import yaml  # type: ignore[import-untyped]
-    except ImportError:
+    except ImportError:  # pragma: no cover
         logger.warning("config_loader: PyYAML not installed — using defaults")
         return RetrievalConfig.defaults()
 
