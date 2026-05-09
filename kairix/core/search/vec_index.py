@@ -95,9 +95,12 @@ class VectorIndex:
 
         self._index = Index.restore(str(self._index_path), view=True)
         if self._meta_path.exists():
-            meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
-            self._key_to_hash_seq = {int(k): v for k, v in meta["keys"].items()}
-            self._next_key = meta.get("next_key", max(self._key_to_hash_seq.keys(), default=-1) + 1)
+            try:
+                meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
+                self._key_to_hash_seq = {int(k): v for k, v in meta["keys"].items()}
+                self._next_key = meta.get("next_key", max(self._key_to_hash_seq.keys(), default=-1) + 1)
+            except (json.JSONDecodeError, OSError, KeyError) as e:
+                logger.warning("vec_index: meta unreadable — index loaded without key mapping (%s)", e)
         return len(self._index)
 
     def _delete_index_files(self) -> None:
@@ -268,8 +271,14 @@ class VectorIndex:
 _VECTOR_INDEX: Any = None
 
 
-def get_vector_index() -> Any:
-    """Lazily load the usearch VectorIndex singleton from the canonical paths.
+def get_vector_index(db_path: Path | None = None) -> Any:
+    """Lazily load the usearch VectorIndex singleton.
+
+    Args:
+        db_path: SQLite index path. The vector files (``vectors.usearch``
+                 and ``vectors.meta.json``) are expected in the same
+                 directory. Defaults to ``kairix.paths.db_path()`` for
+                 production use; tests pass an explicit path.
 
     Returns the loaded index, or None if the index is empty/missing/unloadable.
     Subsequent calls return the cached instance.
@@ -279,12 +288,13 @@ def get_vector_index() -> Any:
     if _VECTOR_INDEX is not None:
         return _VECTOR_INDEX
     try:
-        from kairix.paths import db_path as get_db_path
+        if db_path is None:
+            from kairix.paths import db_path as _resolve_db_path
 
-        db_p = get_db_path()
-        index_path = db_p.parent / "vectors.usearch"
-        meta_path = db_p.parent / "vectors.meta.json"
-        idx = VectorIndex(index_path=index_path, meta_path=meta_path, db_path=db_p)
+            db_path = _resolve_db_path()
+        index_path = db_path.parent / "vectors.usearch"
+        meta_path = db_path.parent / "vectors.meta.json"
+        idx = VectorIndex(index_path=index_path, meta_path=meta_path, db_path=db_path)
         count = idx.load()
         if count > 0:
             logger.info("vec_index: loaded usearch index (%d vectors)", count)
@@ -295,3 +305,9 @@ def get_vector_index() -> Any:
     except Exception as e:
         logger.warning("vec_index: failed to load usearch index — %s", e)
         return None
+
+
+def reset_vector_index_singleton() -> None:
+    """Clear the cached singleton. For test isolation."""
+    global _VECTOR_INDEX
+    _VECTOR_INDEX = None
