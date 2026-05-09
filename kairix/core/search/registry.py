@@ -346,6 +346,14 @@ def parse_agent_registry(data: dict, *, default_pattern: str = "{agent}-memory")
                 )
             else:
                 legacy_name = candidate
+                logger.warning(
+                    "agent %r: 'collection: %s' is deprecated — prefer the multi-path "
+                    "schema 'paths: [%s]'. The legacy field still parses but will be "
+                    "removed in a future release. (#115)",
+                    name,
+                    candidate,
+                    write_path or "/data/workspaces/" + str(name),
+                )
         elif not paths:
             # Fully-default agent: the legacy default_pattern still applies as a
             # label so existing benchmarks pinned to ``{agent}-memory`` keep working.

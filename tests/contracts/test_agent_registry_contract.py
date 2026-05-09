@@ -276,6 +276,42 @@ def test_parse_round_trips_read_only_flag() -> None:
 
 
 # ---------------------------------------------------------------------------
+# parse_agent_registry — legacy ``collection:`` emits a deprecation warning.
+# Documented (#115): "Schema (legacy, still parses with a deprecation warning)".
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.contract
+def test_parse_warns_when_legacy_collection_field_used(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A YAML using the deprecated ``collection:`` form parses correctly but
+    emits a deprecation warning naming the agent and the suggested
+    multi-path replacement.
+    """
+    raw = {
+        "agents": [
+            {
+                "name": "alpha",
+                "collection": "alpha-memory",
+                "write_path": "agents/alpha",
+            }
+        ]
+    }
+    with caplog.at_level(logging.WARNING):
+        registry = parse_agent_registry(raw)
+
+    # Behaviour preserved: legacy override still wins on the first synthetic name.
+    assert registry.collection_for("alpha") == "alpha-memory"
+
+    # Deprecation warning emitted naming the agent + the deprecated field.
+    deprecation_warnings = [r for r in caplog.records if "alpha" in r.message and "deprecated" in r.message]
+    assert deprecation_warnings, (
+        f"expected a deprecation warning naming agent 'alpha'; got: {[r.message for r in caplog.records]}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # parse_agent_registry — multi-path schema round-trip.
 # Documented schema:
 #   agents:
