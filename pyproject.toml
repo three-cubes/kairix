@@ -83,18 +83,21 @@ source = ["kairix"]
 relative_files = true
 omit = [
     "tests/*",
-    # CLI entry points are thin argparse wrappers — tested via integration, not unit coverage
-    "kairix/cli.py",
-    "kairix/**/cli.py",
-    # External I/O adapters — Azure API; behaviour mocked in unit tests
+    # External I/O adapter — Azure API client; uncovered branches are
+    # error paths only reachable with a live Azure endpoint.
     "kairix/_azure.py",
-    # Eval orchestration — requires live DB + Azure for end-to-end sweep
-    "kairix/quality/eval/hybrid_sweep.py",
-    "kairix/quality/eval/sweep.py",
-    # Neo4j graph layer — requires live Neo4j instance; not available in CI
-    "kairix/knowledge/graph/*",
-    # Pipeline orchestrators — thin wrappers over individually-tested modules
-    "kairix/core/temporal/index.py",
+    # Neo4j driver wrapper — connection/session paths require a live
+    # Neo4j instance; the testable surface (FakeNeo4jClient-driven repo
+    # methods) has its own coverage in kairix.knowledge.graph.repository.
+    "kairix/knowledge/graph/client.py",
+    # CLIs without BDD or integration coverage yet — flagged for backfill.
+    # Each will move out of this list when tests land.
+    "kairix/knowledge/contradict/cli.py",
+    "kairix/knowledge/reflib/cli.py",
+    "kairix/platform/onboard/cli.py",
+    "kairix/quality/benchmark/cli.py",
+    # Wikilinks audit reporter — 0% coverage today, no public callers in
+    # tests; flagged for backfill or removal.
     "kairix/knowledge/wikilinks/audit.py",
 ]
 
