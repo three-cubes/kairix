@@ -89,22 +89,25 @@ def kairix_db(tmp_path: Path) -> Path:
 
 
 @pytest.mark.integration
-def test_bm25_search_with_weights_returns_results_against_real_fts(kairix_db: Path) -> None:
-    """BM25 search must return the docker-deployment-guide for the query 'docker deployment'."""
+def test_bm25_pool_returns_seeded_doc_against_real_fts(kairix_db: Path) -> None:
+    """``GoldBuilder.pool`` with a BM25 system must surface the seeded doc for 'docker deployment'."""
     builder = GoldBuilder()
-    results = builder._bm25_search_with_weights(
+    candidates = builder.pool(
         "docker deployment",
-        weights=(1.0, 1.0, 1.0),
+        systems=["bm25-equal"],
         collections=None,
-        limit=5,
+        limit_per_system=5,
     )
-    paths = [r["path"] for r in results]
+    paths = [c.path for c in candidates]
     assert "/eng/docker-deployment-guide.md" in paths, (
-        f"BM25 search did not return the docker-deployment-guide; got: {paths}"
+        f"BM25 pool did not return the docker-deployment-guide; got: {paths}"
     )
-    # Result rows expose the dict keys the pool code consumes.
-    first = results[0]
-    assert {"path", "title", "snippet", "collection"}.issubset(first.keys())
+    # PooledCandidate exposes the same fields downstream consumers read.
+    first = candidates[0]
+    assert first.path
+    assert first.title is not None
+    assert first.snippet is not None
+    assert first.collection
 
 
 @pytest.mark.integration

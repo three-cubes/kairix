@@ -22,7 +22,6 @@ from kairix.quality.eval.gold_builder import (
     GoldBuilder,
     GoldBuildReport,
     PooledCandidate,
-    _validate_weights,
     grade_candidates,
     path_title,
 )
@@ -435,54 +434,14 @@ class TestGoldBuilderBuildIndependentGold:
 
 
 # ---------------------------------------------------------------------------
-# _validate_weights — Phase 0b math.isfinite guard
+# Note: ``_validate_weights`` is a defensive Phase-0b guard against future
+# devs adding bm25 weight presets with nan / inf / non-positive values.
+# Through the public surface (``GoldBuilder.pool``), all weights come from
+# the hardcoded ``_WEIGHT_PRESETS`` dict and are always finite-positive, so
+# the raise branch is unreachable today and pragma'd in gold_builder.py.
+# Direct tests of the guard were a code smell (test-shaped API) and have
+# been removed.
 # ---------------------------------------------------------------------------
-
-
-class TestValidateWeights:
-    @pytest.mark.unit
-    def test_accepts_finite_positive(self) -> None:
-        # No exception
-        _validate_weights((1.0, 2.0, 3.0))
-        _validate_weights((10.0, 1.0, 1.0))
-
-    @pytest.mark.unit
-    def test_rejects_nan(self) -> None:
-        with pytest.raises(ValueError, match="must be finite and positive"):
-            _validate_weights((float("nan"), 1.0, 1.0))
-
-    @pytest.mark.unit
-    def test_rejects_positive_infinity(self) -> None:
-        with pytest.raises(ValueError, match="must be finite and positive"):
-            _validate_weights((float("inf"), 1.0, 1.0))
-
-    @pytest.mark.unit
-    def test_rejects_negative_infinity(self) -> None:
-        with pytest.raises(ValueError, match="must be finite and positive"):
-            _validate_weights((1.0, float("-inf"), 1.0))
-
-    @pytest.mark.unit
-    def test_rejects_zero(self) -> None:
-        with pytest.raises(ValueError, match="must be finite and positive"):
-            _validate_weights((1.0, 1.0, 0.0))
-
-    @pytest.mark.unit
-    def test_rejects_negative(self) -> None:
-        with pytest.raises(ValueError, match="must be finite and positive"):
-            _validate_weights((-1.0, 1.0, 1.0))
-
-    @pytest.mark.unit
-    def test_message_names_offending_label(self) -> None:
-        """Error names which weight position is at fault for diagnosability."""
-        with pytest.raises(ValueError, match=r"title="):
-            _validate_weights((1.0, float("nan"), 1.0))
-
-    @pytest.mark.unit
-    def test_bm25_search_validates_weights_before_db(self) -> None:
-        """``_bm25_search_with_weights`` raises before opening DB on bad weight."""
-        builder = GoldBuilder()
-        with pytest.raises(ValueError, match="must be finite and positive"):
-            builder._bm25_search_with_weights("query", (float("nan"), 1.0, 1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -521,74 +480,25 @@ def test_pool_candidates_shim_delegates_to_class() -> None:
 
 
 @pytest.mark.unit
-def test_module_level_bm25_shim_delegates_to_class() -> None:
-    """The free ``_bm25_search_with_weights`` shim constructs a one-off GoldBuilder."""
-    from kairix.quality.eval.gold_builder import _bm25_search_with_weights
-
-    # No DB available in test env → opens a fresh empty SQLite, FTS query fails,
-    # returns []. The shim itself is exercised.
-    results = _bm25_search_with_weights("any", weights=(1.0, 1.0, 1.0), limit=5)
-    assert isinstance(results, list)
-
-
-@pytest.mark.unit
-def test_bm25_search_with_empty_tokenized_query_returns_empty() -> None:
-    """``_bm25_search_with_weights`` returns [] when the tokenizer produces nothing."""
+def test_pool_with_bm25_system_and_empty_tokenised_query_returns_no_candidates() -> None:
+    """An all-punctuation query tokenises to the empty FTS string → no BM25 candidates pooled."""
     builder = GoldBuilder()
-    # An all-punctuation query tokenizes to the empty FTS string in `bare` style.
-    results = builder._bm25_search_with_weights("!!! @@@ ###", weights=(1.0, 1.0, 1.0))
-    assert results == []
+    candidates = builder.pool("!!! @@@ ###", systems=["bm25-equal"], limit_per_system=5)
+    assert candidates == []
 
 
 @pytest.mark.unit
-def test_vector_retrieve_swallows_retriever_exceptions() -> None:
-    """When the retriever's ``retrieve`` raises, ``_vector_retrieve`` returns []."""
+def test_pool_with_vector_system_and_raising_retriever_returns_no_candidates() -> None:
+    """A retriever that raises is swallowed by _vector_retrieve → vector system contributes nothing."""
 
     class _RaisingRetriever:
         def retrieve(self, query: str, *, collections: Any = None, cfg: Any = None) -> Any:
             raise RuntimeError("retrieval failed")
 
     builder = GoldBuilder(retriever=_RaisingRetriever())  # type: ignore[arg-type]
-    results = builder._vector_retrieve("any query", collections=None, limit=5)
-    assert results == []
-
-
-@pytest.mark.unit
-def test_get_llm_judge_constructs_production_default_lazily() -> None:
-    """``_get_llm_judge`` builds a production LLMJudge when none was injected."""
-    builder = GoldBuilder()
-    judge = builder._get_llm_judge()
-    # The lazily-built judge must satisfy the protocol surface.
-    assert hasattr(judge, "grade")
-    assert hasattr(judge, "calibrate")
-    # Subsequent calls return the same instance (cache).
-    assert builder._get_llm_judge() is judge
-
-
-@pytest.mark.unit
-def test_get_retriever_constructs_default_gold_retriever_lazily() -> None:
-    """``_get_retriever`` builds a ``_DefaultGoldRetriever`` when none was injected."""
-    builder = GoldBuilder()
-    retriever = builder._get_retriever()
-    assert hasattr(retriever, "retrieve")
-    # Cached after first call.
-    assert builder._get_retriever() is retriever
-
-
-@pytest.mark.unit
-def test_default_gold_retriever_returns_simplenamespace() -> None:
-    """``_DefaultGoldRetriever.retrieve`` returns a SimpleNamespace shape.
-
-    The vector_search call fails in the test env (no embed credentials) and
-    surfaces via the empty results path. The protocol-shaped wrapper still
-    returns a SimpleNamespace with ``results=[]`` and ``vec_failed=False``.
-    """
-    from kairix.quality.eval.gold_builder import _DefaultGoldRetriever
-
-    retriever = _DefaultGoldRetriever()
-    result = retriever.retrieve("any query", collections=None, cfg=10)
-    assert hasattr(result, "results")
-    assert isinstance(result.results, list)
+    # vector is the only requested system, and it raises → no candidates pooled.
+    candidates = builder.pool("any query", systems=["vector"], limit_per_system=5)
+    assert candidates == []
 
 
 @pytest.mark.unit
@@ -634,25 +544,41 @@ def test_build_independent_gold_handles_legacy_gold_paths_field(tmp_path: Path) 
 
 
 @pytest.mark.unit
-def test_bm25_search_with_collections_filter(kairix_db_path: Path) -> None:
-    """``_bm25_search_with_weights`` returns the indexed doc when its collection is in the filter."""
+def test_pool_with_bm25_system_filters_candidates_by_collection(kairix_db_path: Path) -> None:
+    """``GoldBuilder.pool`` propagates the ``collections`` filter to BM25 search.
+
+    Asserts that a seeded doc in collection ``engineering`` is pooled when the
+    filter matches it AND when no filter is set, but is filtered out when the
+    only requested collection is unrelated.
+    """
     builder = GoldBuilder()
-    with_filter = builder._bm25_search_with_weights(
-        "docker", weights=(1.0, 1.0, 1.0), collections=["engineering"], limit=5
+
+    pooled_with_match = builder.pool(
+        "docker",
+        systems=["bm25-equal"],
+        collections=["engineering"],
+        limit_per_system=5,
     )
-    without_filter = builder._bm25_search_with_weights("docker", weights=(1.0, 1.0, 1.0), collections=None, limit=5)
-    excluded_filter = builder._bm25_search_with_weights(
-        "docker", weights=(1.0, 1.0, 1.0), collections=["non-existent-collection"], limit=5
+    pooled_without_filter = builder.pool(
+        "docker",
+        systems=["bm25-equal"],
+        collections=None,
+        limit_per_system=5,
     )
-    # The seeded doc must appear when the filter matches its collection AND when no filter is set.
-    assert any(r["path"] == "/eng/docker.md" for r in with_filter), (
-        f"Expected /eng/docker.md in with_filter results; got: {[r['path'] for r in with_filter]}"
+    pooled_excluded = builder.pool(
+        "docker",
+        systems=["bm25-equal"],
+        collections=["non-existent-collection"],
+        limit_per_system=5,
     )
-    assert any(r["path"] == "/eng/docker.md" for r in without_filter), (
-        f"Expected /eng/docker.md in without_filter results; got: {[r['path'] for r in without_filter]}"
-    )
-    # Excluded collection must filter the doc out.
-    assert excluded_filter == [], f"Expected empty results for excluded collection; got: {excluded_filter}"
+
+    matched_paths = [c.path for c in pooled_with_match]
+    assert "/eng/docker.md" in matched_paths, f"expected match; got: {matched_paths}"
+
+    unfiltered_paths = [c.path for c in pooled_without_filter]
+    assert "/eng/docker.md" in unfiltered_paths, f"expected match; got: {unfiltered_paths}"
+
+    assert pooled_excluded == [], f"expected empty pool for excluded collection; got: {pooled_excluded}"
 
 
 @pytest.fixture

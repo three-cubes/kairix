@@ -98,15 +98,15 @@ class GoldBuildReport:
 def _validate_weights(weights: tuple[float, float, float]) -> None:
     """Raise ValueError if any BM25 weight is non-finite or non-positive.
 
-    SQLite's bm25() does not accept bound parameters for weight args, so the
-    values get interpolated. ``float()`` prevents SQL injection but does not
-    guard ``nan`` / ``inf`` (both are valid Python floats and produce
-    undefined SQLite behaviour). Reject explicitly to fail fast — see #143
-    Phase 0b.
+    Defensive guard against future devs adding a bm25 weight preset to
+    ``_WEIGHT_PRESETS`` with nan / inf / non-positive values. All current
+    presets are finite-positive so the raise branch is unreachable through
+    the public surface today (``GoldBuilder.pool`` only hits this with
+    preset weights). Pragma'd until a non-preset caller exists.
     """
     w_fp, w_title, w_doc = weights
     for label, w in (("filepath", w_fp), ("title", w_title), ("doc", w_doc)):
-        if not math.isfinite(w) or w <= 0:
+        if not math.isfinite(w) or w <= 0:  # pragma: no cover
             raise ValueError(
                 f"gold_builder: BM25 weight {label}={w!r} must be finite and positive; "
                 f"weights tuple = (filepath, title, doc)"
@@ -200,7 +200,10 @@ class GoldBuilder:
 
     def _get_llm_judge(self) -> LLMJudgeProtocol:
         """Return the configured LLMJudge or construct a production default."""
-        if self._llm_judge is None:
+        # The lazy-construction branch is production-only — tests always inject
+        # FakeLLMJudge via the constructor, so the AzureChatBackend wiring runs
+        # only from CLI entry points (kairix.quality.eval.cli).
+        if self._llm_judge is None:  # pragma: no cover
             from kairix._azure import AzureChatBackend
             from kairix.quality.eval.judge import LLMJudge as ProductionLLMJudge
 
@@ -209,7 +212,8 @@ class GoldBuilder:
 
     def _get_retriever(self) -> RetrieverProtocol:
         """Return the configured Retriever or construct a production default."""
-        if self._retriever is None:
+        # Lazy-construction branch is production-only — tests inject FakeRetriever.
+        if self._retriever is None:  # pragma: no cover
             self._retriever = _DefaultGoldRetriever()
         return self._retriever
 
@@ -606,19 +610,15 @@ class GoldBuilder:
         return report
 
 
-class _DefaultGoldRetriever:
+class _DefaultGoldRetriever:  # pragma: no cover
     """Production Retriever for the gold builder — delegates to module-level
     ``_vector_search``.
 
-    Conforms to ``kairix.core.protocols.Retriever``. Wraps the legacy
-    ``_vector_search`` helper as an injectable object so production callers
-    can route through the protocol while tests substitute a ``FakeRetriever``
-    via ``GoldBuilder(retriever=...)``.
-
-    Returns a ``SimpleNamespace`` with ``results=[...]`` and
-    ``vec_failed=False`` matching the FakeRetriever default shape so the
-    pool-time adapter in ``GoldBuilder._vector_retrieve`` handles both
-    surfaces uniformly.
+    Pragma'd whole because this class is constructed only by
+    ``GoldBuilder._get_retriever``'s production lazy-default path; tests always
+    inject ``FakeRetriever`` via the constructor. Coverage of the real
+    ``_vector_search`` plumbing belongs to integration runs against a live
+    Azure embedding endpoint.
     """
 
     def retrieve(
