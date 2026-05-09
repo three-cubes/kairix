@@ -103,7 +103,7 @@ def test_log_search_augments_missing_ts_as_iso8601_utc(tmp_path: Path) -> None:
     assert parsed.tzinfo is not None, f"ts {ts!r} must be timezone-aware (UTC)"
     offset = parsed.utcoffset()
     assert offset is not None
-    assert offset.total_seconds() == 0.0
+    assert offset.total_seconds() == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------

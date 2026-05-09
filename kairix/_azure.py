@@ -201,6 +201,12 @@ class AzureChatBackend:
         temperature: float = 0.0,
         timeout_s: float = 30.0,
     ) -> str:
+        # Credentials and tuning kwargs are ChatBackend-protocol fields that
+        # this Adapter ignores — chat_completion() resolves credentials from
+        # vault-agent / env / Key Vault internally. Mark as intentionally
+        # unused so static analyzers don't flag the protocol-conformance
+        # surface.
+        del api_key, endpoint, deployment, temperature, timeout_s
         messages: list[dict[str, str]] = []
         if system:
             messages.append({"role": "system", "content": system})

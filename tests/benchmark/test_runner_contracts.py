@@ -57,7 +57,7 @@ def _retrieve_fn_returning(paths: list[str]):
 @pytest.mark.unit
 def test_compute_weighted_total_does_not_exceed_one_for_perfect_v10_suite() -> None:
     """v1.0 suite + perfect per-category scores → weighted_total ≤ 1.0."""
-    perfect = {cat: 1.0 for cat in CATEGORY_WEIGHTS}
+    perfect = dict.fromkeys(CATEGORY_WEIGHTS, 1.0)
     total = compute_weighted_total(perfect, "1.0")
     assert total <= 1.0, f"weighted_total exceeds 1.0 cap: got {total}"
 
@@ -70,7 +70,7 @@ def test_compute_weighted_total_does_not_exceed_one_for_perfect_v11_with_classif
     still sum to 1.0 — otherwise a perfect-scoring suite reports > 1.0,
     breaking score_tier and the phase-gate comparisons.
     """
-    perfect = {cat: 1.0 for cat in CATEGORY_WEIGHTS}
+    perfect = dict.fromkeys(CATEGORY_WEIGHTS, 1.0)
     perfect["classification"] = 1.0  # ensure the > 0 branch fires
     total = compute_weighted_total(perfect, "1.1")
     assert total <= 1.0, (
@@ -96,7 +96,7 @@ def test_compute_weighted_total_v11_with_zero_classification_does_not_apply_adju
     otherwise a v1.1 suite with no classification cases would unexpectedly
     rebalance temporal weight.
     """
-    scores = {cat: 1.0 for cat in CATEGORY_WEIGHTS}
+    scores = dict.fromkeys(CATEGORY_WEIGHTS, 1.0)
     scores["classification"] = 0.0  # zero classification → no Phase 3 adjustment
     v10_total = compute_weighted_total(scores, "1.0")
     v11_total = compute_weighted_total(scores, "1.1")
@@ -290,10 +290,10 @@ def test_format_interpretation_embeds_weighted_total_in_output() -> None:
         meta={"system": "hybrid"},
         summary={
             "weighted_total": 0.762,
-            "category_scores": {cat: 0.7 for cat in CATEGORY_WEIGHTS},
+            "category_scores": dict.fromkeys(CATEGORY_WEIGHTS, 0.7),
             "gates": {"phase1": True, "phase2": True, "phase3": True},
         },
-        diagnostics={"category_counts": {cat: 1 for cat in CATEGORY_WEIGHTS}},
+        diagnostics={"category_counts": dict.fromkeys(CATEGORY_WEIGHTS, 1)},
         cases=[],
     )
     output = format_interpretation(result)

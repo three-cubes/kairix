@@ -274,7 +274,7 @@ def _result_with_category_score(category: str, score: float) -> BenchmarkResult:
     return BenchmarkResult(
         meta={"suite_name": "t", "system": "hybrid", "date": "2026-05-09", "n_cases": 6},
         summary={"weighted_total": 0.7, "category_scores": cat_scores, "gates": {"phase1": True}},
-        diagnostics={"category_counts": {c: 1 for c in cat_scores}},
+        diagnostics={"category_counts": dict.fromkeys(cat_scores, 1)},
         cases=[],
     )
 
@@ -799,7 +799,7 @@ def test_score_case_dispatches_classification_viaclassification_score() -> None:
     score, detail = score_case(case, paths=[], snippets=[], retrieval_meta={})
     # In test env _classification_score's lazy default fails to import → returns 0.0.
     # The detail dict is empty for non-NDCG dispatches.
-    assert score == 0.0
+    assert score == pytest.approx(0.0)
     assert detail == {}
 
 

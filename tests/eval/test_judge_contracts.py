@@ -80,7 +80,7 @@ def test_grade_returns_all_zero_grades_when_backend_raises() -> None:
     backend = FakeChatBackend(raise_on_call=RuntimeError("network down"))
     judge = LLMJudge(chat_backend=backend)
     result = judge.grade(_QUERY, _CANDIDATES, api_key="k", endpoint="e", shuffle=False)
-    assert result.grades == {stem: 0 for stem, _ in _CANDIDATES}
+    assert result.grades == dict.fromkeys((stem for stem, _ in _CANDIDATES), 0)
 
 
 @pytest.mark.unit
@@ -92,7 +92,7 @@ def test_grade_returns_all_zero_grades_when_credentials_are_empty() -> None:
     judge = LLMJudge(chat_backend=backend)
     # No api_key or endpoint passed → internal ValueError → caught → all-zero.
     result = judge.grade(_QUERY, _CANDIDATES, api_key="", endpoint="")
-    assert result.grades == {stem: 0 for stem, _ in _CANDIDATES}
+    assert result.grades == dict.fromkeys((stem for stem, _ in _CANDIDATES), 0)
     # Backend was not called (the credential check fires before .complete()).
     assert backend.calls == []
 

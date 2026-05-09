@@ -20,6 +20,9 @@ from kairix.core.search.scope import Scope
 
 pytestmark = pytest.mark.bdd
 
+# Default markdown glob shared by every test fixture in this module.
+_MD_GLOB = "**/*.md"
+
 
 @pytest.fixture
 def state() -> dict:
@@ -34,7 +37,7 @@ def yaml_loaded(state: dict) -> None:
 
 @given(parsers.parse('the YAML declares a collection "{name}" with no in_default field'))
 def collection_without_flag(state: dict, name: str) -> None:
-    state["yaml_collections"].append({"name": name, "path": name, "glob": "**/*.md"})
+    state["yaml_collections"].append({"name": name, "path": name, "glob": _MD_GLOB})
 
 
 @given(parsers.parse('the YAML declares a collection "{name}" with in_default {flag:S}'))
@@ -42,13 +45,13 @@ def collection_with_flag(state: dict, name: str, flag: str) -> None:
     bool_value = {"true": True, "false": False}.get(flag.lower())
     if bool_value is None:
         raise ValueError(f"Unrecognised in_default flag {flag!r} in scenario data")
-    state["yaml_collections"].append({"name": name, "path": name, "glob": "**/*.md", "in_default": bool_value})
+    state["yaml_collections"].append({"name": name, "path": name, "glob": _MD_GLOB, "in_default": bool_value})
 
 
 @given(parsers.parse('the YAML declares a collection "{name}" with in_default value "{raw}"'))
 def collection_with_raw_value(state: dict, name: str, raw: str) -> None:
     """Used for non-boolean inputs that should be rejected by the parser."""
-    state["yaml_collections"].append({"name": name, "path": name, "glob": "**/*.md", "in_default": raw})
+    state["yaml_collections"].append({"name": name, "path": name, "glob": _MD_GLOB, "in_default": raw})
 
 
 @given(parsers.parse('the YAML declares an agent "{name}"'))

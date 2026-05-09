@@ -310,6 +310,10 @@ class FakePlannerGraphClient:
         return list(self._entities_by_word.get(name.lower(), []))
 
     def related_entities(self, entity_id: str, max_hops: int = 1) -> list[dict[str, Any]]:
+        # max_hops is part of the protocol surface but the fake returns its
+        # configured related-entities list verbatim; tests that need hop-aware
+        # behaviour configure the fake's data accordingly.
+        del max_hops
         self.related_calls.append(entity_id)
         if self._related_raises is not None:
             raise self._related_raises
@@ -643,15 +647,16 @@ class FakeSearchLogger:
         self.events: list[dict[str, Any]] = []
         self._raises = raises
 
-    def log_search(self, event: dict[str, Any]) -> None:
+    def _record(self, event: dict[str, Any]) -> None:
         if self._raises is not None:
             raise self._raises
         self.events.append(event)
 
+    def log_search(self, event: dict[str, Any]) -> None:
+        self._record(event)
+
     def log_query(self, event: dict[str, Any]) -> None:
-        if self._raises is not None:
-            raise self._raises
-        self.events.append(event)
+        self._record(event)
 
 
 class FakeCollectionResolver:
@@ -807,6 +812,9 @@ class FakeLLMJudge:
         *,
         runs: int = 1,
     ) -> Any:
+        # ``runs`` is part of the LLMJudge protocol; the fake returns the
+        # configured grades regardless of run count (deterministic by design).
+        del runs
         self.grade_calls.append((query, candidates))
         configured = self._grades_by_query.get(query, {})
         # Build a minimal namespace mimicking JudgeResult — judge_model / shuffle_order

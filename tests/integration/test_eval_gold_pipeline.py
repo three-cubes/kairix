@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -53,7 +54,7 @@ def _seed_db(db_path: Path, docs: list[tuple[str, str, str, str]]) -> None:
 
 
 @pytest.fixture
-def kairix_db(tmp_path: Path) -> Path:
+def kairix_db(tmp_path: Path) -> Iterator[Path]:
     """Production-schema SQLite at a stable path; KAIRIX_DB_PATH points here."""
     db_path = tmp_path / "kairix.sqlite"
     _seed_db(

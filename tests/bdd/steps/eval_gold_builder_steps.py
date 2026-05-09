@@ -17,6 +17,12 @@ from kairix.core.db.schema import create_schema
 from kairix.quality.eval.gold_builder import GoldBuilder
 from tests.fakes import FakeLLMJudge, FakeRetriever
 
+# Test fixture document constants — used across multiple scenario steps.
+_DOCKER_PATH = "/eng/docker-deployment-guide.md"
+_DOCKER_TITLE = "Docker Deployment Guide"
+_CI_PATH = "/eng/ci-cd-pipeline.md"
+_CI_TITLE = "CI CD Pipeline"
+
 _state: dict[str, Any] = {}
 
 
@@ -33,14 +39,14 @@ def _seed_db(db_path: Path) -> None:
     cur = db.cursor()
     docs = [
         (
-            "/eng/docker-deployment-guide.md",
-            "Docker Deployment Guide",
+            _DOCKER_PATH,
+            _DOCKER_TITLE,
             "engineering",
             "Deploy Docker containers with build, tag, push and run commands. " * 10,
         ),
         (
-            "/eng/ci-cd-pipeline.md",
-            "CI CD Pipeline",
+            _CI_PATH,
+            _CI_TITLE,
             "engineering",
             "GitHub Actions runs tests on every pull request before merging to main. " * 10,
         ),
@@ -74,8 +80,8 @@ def retriever_returns_one_doc() -> None:
             "docker": SimpleNamespace(
                 results=[
                     {
-                        "path": "/eng/docker-deployment-guide.md",
-                        "title": "Docker Deployment Guide",
+                        "path": _DOCKER_PATH,
+                        "title": _DOCKER_TITLE,
                         "snippet": "Deploy Docker containers...",
                         "collection": "engineering",
                     }
@@ -95,8 +101,8 @@ def retriever_overlaps_bm25() -> None:
             "docker": SimpleNamespace(
                 results=[
                     {
-                        "path": "/eng/docker-deployment-guide.md",
-                        "title": "Docker Deployment Guide",
+                        "path": _DOCKER_PATH,
+                        "title": _DOCKER_TITLE,
                         "snippet": "Deploy",
                         "collection": "engineering",
                     }
@@ -138,14 +144,14 @@ def retriever_returns_both_docs() -> None:
             _state["query"]: SimpleNamespace(
                 results=[
                     {
-                        "path": "/eng/docker-deployment-guide.md",
-                        "title": "Docker Deployment Guide",
+                        "path": _DOCKER_PATH,
+                        "title": _DOCKER_TITLE,
                         "snippet": "Deploy",
                         "collection": "engineering",
                     },
                     {
-                        "path": "/eng/ci-cd-pipeline.md",
-                        "title": "CI CD Pipeline",
+                        "path": _CI_PATH,
+                        "title": _CI_TITLE,
                         "snippet": "GitHub Actions",
                         "collection": "engineering",
                     },
@@ -207,7 +213,7 @@ def operator_builds_gold_suite_no_creds() -> None:
 @then("the pool contains the retrieved document")
 def pool_contains_retrieved_doc() -> None:
     paths = [c.path for c in _state["candidates"]]
-    assert "/eng/docker-deployment-guide.md" in paths
+    assert _DOCKER_PATH in paths
 
 
 @then("each pooled candidate records the systems that retrieved it")

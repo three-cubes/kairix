@@ -159,7 +159,7 @@ def test_returns_empty_result_when_suite_has_zero_cases(tmp_path: Path) -> None:
     )
 
     assert result.n_cases == 0
-    assert result.weighted_ndcg == 0.0
+    assert result.weighted_ndcg == pytest.approx(0.0)
     assert result.regression is False
     assert runner_calls == []
 
@@ -300,7 +300,7 @@ def test_returns_empty_result_when_suite_loader_raises(tmp_path: Path) -> None:
 
     assert isinstance(result, MonitorResult)
     assert result.regression is False
-    assert result.weighted_ndcg == 0.0
+    assert result.weighted_ndcg == pytest.approx(0.0)
 
 
 @pytest.mark.unit

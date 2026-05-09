@@ -13,6 +13,7 @@ schema, and a real usearch index file.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -60,7 +61,7 @@ def _normed(rng: np.random.Generator, dim: int) -> np.ndarray:
 
 
 @pytest.fixture(autouse=True)
-def _reset_singleton() -> None:
+def _reset_singleton() -> Iterator[None]:
     """Each integration test starts with a fresh singleton."""
     reset_vector_index_singleton()
     yield

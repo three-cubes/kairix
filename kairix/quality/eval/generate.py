@@ -477,7 +477,12 @@ def _retrieve(query: str, intent: str, agent: str = "shape") -> tuple[list[str],
     """
     Run hybrid search and return (paths, snippets).
     Returns ([], []) on any failure.
+
+    ``intent`` is part of the historical signature shared with the sibling
+    helpers in hybrid_sweep / runner — kept for call-site uniformity even
+    though hybrid retrieval doesn't dispatch by intent.
     """
+    del intent
     try:
         from kairix.quality.eval.retrieval import retrieve
 

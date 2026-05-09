@@ -52,7 +52,7 @@ from tests.fakes import (
 # Fixtures -- test data builders
 # ---------------------------------------------------------------------------
 
-_FAKE_VEC = np.random.rand(1536).astype(np.float32).tolist()
+_FAKE_VEC = np.random.default_rng(seed=42).random(1536, dtype=np.float32).tolist()
 
 
 def _bm25_result(path: str = "/vault/doc.md", score: float = 2.0) -> BM25Result:

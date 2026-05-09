@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -584,7 +585,7 @@ def test_pool_with_bm25_system_filters_candidates_by_collection(kairix_db_path: 
 
 
 @pytest.fixture
-def kairix_db_path(tmp_path: Path) -> Path:
+def kairix_db_path(tmp_path: Path) -> Iterator[Path]:
     """Production-schema SQLite with FTS5 populated; KAIRIX_DB_PATH overridden."""
     from kairix.core.db.fts import rebuild_fts
 

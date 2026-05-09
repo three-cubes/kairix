@@ -178,7 +178,7 @@ def test_recall_checker_skips_query_when_provider_returns_empty_embedding_list()
     checker = RecallChecker(embed_provider=_AlwaysEmptyProvider(), vector_searcher=FakeVectorSearcher())
     result = checker.check(recall_queries=[("R1", "engineering", "engineering")])
 
-    assert result["score"] == 0.0
+    assert result["score"] == pytest.approx(0.0)
     assert result["passed"] == 0
     assert result["total"] == 0  # skipped queries are excluded from the denominator
     assert len(result["detail"]) == 1
@@ -211,7 +211,7 @@ def test_recall_checker_misses_when_gold_fragment_not_in_any_returned_path() -> 
 
     assert result["passed"] == 0
     assert result["total"] == 1
-    assert result["score"] == 0.0
+    assert result["score"] == pytest.approx(0.0)
     assert result["detail"][0]["hit"] is False
     assert result["detail"][0]["returned"] == ["docs/unrelated.md", "docs/other.md"]
 
@@ -313,8 +313,8 @@ def test_save_recall_result_appends_to_existing_log(tmp_path: Path) -> None:
 
     runs = json.loads(log.read_text())
     assert len(runs) == 2
-    assert runs[0]["score"] == 0.5
-    assert runs[1]["score"] == 0.7
+    assert runs[0]["score"] == pytest.approx(0.5)
+    assert runs[1]["score"] == pytest.approx(0.7)
 
 
 @pytest.mark.unit
@@ -326,9 +326,9 @@ def test_save_recall_result_caps_log_at_90_entries(tmp_path: Path) -> None:
 
     runs = json.loads(log.read_text())
     assert len(runs) == 90
-    assert runs[-1]["score"] == 0.99
+    assert runs[-1]["score"] == pytest.approx(0.99)
     # The oldest entry was dropped.
-    assert runs[0]["score"] == 0.0
+    assert runs[0]["score"] == pytest.approx(0.0)
 
 
 @pytest.mark.unit

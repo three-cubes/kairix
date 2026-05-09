@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,7 @@ from kairix.core.search.config_loader import (
 
 
 @pytest.fixture(autouse=True)
-def _isolated_cache_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolated_cache_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Each contract probe gets a fresh load-cache and a clean cwd.
 
     The module caches the resolved config per process via lru_cache(maxsize=1).

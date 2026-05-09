@@ -68,7 +68,7 @@ def test_check_score_is_zero_when_zero_queries_are_checked() -> None:
 
     checker = RecallChecker(embed_provider=_AlwaysEmptyProvider(), vector_searcher=FakeVectorSearcher())
     result = checker.check(recall_queries=[("R1", "q", "g")])
-    assert result["score"] == 0.0
+    assert result["score"] == pytest.approx(0.0)
     assert result["total"] == 0  # all skipped → checked is zero
     assert result["passed"] == 0
 
@@ -153,7 +153,7 @@ def test_save_recall_result_caps_log_at_90_runs(tmp_path: Path) -> None:
 
     runs = json.loads(log.read_text())
     assert len(runs) == 90
-    assert runs[-1]["score"] == 0.99
+    assert runs[-1]["score"] == pytest.approx(0.99)
 
 
 # ---------------------------------------------------------------------------

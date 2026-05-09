@@ -205,6 +205,10 @@ def _gather_eligible_files(paths: KairixPaths) -> list[str]:
 
 def _audit_cmd(argv: list[str], *, paths: KairixPaths) -> None:
     """Handle `kairix wikilinks audit`."""
+    # The audit subcommand has no per-invocation options beyond the shared
+    # `paths` context; argv is accepted for sub-handler signature uniformity
+    # with the inject/dry-run handlers.
+    del argv
     from kairix.knowledge.wikilinks.audit import weekly_report
 
     entities = get_entities()
