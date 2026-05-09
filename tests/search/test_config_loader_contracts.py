@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from kairix.core.search import config_loader
-from kairix.core.search.config import REFLIB_RETRIEVAL_CONFIG, RetrievalConfig
+from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.config_loader import (
     ConfigValidationError,
     load_collections,

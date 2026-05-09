@@ -76,7 +76,7 @@ def _validate_collections(collections: Any) -> list[str]:
         if name in seen_names:
             errors.append(f"{prefix}: duplicate collection name {name!r}")
         seen_names.add(name)
-        if "path" not in item:
+        if not item.get("path"):
             errors.append(f"{prefix} ({name}): missing required 'path'")
 
         overrides = item.get("retrieval")

@@ -86,11 +86,17 @@ def test_collection_missing_path_reports_named_field() -> None:
     assert any("collections.shared[0] (docs): missing required 'path'" in e for e in errors)
 
 
-def test_collection_path_empty_string_is_accepted_as_present() -> None:
-    """Edge: 'path' present (even empty) satisfies the 'in item' check."""
-    # Documented rule: missing path is the error condition, not empty.
+def test_collection_path_empty_string_is_rejected() -> None:
+    """``path: ""`` must fail validation just like a missing path.
+
+    The validator's job is to reject operator typos before they reach the
+    document loader. ``path:`` (no value, parses as empty string) is the
+    same operator mistake as omitting the key entirely.
+    """
     errors = validate_config({"collections": {"shared": [{"name": "docs", "path": ""}]}})
-    assert not any("missing required 'path'" in e for e in errors)
+    assert any("missing required 'path'" in e or "empty 'path'" in e for e in errors), (
+        f"expected an empty-path error, got: {errors}"
+    )
 
 
 def test_duplicate_collection_names_reported_with_name() -> None:
