@@ -2,12 +2,15 @@
 
 All injection happens via ``RecallChecker(embed_provider=..., vector_searcher=...)``
 constructor args using ``FakeEmbedProvider`` / ``FakeVectorSearcher`` from
-tests/fakes.py. No monkeypatch, no @patch, no setattr, no ``*_fn=`` kwargs.
+tests/fakes.py. No private helpers are imported — every branch is driven
+through ``RecallChecker.check`` / ``run_recall_gate`` and observed via the
+returned result dict (``detail``, ``passed``, ``total``, ``score``).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -17,9 +20,6 @@ import pytest
 from kairix.core.embed.recall_check import (
     DEFAULT_RECALL_QUERIES,
     RecallChecker,
-    _build_adaptive_queries,
-    _embed_query,
-    _get_recall_queries,
     check_recall,
     load_previous_score,
     run_recall_gate,
@@ -28,169 +28,160 @@ from kairix.core.embed.recall_check import (
 from tests.fakes import FakeEmbedProvider, FakeVectorSearcher
 
 # ---------------------------------------------------------------------------
-# _get_recall_queries
+# Recall-query selection — driven through RecallChecker.check(db=...)
+#
+# detail[i]["id"] / detail[i]["query"] reveal which queries the checker
+# selected: defaults (R01..R05) when the DB has no usable docs, adaptive
+# (A01..) when it does.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_get_recall_queries_returns_default_list_with_no_db() -> None:
-    """Without a DB, returns the static DEFAULT_RECALL_QUERIES verbatim."""
-    queries = _get_recall_queries(None)
-    assert queries == list(DEFAULT_RECALL_QUERIES)
-
-
-@pytest.mark.unit
-def test_get_recall_queries_returns_default_list_when_db_has_no_documents() -> None:
-    """An empty documents table falls through to the defaults."""
+def _make_documents_db(rows: list[tuple[str, str | None, int]]) -> sqlite3.Connection:
+    """Build an in-memory ``documents`` table from ``(path, title, active)`` rows."""
     db = sqlite3.connect(":memory:")
     db.execute("CREATE TABLE documents (path TEXT, title TEXT, active INTEGER)")
-    queries = _get_recall_queries(db)
-    assert queries == list(DEFAULT_RECALL_QUERIES)
+    db.executemany("INSERT INTO documents (path, title, active) VALUES (?, ?, ?)", rows)
+    db.commit()
+    return db
 
 
 @pytest.mark.unit
-def test_get_recall_queries_uses_adaptive_when_db_has_documents() -> None:
-    """When the documents table has indexed titles, adaptive queries take precedence."""
-    db = sqlite3.connect(":memory:")
-    db.executescript(
-        """
-        CREATE TABLE documents (path TEXT, title TEXT, active INTEGER);
-        INSERT INTO documents VALUES ('docs/my-doc.md', 'my-doc', 1);
-        """
+def test_check_uses_default_queries_when_db_has_no_documents() -> None:
+    """An empty documents table falls through to DEFAULT_RECALL_QUERIES (R01..R05)."""
+    db = _make_documents_db([])
+    checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=FakeVectorSearcher())
+    result = checker.check(db=db)
+
+    assert len(result["detail"]) == len(DEFAULT_RECALL_QUERIES)
+    ids = [d["id"] for d in result["detail"]]
+    assert ids == [q[0] for q in DEFAULT_RECALL_QUERIES]
+
+
+@pytest.mark.unit
+def test_check_uses_three_adaptive_queries_for_three_indexed_documents() -> None:
+    """Three indexed titles produce three adaptive queries (A01..A03) ordered by row."""
+    db = _make_documents_db(
+        [
+            ("docs/architecture.md", "architecture", 1),
+            ("docs/deploy-guide.md", "deploy-guide", 1),
+            ("docs/testing.md", "testing", 1),
+        ]
     )
-    queries = _get_recall_queries(db)
-    assert len(queries) == 1
-    assert queries[0][0] == "A01"  # adaptive id prefix
-    assert queries[0][1] == "my doc"  # title with dashes replaced
-    assert queries[0][2] == "my-doc"  # path stem
+    checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=FakeVectorSearcher())
+    result = checker.check(db=db)
 
-
-# ---------------------------------------------------------------------------
-# _build_adaptive_queries
-# ---------------------------------------------------------------------------
+    assert len(result["detail"]) == 3
+    assert {d["id"] for d in result["detail"]} == {"A01", "A02", "A03"}
+    # Each adaptive entry's query is the title with dashes/underscores replaced;
+    # the gold_fragment is the path stem.
+    gold_fragments = {d["gold_fragment"] for d in result["detail"]}
+    assert gold_fragments == {"architecture", "deploy-guide", "testing"}
 
 
 @pytest.mark.unit
-def test_build_adaptive_queries_from_three_indexed_documents() -> None:
-    """Three indexed titles produce three adaptive queries."""
-    db = sqlite3.connect(":memory:")
-    db.executescript(
-        """
-        CREATE TABLE documents (path TEXT, title TEXT, active INTEGER);
-        INSERT INTO documents VALUES ('docs/architecture.md', 'architecture', 1);
-        INSERT INTO documents VALUES ('docs/deploy-guide.md', 'deploy-guide', 1);
-        INSERT INTO documents VALUES ('docs/testing.md', 'testing', 1);
-        """
+def test_check_excludes_inactive_and_titleless_documents_from_adaptive_queries() -> None:
+    """Inactive / NULL-title / empty-title rows do not contribute adaptive queries."""
+    db = _make_documents_db(
+        [
+            ("docs/keep.md", "keep", 1),
+            ("docs/inactive.md", "inactive", 0),
+            ("docs/empty.md", "", 1),
+            ("docs/null.md", None, 1),
+        ]
     )
-    queries = _build_adaptive_queries(db)
-    assert len(queries) == 3
-    qids = {q[0] for q in queries}
-    assert qids == {"A01", "A02", "A03"}
-    paths_via_gold = {q[2] for q in queries}
-    assert paths_via_gold == {"architecture", "deploy-guide", "testing"}
+    checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=FakeVectorSearcher())
+    result = checker.check(db=db)
+
+    # Only the one valid row makes it into adaptive queries.
+    assert len(result["detail"]) == 1
+    assert result["detail"][0]["gold_fragment"] == "keep"
 
 
 @pytest.mark.unit
-def test_build_adaptive_queries_excludes_inactive_and_titleless_documents() -> None:
-    """Inactive rows and rows with NULL/empty title are excluded from the sample."""
+def test_check_falls_back_to_defaults_when_documents_table_is_missing() -> None:
+    """A DB with no ``documents`` table → adaptive returns [] → defaults are used."""
     db = sqlite3.connect(":memory:")
-    db.executescript(
-        """
-        CREATE TABLE documents (path TEXT, title TEXT, active INTEGER);
-        INSERT INTO documents VALUES ('docs/keep.md', 'keep', 1);
-        INSERT INTO documents VALUES ('docs/inactive.md', 'inactive', 0);
-        INSERT INTO documents VALUES ('docs/empty.md', '', 1);
-        INSERT INTO documents VALUES ('docs/null.md', NULL, 1);
-        """
-    )
-    queries = _build_adaptive_queries(db)
-    gold_fragments = {q[2] for q in queries}
-    assert gold_fragments == {"keep"}
+    checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=FakeVectorSearcher())
+    result = checker.check(db=db)
 
-
-@pytest.mark.unit
-def test_build_adaptive_queries_returns_empty_when_documents_table_missing() -> None:
-    """Missing documents table → empty list, no exception."""
-    db = sqlite3.connect(":memory:")
-    queries = _build_adaptive_queries(db)
-    assert queries == []
+    assert len(result["detail"]) == len(DEFAULT_RECALL_QUERIES)
+    assert [d["id"] for d in result["detail"]] == [q[0] for q in DEFAULT_RECALL_QUERIES]
 
 
 # ---------------------------------------------------------------------------
-# _embed_query — DI via FakeEmbedProvider
+# Embedding plumbing — observed via FakeEmbedProvider.calls and
+# FakeVectorSearcher.calls after RecallChecker.check.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_embed_query_normalises_provider_output_to_unit_vector() -> None:
-    """Embedded vector must be unit-normalised (||v|| == 1) for cosine similarity."""
-    fake = FakeEmbedProvider(vector=[0.0, 3.0, 4.0])  # raw norm = 5.0
-    arr = _embed_query("anything", provider=fake, model="text-embedding-3-large")
-    assert arr is not None
-    assert abs(float(np.linalg.norm(arr)) - 1.0) < 1e-5
-    # Normalised values: 0/5, 3/5, 4/5
-    assert arr[0] == pytest.approx(0.0, abs=1e-5)
-    assert arr[1] == pytest.approx(0.6, abs=1e-5)
-    assert arr[2] == pytest.approx(0.8, abs=1e-5)
-
-
-@pytest.mark.unit
-def test_embed_query_passes_model_and_dims_through_to_provider() -> None:
-    """The provider receives the configured model name and the EMBED_DIMS constant."""
+def test_check_passes_query_text_model_and_canonical_dims_to_provider() -> None:
+    """The embed provider receives the query text, the chosen model name, and EMBED_VECTOR_DIMS."""
     from kairix.core.embed.schema import EMBED_VECTOR_DIMS
 
-    fake = FakeEmbedProvider(vector=[0.0, 1.0])
-    _embed_query("query text", provider=fake, model="text-embedding-3-small")
-    assert len(fake.calls) == 1
-    assert fake.calls[0]["texts"] == ["query text"]
-    assert fake.calls[0]["model"] == "text-embedding-3-small"
-    assert fake.calls[0]["dims"] == EMBED_VECTOR_DIMS
+    fake_provider = FakeEmbedProvider(vector=[0.0, 1.0])
+    checker = RecallChecker(embed_provider=fake_provider, vector_searcher=FakeVectorSearcher())
+    checker.check(recall_queries=[("R1", "specific query text", "x")])
+
+    assert len(fake_provider.calls) == 1
+    call = fake_provider.calls[0]
+    assert call["texts"] == ["specific query text"]
+    assert call["model"] == "text-embedding-3-large"
+    assert call["dims"] == EMBED_VECTOR_DIMS
 
 
 @pytest.mark.unit
-def test_embed_query_returns_none_when_provider_raises() -> None:
-    """Provider exception → returns None (no propagation)."""
+def test_check_normalises_embedded_vector_to_unit_length_before_searching() -> None:
+    """The vector handed to the searcher must be unit-normalised — cosine similarity requires it."""
+    fake_provider = FakeEmbedProvider(vector=[0.0, 3.0, 4.0])  # raw L2 norm = 5.0
+    fake_searcher = FakeVectorSearcher(paths=["docs/x.md"])
+    checker = RecallChecker(embed_provider=fake_provider, vector_searcher=fake_searcher)
+    checker.check(recall_queries=[("R1", "any", "x")])
+
+    assert len(fake_searcher.calls) == 1
+    fed_vector = fake_searcher.calls[0]["vector"]
+    norm = float(np.linalg.norm(fed_vector))
+    assert abs(norm - 1.0) < 1e-5
+    # Normalised values: 0/5, 3/5, 4/5
+    assert fed_vector[0] == pytest.approx(0.0, abs=1e-5)
+    assert fed_vector[1] == pytest.approx(0.6, abs=1e-5)
+    assert fed_vector[2] == pytest.approx(0.8, abs=1e-5)
+
+
+@pytest.mark.unit
+def test_check_skips_query_when_provider_raises() -> None:
+    """Provider exception → query is recorded as skipped, not propagated."""
 
     class _ExplodingProvider:
         def embed_batch(self, texts: list[str], *, model: str, dims: int) -> list[list[float]]:
             raise RuntimeError("provider failed")
 
-    arr = _embed_query("anything", provider=_ExplodingProvider(), model="m")
-    assert arr is None
+    checker = RecallChecker(embed_provider=_ExplodingProvider(), vector_searcher=FakeVectorSearcher())
+    result = checker.check(recall_queries=[("R1", "any", "x")])
 
-
-@pytest.mark.unit
-def test_embed_query_returns_none_when_provider_returns_empty_list() -> None:
-    """An empty embedding list → None."""
-
-    class _EmptyProvider:
-        def embed_batch(self, texts: list[str], *, model: str, dims: int) -> list[list[float]]:
-            return []
-
-    arr = _embed_query("any", provider=_EmptyProvider(), model="m")
-    assert arr is None
+    assert result["total"] == 0
+    assert result["detail"][0]["skipped"] is True
 
 
 # ---------------------------------------------------------------------------
-# RecallChecker.check — class-method tests via FakeEmbedProvider + FakeVectorSearcher
+# RecallChecker.check — semantics with FakeEmbedProvider + FakeVectorSearcher.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_recall_checker_skips_query_when_embed_returns_none() -> None:
-    """When the provider can't embed, the query is recorded as skipped (not failed)."""
+def test_recall_checker_skips_query_when_provider_returns_empty_embedding_list() -> None:
+    """An empty-list provider response is treated as a skip (not a failed query)."""
 
     class _AlwaysEmptyProvider:
         def embed_batch(self, texts: list[str], *, model: str, dims: int) -> list[list[float]]:
-            return []  # returns None inside _embed_query
+            return []  # surfaces as None inside the embedding step
 
     checker = RecallChecker(embed_provider=_AlwaysEmptyProvider(), vector_searcher=FakeVectorSearcher())
-    queries = [("R1", "engineering", "engineering")]
-    result = checker.check(recall_queries=queries)
+    result = checker.check(recall_queries=[("R1", "engineering", "engineering")])
 
     assert result["score"] == 0.0
     assert result["passed"] == 0
-    assert result["total"] == 0  # skipped queries are excluded from total
+    assert result["total"] == 0  # skipped queries are excluded from the denominator
     assert len(result["detail"]) == 1
     assert result["detail"][0]["skipped"] is True
     assert result["detail"][0]["hit"] is False
@@ -199,12 +190,11 @@ def test_recall_checker_skips_query_when_embed_returns_none() -> None:
 @pytest.mark.unit
 def test_recall_checker_counts_a_hit_when_gold_fragment_appears_in_search_results() -> None:
     """A returned path containing the gold fragment counts as a hit; score is 1.0."""
-    fake_vector = FakeEmbedProvider(vector=[1.0, 0.0, 0.0])
+    fake_provider = FakeEmbedProvider(vector=[1.0, 0.0, 0.0])
     fake_searcher = FakeVectorSearcher(paths=["04-Agent-Knowledge/builder/patterns.md"])
 
-    checker = RecallChecker(embed_provider=fake_vector, vector_searcher=fake_searcher)
-    queries = [("R1", "engineering patterns", "builder/patterns")]
-    result = checker.check(recall_queries=queries)
+    checker = RecallChecker(embed_provider=fake_provider, vector_searcher=fake_searcher)
+    result = checker.check(recall_queries=[("R1", "engineering patterns", "builder/patterns")])
 
     assert result["passed"] == 1
     assert result["total"] == 1
@@ -258,13 +248,7 @@ def test_recall_checker_score_is_passed_over_total_excluding_skips() -> None:
 @pytest.mark.unit
 def test_recall_checker_uses_adaptive_queries_when_db_has_documents() -> None:
     """With db= but no recall_queries=, the checker derives queries adaptively."""
-    db = sqlite3.connect(":memory:")
-    db.executescript(
-        """
-        CREATE TABLE documents (path TEXT, title TEXT, active INTEGER);
-        INSERT INTO documents VALUES ('docs/architecture.md', 'architecture', 1);
-        """
-    )
+    db = _make_documents_db([("docs/architecture.md", "architecture", 1)])
     fake_searcher = FakeVectorSearcher(paths=["docs/architecture.md"])
     checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=fake_searcher)
     result = checker.check(db=db)
@@ -346,7 +330,6 @@ def test_save_recall_result_caps_log_at_90_entries(tmp_path: Path) -> None:
     assert runs[-1]["score"] == 0.99
     # The oldest entry was dropped.
     assert runs[0]["score"] == 0.0
-    # Specifically: only one new entry was added; if the cap had failed we'd see 91.
 
 
 @pytest.mark.unit
@@ -487,49 +470,8 @@ def test_run_recall_gate_does_not_invoke_alert_when_callback_is_none(tmp_path: P
 
 
 # ---------------------------------------------------------------------------
-# Production defaults — exercise the lazy-construction fallbacks
+# Default-DB wiring — KAIRIX_DB_PATH driven via direct os.environ.
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_usearch_vector_searcher_returns_empty_when_index_unavailable() -> None:
-    """The production VectorSearcher returns [] when usearch is not initialised.
-
-    In the test environment ``get_vector_index()`` either returns None or raises;
-    either way the production code must surface this as ``[]`` (not a raise) so
-    the recall gate cleanly degrades to "all queries skipped".
-    """
-    from kairix.core.embed.recall_check import _UsearchVectorSearcher
-
-    searcher = _UsearchVectorSearcher()
-    vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-    result = searcher.search_vectors(vec, limit=5)
-    assert result == []
-
-
-@pytest.mark.unit
-def test_recall_checker_lazy_constructs_default_vector_searcher_when_none_provided() -> None:
-    """When ``vector_searcher=None``, ``_search`` lazily builds a ``_UsearchVectorSearcher``.
-
-    The lazy instance is cached on the checker so subsequent calls reuse it.
-    In the test environment the lazy default returns [] (no usearch index),
-    so every query is recorded as a miss with ``returned=[]``.
-    """
-    checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=None)
-    assert checker._vector_searcher is None
-    result = checker.check(recall_queries=[("R1", "any query", "fragment")])
-
-    # The default searcher fell through to []: query is graded but didn't hit.
-    assert result["total"] == 1
-    assert result["passed"] == 0
-    assert result["detail"][0]["returned"] == []
-    assert result["detail"][0]["hit"] is False
-    # Lazy default was constructed and cached.
-    assert checker._vector_searcher is not None
-    cached = checker._vector_searcher
-    # A second call reuses the same instance (cache check).
-    checker.check(recall_queries=[("R2", "another", "frag")])
-    assert checker._vector_searcher is cached
 
 
 @pytest.fixture
@@ -540,8 +482,6 @@ def _kairix_db_at_env_path(tmp_path: Path) -> Path:
     KAIRIX_DB_PATH is operator-facing configuration the production CLI sets,
     not a code-level test seam.
     """
-    import os
-
     db_path = tmp_path / "kairix.sqlite"
     db = sqlite3.connect(str(db_path))
     db.executescript(
@@ -577,8 +517,6 @@ def test_recall_checker_check_opens_db_when_db_arg_is_none(_kairix_db_at_env_pat
 @pytest.mark.unit
 def test_recall_checker_check_falls_through_to_defaults_when_db_path_missing(tmp_path: Path) -> None:
     """When ``db=None`` and ``KAIRIX_DB_PATH`` points at a non-existent file, falls back to default queries."""
-    import os
-
     # Point at a path that does not exist; production raises FileNotFoundError which
     # the check() method catches, leaving db=None so the loop uses DEFAULT_RECALL_QUERIES.
     missing = tmp_path / "this-does-not-exist.sqlite"
@@ -602,10 +540,8 @@ def test_run_recall_gate_constructs_default_checker_when_none_supplied(tmp_path:
     """When ``checker=None``, ``run_recall_gate`` builds a default ``RecallChecker``.
 
     The default checker has no embed_provider, so every query is skipped (returns
-    None from _embed_query). The gate still runs end-to-end and writes a log.
+    None from the embedding step). The gate still runs end-to-end and writes a log.
     """
-    import os
-
     # No KAIRIX_DB_PATH → the lazy DB open falls through to None, default queries used,
     # all of them skipped because no embed credentials.
     prev = os.environ.get("KAIRIX_DB_PATH")

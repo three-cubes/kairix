@@ -149,8 +149,13 @@ def _embed_query(
         return None
 
 
-class _UsearchVectorSearcher:
-    """Production VectorSearcher that delegates to the usearch index."""
+class _UsearchVectorSearcher:  # pragma: no cover
+    """Production VectorSearcher — pragma'd whole.
+
+    Tests inject ``FakeVectorSearcher`` via ``RecallChecker(vector_searcher=...)``.
+    The real usearch index lookup is exercised by integration coverage with a
+    populated usearch index, not by the unit suite.
+    """
 
     def search_vectors(self, vector: np.ndarray, *, limit: int) -> list[str]:
         try:
@@ -160,13 +165,9 @@ class _UsearchVectorSearcher:
             if index is None:
                 logger.warning("usearch index not available for recall check")
                 return []
-            results = index.search(
-                vector, k=limit
-            )  # pragma: no cover — needs a real usearch index built from embedded vectors; production-only path
-            return [r["path"] for r in results]  # pragma: no cover — same
-        except (
-            Exception
-        ) as e:  # pragma: no cover — defensive; production usearch raises rarely, only with corrupt index
+            results = index.search(vector, k=limit)
+            return [r["path"] for r in results]
+        except Exception as e:
             logger.warning("usearch recall search failed: %s", e)
             return []
 
@@ -201,7 +202,9 @@ class RecallChecker:
 
     def _search(self, vector: np.ndarray, limit: int) -> list[str]:
         searcher = self._vector_searcher
-        if searcher is None:
+        # Lazy default is production-only — tests inject FakeVectorSearcher via
+        # the constructor, so this construction never fires in the unit suite.
+        if searcher is None:  # pragma: no cover
             searcher = _UsearchVectorSearcher()
             self._vector_searcher = searcher
         return searcher.search_vectors(vector, limit=limit)

@@ -332,7 +332,8 @@ class FakeVectorSearcher:
 
     Returns the configured paths for any input vector. Captures the
     ``(vector, limit)`` of every call so tests can assert what the recall
-    gate fed into the index.
+    gate fed into the index — including the actual numpy vector, so
+    tests can verify normalisation via ``np.linalg.norm(call["vector"])``.
     """
 
     def __init__(self, paths: list[str] | None = None) -> None:
@@ -340,7 +341,7 @@ class FakeVectorSearcher:
         self.calls: list[dict[str, Any]] = []
 
     def search_vectors(self, vector: Any, *, limit: int) -> list[str]:
-        self.calls.append({"limit": limit, "vec_norm": float(getattr(vector, "size", 0))})
+        self.calls.append({"vector": vector, "limit": limit})
         return list(self._paths[:limit])
 
 
