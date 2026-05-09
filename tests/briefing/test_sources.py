@@ -1,13 +1,14 @@
 """
 Tests for briefing source fetchers (kairix/briefing/sources.py).
 
-All tests use fixtures or temporary directories — no live API calls.
+Tests pass tmp_path-rooted ``memory_dir`` / ``document_root`` Path
+arguments rather than @patch'ing the agent_memory_path / _DOCUMENT_ROOT
+imports — the public fetchers expose these as DI seams.
 """
 
 from __future__ import annotations
 
 from datetime import date, timedelta
-from unittest.mock import patch
 
 import pytest
 
@@ -78,9 +79,7 @@ class TestFetchMemoryLogs:
             "Normal log entry\n"
         )
         (memory_dir / f"{today.isoformat()}.md").write_text(content)
-
-        with patch("kairix.agents.briefing.sources.agent_memory_path", return_value=memory_dir):
-            result = fetch_memory_logs("builder")
+        result = fetch_memory_logs("builder", memory_dir=memory_dir)
 
         assert "[pending]" in result or "pending" in result.lower()
         assert "[blocked]" in result or "blocked" in result.lower()
@@ -92,9 +91,7 @@ class TestFetchMemoryLogs:
         today = date.today()
         bad_file = memory_dir / f"{today.isoformat()}.md"
         bad_file.write_bytes(b"\xff\xfe invalid utf-8")
-
-        with patch("kairix.agents.briefing.sources.agent_memory_path", return_value=memory_dir):
-            result = fetch_memory_logs("builder")
+        result = fetch_memory_logs("builder", memory_dir=memory_dir)
         # Should not raise — may return empty or partial content
         assert isinstance(result, str)
 
@@ -107,9 +104,7 @@ class TestFetchMemoryLogs:
         # Create large content
         content = "\n".join([f"[pending] item {i}" for i in range(1000)])
         (memory_dir / f"{today.isoformat()}.md").write_text(content)
-
-        with patch("kairix.agents.briefing.sources.agent_memory_path", return_value=memory_dir):
-            result = fetch_memory_logs("builder", max_tokens=50)
+        result = fetch_memory_logs("builder", max_tokens=50, memory_dir=memory_dir)
 
         assert estimate_tokens(result) <= 100  # some buffer
 
@@ -135,9 +130,7 @@ class TestFetchRecentMemory:
 
         (memory_dir / f"{today.isoformat()}.md").write_text("Today's content here")
         (memory_dir / f"{yesterday.isoformat()}.md").write_text("Yesterday content here")
-
-        with patch("kairix.agents.briefing.sources.agent_memory_path", return_value=memory_dir):
-            result = fetch_recent_memory("builder")
+        result = fetch_recent_memory("builder", memory_dir=memory_dir)
 
         assert today.isoformat() in result
         assert yesterday.isoformat() in result
@@ -160,9 +153,7 @@ class TestFetchEntityStub:
         entity_dir = tmp_path / "04-Agent-Knowledge" / "entities" / "concept"
         entity_dir.mkdir(parents=True)
         (entity_dir / "builder.md").write_text("# Builder\nThe engineering agent.")
-
-        with patch("kairix.agents.briefing.sources._DOCUMENT_ROOT", tmp_path):
-            result = fetch_entity_stub("builder")
+        result = fetch_entity_stub("builder", document_root=tmp_path)
 
         assert "Builder" in result or "builder" in result.lower()
 
@@ -177,8 +168,7 @@ class TestFetchKnowledgeRules:
     @pytest.mark.unit
     def test_returns_empty_for_missing_rules(self, tmp_path):
         # Use an isolated document store root with no rules files
-        with patch("kairix.agents.briefing.sources._DOCUMENT_ROOT", tmp_path):
-            result = fetch_knowledge_rules("nonexistent_agent_xyz")
+        result = fetch_knowledge_rules("nonexistent_agent_xyz", document_root=tmp_path)
         assert result == ""
 
     @pytest.mark.unit
@@ -186,9 +176,7 @@ class TestFetchKnowledgeRules:
         rules_dir = tmp_path / "04-Agent-Knowledge" / "builder"
         rules_dir.mkdir(parents=True)
         (rules_dir / "rules.md").write_text("# Rules\n1. Never commit secrets\n2. Always test")
-
-        with patch("kairix.agents.briefing.sources._DOCUMENT_ROOT", tmp_path):
-            result = fetch_knowledge_rules("builder")
+        result = fetch_knowledge_rules("builder", document_root=tmp_path)
 
         assert "secrets" in result.lower() or "rules" in result.lower()
 
@@ -212,15 +200,12 @@ class TestFetchRecentDecisions:
         (decisions_dir / "decisions.md").write_text(
             "# Decisions\n- ADR-001: Use Azure embeddings\n- ADR-002: SQLite for entity facts"
         )
-
-        with patch("kairix.agents.briefing.sources._DOCUMENT_ROOT", tmp_path):
-            result = fetch_recent_decisions("builder")
+        result = fetch_recent_decisions("builder", document_root=tmp_path)
 
         assert "ADR" in result or "decision" in result.lower()
 
     @pytest.mark.unit
     def test_returns_empty_when_no_decisions_file(self, tmp_path):
         # Should return empty string when decisions.md doesn't exist
-        with patch("kairix.agents.briefing.sources._DOCUMENT_ROOT", tmp_path):
-            result = fetch_recent_decisions("builder")
+        result = fetch_recent_decisions("builder", document_root=tmp_path)
         assert isinstance(result, str)

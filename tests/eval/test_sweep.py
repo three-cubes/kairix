@@ -256,17 +256,12 @@ class TestSweepBm25Params:
         weights = [(1.0, 1.0, 1.0), (10.0, 1.0, 1.0)]
         styles = ["bare", "prefix"]
 
-        from unittest.mock import patch
-
-        with (
-            patch("kairix.core.db.get_db_path", return_value=str(db_path)),
-            patch("kairix.core.db.open_db", side_effect=lambda p: sqlite3.connect(str(p))),
-        ):
-            report = sweep_bm25_params(
-                suite_path,
-                weight_configs=weights,
-                query_styles=styles,
-            )
+        report = sweep_bm25_params(
+            suite_path,
+            weight_configs=weights,
+            query_styles=styles,
+            db_path=db_path,
+        )
 
         assert report.total_configs == 4  # 2 weights x 2 styles
         assert len(report.results) == 4
@@ -325,18 +320,13 @@ class TestSweepBm25Params:
 
         csv_path = tmp_path / "results.csv"
 
-        from unittest.mock import patch
-
-        with (
-            patch("kairix.core.db.get_db_path", return_value=str(db_path)),
-            patch("kairix.core.db.open_db", side_effect=lambda p: sqlite3.connect(str(p))),
-        ):
-            sweep_bm25_params(
-                suite_path,
-                output_path=csv_path,
-                weight_configs=[(1.0, 1.0, 1.0)],
-                query_styles=["prefix"],
-            )
+        sweep_bm25_params(
+            suite_path,
+            output_path=csv_path,
+            weight_configs=[(1.0, 1.0, 1.0)],
+            query_styles=["prefix"],
+            db_path=db_path,
+        )
 
         assert csv_path.exists()
         lines = csv_path.read_text().splitlines()
@@ -391,17 +381,12 @@ class TestSweepBm25Params:
         with open(suite_path, "w") as f:
             yaml.dump(suite, f)
 
-        from unittest.mock import patch
-
-        with (
-            patch("kairix.core.db.get_db_path", return_value=str(db_path)),
-            patch("kairix.core.db.open_db", side_effect=lambda p: sqlite3.connect(str(p))),
-        ):
-            report = sweep_bm25_params(
-                suite_path,
-                weight_configs=[(1.0, 1.0, 1.0), (10.0, 5.0, 1.0)],
-                query_styles=["prefix", "bare", "quoted"],
-            )
+        report = sweep_bm25_params(
+            suite_path,
+            weight_configs=[(1.0, 1.0, 1.0), (10.0, 5.0, 1.0)],
+            query_styles=["prefix", "bare", "quoted"],
+            db_path=db_path,
+        )
 
         assert report.best is not None
         assert report.best.weighted_total == max(r.weighted_total for r in report.results)

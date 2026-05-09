@@ -130,6 +130,7 @@ def sweep_bm25_params(
     output_path: Path | None = None,
     weight_configs: list[tuple[float, float, float]] | None = None,
     query_styles: list[str] | None = None,
+    db_path: Path | None = None,
 ) -> SweepReport:
     """
     Grid search over BM25 column weights and query styles.
@@ -142,6 +143,9 @@ def sweep_bm25_params(
         output_path:     Optional CSV output for results.
         weight_configs:  Column weight tuples (filepath, title, doc).
         query_styles:    Query construction styles to test.
+        db_path:         Optional explicit kairix DB path. Defaults to
+                         ``get_db_path()`` (env-resolved). Tests pass a
+                         tmp_path-rooted DB to avoid env mutation.
 
     Returns:
         SweepReport with results sorted by weighted_total descending.
@@ -174,9 +178,13 @@ def sweep_bm25_params(
     )
 
     # Open DB once for all configs
-    from kairix.core.db import get_db_path, open_db
+    from kairix.core.db import open_db
 
-    db = open_db(Path(get_db_path()))
+    if db_path is None:
+        from kairix.core.db import get_db_path
+
+        db_path = Path(get_db_path())
+    db = open_db(Path(db_path))
     db.row_factory = sqlite3.Row
 
     report = SweepReport()
