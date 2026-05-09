@@ -337,7 +337,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="kairix embed",
         description="Embed documents into the kairix vector index",
@@ -372,7 +372,7 @@ def main() -> None:
     # status
     sub.add_parser("status", help="Show embedding status")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     setup_logging(args.verbose)
 
     if args.command is None or args.command == "embed":
