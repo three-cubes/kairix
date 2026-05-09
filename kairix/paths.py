@@ -23,35 +23,62 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _is_docker() -> bool:
-    """Detect if running inside a Docker container."""
-    return (
-        os.path.exists("/.dockerenv")
-        or os.environ.get("KAIRIX_DOCKER", "") == "1"
-        or os.environ.get("container", "") != ""
-    )
+def _is_docker(
+    env: Mapping[str, str] | None = None,
+    dockerenv_exists: bool | None = None,
+) -> bool:
+    """Detect if running inside a Docker container.
+
+    ``env`` defaults to ``os.environ``. ``dockerenv_exists`` defaults to a
+    real check on ``/.dockerenv`` — tests pass a bool to skip the FS check.
+    """
+    if env is None:
+        env = os.environ
+    if dockerenv_exists is None:
+        dockerenv_exists = os.path.exists("/.dockerenv")
+    return dockerenv_exists or env.get("KAIRIX_DOCKER", "") == "1" or env.get("container", "") != ""
 
 
-def _is_service_install() -> bool:
-    """Detect if kairix was installed as a system service (/opt/kairix)."""
-    return Path("/opt/kairix/.venv").exists()
+def _is_service_install(venv_exists: bool | None = None) -> bool:
+    """Detect if kairix was installed as a system service (/opt/kairix).
+
+    ``venv_exists`` defaults to a real check on ``/opt/kairix/.venv``.
+    """
+    if venv_exists is None:
+        venv_exists = Path("/opt/kairix/.venv").exists()
+    return venv_exists
 
 
-def _default_document_root() -> Path:
+def _default_document_root(
+    env: Mapping[str, str] | None = None,
+    is_docker: bool | None = None,
+    is_service_install: bool | None = None,
+) -> Path:
     """Platform-appropriate default document store location.
 
     Docker: /data/documents (bind mount from host)
     Server: /var/lib/kairix/documents (admin configures)
     User (all platforms): ~/Documents (most common document location)
     """
-    if _is_docker():
+    if env is None:
+        env = os.environ
+    if is_docker is None:
+        is_docker = _is_docker(env)
+    if is_service_install is None:
+        is_service_install = _is_service_install()
+    if is_docker:
         return Path("/data/documents")
-    if _is_service_install():
+    if is_service_install:
         return Path("/var/lib/kairix/documents")
     return Path.home() / "Documents"
 
 
-def _default_data_dir() -> Path:
+def _default_data_dir(
+    env: Mapping[str, str] | None = None,
+    is_docker: bool | None = None,
+    is_service_install: bool | None = None,
+    platform: str | None = None,
+) -> Path:
     """Platform-appropriate data directory for DB, vectors, and state.
 
     Docker: /data/kairix
@@ -59,21 +86,34 @@ def _default_data_dir() -> Path:
     Linux/macOS user: ~/.local/share/kairix (XDG_DATA_HOME)
     Windows user: %LOCALAPPDATA%/kairix
     """
-    if _is_docker():
+    if env is None:
+        env = os.environ
+    if is_docker is None:
+        is_docker = _is_docker(env)
+    if is_service_install is None:
+        is_service_install = _is_service_install()
+    if platform is None:
+        platform = sys.platform
+    if is_docker:
         return Path("/data/kairix")
-    if _is_service_install():
+    if is_service_install:
         return Path("/var/lib/kairix")
-    if sys.platform == "win32":
-        local = os.environ.get("LOCALAPPDATA")
+    if platform == "win32":
+        local = env.get("LOCALAPPDATA")
         if local:
             return Path(local) / "kairix"
-    xdg = os.environ.get("XDG_DATA_HOME")
+    xdg = env.get("XDG_DATA_HOME")
     if xdg:
         return Path(xdg) / "kairix"
     return Path.home() / ".local" / "share" / "kairix"
 
 
-def _default_cache_dir() -> Path:
+def _default_cache_dir(
+    env: Mapping[str, str] | None = None,
+    is_docker: bool | None = None,
+    is_service_install: bool | None = None,
+    platform: str | None = None,
+) -> Path:
     """Platform-appropriate cache directory for temporary data.
 
     Docker: /data/kairix (same as data dir)
@@ -81,25 +121,43 @@ def _default_cache_dir() -> Path:
     Linux/macOS user: ~/.cache/kairix (XDG_CACHE_HOME)
     Windows user: %LOCALAPPDATA%/kairix/cache
     """
-    if _is_docker():
+    if env is None:
+        env = os.environ
+    if is_docker is None:
+        is_docker = _is_docker(env)
+    if is_service_install is None:
+        is_service_install = _is_service_install()
+    if platform is None:
+        platform = sys.platform
+    if is_docker:
         return Path("/data/kairix")
-    if _is_service_install():
+    if is_service_install:
         return Path("/var/cache/kairix")
-    if sys.platform == "win32":
-        local = os.environ.get("LOCALAPPDATA")
+    if platform == "win32":
+        local = env.get("LOCALAPPDATA")
         if local:
             return Path(local) / "kairix" / "cache"
-    xdg = os.environ.get("XDG_CACHE_HOME")
+    xdg = env.get("XDG_CACHE_HOME")
     if xdg:
         return Path(xdg) / "kairix"
     return Path.home() / ".cache" / "kairix"
 
 
-def _default_workspace_root() -> Path:
+def _default_workspace_root(
+    env: Mapping[str, str] | None = None,
+    is_docker: bool | None = None,
+    is_service_install: bool | None = None,
+) -> Path:
     """Platform-appropriate workspace root for agent memory logs."""
-    if _is_docker():
+    if env is None:
+        env = os.environ
+    if is_docker is None:
+        is_docker = _is_docker(env)
+    if is_service_install is None:
+        is_service_install = _is_service_install()
+    if is_docker:
         return Path("/data/workspaces")
-    if _is_service_install():
+    if is_service_install:
         return Path("/data/workspaces")
     return Path.home() / ".kairix" / "workspaces"
 
@@ -118,39 +176,45 @@ class KairixPaths:
     workspace_root: Path
 
     @classmethod
-    def resolve(cls) -> KairixPaths:
+    def resolve(cls, env: Mapping[str, str] | None = None) -> KairixPaths:
         """Resolve paths from environment variables, config file, or platform defaults.
 
-        Call this once at startup. The result is cached per process.
+        Call this once at startup. The default ``env=None`` reads
+        ``os.environ`` and caches the result per process. Tests pass an
+        explicit env mapping (cache is bypassed for non-default env).
         """
-        return _resolve_cached()
+        if env is None:
+            return _resolve_cached()
+        return _resolve(env)
 
 
 @lru_cache(maxsize=1)
 def _resolve_cached() -> KairixPaths:
-    """Internal cached resolution — called by KairixPaths.resolve()."""
-    cache_dir = _default_cache_dir()
+    """Cached no-arg resolution against ``os.environ``."""
+    return _resolve(os.environ)
+
+
+def _resolve(env: Mapping[str, str]) -> KairixPaths:
+    """Resolve KairixPaths from an explicit env mapping. No caching."""
+    cache_dir = _default_cache_dir(env=env)
 
     # Try loading paths from config file
-    config_paths = _load_paths_from_config()
+    config_paths = _load_paths_from_config(env=env)
 
     document_root = Path(
-        os.environ.get("KAIRIX_DOCUMENT_ROOT") or config_paths.get("document_root") or str(_default_document_root())
+        env.get("KAIRIX_DOCUMENT_ROOT") or config_paths.get("document_root") or str(_default_document_root(env=env))
     ).expanduser()
 
     db_path = Path(
-        os.environ.get("KAIRIX_DB_PATH") or config_paths.get("db_path") or str(cache_dir / "index.sqlite")
+        env.get("KAIRIX_DB_PATH") or config_paths.get("db_path") or str(cache_dir / "index.sqlite")
     ).expanduser()
 
     log_dir = Path(
-        os.environ.get("KAIRIX_LOG_DIR")
-        or os.environ.get("LOG_DIR")
-        or config_paths.get("log_dir")
-        or str(cache_dir / "logs")
+        env.get("KAIRIX_LOG_DIR") or env.get("LOG_DIR") or config_paths.get("log_dir") or str(cache_dir / "logs")
     ).expanduser()
 
     workspace_root = Path(
-        os.environ.get("KAIRIX_WORKSPACE_ROOT") or config_paths.get("workspace_root") or str(_default_workspace_root())
+        env.get("KAIRIX_WORKSPACE_ROOT") or config_paths.get("workspace_root") or str(_default_workspace_root(env=env))
     ).expanduser()
 
     return KairixPaths(
@@ -161,9 +225,11 @@ def _resolve_cached() -> KairixPaths:
     )
 
 
-def _load_paths_from_config() -> dict[str, str]:
+def _load_paths_from_config(env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Load the paths: section from kairix.config.yaml if it exists."""
-    config_path = os.environ.get("KAIRIX_CONFIG_PATH", "kairix.config.yaml")
+    if env is None:
+        env = os.environ
+    config_path = env.get("KAIRIX_CONFIG_PATH", "kairix.config.yaml")
     try:
         import yaml
 
@@ -186,39 +252,43 @@ def clear_cache() -> None:
 # Convenience functions — import these directly instead of calling KairixPaths.resolve()
 
 
-def document_root() -> Path:
+def document_root(env: Mapping[str, str] | None = None) -> Path:
     """Return the document store root path."""
-    return KairixPaths.resolve().document_root
+    return KairixPaths.resolve(env=env).document_root
 
 
-def reference_library_root() -> Path:
+def reference_library_root(env: Mapping[str, str] | None = None) -> Path:
     """Reference library root — ships inside the container at /opt/kairix/reference-library."""
-    return Path(os.environ.get("KAIRIX_REFLIB_ROOT", "reference-library"))
+    if env is None:
+        env = os.environ
+    return Path(env.get("KAIRIX_REFLIB_ROOT", "reference-library"))
 
 
-def db_path() -> Path:
+def db_path(env: Mapping[str, str] | None = None) -> Path:
     """Get the database path."""
-    return KairixPaths.resolve().db_path
+    return KairixPaths.resolve(env=env).db_path
 
 
-def log_dir() -> Path:
+def log_dir(env: Mapping[str, str] | None = None) -> Path:
     """Get the log directory path."""
-    return KairixPaths.resolve().log_dir
+    return KairixPaths.resolve(env=env).log_dir
 
 
-def workspace_root() -> Path:
+def workspace_root(env: Mapping[str, str] | None = None) -> Path:
     """Get the workspace root path."""
-    return KairixPaths.resolve().workspace_root
+    return KairixPaths.resolve(env=env).workspace_root
 
 
-def summaries_db_path() -> Path:
+def summaries_db_path(env: Mapping[str, str] | None = None) -> Path:
     """Get the summaries database path.
 
     Configurable via KAIRIX_SUMMARIES_DB env var.
     Default: ~/.cache/kairix/summaries.db
     """
+    if env is None:
+        env = os.environ
     return Path(
-        os.environ.get(
+        env.get(
             "KAIRIX_SUMMARIES_DB",
             str(Path.home() / ".cache" / "kairix" / "summaries.db"),
         )
@@ -256,4 +326,4 @@ def agent_memory_path(agent: str, env: Mapping[str, str] | None = None) -> Path:
             )
             return override_path
         return override_path / agent / "memory"
-    return document_root() / "04-Agent-Knowledge" / agent / "memory"
+    return document_root(env=env) / "04-Agent-Knowledge" / agent / "memory"
