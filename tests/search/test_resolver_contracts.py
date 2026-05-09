@@ -263,10 +263,16 @@ def test_resolve_returns_none_for_agent_scope_with_no_agent_and_no_extras() -> N
 
 
 @pytest.mark.contract
-def test_resolve_returns_none_when_registry_empty_for_all_agents() -> None:
-    """An empty registry yields no agent collections → None per the contract."""
+def test_resolve_raises_when_registry_empty_for_all_agents() -> None:
+    """An empty AgentRegistry triggers the same loud-failure path as no
+    registry: NotImplementedError naming the missing config. Without this,
+    the resolver returned ``[]`` → was coerced to ``None`` → downstream
+    BM25 treated ``None`` as "no filter" and silently returned global
+    results (#164).
+    """
     resolver = DefaultCollectionResolver(
         collections_config=None,
         agent_registry=FakeAgentRegistry(agents=[]),
     )
-    assert resolver.resolve(None, Scope.ALL_AGENTS) is None
+    with pytest.raises(NotImplementedError, match="at least one agent"):
+        resolver.resolve(None, Scope.ALL_AGENTS)

@@ -133,9 +133,11 @@ class DefaultCollectionResolver:
         cross-agent shared paths (e.g. ``04-Agent-Knowledge/shared``) are
         never duplicated in the resolver's output.
 
-        Raises ``NotImplementedError`` when no registry is configured — the
-        misconfiguration is loud rather than silent (returning an empty list
-        would mask bad ops as "search nothing").
+        Raises ``NotImplementedError`` when no registry is configured *or*
+        when the registry has zero agents — the misconfiguration is loud
+        rather than silent (returning an empty list would mask bad ops as
+        "search nothing", which downstream backends interpret as "no filter
+        — search everything", silently returning the wrong content).
         """
         if self._registry is None:
             raise NotImplementedError(
@@ -148,9 +150,18 @@ class DefaultCollectionResolver:
         # fall back to per-agent iteration for fakes that only implement
         # ``list_agents()``.
         if hasattr(self._registry, "all_collections"):
-            return list(self._registry.all_collections())
-        cols: list[str] = []
-        for agent in self._registry.list_agents():
-            names = agent.collection_names() if hasattr(agent, "collection_names") else [agent.collection]
-            cols.extend(names)
-        return _dedupe_preserving_order(cols)
+            cols = list(self._registry.all_collections())
+        else:
+            cols = []
+            for agent in self._registry.list_agents():
+                names = agent.collection_names() if hasattr(agent, "collection_names") else [agent.collection]
+                cols.extend(names)
+            cols = _dedupe_preserving_order(cols)
+        if not cols:
+            raise NotImplementedError(
+                "scope=all-agents / scope=everything requires an AgentRegistry "
+                "with at least one agent registered. The configured AgentRegistry "
+                "is empty — add at least one entry to the `agents:` section of "
+                "kairix.config.yaml: `agents: [{name: <agent>, write_path: <path>}]`."
+            )
+        return cols

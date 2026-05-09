@@ -57,13 +57,17 @@ def test_all_agents_without_registry_still_raises() -> None:
 
 
 @pytest.mark.unit
-def test_empty_registry_returns_none_for_all_agents() -> None:
-    """A registry with no agents is a valid configuration; resolve returns None."""
+def test_empty_registry_raises_for_all_agents() -> None:
+    """An empty registry is treated the same as no registry: scope=ALL_AGENTS
+    must raise NotImplementedError so the misconfiguration is loud rather
+    than silently falling through to "search everything" downstream (#164).
+    """
     resolver = DefaultCollectionResolver(
         collections_config=None,
         agent_registry=ConfigDrivenAgentRegistry(),
     )
-    assert resolver.resolve(None, Scope.ALL_AGENTS) is None
+    with pytest.raises(NotImplementedError, match="at least one agent"):
+        resolver.resolve(None, Scope.ALL_AGENTS)
 
 
 @pytest.mark.unit

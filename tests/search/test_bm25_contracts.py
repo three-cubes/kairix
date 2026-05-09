@@ -270,3 +270,64 @@ def test_doc_repo_branch_does_not_raise_on_partially_shaped_rows() -> None:
     # an empty row is unspecified by the docstring, but it must be a list.
     results = bm25_search("q", doc_repo=repo)
     assert isinstance(results, list)
+
+
+# ---------------------------------------------------------------------------
+# collections=None vs collections=[] — distinct semantics (#164)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_collections_none_searches_all_active_documents(tmp_path: Path) -> None:
+    """``collections=None`` is the "no filter" signal — search every active
+    document regardless of collection. Sabotage anchor for the second test:
+    proves the underlying DB has matchable content.
+    """
+    db_path = _create_db_with_doc(tmp_path, "kairix content", path="some/doc.md")
+    results = bm25_search("kairix", db_path=db_path, collections=None)
+    assert len(results) == 1
+
+
+@pytest.mark.unit
+def test_collections_empty_list_returns_no_results(tmp_path: Path) -> None:
+    """``collections=[]`` is the explicit "search nothing" signal — distinct
+    from ``None`` (no filter).
+
+    Closes #164: production was conflating ``[]`` with ``None`` via
+    ``if collections:``, so when the resolver narrowed scope to zero
+    collections the search backend silently returned global results. The
+    contract is now: ``collections=[]`` returns ``[]``, no SQL hits the DB.
+    """
+    db_path = _create_db_with_doc(tmp_path, "kairix content", path="some/doc.md")
+    # Same query that returns 1 result with collections=None.
+    results = bm25_search("kairix", db_path=db_path, collections=[])
+    assert results == [], (
+        "collections=[] should return no results; got results from a global "
+        "search — this is the #164 conflation regression."
+    )
+
+
+@pytest.mark.unit
+def test_doc_repo_branch_also_short_circuits_on_empty_collections() -> None:
+    """The doc_repo delegation path honours the same ``collections=[]``
+    short-circuit as the direct-SQL path. Without this, the bug recurs at
+    a different layer: doc_repo.search_fts would receive ``collections=[]``
+    and might apply the same conflation.
+    """
+    repo = FakeDocumentRepository(
+        documents=[
+            {
+                "path": "doc.md",
+                "title": "Doc",
+                "content": "kairix content",
+                "collection": "vault-areas",
+            }
+        ]
+    )
+    # Sanity: with None, the row matches.
+    assert len(bm25_search("kairix", doc_repo=repo, collections=None)) == 1
+    # With []: zero results, and the repo's search_fts is never invoked
+    # (calls list stays the same).
+    calls_before = len(repo.calls)
+    assert bm25_search("kairix", doc_repo=repo, collections=[]) == []
+    assert len(repo.calls) == calls_before, "doc_repo.search_fts should not be called when collections is []"

@@ -198,10 +198,14 @@ def _build_bm25_query(
 ) -> tuple[str, list]:
     """Build the FTS5 SQL query and parameter list.
 
-    Returns (sql, params) tuple. Collection filtering is applied when
-    collections is non-empty; otherwise searches all active documents.
+    ``collections=None`` means "no scope filter — search all active
+    documents". ``collections=[non-empty]`` filters via ``IN (...)``.
+    ``collections=[]`` (explicit empty) is the caller's "search nothing"
+    signal — the public ``bm25_search`` short-circuits before reaching this
+    helper, so this function is only ever called with ``None`` or a
+    non-empty list.
     """
-    if collections:
+    if collections is not None:
         placeholders = ",".join("?" * len(collections))
         sql = f"""
             SELECT d.collection,
@@ -267,6 +271,14 @@ def bm25_search(
         Never raises.
     """
     if not query or not query.strip():
+        return []
+
+    # Explicit empty collections list means "search nothing — the caller
+    # has narrowed the scope to zero collections". Distinct from
+    # ``collections=None`` which means "no filter — search all active
+    # documents". Without this guard, downstream code conflates the two
+    # and silently returns global results when the caller meant zero.
+    if collections is not None and len(collections) == 0:
         return []
 
     # Delegate to DocumentRepository when provided
