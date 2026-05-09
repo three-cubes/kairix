@@ -145,13 +145,20 @@ def test_preflight_check_returns_actual_dims_when_client_returns_smaller_vector(
 @pytest.mark.unit
 def test_preflight_check_propagates_authentication_errors_from_client() -> None:
     """AuthenticationError from the client is not swallowed."""
-    from unittest.mock import MagicMock
-
     import openai
+
+    class _StubRequest:
+        pass
+
+    class _StubResponse:
+        def __init__(self) -> None:
+            self.status_code = 401
+            self.request = _StubRequest()
+            self.headers: dict[str, str] = {}
 
     err = openai.AuthenticationError(
         message="HTTP 401",
-        response=MagicMock(status_code=401),
+        response=_StubResponse(),
         body=None,
     )
     client = _FakePreflightClient(raises=err)

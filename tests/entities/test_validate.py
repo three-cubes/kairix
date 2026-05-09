@@ -1,6 +1,6 @@
 """Tests for kairix.knowledge.entities.validate — Wikidata validator."""
 
-from unittest.mock import MagicMock
+from typing import Any
 
 import pytest
 
@@ -12,14 +12,25 @@ from kairix.knowledge.entities.validate import (
 from tests.fixtures.neo4j_mock import FakeNeo4jClient
 
 
+class _FakeResponse:
+    """Minimal requests.Response stand-in: ``raise_for_status`` is a no-op,
+    ``json()`` returns the wrapped Wikidata payload."""
+
+    def __init__(self, items: list[dict]) -> None:
+        self._items = items
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, Any]:
+        return {"search": self._items}
+
+
 def _fake_http_get(items: list[dict]):
     """Return a callable that mimics requests.get returning Wikidata items."""
 
-    def _get(*args, **kwargs):
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"search": items}
-        return mock_resp
+    def _get(*args: Any, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse(items)
 
     return _get
 

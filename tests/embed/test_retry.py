@@ -9,11 +9,29 @@ production client entirely.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
 from kairix.core.embed.embed import embed_batch
+
+
+class _StubHTTPRequest:
+    """Stub for ``response.request`` accessed by openai's exception ctor."""
+
+
+class _StubHTTPResponse:
+    """Minimal HTTPResponse-shaped object for openai.BadRequestError(response=...).
+
+    The openai exception constructor reads ``response.request`` and
+    ``response.headers.get("x-request-id")`` — both attributes are stubbed
+    here. Status code is exposed for completeness.
+    """
+
+    def __init__(self, status_code: int = 400) -> None:
+        self.status_code = status_code
+        self.request = _StubHTTPRequest()
+        self.headers: dict[str, str] = {}
+
 
 API_KEY = "test-key"  # pragma: allowlist secret
 ENDPOINT = "https://test.openai.azure.com"
@@ -132,7 +150,7 @@ class TestEmbedBatchBadRequestSplit:
             if len(texts) > 1:
                 raise openai.BadRequestError(
                     message="batch too large",
-                    response=MagicMock(status_code=400),
+                    response=_StubHTTPResponse(status_code=400),
                     body=None,
                 )
             return _EmbeddingsResponse([_EmbeddingItem(i, 0.1) for i in range(len(texts))])
@@ -154,7 +172,7 @@ class TestEmbedBatchBadRequestSplit:
         def always_bad_request(_texts: list[str]) -> _EmbeddingsResponse:
             raise openai.BadRequestError(
                 message="bad input",
-                response=MagicMock(status_code=400),
+                response=_StubHTTPResponse(status_code=400),
                 body=None,
             )
 
