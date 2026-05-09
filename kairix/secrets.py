@@ -34,7 +34,6 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-from collections.abc import Mapping, MutableMapping
 from functools import lru_cache
 from pathlib import Path
 
@@ -55,27 +54,20 @@ _SECRET_ENV_MAP = {
 }
 
 
-def load_secrets(
-    path: str | Path | None = None,
-    env: MutableMapping[str, str] | None = None,
-) -> int:
+def load_secrets(path: str | Path | None = None) -> int:
     """
-    Load KEY=VALUE pairs from the secrets file into ``env`` (default ``os.environ``).
+    Load KEY=VALUE pairs from the secrets file into os.environ.
 
     Args:
-        path: Path to the secrets file. Defaults to KAIRIX_SECRETS_FILE entry
-              in ``env``, or /run/secrets/kairix.env if not set.
-        env:  Mutable mapping to load values into. Defaults to ``os.environ``.
-              Tests pass an explicit dict.
+        path: Path to the secrets file. Defaults to KAIRIX_SECRETS_FILE env
+              var, or /run/secrets/kairix.env if not set.
 
     Returns:
         Number of environment variables loaded (0 if file absent or empty).
         Never raises.
     """
-    if env is None:
-        env = os.environ
     if path is None:
-        path = env.get("KAIRIX_SECRETS_FILE", _DEFAULT_SECRETS_FILE)
+        path = os.environ.get("KAIRIX_SECRETS_FILE", _DEFAULT_SECRETS_FILE)
     secrets_path = Path(path)
 
     if not secrets_path.exists():
@@ -94,10 +86,10 @@ def load_secrets(
             key = key.strip()
             if not key:
                 continue
-            if key in env:
-                # Existing entry takes priority — sidecar secrets are fallback
+            if key in os.environ:
+                # Existing env var takes priority — sidecar secrets are fallback
                 continue
-            env[key] = value
+            os.environ[key] = value
             count += 1
     except (OSError, UnicodeDecodeError) as exc:
         logger.warning("secrets: failed to load secrets file — %s", exc)
@@ -128,14 +120,14 @@ def load_secrets_file(path: Path) -> dict[str, str]:
     return result
 
 
-def _read_secret_file(name: str, env: Mapping[str, str] | None = None) -> str | None:
+def _read_secret_file(name: str) -> str | None:
     """Read a single secret from a per-file secret (Docker secrets pattern).
 
     Looks for a file named ``name`` in the secrets directory
     (``/run/secrets/`` for Docker, ``~/.config/kairix/secrets/`` for pip).
     Returns the file content stripped of whitespace, or None.
     """
-    for secrets_dir in _secret_file_dirs(env=env):
+    for secrets_dir in _secret_file_dirs():
         secret_path = Path(secrets_dir) / name
         if secret_path.is_file():
             try:
@@ -147,28 +139,22 @@ def _read_secret_file(name: str, env: Mapping[str, str] | None = None) -> str | 
     return None
 
 
-def _secret_file_dirs(env: Mapping[str, str] | None = None) -> list[str]:
+def _secret_file_dirs() -> list[str]:
     """Return directories to scan for per-file secrets, in priority order."""
-    if env is None:
-        env = os.environ
     dirs = []
     # Explicit override
-    override = env.get("KAIRIX_SECRETS_DIR")
+    override = os.environ.get("KAIRIX_SECRETS_DIR")
     if override:
         dirs.append(override)
     # Docker secrets (tmpfs)
     dirs.append(_DEFAULT_SECRETS_DIR)
     # pip install path (XDG)
-    xdg = env.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    xdg = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     dirs.append(str(Path(xdg) / "kairix" / "secrets"))
     return dirs
 
 
-def get_secret(
-    name: str,
-    required: bool = True,
-    env: Mapping[str, str] | None = None,
-) -> str | None:
+def get_secret(name: str, required: bool = True) -> str | None:
     """
     Resolve a secret by name. Returns value or None (raises if required).
 
@@ -181,8 +167,6 @@ def get_secret(
     Args:
         name:     Secret name (e.g. "kairix-llm-api-key").
         required: If True and no value found, raises OSError. Default True.
-        env:      Env mapping to read from. Defaults to ``os.environ``;
-                  tests pass an explicit dict.
 
     Returns:
         Secret value string, or None if not found and required=False.
@@ -190,23 +174,21 @@ def get_secret(
     Raises:
         OSError: When required=True and the secret cannot be resolved.
     """
-    if env is None:
-        env = os.environ
     env_var = _SECRET_ENV_MAP.get(name)
 
     # Step 1: direct environment variable
     if env_var:
-        value = env.get(env_var)
+        value = os.environ.get(env_var)
         if value:
             return value
 
     # Step 2: per-file secret (Docker secrets / XDG config)
-    value = _read_secret_file(name, env=env)
+    value = _read_secret_file(name)
     if value:
         return value
 
     # Step 3: legacy bundle file (vault-agent sidecar)
-    secrets_dir = env.get("KAIRIX_SECRETS_DIR", _DEFAULT_SECRETS_DIR)
+    secrets_dir = os.environ.get("KAIRIX_SECRETS_DIR", _DEFAULT_SECRETS_DIR)
     secrets_file = Path(secrets_dir) / "kairix.env"
     if secrets_file.exists():
         file_secrets = load_secrets_file(secrets_file)
@@ -216,7 +198,7 @@ def get_secret(
                 return value
 
     # Step 4: Azure Key Vault CLI fallback
-    kv_name = env.get("KAIRIX_KV_NAME", "")
+    kv_name = os.environ.get("KAIRIX_KV_NAME", "")
     if kv_name:
         try:
             result = subprocess.run(  # noqa: S603 — az keyvault is a trusted CLI binary
@@ -252,16 +234,12 @@ def get_secret(
     return None
 
 
-def refresh_secrets(
-    path: str | Path | None = None,
-    env: MutableMapping[str, str] | None = None,
-) -> int:
+def refresh_secrets(path: str | Path | None = None) -> int:
     """Clear cached secrets and reload from the secrets file.
 
     Clears the lru_cache on ``load_secrets_file`` so the next
     ``get_secret`` call re-reads the file. Then calls ``load_secrets``
-    to re-populate ``env`` (default ``os.environ``) with any new or
-    rotated values.
+    to re-populate ``os.environ`` with any new or rotated values.
 
     Use this after rotating credentials in Azure Key Vault and
     re-fetching the secrets file (e.g., via a cron job or systemd
@@ -270,4 +248,4 @@ def refresh_secrets(
     Returns the number of environment variables loaded.
     """
     load_secrets_file.cache_clear()
-    return load_secrets(path, env=env)
+    return load_secrets(path)
