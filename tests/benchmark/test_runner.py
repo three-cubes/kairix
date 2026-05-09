@@ -1,9 +1,9 @@
 """
 Tests for kairix.quality.benchmark.runner — covers previously-untested paths:
-- _exact_match(): gold path matching variants
-- _fuzzy_match(): partial path matching
-- _classification_score(): rule classifier integration
-- _llm_judge(): API call mocked + error paths
+- exact_match(): gold path matching variants
+- fuzzy_match(): partial path matching
+- classification_score(): rule classifier integration
+- llm_judge(): API call mocked + error paths
 - score_tier(): tier labels
 - _category_diagnosis(): diagnostic strings
 - format_interpretation(): output structure
@@ -17,21 +17,19 @@ import pytest
 
 from kairix.quality.benchmark.runner import (
     BenchmarkResult,
-    _category_diagnosis,
-    _classification_score,
-    _exact_match,
-    _fuzzy_match,
-    _llm_judge,
-    _title_in_retrieved,
+    classification_score,
+    exact_match,
     format_interpretation,
+    fuzzy_match,
+    llm_judge,
     score_tier,
+    title_in_retrieved,
 )
 from kairix.quality.eval.metrics import (
-    _normalise_title,
-    _stem_from_path,
     dcg,
     hit_at_k_graded,
     ideal_dcg_graded,
+    match_gold_to_path,
     ndcg_graded,
     reciprocal_rank_graded,
 )
@@ -44,35 +42,35 @@ from kairix.quality.eval.metrics import (
 @pytest.mark.unit
 def test_exact_match_returns_1_for_direct_match() -> None:
     paths = ["04-Agent-Knowledge/builder/patterns.md", "some/other/doc.md"]
-    assert _exact_match(paths, "04-Agent-Knowledge/builder/patterns.md") == pytest.approx(1.0)
+    assert exact_match(paths, "04-Agent-Knowledge/builder/patterns.md") == pytest.approx(1.0)
 
 
 @pytest.mark.unit
 def test_exact_match_returns_1_for_substring_match() -> None:
     paths = ["04-Agent-Knowledge/builder/patterns.md"]
-    assert _exact_match(paths, "builder/patterns") == pytest.approx(1.0)
+    assert exact_match(paths, "builder/patterns") == pytest.approx(1.0)
 
 
 @pytest.mark.unit
 def test_exact_match_returns_0_when_no_match() -> None:
     paths = ["some/unrelated/doc.md"]
-    assert _exact_match(paths, "builder/patterns.md") == pytest.approx(0.0)
+    assert exact_match(paths, "builder/patterns.md") == pytest.approx(0.0)
 
 
 @pytest.mark.unit
 def test_exact_match_returns_0_for_empty_gold() -> None:
-    assert _exact_match(["any/path.md"], "") == pytest.approx(0.0)
+    assert exact_match(["any/path.md"], "") == pytest.approx(0.0)
 
 
 @pytest.mark.unit
 def test_exact_match_returns_0_for_empty_paths() -> None:
-    assert _exact_match([], "builder/patterns.md") == pytest.approx(0.0)
+    assert exact_match([], "builder/patterns.md") == pytest.approx(0.0)
 
 
 @pytest.mark.unit
 def test_exact_match_is_case_insensitive() -> None:
     paths = ["04-Agent-Knowledge/Builder/Patterns.md"]
-    assert _exact_match(paths, "builder/patterns.md") == pytest.approx(1.0)
+    assert exact_match(paths, "builder/patterns.md") == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -83,25 +81,25 @@ def test_exact_match_is_case_insensitive() -> None:
 @pytest.mark.unit
 def test_fuzzy_match_returns_1_for_suffix_match() -> None:
     paths = ["04-Agent-Knowledge/entities/jordan-blake.md"]
-    assert _fuzzy_match(paths, "entities/jordan-blake.md") == pytest.approx(1.0)
+    assert fuzzy_match(paths, "entities/jordan-blake.md") == pytest.approx(1.0)
 
 
 @pytest.mark.unit
 def test_fuzzy_match_returns_0_for_no_match() -> None:
     paths = ["totally/unrelated/file.md"]
-    assert _fuzzy_match(paths, "entities/jordan-blake.md") == pytest.approx(0.0)
+    assert fuzzy_match(paths, "entities/jordan-blake.md") == pytest.approx(0.0)
 
 
 @pytest.mark.unit
 def test_fuzzy_match_returns_0_for_empty_gold() -> None:
-    assert _fuzzy_match(["any/path.md"], "") == pytest.approx(0.0)
+    assert fuzzy_match(["any/path.md"], "") == pytest.approx(0.0)
 
 
 @pytest.mark.unit
 def test_fuzzy_match_respects_topk_limit() -> None:
     # gold is in position 11 (0-indexed), beyond top-10
     paths = [f"unrelated/{i}.md" for i in range(10)] + ["04-Agent-Knowledge/entities/target.md"]
-    assert _fuzzy_match(paths, "entities/target.md") == pytest.approx(0.0)
+    assert fuzzy_match(paths, "entities/target.md") == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +118,7 @@ def test_classification_score_returns_1_when_rules_classifier_matches_expected()
     from tests.fakes import FakeContentClassifier
 
     classifier = FakeContentClassifier(rules_type="decision")
-    score = _classification_score("We decided to use PostgreSQL.", "decision", classifier=classifier)
+    score = classification_score("We decided to use PostgreSQL.", "decision", classifier=classifier)
     assert score == pytest.approx(1.0)
     # Rules step ran exactly once with agent="shared"; LLM fallback was NOT consulted.
     assert classifier.rules_calls == [{"query": "We decided to use PostgreSQL.", "agent": "shared"}]
@@ -133,7 +131,7 @@ def test_classification_score_returns_0_when_rules_returns_different_type() -> N
     from tests.fakes import FakeContentClassifier
 
     classifier = FakeContentClassifier(rules_type="pattern")
-    score = _classification_score("We decided to use PostgreSQL.", "decision", classifier=classifier)
+    score = classification_score("We decided to use PostgreSQL.", "decision", classifier=classifier)
     assert score == pytest.approx(0.0)
     # Rules result wasn't 'unknown' so LLM fallback is skipped.
     assert classifier.llm_calls == []
@@ -145,7 +143,7 @@ def test_classification_score_returns_0_when_classifier_raises() -> None:
     from tests.fakes import FakeContentClassifier
 
     classifier = FakeContentClassifier(rules_raises=RuntimeError("oops"))
-    score = _classification_score("anything", "decision", classifier=classifier)
+    score = classification_score("anything", "decision", classifier=classifier)
     assert score == pytest.approx(0.0)
 
 
@@ -155,7 +153,7 @@ def test_classification_score_falls_back_to_llm_when_rules_returns_unknown() -> 
     from tests.fakes import FakeContentClassifier
 
     classifier = FakeContentClassifier(rules_type="unknown", llm_type="decision")
-    score = _classification_score("We decided to use PostgreSQL.", "decision", classifier=classifier)
+    score = classification_score("We decided to use PostgreSQL.", "decision", classifier=classifier)
     assert score == pytest.approx(1.0)
     # Both steps were consulted, with the rules step first.
     assert len(classifier.rules_calls) == 1
@@ -168,7 +166,7 @@ def test_classification_score_returns_0_when_llm_fallback_also_misses() -> None:
     from tests.fakes import FakeContentClassifier
 
     classifier = FakeContentClassifier(rules_type="unknown", llm_type="pattern")
-    score = _classification_score("anything", "decision", classifier=classifier)
+    score = classification_score("anything", "decision", classifier=classifier)
     assert score == pytest.approx(0.0)
     assert len(classifier.llm_calls) == 1
 
@@ -184,7 +182,7 @@ def test_llm_judge_returns_score_from_chat_backend() -> None:
     from tests.fakes import FakeChatBackend
 
     backend = FakeChatBackend(responses=["0.8"])
-    score = _llm_judge(
+    score = llm_judge(
         query="what are our engineering patterns?",
         paths=["04-Agent-Knowledge/builder/patterns.md"],
         snippets=["Engineering patterns for Builder"],
@@ -201,9 +199,9 @@ def test_llm_judge_clamps_score_to_unit_interval() -> None:
     """Backend returning 1.5 clamps to 1.0; -0.3 clamps to 0.0."""
     from tests.fakes import FakeChatBackend
 
-    high = _llm_judge("q", ["p.md"], ["s"], chat_backend=FakeChatBackend(responses=["1.5"]))
+    high = llm_judge("q", ["p.md"], ["s"], chat_backend=FakeChatBackend(responses=["1.5"]))
     assert high == pytest.approx(1.0)
-    low = _llm_judge("q", ["p.md"], ["s"], chat_backend=FakeChatBackend(responses=["-0.3"]))
+    low = llm_judge("q", ["p.md"], ["s"], chat_backend=FakeChatBackend(responses=["-0.3"]))
     assert low == pytest.approx(0.0)
 
 
@@ -213,7 +211,7 @@ def test_llm_judge_returns_0_when_chat_backend_raises() -> None:
     from tests.fakes import FakeChatBackend
 
     backend = FakeChatBackend(raise_on_call=OSError("timeout"))
-    score = _llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
+    score = llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
     assert score == pytest.approx(0.0)
 
 
@@ -223,7 +221,7 @@ def test_llm_judge_returns_0_for_empty_paths_without_calling_backend() -> None:
     from tests.fakes import FakeChatBackend
 
     backend = FakeChatBackend(responses=[])  # would IndexError if called
-    score = _llm_judge("q", [], [], chat_backend=backend)
+    score = llm_judge("q", [], [], chat_backend=backend)
     assert score == pytest.approx(0.0)
     assert len(backend.calls) == 0
 
@@ -234,7 +232,7 @@ def test_llm_judge_returns_0_when_response_not_parseable_as_float() -> None:
     from tests.fakes import FakeChatBackend
 
     backend = FakeChatBackend(responses=["not a number"])
-    score = _llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
+    score = llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
     assert score == pytest.approx(0.0)
 
 
@@ -264,26 +262,44 @@ def testscore_tier_needs_work() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _category_diagnosis
+# Category-diagnosis output — observed via format_interpretation, which
+# embeds the diagnosis line for each category in the rendered report.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_category_diagnosis_temporal_low() -> None:
-    msg = _category_diagnosis("temporal", 0.3)
-    assert "temporal" in msg.lower() or "date" in msg.lower() or "chunking" in msg.lower()
+def _result_with_category_score(category: str, score: float) -> BenchmarkResult:
+    """Build a minimal BenchmarkResult with one category at ``score`` and others at 1.0."""
+    cat_scores = {"recall": 1.0, "temporal": 1.0, "entity": 1.0, "conceptual": 1.0, "multi_hop": 1.0, "procedural": 1.0}
+    cat_scores[category] = score
+    return BenchmarkResult(
+        meta={"suite_name": "t", "system": "hybrid", "date": "2026-05-09", "n_cases": 6},
+        summary={"weighted_total": 0.7, "category_scores": cat_scores, "gates": {"phase1": True}},
+        diagnostics={"category_counts": {c: 1 for c in cat_scores}},
+        cases=[],
+    )
 
 
 @pytest.mark.unit
-def test_category_diagnosis_entity_low() -> None:
-    msg = _category_diagnosis("entity", 0.3)
-    assert len(msg) > 0  # Just verify it returns a non-empty string
+def test_format_interpretation_emits_category_specific_diagnosis_for_low_temporal() -> None:
+    """A low temporal score surfaces a temporal-aware diagnosis line in the report."""
+    output = format_interpretation(_result_with_category_score("temporal", 0.3)).lower()
+    assert "temporal" in output
+    # The temporal-low diagnosis mentions date-aware chunking.
+    assert "date" in output or "chunking" in output
 
 
 @pytest.mark.unit
-def test_category_diagnosis_unknown_category() -> None:
-    msg = _category_diagnosis("nonexistent_category", 0.5)
-    assert isinstance(msg, str)  # Should not crash
+def test_format_interpretation_marks_above_floor_categories_with_check_mark() -> None:
+    """Categories at or above CATEGORY_FLOOR get the ``above floor`` diagnosis."""
+    output = format_interpretation(_result_with_category_score("entity", 1.0))
+    # Each above-floor category gets the ``above floor`` diagnosis text.
+    assert "above floor" in output
+
+
+# Note: ``_category_diagnosis``'s unknown-category fallback (the
+# ``diagnoses.get(category, ...)`` default) is unreachable through
+# format_interpretation, which only iterates the fixed CATEGORY_WEIGHTS
+# keys. The fallback is pragma'd in runner.py.
 
 
 # ---------------------------------------------------------------------------
@@ -440,53 +456,62 @@ def test_reciprocal_rank_not_found() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Title-based helpers — _normalise_title, _stem_from_path
+# Title-and-stem normalisation — observed via match_gold_to_path, the
+# public caller of _normalise_title / _stem_from_path. Each test asserts on
+# the matching outcome rather than on the helper return values directly.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_normalise_title_spaces_to_hyphens() -> None:
-    assert _normalise_title("Jordan Blake") == "jordan-blake"
+def test_match_gold_normalises_spaces_in_gold_title_against_hyphenated_filename() -> None:
+    """Gold ``Jordan Blake`` (space-separated) matches a filename ``jordan-blake.md``."""
+    assert match_gold_to_path("Jordan Blake", "vault/jordan-blake.md") is True
 
 
 @pytest.mark.unit
-def test_normalise_title_underscores_to_hyphens() -> None:
-    assert _normalise_title("some_slug") == "some-slug"
+def test_match_gold_normalises_underscores_in_gold_against_hyphenated_filename() -> None:
+    """Gold ``some_slug`` (underscore) matches a filename ``some-slug.md``."""
+    assert match_gold_to_path("some_slug", "vault/some-slug.md") is True
 
 
 @pytest.mark.unit
-def test_normalise_title_idempotent() -> None:
-    assert _normalise_title("already-normalised") == "already-normalised"
+def test_match_gold_already_normalised_title_round_trips() -> None:
+    """An already-normalised gold title matches its identical-stem filename."""
+    assert match_gold_to_path("already-normalised", "vault/already-normalised.md") is True
 
 
 @pytest.mark.unit
-def test_normalise_title_mixed_separators() -> None:
-    assert _normalise_title("foo  bar--baz") == "foo-bar-baz"
+def test_match_gold_collapses_runs_of_separators_in_title() -> None:
+    """Gold ``foo  bar--baz`` (double space + double hyphen) matches ``foo-bar-baz.md``."""
+    assert match_gold_to_path("foo  bar--baz", "vault/foo-bar-baz.md") is True
 
 
 @pytest.mark.unit
-def test_normalise_title_strips_leading_trailing_hyphens() -> None:
-    assert _normalise_title("-leading-trailing-") == "leading-trailing"
+def test_match_gold_strips_leading_and_trailing_separators_in_title() -> None:
+    """Gold ``-leading-trailing-`` matches ``leading-trailing.md``."""
+    assert match_gold_to_path("-leading-trailing-", "vault/leading-trailing.md") is True
 
 
 @pytest.mark.unit
-def test_stem_from_path_simple_filename() -> None:
-    assert _stem_from_path("patterns.md") == "patterns"
+def test_match_gold_extracts_stem_from_simple_filename() -> None:
+    """Path-stem extraction: gold ``patterns`` matches ``patterns.md``."""
+    assert match_gold_to_path("patterns", "patterns.md") is True
 
 
 @pytest.mark.unit
-def test_stem_from_path_deep_document_store_path() -> None:
-    assert _stem_from_path("02-Areas/00-Clients/Acme-Corp/Acme-Corp.md") == "acme-corp"
+def test_match_gold_extracts_stem_from_deep_document_path() -> None:
+    """Stem extraction works for a deep filesystem path."""
+    assert match_gold_to_path("acme-corp", "02-Areas/00-Clients/Acme-Corp/Acme-Corp.md") is True
 
 
 @pytest.mark.unit
-def test_stem_from_path_entity_path() -> None:
-    assert _stem_from_path("entities/person/jordan-blake.md") == "jordan-blake"
+def test_match_gold_extracts_stem_from_entity_path() -> None:
+    assert match_gold_to_path("jordan-blake", "entities/person/jordan-blake.md") is True
 
 
 @pytest.mark.unit
-def test_stem_from_path_dated_log() -> None:
-    assert _stem_from_path("agent-memory/builder/2026-04-10.md") == "2026-04-10"
+def test_match_gold_extracts_stem_from_dated_log_filename() -> None:
+    assert match_gold_to_path("2026-04-10", "agent-memory/builder/2026-04-10.md") is True
 
 
 # ---------------------------------------------------------------------------
@@ -495,34 +520,34 @@ def test_stem_from_path_dated_log() -> None:
 
 
 @pytest.mark.unit
-def test_title_in_retrieved_exact_match() -> None:
+def test_title_in_retrievedexact_match() -> None:
     paths = ["02-Areas/00-Clients/Acme-Corp/Acme-Corp.md", "other/doc.md"]
-    assert _title_in_retrieved("Acme Corp", paths, top_k=5) is True
+    assert title_in_retrieved("Acme Corp", paths, top_k=5) is True
 
 
 @pytest.mark.unit
 def test_title_in_retrieved_entity_slug_match() -> None:
     paths = ["entities/person/jordan-blake.md"]
-    assert _title_in_retrieved("jordan-blake", paths, top_k=5) is True
+    assert title_in_retrieved("jordan-blake", paths, top_k=5) is True
 
 
 @pytest.mark.unit
 def test_title_in_retrieved_no_match() -> None:
     paths = ["some/unrelated/doc.md"]
-    assert _title_in_retrieved("jordan-blake", paths, top_k=5) is False
+    assert title_in_retrieved("jordan-blake", paths, top_k=5) is False
 
 
 @pytest.mark.unit
 def test_title_in_retrieved_respects_top_k() -> None:
     # Gold title is at position 3, but top_k=2 — must not match
     paths = ["a.md", "b.md", "entities/person/jordan-blake.md"]
-    assert _title_in_retrieved("jordan-blake", paths, top_k=2) is False
+    assert title_in_retrieved("jordan-blake", paths, top_k=2) is False
 
 
 @pytest.mark.unit
 def test_title_in_retrieved_case_insensitive() -> None:
     paths = ["Vault/JORDAN-BLAKE.md"]
-    assert _title_in_retrieved("Jordan Blake", paths, top_k=5) is True
+    assert title_in_retrieved("Jordan Blake", paths, top_k=5) is True
 
 
 # ---------------------------------------------------------------------------
@@ -683,29 +708,23 @@ def test_format_interpretation_omits_ndcg_section_when_absent() -> None:
 
 @pytest.mark.unit
 def test_exact_match_returns_1_via_progressive_suffix_match() -> None:
-    """``_exact_match`` returns 1.0 when the gold path's last components match a result path.
+    """``exact_match`` returns 1.0 when the gold path's last component matches a result path.
 
-    Closes coverage of the ``return 1.0`` from the suffix-shortening loop (line 133).
     Both paths are absolute strings that don't share a substring, but the gold's
     last segment ``rules.md`` matches as a suffix of the retrieved path.
     """
-    from kairix.quality.benchmark.runner import _exact_match
-
     paths = ["04-Agent-Knowledge/builder/rules.md"]
-    # Gold uses a different leading prefix; the last segment is the only overlap.
-    score = _exact_match(paths, "alt-prefix/that-doesnt-overlap/rules.md")
+    score = exact_match(paths, "alt-prefix/that-doesnt-overlap/rules.md")
     assert score == pytest.approx(1.0)
 
 
 @pytest.mark.unit
 def test_fuzzy_match_returns_1_via_progressive_suffix_match() -> None:
-    """``_fuzzy_match`` matches via the same suffix-shortening loop (line 176)."""
-    from kairix.quality.benchmark.runner import _fuzzy_match
-
+    """``fuzzy_match`` matches via the same suffix-shortening loop."""
     paths = ["a/b/c/d/e/f/notes.md"]
     # Last segment ``notes.md`` matches but the longer suffix ``e/f/notes.md`` is
     # what the loop step lands on.
-    score = _fuzzy_match(paths, "different/dir/e/f/notes.md")
+    score = fuzzy_match(paths, "different/dir/e/f/notes.md")
     assert score == pytest.approx(1.0)
 
 
@@ -754,11 +773,11 @@ def test_format_interpretation_lists_categories_below_floor_when_any_fail() -> N
 
 
 @pytest.mark.unit
-def test_score_case_dispatches_classification_via_classification_score() -> None:
+def test_score_case_dispatches_classification_viaclassification_score() -> None:
     """A case with score_method='classification' delegates to ``_classification_score``.
 
     Closes coverage of line 360 — the classification-dispatch path in score_case.
-    Production calls _classification_score(...) without an injected classifier;
+    Production calls classification_score(...) without an injected classifier;
     the FakeContentClassifier here would not be picked up. We instead rely on
     the production-default classifier path's ``except Exception: return 0.0``
     behaviour: the classify modules are unavailable in the test env, so the
@@ -917,73 +936,55 @@ def test_compute_weighted_total_uses_v1_1_classification_weight_when_classificat
 
 
 @pytest.mark.unit
-def test_validate_suite_prerequisites_warns_when_some_recall_cases_have_no_gold(
+def test_run_benchmark_warns_when_some_recall_cases_have_no_gold(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Some-but-not-all recall cases missing gold references → warning, no raise.
 
-    Closes coverage of lines 476 + 479-483 — the warning emission.
+    The validation step runs at the start of ``run_benchmark`` and observes
+    the suite. We invoke ``run_benchmark`` with a mixed suite and assert the
+    warning record appears; the run still completes (no raise).
     """
     import logging
-    from types import SimpleNamespace
 
-    from kairix.quality.benchmark.runner import _validate_suite_prerequisites
+    from kairix.quality.benchmark.runner import run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
 
-    suite = SimpleNamespace(
+    suite = BenchmarkSuite(
+        meta={"agent": "t", "collections": ["vault"]},
         cases=[
-            SimpleNamespace(
-                id="R1",
-                category="recall",
-                score_method="ndcg",
-                gold_titles=None,
-                gold_paths=None,
-                gold_path=None,  # no gold
-            ),
-            SimpleNamespace(
-                id="R2",
-                category="recall",
-                score_method="ndcg",
-                gold_titles=None,
-                gold_paths=None,
-                gold_path="docs/x.md",  # has gold
-            ),
-        ]
+            BenchmarkCase(id="R1", category="recall", query="q1", gold_path=None, score_method="ndcg"),
+            BenchmarkCase(id="R2", category="recall", query="q2", gold_path="docs/x.md", score_method="ndcg"),
+        ],
     )
+
+    def _retrieve(**kwargs):  # type: ignore[no-untyped-def]
+        return ([], [], {"intent": "semantic"})
+
     with caplog.at_level(logging.WARNING):
-        # Does not raise — only warns.
-        _validate_suite_prerequisites(suite)
+        # Runs to completion — no raise — just warns.
+        run_benchmark(suite, system="hybrid", agent="t", retrieve_fn=_retrieve)
     assert any("1/2 recall cases have no gold references" in r.message for r in caplog.records)
 
 
 @pytest.mark.unit
-def test_validate_suite_prerequisites_raises_when_all_recall_cases_have_no_gold() -> None:
-    """All recall cases missing gold references → raises ValueError naming the regenerate command.
+def test_run_benchmark_raises_value_error_when_all_recall_cases_have_no_gold() -> None:
+    """All recall cases missing gold references → ``run_benchmark`` raises before retrieving."""
+    from kairix.quality.benchmark.runner import run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
 
-    Closes coverage of lines 485-490 — the raise branch.
-    """
-    from types import SimpleNamespace
-
-    from kairix.quality.benchmark.runner import _validate_suite_prerequisites
-
-    suite = SimpleNamespace(
+    suite = BenchmarkSuite(
+        meta={"agent": "t", "collections": ["vault"]},
         cases=[
-            SimpleNamespace(
-                id="R1",
-                category="recall",
-                score_method="ndcg",
-                gold_titles=None,
-                gold_paths=None,
-                gold_path=None,
-            ),
-            SimpleNamespace(
-                id="R2",
-                category="recall",
-                score_method="ndcg",
-                gold_titles=None,
-                gold_paths=None,
-                gold_path=None,
-            ),
-        ]
+            BenchmarkCase(id="R1", category="recall", query="q1", gold_path=None, score_method="ndcg"),
+            BenchmarkCase(id="R2", category="recall", query="q2", gold_path=None, score_method="ndcg"),
+        ],
     )
+
+    def _retrieve(**kwargs):  # type: ignore[no-untyped-def]
+        # If validation didn't fire, the retrieve_fn would be called; the test would
+        # then surface the failure as "retrieve was called" rather than a ValueError.
+        raise AssertionError("retrieve_fn must not run when validation fails")
+
     with pytest.raises(ValueError, match="no gold references"):
-        _validate_suite_prerequisites(suite)
+        run_benchmark(suite, system="hybrid", agent="t", retrieve_fn=_retrieve)

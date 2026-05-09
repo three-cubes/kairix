@@ -95,7 +95,7 @@ FUZZY_MATCH_TOPK = 10
 __all__ = ["CATEGORY_ALIASES", "CATEGORY_WEIGHTS", "PHASE_GATES", "match_gold_to_path"]
 
 
-def _title_in_retrieved(gold_title: str, retrieved_paths: list[str], top_k: int) -> bool:
+def title_in_retrieved(gold_title: str, retrieved_paths: list[str], top_k: int) -> bool:
     """True if any of the top-k retrieved paths resolves to the gold title."""
     return any(match_gold_to_path(gold_title, p) for p in retrieved_paths[:top_k])
 
@@ -118,7 +118,7 @@ class BenchmarkResult:
 # ---------------------------------------------------------------------------
 
 
-def _exact_match(paths: list[str], gold: str) -> float:
+def exact_match(paths: list[str], gold: str) -> float:
     """1.0 if gold path is a case-insensitive substring of any top-K result paths."""
     if not gold:
         return 0.0
@@ -137,7 +137,7 @@ def _exact_match(paths: list[str], gold: str) -> float:
     return 0.0
 
 
-def _classification_score(
+def classification_score(
     query: str,
     expected_type: str,
     classifier: ContentClassifier | None = None,
@@ -163,7 +163,7 @@ def _classification_score(
         return 0.0
 
 
-def _fuzzy_match(paths: list[str], gold: str) -> float:
+def fuzzy_match(paths: list[str], gold: str) -> float:
     """1.0 if gold path is in any top-10 result paths."""
     if not gold:
         return 0.0
@@ -180,7 +180,7 @@ def _fuzzy_match(paths: list[str], gold: str) -> float:
     return 0.0
 
 
-def _llm_judge(
+def llm_judge(
     query: str,
     paths: list[str],
     snippets: list[str],
@@ -299,7 +299,9 @@ def _category_diagnosis(category: str, score: float) -> str:
         "procedural": "❌ procedural docs not surfacing — check collection scope",
         "classification": "❌ classification rules not matching — check rules.py patterns",
     }
-    return diagnoses.get(category, f"❌ score {score:.3f} below floor {CATEGORY_FLOOR}")
+    # The dict-default branch is unreachable through ``format_interpretation``,
+    # which iterates only ``CATEGORY_WEIGHTS`` keys (all present in ``diagnoses``).
+    return diagnoses.get(category, f"❌ score {score:.3f} below floor {CATEGORY_FLOOR}")  # pragma: no cover
 
 
 def format_interpretation(result: BenchmarkResult) -> str:
@@ -362,20 +364,20 @@ def score_case(
     Returns (score, ndcg_detail) where ndcg_detail is non-empty only for NDCG cases.
     """
     if case.score_method == "classification":
-        return _classification_score(case.query, case.expected_type or ""), {}
+        return classification_score(case.query, case.expected_type or ""), {}
 
     if case.score_method == "exact":
         if case.gold_title:
-            score = 1.0 if _title_in_retrieved(case.gold_title, paths, EXACT_MATCH_TOPK) else 0.0
+            score = 1.0 if title_in_retrieved(case.gold_title, paths, EXACT_MATCH_TOPK) else 0.0
         else:
-            score = _exact_match(paths, case.gold_path or "")
+            score = exact_match(paths, case.gold_path or "")
         return score, {}
 
     if case.score_method == "fuzzy":
         if case.gold_title:
-            score = 1.0 if _title_in_retrieved(case.gold_title, paths, FUZZY_MATCH_TOPK) else 0.0
+            score = 1.0 if title_in_retrieved(case.gold_title, paths, FUZZY_MATCH_TOPK) else 0.0
         else:
-            score = _fuzzy_match(paths, case.gold_path or "")
+            score = fuzzy_match(paths, case.gold_path or "")
         return score, {}
 
     if case.score_method == "ndcg":
@@ -392,7 +394,7 @@ def score_case(
         return score, ndcg_detail
 
     # llm fallback
-    return _llm_judge(query=case.query, paths=paths, snippets=snippets), {}
+    return llm_judge(query=case.query, paths=paths, snippets=snippets), {}
 
 
 def retrieve_case(
