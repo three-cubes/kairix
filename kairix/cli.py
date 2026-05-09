@@ -17,6 +17,10 @@ Subcommands:
   benchmark   Run retrieval quality benchmark
   wikilinks   Inject [[wikilinks]] on first mention in agent-written document store files
   reference-library  Reference library: install entities, check status, run extraction
+  eval        Evaluation harness: gold suite build, judge, sweep, monitor, gate
+  setup       First-time onboarding wizard for credentials and paths
+  worker      Background worker: re-index, recall-check, embedding refresh on a timer
+  config      Validate kairix.config.yaml against the schema and print errors
 
 See KAIRIX-ARCHITECTURE.md for architecture, ADRs, and roadmap.
 """

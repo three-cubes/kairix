@@ -55,6 +55,7 @@ pytest_plugins = [
     "tests.bdd.steps.search_collection_retrieval_overrides_steps",
     "tests.bdd.steps.search_cli_steps",
     "tests.bdd.steps.summarise_cli_steps",
+    "tests.bdd.steps.kairix_cli_top_level_steps",
 ]
 
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
