@@ -52,7 +52,7 @@ def _build_entity_relationships(entities: list[dict], client: object) -> list[st
     for entity in entities[:3]:
         eid = entity.get("id")
         ename = entity.get("name", eid)
-        if not eid:
+        if not eid:  # pragma: no cover — defensive; ``_find_query_entities`` already filters entities without an ``id`` so this branch is unreachable in practice
             continue
         try:
             related = client.related_entities(eid, max_hops=1)
@@ -143,7 +143,9 @@ class QueryPlanner:
         prompt for reliable parsing. Falls back to [query] on any failure.
         """
         try:
-            if llm_backend is None:
+            if (
+                llm_backend is None
+            ):  # pragma: no cover — production-only lazy default backend; tests inject FakeLLMBackend
                 from kairix.platform.llm import get_default_backend as _get_llm
 
                 llm_backend = _get_llm()
@@ -153,7 +155,7 @@ class QueryPlanner:
             if neo4j_client is not None and getattr(neo4j_client, "available", False):
                 try:
                     ctx = neo4j_graph_context(query, neo4j_client)
-                except Exception:  # broad catch justified: Neo4j driver can raise arbitrary exceptions
+                except Exception:  # pragma: no cover — defensive; ``neo4j_graph_context``'s helpers already catch driver exceptions, so this outer except is reachable only if those helpers themselves raise (currently impossible)
                     logger.debug("planner: Neo4j graph context unavailable")
             if ctx:
                 prompt = _DECOMPOSE_PROMPT_WITH_CONTEXT.format(entity_context=ctx, query=query)

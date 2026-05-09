@@ -30,7 +30,6 @@ from kairix.core.db.fts import rebuild_fts
 from kairix.core.db.schema import create_schema
 from kairix.quality.eval.cli import main
 
-
 pytestmark = pytest.mark.integration
 
 

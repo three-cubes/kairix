@@ -206,6 +206,50 @@ class FakeEmbedProvider:
         return [list(self._vector) for _ in texts]
 
 
+class FakeLLMBackend:
+    """Deterministic ``LLMBackend`` for tests.
+
+    Implements ``kairix.platform.llm.protocol.LLMBackend``: ``chat(messages, max_tokens)``
+    returns a configured response (or successive responses), and ``embed(text)`` returns
+    a configured vector. Captures call args.
+    """
+
+    def __init__(
+        self,
+        *,
+        chat_responses: list[str] | None = None,
+        chat_response: str | None = None,
+        embed_vector: list[float] | None = None,
+        chat_raises: BaseException | None = None,
+    ) -> None:
+        # Single-response shortcut: chat_response="..." reuses the value for every call.
+        if chat_response is not None:
+            chat_responses = [chat_response]
+        self._chat_responses = list(chat_responses or [])
+        self._chat_call_idx = 0
+        self._embed_vector = list(embed_vector or [0.0, 0.6, 0.8])
+        self._chat_raises = chat_raises
+        self.chat_calls: list[dict[str, Any]] = []
+        self.embed_calls: list[str] = []
+
+    def chat(self, messages: list[dict[str, Any]], max_tokens: int = 800) -> str:
+        self.chat_calls.append({"messages": list(messages), "max_tokens": max_tokens})
+        if self._chat_raises is not None:
+            raise self._chat_raises
+        if not self._chat_responses:
+            return ""
+        # If we have multiple responses, advance through them; if only one, reuse it.
+        if len(self._chat_responses) == 1:
+            return self._chat_responses[0]
+        idx = min(self._chat_call_idx, len(self._chat_responses) - 1)
+        self._chat_call_idx += 1
+        return self._chat_responses[idx]
+
+    def embed(self, text: str) -> list[float]:
+        self.embed_calls.append(text)
+        return list(self._embed_vector)
+
+
 class FakeContentClassifier:
     """Two-step ``ContentClassifier`` for the benchmark runner.
 
