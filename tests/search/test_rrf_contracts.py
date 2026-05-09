@@ -26,6 +26,7 @@ from kairix.core.search.rrf import (
     rrf,
     temporal_date_boost,
 )
+from tests.fakes import FakeGraphRepository
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -148,21 +149,6 @@ def test_rrf_never_raises_on_malformed_input() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _NeoStub:
-    """Minimal Neo4j-shaped stub matching the production API.
-
-    The production callsite calls ``neo4j_client.cypher(query)`` and reads back
-    rows with keys ``vault_path``, ``name``, ``labels``, ``in_degree``.
-    """
-
-    def __init__(self, *, available: bool = True, rows: list[dict] | None = None) -> None:
-        self.available = available
-        self._rows = list(rows or [])
-
-    def cypher(self, _query: str) -> list[dict]:
-        return self._rows
-
-
 def _row(vault_path: str, in_degree: int, *, name: str = "", labels: list[str] | None = None) -> dict:
     """Build a Neo4j-shaped row matching the production cypher SELECT."""
     return {
@@ -178,7 +164,7 @@ def test_entity_boost_returns_results_unchanged_when_disabled() -> None:
     """``EntityBoostConfig(enabled=False)`` → boosted_score == rrf_score for every result."""
     cfg = EntityBoostConfig(enabled=False)
     results = rrf([_bm25("a.md")], [])
-    boosted = entity_boost_neo4j(results, _NeoStub(), cfg)
+    boosted = entity_boost_neo4j(results, FakeGraphRepository(), cfg)
     assert boosted[0].boosted_score == boosted[0].rrf_score
 
 
@@ -186,7 +172,7 @@ def test_entity_boost_returns_results_unchanged_when_disabled() -> None:
 def test_entity_boost_returns_results_unchanged_when_neo4j_is_unavailable() -> None:
     """``neo4j_client.available is False`` → no boost applied."""
     results = rrf([_bm25("a.md")], [])
-    boosted = entity_boost_neo4j(results, _NeoStub(available=False))
+    boosted = entity_boost_neo4j(results, FakeGraphRepository(available=False))
     assert boosted[0].boosted_score == boosted[0].rrf_score
 
 
@@ -201,7 +187,7 @@ def test_entity_boost_returns_results_unchanged_when_neo4j_client_is_none() -> N
 
 @pytest.mark.unit
 def test_entity_boost_returns_empty_when_results_empty() -> None:
-    assert entity_boost_neo4j([], _NeoStub()) == []
+    assert entity_boost_neo4j([], FakeGraphRepository()) == []
 
 
 @pytest.mark.unit
@@ -211,7 +197,7 @@ def test_entity_boost_applies_when_doc_path_matches_entity_vault_path() -> None:
     wired and the formula actually fires.
     """
     rows = [_row("vault/jordan-blake.md", in_degree=10, name="Jordan", labels=["Person"])]
-    neo = _NeoStub(rows=rows)
+    neo = FakeGraphRepository(entities=rows)
     cfg = EntityBoostConfig(enabled=True, factor=0.5, cap=2.0)
 
     results = rrf([_bm25("vault/jordan-blake.md")], [])
@@ -230,7 +216,7 @@ def test_entity_boost_factor_is_capped_at_config_cap() -> None:
     no greater than ``cap``.
     """
     rows = [_row("vault/jordan-blake.md", in_degree=999, name="Jordan", labels=["Person"])]
-    neo = _NeoStub(rows=rows)
+    neo = FakeGraphRepository(entities=rows)
     cfg = EntityBoostConfig(enabled=True, factor=10.0, cap=2.0)  # large factor, cap=2.0
 
     results = rrf([_bm25("vault/jordan-blake.md")], [])
@@ -260,7 +246,7 @@ def test_entity_boost_log_formula_grows_monotonically_with_in_degree() -> None:
         _row("vault/low.md", in_degree=1, name="Low", labels=["Person"]),
         _row("vault/high.md", in_degree=100, name="High", labels=["Person"]),
     ]
-    neo = _NeoStub(rows=rows)
+    neo = FakeGraphRepository(entities=rows)
     results = rrf([_bm25("vault/low.md"), _bm25("vault/high.md")], [])
     boosted = entity_boost_neo4j(results, neo, cfg)
     by_path = {r.path: r for r in boosted}
@@ -277,7 +263,7 @@ def test_entity_boost_resorts_results_by_boosted_score_descending() -> None:
     # First doc gets no entity boost; second doc gets max boost.
     # Pre-boost the first ranks higher; post-boost the second must.
     rows = [_row("vault/celebrity.md", in_degree=999, name="Celebrity", labels=["Person"])]
-    neo = _NeoStub(rows=rows)
+    neo = FakeGraphRepository(entities=rows)
     results = rrf(
         [_bm25("vault/nobody.md"), _bm25("vault/celebrity.md")],
         [],
@@ -299,7 +285,7 @@ def test_entity_boost_applies_via_name_slug_lookup() -> None:
     # Entity vault_path is somewhere else, but name-slug should produce
     # 'person/jordan-blake.md' as a secondary lookup key.
     rows = [_row("notes/about-jordan.md", in_degree=10, name="Jordan Blake", labels=["Person"])]
-    neo = _NeoStub(rows=rows)
+    neo = FakeGraphRepository(entities=rows)
     results = rrf([_bm25("person/jordan-blake.md")], [])
     pre_score = results[0].rrf_score
     boosted = entity_boost_neo4j(results, neo, cfg)
@@ -319,7 +305,7 @@ def test_entity_boost_directory_match_applies_half_boost() -> None:
     # An entity at vault/jordan.md with high in-degree creates a dir 'vault'
     # → docs under vault/ get half boost.
     rows = [_row("vault/jordan.md", in_degree=100, name="Jordan", labels=["Person"])]
-    neo = _NeoStub(rows=rows)
+    neo = FakeGraphRepository(entities=rows)
     # Doc that's *under* the directory (not the entity itself).
     results = rrf([_bm25("vault/random-other-doc.md")], [])
     pre_score = results[0].rrf_score
@@ -333,7 +319,7 @@ def test_entity_boost_directory_match_applies_half_boost() -> None:
 def test_entity_boost_zero_in_degree_means_no_boost() -> None:
     """When the doc isn't in the Neo4j entity index, boosted_score == rrf_score."""
     rows = [_row("vault/other.md", in_degree=100, name="Other", labels=["Person"])]
-    neo = _NeoStub(rows=rows)
+    neo = FakeGraphRepository(entities=rows)
     results = rrf([_bm25("totally-different.md")], [])
     pre_score = results[0].rrf_score
     boosted = entity_boost_neo4j(results, neo)
@@ -342,27 +328,22 @@ def test_entity_boost_zero_in_degree_means_no_boost() -> None:
 
 @pytest.mark.unit
 def test_entity_boost_never_raises_when_cypher_raises() -> None:
-    """Per docstring "Never raises" — a Neo4j stub whose cypher() raises must
+    """Per docstring "Never raises" — a graph backend whose cypher() raises must
     surface as unmodified results.
     """
-
-    class _RaisingNeo:
-        available = True
-
-        def cypher(self, _query: str) -> list[dict]:
-            raise RuntimeError("neo4j down")
-
+    neo = FakeGraphRepository(raises=RuntimeError("neo4j down"))
     results = rrf([_bm25("a.md")], [])
     pre_score = results[0].rrf_score
-    boosted = entity_boost_neo4j(results, _RaisingNeo())
+    boosted = entity_boost_neo4j(results, neo)
     assert boosted[0].boosted_score == pytest.approx(pre_score)
 
 
 @pytest.mark.unit
 def test_entity_boost_empty_cypher_rows_means_no_boost() -> None:
-    """When Neo4j returns no rows, the function still returns results and
-    leaves boosted_score == rrf_score (rather than raising on max() of empty)."""
-    neo = _NeoStub(rows=[])
+    """When the graph backend returns no rows, the function still returns
+    results and leaves boosted_score == rrf_score (rather than raising on
+    max() of empty)."""
+    neo = FakeGraphRepository()  # no entities → cypher returns []
     results = rrf([_bm25("a.md")], [])
     pre_score = results[0].rrf_score
     boosted = entity_boost_neo4j(results, neo)

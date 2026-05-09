@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from kairix.core.search.bm25 import bm25_search
+from tests.fakes import FakeDocumentRepository
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,31 +60,6 @@ def _create_db_with_doc(tmp_path: Path, doc_text: str, *, path: str = "doc.md") 
     return db_path
 
 
-class _DocRepoStub:
-    """Minimal DocumentRepository-shaped stub for the doc_repo branch."""
-
-    def __init__(
-        self,
-        *,
-        rows: list[dict] | None = None,
-        raises: Exception | None = None,
-    ) -> None:
-        self._rows = list(rows or [])
-        self._raises = raises
-        self.calls: list[tuple[str, list[str] | None, int]] = []
-
-    def search_fts(
-        self,
-        query: str,
-        collections: list[str] | None = None,
-        limit: int = 20,
-    ) -> list[dict]:
-        self.calls.append((query, collections, limit))
-        if self._raises is not None:
-            raise self._raises
-        return self._rows
-
-
 # ---------------------------------------------------------------------------
 # Whitespace / empty contracts
 # ---------------------------------------------------------------------------
@@ -92,9 +68,9 @@ class _DocRepoStub:
 @pytest.mark.unit
 def test_whitespace_only_query_returns_empty_without_calling_doc_repo() -> None:
     """A whitespace-only query short-circuits to [] BEFORE the doc_repo
-    branch runs. Sabotage-prove: assert the repo was never called.
+    branch runs. Sabotage-prove: assert the canonical fake was never called.
     """
-    repo = _DocRepoStub(rows=[{"file": "x", "title": "", "snippet": "", "score": 0, "collection": ""}])
+    repo = FakeDocumentRepository(force_rows=[{"file": "x", "title": "", "snippet": "", "score": 0, "collection": ""}])
     results = bm25_search("   \t\n   ", doc_repo=repo)
     assert results == []
     assert repo.calls == [], "whitespace-only query must not reach doc_repo.search_fts"
@@ -183,8 +159,8 @@ def test_doc_repo_is_used_when_provided_skipping_direct_sql() -> None:
     and never touches a real DB. Confirmed by passing a nonexistent db_path
     that would fail open if the SQL branch ran.
     """
-    repo = _DocRepoStub(
-        rows=[{"file": "a.md", "title": "A", "snippet": "snippet A", "score": 0.5, "collection": "vault"}]
+    repo = FakeDocumentRepository(
+        force_rows=[{"file": "a.md", "title": "A", "snippet": "snippet A", "score": 0.5, "collection": "vault"}]
     )
     results = bm25_search(
         "anything",
@@ -200,8 +176,8 @@ def test_doc_repo_falls_back_to_path_key_when_file_absent() -> None:
     """Per impl: ``r.get("file", r.get("path", ""))`` — repos that
     return ``path`` instead of ``file`` must still produce a usable result.
     """
-    repo = _DocRepoStub(
-        rows=[{"path": "from-path-key.md", "title": "T", "snippet": "S", "score": 0.1, "collection": "c"}]
+    repo = FakeDocumentRepository(
+        force_rows=[{"path": "from-path-key.md", "title": "T", "snippet": "S", "score": 0.1, "collection": "c"}]
     )
     results = bm25_search("q", doc_repo=repo)
     assert len(results) == 1
@@ -212,7 +188,9 @@ def test_doc_repo_falls_back_to_path_key_when_file_absent() -> None:
 def test_doc_repo_falls_back_to_content_for_snippet_when_snippet_absent() -> None:
     """Per impl: ``r.get("snippet", r.get("content", "")[:300])``."""
     long_content = "x" * 500
-    repo = _DocRepoStub(rows=[{"file": "a.md", "title": "T", "content": long_content, "score": 0.1, "collection": "c"}])
+    repo = FakeDocumentRepository(
+        force_rows=[{"file": "a.md", "title": "T", "content": long_content, "score": 0.1, "collection": "c"}]
+    )
     results = bm25_search("q", doc_repo=repo)
     assert len(results) == 1
     assert len(results[0]["snippet"]) == 300
@@ -221,7 +199,7 @@ def test_doc_repo_falls_back_to_content_for_snippet_when_snippet_absent() -> Non
 @pytest.mark.unit
 def test_doc_repo_returns_empty_when_search_fts_raises() -> None:
     """The doc_repo branch swallows exceptions and returns [] (per "Never raises")."""
-    repo = _DocRepoStub(raises=RuntimeError("repo broken"))
+    repo = FakeDocumentRepository(raises=RuntimeError("repo broken"))
     results = bm25_search("q", doc_repo=repo)
     assert results == []
 
@@ -229,8 +207,8 @@ def test_doc_repo_returns_empty_when_search_fts_raises() -> None:
 @pytest.mark.unit
 def test_doc_repo_applies_date_filter_paths_post_query() -> None:
     """``date_filter_paths`` filters the doc_repo branch results by file path."""
-    repo = _DocRepoStub(
-        rows=[
+    repo = FakeDocumentRepository(
+        force_rows=[
             {"file": "keep.md", "title": "K", "snippet": "S", "score": 0.5, "collection": "c"},
             {"file": "drop.md", "title": "D", "snippet": "S", "score": 0.5, "collection": "c"},
         ]
@@ -246,7 +224,7 @@ def test_doc_repo_applies_date_filter_paths_post_query() -> None:
 @pytest.mark.unit
 def test_doc_repo_propagates_collections_and_limit_to_search_fts() -> None:
     """The collections list and limit kwarg should reach the repo."""
-    repo = _DocRepoStub(rows=[])
+    repo = FakeDocumentRepository(force_rows=[])
     bm25_search("q", collections=["vault", "shared"], limit=3, doc_repo=repo)
     assert repo.calls[0] == ("q", ["vault", "shared"], 3)
 
@@ -287,7 +265,7 @@ def test_doc_repo_branch_does_not_raise_on_partially_shaped_rows() -> None:
     a partially-shaped row (missing every documented key) must still
     yield a result rather than raise. Validates the never-raises invariant.
     """
-    repo = _DocRepoStub(rows=[{}])  # totally empty row
+    repo = FakeDocumentRepository(force_rows=[{}])  # totally empty row
     # The contract is just: must not raise. The shape of the result on
     # an empty row is unspecified by the docstring, but it must be a list.
     results = bm25_search("q", doc_repo=repo)

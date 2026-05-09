@@ -68,13 +68,30 @@ class FakeClassifier:
 
 
 class FakeDocumentRepository:
-    """In-memory document store keyed by path."""
+    """In-memory document store keyed by path.
 
-    def __init__(self, documents: list[dict[str, Any]] | None = None) -> None:
+    Configure with ``documents=`` to populate the substring-search index.
+    Pass ``raises=Exception(...)`` to make every call raise (covers
+    ``never-raises`` contracts in callers).
+    Pass ``force_rows=`` to return a fixed list regardless of query —
+    use when a contract test needs exact row shapes (e.g. missing keys).
+    Captures every ``search_fts`` call arg in ``calls`` for assertion.
+    """
+
+    def __init__(
+        self,
+        documents: list[dict[str, Any]] | None = None,
+        *,
+        raises: BaseException | None = None,
+        force_rows: list[dict[str, Any]] | None = None,
+    ) -> None:
         self._docs: dict[str, dict[str, Any]] = {}
         for doc in documents or []:
             path = doc.get("path", "")
             self._docs[path] = doc
+        self._raises = raises
+        self._force_rows = force_rows
+        self.calls: list[tuple[str, list[str] | None, int]] = []
 
     def search_fts(
         self,
@@ -82,6 +99,11 @@ class FakeDocumentRepository:
         collections: list[str] | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
+        self.calls.append((query, collections, limit))
+        if self._raises is not None:
+            raise self._raises
+        if self._force_rows is not None:
+            return list(self._force_rows[:limit])
         results = []
         query_lower = query.lower()
         for doc in self._docs.values():
@@ -123,15 +145,25 @@ class FakeDocumentRepository:
 
 
 class FakeGraphRepository:
-    """In-memory entity graph keyed by name."""
+    """In-memory entity graph keyed by name.
+
+    Configure with ``entities=`` (each must have a ``name`` for indexing).
+    Pass ``available=False`` to simulate Neo4j-not-wired.
+    Pass ``raises=Exception(...)`` to make ``cypher()`` raise (covers
+    the never-raises contract in entity-boost callers).
+    """
 
     def __init__(
         self,
         entities: list[dict[str, Any]] | None = None,
         available: bool = True,
+        *,
+        raises: BaseException | None = None,
     ) -> None:
         self._available = available
+        self._raises = raises
         self._entities: dict[str, dict[str, Any]] = {}
+        self._all_entities: list[dict[str, Any]] = list(entities or [])
         for entity in entities or []:
             name = entity.get("name", entity.get("id", ""))
             self._entities[name.lower()] = entity
@@ -144,10 +176,12 @@ class FakeGraphRepository:
         return self._entities.get(name.lower())
 
     def entity_in_degrees(self) -> list[dict[str, Any]]:
-        return list(self._entities.values())
+        return list(self._all_entities)
 
     def cypher(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        return list(self._entities.values())
+        if self._raises is not None:
+            raise self._raises
+        return list(self._all_entities)
 
 
 class FakeVectorRepository:
