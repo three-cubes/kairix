@@ -18,6 +18,43 @@ from kairix.core.search.pipeline import SearchPipeline
 logger = logging.getLogger(__name__)
 
 
+def select_boosts(cfg: RetrievalConfig, graph: Any) -> list[Any]:
+    """Build the production boost chain from a RetrievalConfig.
+
+    Public helper so tests can pin which boosts the production pipeline
+    actually wires for a given config — without spinning up Azure/Neo4j/SQLite.
+    Each boost adapter is intent-gated internally (see kairix.core.search.boosts);
+    this function only decides which adapters are *registered*, not when they
+    fire.
+
+    Args:
+        cfg:   ``RetrievalConfig``. Each ``*_enabled`` flag opts the matching
+               adapter into the chain.
+        graph: ``GraphRepository`` for ``EntityBoost``. Other boosts ignore it.
+
+    Returns:
+        List of boost-strategy instances in registration order:
+        EntityBoost → ProceduralBoost → TemporalDateBoost → ChunkDateBoost.
+    """
+    from kairix.core.search.boosts import (
+        ChunkDateBoost,
+        EntityBoost,
+        ProceduralBoost,
+        TemporalDateBoost,
+    )
+
+    boosts: list[Any] = []
+    if cfg.entity.enabled:
+        boosts.append(EntityBoost(graph=graph, config=cfg.entity))
+    if cfg.procedural.enabled:
+        boosts.append(ProceduralBoost(config=cfg.procedural))
+    if cfg.temporal.date_path_boost_enabled:
+        boosts.append(TemporalDateBoost(config=cfg.temporal))
+    if cfg.temporal.chunk_date_boost_enabled:
+        boosts.append(ChunkDateBoost(config=cfg.temporal))
+    return boosts
+
+
 def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeline:
     """Construct the production search pipeline.
 
@@ -106,13 +143,7 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
         fusion = BM25PrimaryFusion()
 
     # Boost chain
-    boosts: list[Any] = []
-    from kairix.core.search.boosts import EntityBoost, ProceduralBoost
-
-    if cfg.entity.enabled:
-        boosts.append(EntityBoost(graph=graph, config=cfg.entity))
-    if cfg.procedural.enabled:
-        boosts.append(ProceduralBoost(config=cfg.procedural))
+    boosts = select_boosts(cfg, graph)
 
     # Search logger — JSONL adapter writing to /data/kairix/logs/ in Docker,
     # ~/.cache/kairix/logs/ otherwise. Path resolution lives at the boundary

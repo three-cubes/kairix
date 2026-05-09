@@ -37,6 +37,19 @@ class BM25SearchBackend:
         """Delegate to DocumentRepository.search_fts."""
         return self._doc_repo.search_fts(query, collections=collections, limit=limit)
 
+    def get_chunk_dates(self, paths: list[str]) -> dict[str, str]:
+        """Proxy DocumentRepository.get_chunk_dates so the pipeline can enrich
+        FusedResults with chunk_date metadata before the boost chain runs.
+
+        Returns ``{path: chunk_date_iso}`` for paths that carry a chunk_date;
+        absent paths are simply not in the dict. Returns ``{}`` on repo failure.
+        """
+        try:
+            return self._doc_repo.get_chunk_dates(paths)
+        except Exception as e:
+            logger.warning("BM25SearchBackend.get_chunk_dates: %s", e)
+            return {}
+
 
 class VectorSearchBackend:
     """SearchBackend adapter wrapping vector search with optional HyDE.

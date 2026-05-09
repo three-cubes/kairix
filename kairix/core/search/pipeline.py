@@ -14,6 +14,7 @@ Pipeline stages:
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import logging
 import time
@@ -161,8 +162,33 @@ class SearchPipeline:
             _logger.warning("pipeline: fusion failed — %s — falling back to empty fused list", e)
             fused = []
 
-        # 5. Boost chain
-        context = {"intent": intent, "query": query, "graph": self.graph}
+        # 4b. Enrich each fused result with chunk_date metadata so the boost
+        # chain (specifically ChunkDateBoost) can score by recency. Source
+        # of truth is DocumentRepository.get_chunk_dates, exposed here via
+        # the BM25 backend — boost adapters never reach into the repo.
+        if fused:
+            try:
+                paths = [getattr(r, "path", "") for r in fused]
+                chunk_dates = self.bm25.get_chunk_dates(paths)
+                for r in fused:
+                    cd = chunk_dates.get(getattr(r, "path", ""))
+                    if cd and not getattr(r, "chunk_date", ""):
+                        r.chunk_date = cd
+            except Exception as e:
+                _logger.warning("pipeline: chunk_date enrichment failed — %s", e)
+
+        # 5. Boost chain.
+        # Extract any explicit ISO/year-month date in the query so
+        # ChunkDateBoost can reorder by chunk_date proximity. Done at
+        # the boundary, not inside boosts, so every boost sees the same
+        # parsed date and pipeline-level errors are caught here.
+        query_date = _extract_query_date(query)
+        context = {
+            "intent": intent,
+            "query": query,
+            "graph": self.graph,
+            "query_date": query_date,
+        }
         for boost in self.boosts:
             try:
                 fused = boost.boost(fused, query, context)
@@ -221,3 +247,22 @@ class SearchPipeline:
 
 
 _logger = logging.getLogger(__name__)
+
+
+def _extract_query_date(query: str) -> datetime.date | None:
+    """Best-effort extraction of an explicit calendar date from the query.
+
+    Returns a ``datetime.date`` for the first ISO ``YYYY-MM-DD`` substring
+    in the query, or ``None`` if none is present (or if parsing fails).
+    Used by the boost chain to drive ``ChunkDateBoost`` recency scoring.
+    Never raises.
+    """
+    import re
+
+    m = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", query)
+    if not m:
+        return None
+    try:
+        return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except (ValueError, TypeError):
+        return None
