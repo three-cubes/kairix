@@ -402,9 +402,25 @@ def _embed_and_store_batch(
         )
         return 0, list(batch)
 
+    # Defend against a partial response — the backend may return fewer vectors
+    # than texts (rate-limit, partial 5xx, mocked dev backends). Without this
+    # guard, ``zip(strict=False)`` would silently truncate and we'd report all
+    # chunks as embedded while staging only the matched ones — a silent
+    # over-count surfaced by the partial-response contract test.
+    matched = batch[: len(vectors)]
+    unaccounted = list(batch[len(vectors) :])
+    if unaccounted:
+        logger.error(
+            "Batch %d: backend returned %d vectors for %d texts — %d chunks unaccounted",
+            batch_idx,
+            len(vectors),
+            len(batch),
+            len(unaccounted),
+        )
+
     try:
         with db:
-            for chunk, vector in zip(batch, vectors, strict=False):
+            for chunk, vector in zip(matched, vectors, strict=True):
                 stage_embedding(
                     db,
                     chunk["hash"],
@@ -417,13 +433,13 @@ def _embed_and_store_batch(
                 )
         if vec_index is not None:
             try:
-                batch_hash_seqs = [build_hash_seq(c["hash"], c["seq"]) for c in batch]
+                batch_hash_seqs = [build_hash_seq(c["hash"], c["seq"]) for c in matched]
                 vec_index.add_vectors(batch_hash_seqs, vectors)
                 if (batch_idx + 1) % save_interval == 0:
                     vec_index.save()
             except Exception as e:
                 logger.error("usearch batch %d failed: %s", batch_idx, e)
-        return len(batch), []
+        return len(matched), unaccounted
     except sqlite3.Error as e:
         logger.error("DB write for batch %d failed: %s", batch_idx, e)
         return 0, list(batch)

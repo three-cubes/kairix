@@ -230,7 +230,12 @@ def run_monitor(
         weighted = sum(ndcg_by_category.get(cat, 0.0) * w for cat, w in CATEGORY_WEIGHTS.items())
         weighted_ndcg = round(weighted, 4)
 
-        vec_failed = sum(1 for case in result.cases if case.get("meta", {}).get("vec_failed", False))
+        # ``BenchmarkResult.cases`` is built by ``run_benchmark`` with
+        # ``retrieval_meta`` spread directly into each case dict, so
+        # ``vec_failed`` lives at the top level — not nested under "meta".
+        # The previous ``case["meta"]["vec_failed"]`` read always returned
+        # False (silent dead-zero bug surfaced by contract test).
+        vec_failed = sum(1 for case in result.cases if case.get("vec_failed", False))
 
     except Exception as e:
         logger.warning("monitor: benchmark run failed — %s", e)
