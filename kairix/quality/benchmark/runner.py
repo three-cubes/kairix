@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from kairix.quality.benchmark.suite import BenchmarkSuite
 from kairix.quality.eval.constants import (
@@ -33,6 +33,41 @@ from kairix.quality.eval.metrics import (
     ndcg_graded,
     reciprocal_rank_graded,
 )
+
+if TYPE_CHECKING:
+    from kairix.core.protocols import ChatBackend
+
+
+@runtime_checkable
+class ContentClassifier(Protocol):
+    """Two-step classifier surface used by the benchmark runner.
+
+    Production: ``ContentClassifier`` wraps ``kairix.core.classify.rules.classify_content``
+    and ``kairix.core.classify.judge.classify_with_llm``. Tests pass a
+    ``FakeContentClassifier`` from ``tests/fakes.py`` instead of substituting
+    individual ``classify_fn`` / ``classify_llm_fn`` callables.
+    """
+
+    def classify_rules(self, query: str, agent: str) -> Any: ...
+
+    def classify_with_llm(self, query: str, agent: str) -> Any: ...
+
+
+class _DefaultContentClassifier:
+    """Production ``ContentClassifier`` — delegates to the real classify modules."""
+
+    def classify_rules(
+        self, query: str, agent: str
+    ) -> Any:  # pragma: no cover — needs the real classify_content; deferred to integration coverage
+        from kairix.core.classify.rules import classify_content
+
+        return classify_content(query, agent=agent)
+
+    def classify_with_llm(self, query: str, agent: str) -> Any:  # pragma: no cover — same as above
+        from kairix.core.classify.judge import classify_with_llm
+
+        return classify_with_llm(query, agent=agent)
+
 
 # Re-export so existing `from kairix.quality.benchmark.runner import CATEGORY_WEIGHTS` keeps working
 
@@ -105,32 +140,24 @@ def _exact_match(paths: list[str], gold: str) -> float:
 def _classification_score(
     query: str,
     expected_type: str,
-    classify_fn: Callable[..., Any] | None = None,
-    classify_llm_fn: Callable[..., Any] | None = None,
+    classifier: ContentClassifier | None = None,
 ) -> float:
-    """
-    Score a classification case by running kairix classify and comparing type.
-    Returns 1.0 if result type matches expected_type, 0.0 otherwise.
+    """Score a classification case by running kairix classify and comparing type.
 
-    Args:
-        classify_fn:     Injectable rules classifier. Defaults to ``classify_content``.
-        classify_llm_fn: Injectable LLM classifier fallback. Defaults to ``classify_with_llm``.
+    Returns 1.0 if the classifier's result.type matches ``expected_type``, 0.0 otherwise.
+    Two-step: rules first; if the rules return ``unknown``, fall back to the LLM
+    classifier. Returns 0.0 on any exception.
+
+    Tests pass a ``FakeContentClassifier`` from tests/fakes.py to control both
+    steps; production uses ``_DefaultContentClassifier`` which delegates to the
+    real classify modules.
     """
     try:
-        if classify_fn is None:
-            from kairix.core.classify.rules import classify_content
-
-            classify_fn = classify_content
-        if classify_llm_fn is None:
-            from kairix.core.classify.judge import classify_with_llm
-
-            classify_llm_fn = classify_with_llm
-
-        result = classify_fn(query, agent="shared")
+        if classifier is None:
+            classifier = _DefaultContentClassifier()
+        result = classifier.classify_rules(query, agent="shared")
         if result.type == "unknown":
-            # Try LLM fallback
-            result = classify_llm_fn(query, agent="shared")
-
+            result = classifier.classify_with_llm(query, agent="shared")
         return 1.0 if result.type == expected_type else 0.0
     except Exception:
         return 0.0
@@ -157,30 +184,30 @@ def _llm_judge(
     query: str,
     paths: list[str],
     snippets: list[str],
-    chat_fn: Callable[..., str] | None = None,
+    chat_backend: ChatBackend | None = None,
 ) -> float:
-    """
-    Score 0.0-1.0 using gpt-4o-mini as relevance judge.
+    """Score 0.0-1.0 using gpt-4o-mini as a relevance judge.
 
     Args:
-        query:    The search query to judge.
-        paths:    Retrieved document paths.
-        snippets: Retrieved document snippets.
-        chat_fn:  Optional chat completion callable for dependency injection.
-                  Defaults to ``kairix._azure.chat_completion``.
+        query:        The search query to judge.
+        paths:        Retrieved document paths.
+        snippets:     Retrieved document snippets.
+        chat_backend: ``ChatBackend`` protocol implementation. Defaults to
+                      ``AzureChatBackend`` constructed lazily.
 
     Returns 0.0 on any failure (API error, parse error, timeout).
     """
     try:
-        if chat_fn is None:
-            from kairix._azure import chat_completion
-
-            chat_fn = chat_completion
-
         if not paths:
             return 0.0
+        if (
+            chat_backend is None
+        ):  # pragma: no cover — production-only lazy AzureChatBackend construction; tests inject FakeChatBackend
+            from kairix._azure import AzureChatBackend
 
-        # Match the original run-benchmark-hybrid.py scorer — paths only, 6-point scale
+            chat_backend = AzureChatBackend()
+
+        # Match the original run-benchmark-hybrid.py scorer — paths only, 6-point scale.
         # This ensures scores are comparable across runs.
         snippets_text = "\n".join(f"- {p}" for p in paths[:5])
         prompt = (
@@ -197,8 +224,12 @@ def _llm_judge(
             "Reply with ONLY a number between 0.0 and 1.0."
         )
 
-        messages = [{"role": "user", "content": prompt}]
-        content = chat_fn(messages, max_tokens=10)
+        content = chat_backend.complete(
+            prompt,
+            api_key="",
+            endpoint="",
+            deployment="gpt-4o-mini",
+        )
         score = float(content)
         return max(0.0, min(1.0, score))
 

@@ -206,6 +206,44 @@ class FakeEmbedProvider:
         return [list(self._vector) for _ in texts]
 
 
+class FakeContentClassifier:
+    """Two-step ``ContentClassifier`` for the benchmark runner.
+
+    Implements ``kairix.quality.benchmark.runner.ContentClassifier``:
+    ``classify_rules(query, agent)`` and ``classify_with_llm(query, agent)``.
+
+    Configure via ``rules_type`` (returned for every rules call) and
+    ``llm_type`` (returned for every LLM-fallback call). Captures call args.
+    """
+
+    def __init__(
+        self,
+        *,
+        rules_type: str = "unknown",
+        llm_type: str = "unknown",
+        rules_raises: BaseException | None = None,
+    ) -> None:
+        self._rules_type = rules_type
+        self._llm_type = llm_type
+        self._rules_raises = rules_raises
+        self.rules_calls: list[dict[str, str]] = []
+        self.llm_calls: list[dict[str, str]] = []
+
+    def classify_rules(self, query: str, agent: str) -> Any:
+        self.rules_calls.append({"query": query, "agent": agent})
+        if self._rules_raises is not None:
+            raise self._rules_raises
+        from types import SimpleNamespace
+
+        return SimpleNamespace(type=self._rules_type)
+
+    def classify_with_llm(self, query: str, agent: str) -> Any:
+        self.llm_calls.append({"query": query, "agent": agent})
+        from types import SimpleNamespace
+
+        return SimpleNamespace(type=self._llm_type)
+
+
 class FakeVectorSearcher:
     """Deterministic VectorSearcher for ``RecallChecker``.
 

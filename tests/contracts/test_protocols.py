@@ -711,8 +711,10 @@ class TestScorerRegistry:
 
     @pytest.mark.contract
     def test_all_registry_entries_are_scoring_strategies(self):
+        from tests.fakes import FakeChatBackend
+
         for name, cls in SCORERS.items():
-            instance = cls() if name != "llm" else cls(chat_fn=lambda msgs, **kw: "0.5")
+            instance = cls(chat_backend=FakeChatBackend(responses=["0.5"])) if name == "llm" else cls()
             assert isinstance(instance, ScoringStrategy), f"{name} does not satisfy ScoringStrategy"
 
 

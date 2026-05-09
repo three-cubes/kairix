@@ -12,10 +12,12 @@ Registry:
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kairix.quality.eval.metrics import ndcg_graded
+
+if TYPE_CHECKING:
+    from kairix.core.protocols import ChatBackend
 
 
 class ExactMatchScorer:
@@ -71,12 +73,12 @@ class LLMJudgeScorer:
     """LLM-based relevance scoring (gpt-4o-mini rates 0.0-1.0).
 
     Args:
-        chat_fn: Optional chat completion callable for dependency injection.
-                 Defaults to kairix._azure.chat_completion at call time.
+        chat_backend: ``ChatBackend`` protocol implementation. Defaults to
+                      ``AzureChatBackend`` constructed lazily inside ``_llm_judge``.
     """
 
-    def __init__(self, chat_fn: Callable[..., str] | None = None) -> None:
-        self._chat_fn = chat_fn
+    def __init__(self, chat_backend: ChatBackend | None = None) -> None:
+        self._chat_backend = chat_backend
 
     def score(self, retrieved: list[str], gold: list[dict[str, Any]]) -> float:
         from kairix.quality.benchmark.runner import _llm_judge
@@ -89,7 +91,7 @@ class LLMJudgeScorer:
             query=query,
             paths=retrieved,
             snippets=[],
-            chat_fn=self._chat_fn,
+            chat_backend=self._chat_backend,
         )
 
 
