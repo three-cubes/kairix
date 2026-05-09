@@ -58,6 +58,7 @@ pytest_plugins = [
     "tests.bdd.steps.kairix_cli_top_level_steps",
     "tests.bdd.steps.store_cli_steps",
     "tests.bdd.steps.brief_cli_steps",
+    "tests.bdd.steps.setup_cli_steps",
 ]
 
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
