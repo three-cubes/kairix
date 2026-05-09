@@ -210,7 +210,7 @@ class FakeSummaryLoader:
     """Deterministic ``SummaryLoader`` for the budget enforcer.
 
     Implements ``kairix.core.search.budget.SummaryLoader``:
-    ``get_l0(path, db)`` and ``get_l1(path, db)``.
+    ``get_l0(path)`` and ``get_l1(path)``.
 
     Configure with ``l0_by_path`` / ``l1_by_path`` dicts. Unset paths return
     ``None``. Pass ``raises=Exception(...)`` to make every call raise.
@@ -229,13 +229,13 @@ class FakeSummaryLoader:
         self.l0_calls: list[str] = []
         self.l1_calls: list[str] = []
 
-    def get_l0(self, path: str, db: Any) -> str | None:
+    def get_l0(self, path: str) -> str | None:
         self.l0_calls.append(path)
         if self._raises is not None:
             raise self._raises
         return self._l0.get(path)
 
-    def get_l1(self, path: str, db: Any) -> str | None:
+    def get_l1(self, path: str) -> str | None:
         self.l1_calls.append(path)
         if self._raises is not None:
             raise self._raises
