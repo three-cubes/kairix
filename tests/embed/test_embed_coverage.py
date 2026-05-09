@@ -1,27 +1,74 @@
 """
-Tests for kairix.core.embed.embed — covers previously-untested paths:
-- _get_azure_config(): env vars, missing key/endpoint errors
-- preflight_check(): mocked HTTP success + error
+Tests for kairix.core.embed.embed — covers paths reachable through the public surface:
+- preflight_check(): client=fake injection (no patch on openai SDK)
 - stage_embedding(): insert into content_vectors
 - batched(): chunk iteration
 - chunk_text(): boundary + overlap
+- run_embed(): orchestration via EmbedDependencies fakes
+
+``_get_azure_config`` is the production lazy default for credentials and is
+now ``# pragma: no cover``-annotated; its credential-resolution behaviour is
+exercised in ``tests/test_credentials.py`` against the real
+``kairix.credentials.get_credentials("embed")`` boundary. Tests here never
+import the private wrapper.
 """
 
 from __future__ import annotations
 
 import sqlite3
-from unittest.mock import MagicMock, patch
+from typing import Any
 
 import pytest
 
 from kairix.core.embed.embed import (
-    _get_azure_config,
     batched,
     build_hash_seq,
     chunk_text,
     preflight_check,
     stage_embedding,
 )
+
+# ---------------------------------------------------------------------------
+# Fake OpenAI client for preflight_check — same shape as test_retry.py.
+# ---------------------------------------------------------------------------
+
+
+class _PreflightEmbeddingItem:
+    def __init__(self, embedding: list[float]) -> None:
+        self.embedding = embedding
+
+
+class _PreflightResponse:
+    def __init__(self, embedding: list[float]) -> None:
+        self.data = [_PreflightEmbeddingItem(embedding)]
+
+
+class _PreflightEmbeddings:
+    def __init__(self, responder: Any) -> None:
+        self._responder = responder
+
+    def create(self, *, model: str, input: list[str], dimensions: int) -> _PreflightResponse:
+        return self._responder()
+
+
+class _FakePreflightClient:
+    """OpenAI-compatible fake whose ``embeddings.create`` returns a fixed-dim vector."""
+
+    def __init__(self, *, dims: int = 1536, raises: BaseException | None = None) -> None:
+        if raises is not None:
+
+            def _raiser() -> _PreflightResponse:
+                raise raises
+
+            responder = _raiser
+        else:
+
+            def _ok() -> _PreflightResponse:
+                return _PreflightResponse([0.1] * dims)
+
+            responder = _ok
+        self.embeddings = _PreflightEmbeddings(responder)
+
 
 # ---------------------------------------------------------------------------
 # build_hash_seq
@@ -75,84 +122,41 @@ def test_chunk_text_empty_string() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _get_azure_config
+# preflight_check — driven through the ``client=`` injection seam.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_get_azure_config_returns_tuple(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KAIRIX_LLM_API_KEY", "test-key")
-    monkeypatch.setenv("KAIRIX_LLM_ENDPOINT", "https://fake.example.com/")
-    monkeypatch.setenv("KAIRIX_EMBED_MODEL", "my-deploy")
-
-    key, endpoint, deployment = _get_azure_config()
-    assert key == "test-key"
-    assert endpoint == "https://fake.example.com"  # trailing slash stripped
-    assert deployment == "my-deploy"
-
-
-@pytest.mark.unit
-def test_get_azure_config_raises_without_api_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
-    monkeypatch.delenv("KAIRIX_EMBED_API_KEY", raising=False)
-    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
-    monkeypatch.setenv("KAIRIX_LLM_ENDPOINT", "https://fake.example.com/")
-    monkeypatch.setenv("KAIRIX_SECRETS_DIR", "/nonexistent-dir-abc123")
-    with pytest.raises(OSError):
-        _get_azure_config()
-
-
-@pytest.mark.unit
-def test_get_azure_config_raises_without_endpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("KAIRIX_LLM_API_KEY", "test-key")
-    monkeypatch.delenv("KAIRIX_LLM_ENDPOINT", raising=False)
-    monkeypatch.delenv("KAIRIX_EMBED_ENDPOINT", raising=False)
-    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
-    monkeypatch.setenv("KAIRIX_SECRETS_DIR", "/nonexistent-dir-abc123")
-    with pytest.raises(OSError):
-        _get_azure_config()
-
-
-# ---------------------------------------------------------------------------
-# preflight_check
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_preflight_check_returns_dims_on_success() -> None:
-    fake_vec = [0.1] * 1536
-    mock_embedding = MagicMock()
-    mock_embedding.embedding = fake_vec
-    mock_response = MagicMock()
-    mock_response.data = [mock_embedding]
-
-    with patch("openai.OpenAI") as mock_cls:
-        mock_client = MagicMock()
-        mock_cls.return_value = mock_client
-        mock_client.embeddings.create.return_value = mock_response
-        dims = preflight_check("key", "https://fake.example.com", "text-embedding-3-large")
-
+def test_preflight_check_returns_embedding_dims_on_success() -> None:
+    """A successful embed call returns the length of the returned vector."""
+    client = _FakePreflightClient(dims=1536)
+    dims = preflight_check("key", "https://fake.example.com", "text-embedding-3-large", client=client)
     assert dims == 1536
 
 
 @pytest.mark.unit
-def test_preflight_check_raises_on_api_error() -> None:
+def test_preflight_check_returns_actual_dims_when_client_returns_smaller_vector() -> None:
+    """Sanity check: ``preflight_check`` reports whatever dims the API actually returns."""
+    client = _FakePreflightClient(dims=512)
+    dims = preflight_check("key", "https://fake.example.com", "text-embedding-3-small", client=client)
+    assert dims == 512
+
+
+@pytest.mark.unit
+def test_preflight_check_propagates_authentication_errors_from_client() -> None:
+    """AuthenticationError from the client is not swallowed."""
+    from unittest.mock import MagicMock
+
     import openai
 
-    with patch("openai.OpenAI") as mock_cls:
-        mock_client = MagicMock()
-        mock_cls.return_value = mock_client
-        mock_client.embeddings.create.side_effect = openai.AuthenticationError(
-            message="HTTP 401",
-            response=MagicMock(status_code=401),
-            body=None,
-        )
-        with pytest.raises(openai.AuthenticationError):
-            preflight_check("bad-key", "https://fake.example.com", "deploy")
+    err = openai.AuthenticationError(
+        message="HTTP 401",
+        response=MagicMock(status_code=401),
+        body=None,
+    )
+    client = _FakePreflightClient(raises=err)
+    with pytest.raises(openai.AuthenticationError):
+        preflight_check("bad-key", "https://fake.example.com", "deploy", client=client)
 
 
 # ---------------------------------------------------------------------------

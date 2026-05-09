@@ -90,10 +90,15 @@ def chunk_text(
 # ── Azure API ─────────────────────────────────────────────────────────────────
 
 
-def _get_azure_config() -> tuple[str, str, str]:
+def _get_azure_config() -> tuple[str, str, str]:  # pragma: no cover
     """
     Read embed API config via ``get_credentials("embed")``. Supports Azure,
     OpenRouter, or any OpenAI-compatible endpoint.
+
+    Production lazy default for ``EmbedDependencies.get_azure_config``;
+    tests inject a fake callable via ``run_embed(deps=...)`` so this
+    function is never test-reachable. The credential resolution itself
+    is exercised in ``tests/test_credentials.py``.
 
     Raises OSError when credentials cannot be resolved.
     """
@@ -122,15 +127,27 @@ def _get_azure_config() -> tuple[str, str, str]:
     return api_key, endpoint, deployment
 
 
-def preflight_check(api_key: str, endpoint: str, deployment: str) -> int:
+def preflight_check(
+    api_key: str,
+    endpoint: str,
+    deployment: str,
+    *,
+    client: Any | None = None,
+) -> int:
     """
     Verify the embedding API is reachable with a single-item embed call.
     Returns embedding dimensions on success, raises on failure.
     Does NOT touch the DB — safe to call before any writes.
-    """
-    from kairix.credentials import make_openai_client
 
-    client = make_openai_client(api_key, endpoint, max_retries=2, timeout=30.0)
+    ``client`` is an injection seam for tests — pass an OpenAI-compatible
+    fake whose ``embeddings.create(...)`` returns a response with a
+    ``.data[0].embedding`` list. Production callers leave it as ``None`` so
+    the real client is built lazily via ``make_openai_client``.
+    """
+    if client is None:  # pragma: no cover
+        from kairix.credentials import make_openai_client
+
+        client = make_openai_client(api_key, endpoint, max_retries=2, timeout=30.0)
     response = client.embeddings.create(
         model=deployment,
         input=["preflight check"],
@@ -148,8 +165,13 @@ _embed_client = None
 _embed_client_key: tuple[str, str] = ("", "")
 
 
-def _get_embed_client(api_key: str, endpoint: str) -> Any:
-    """Return a cached OpenAI client. Creates a new one if credentials change."""
+def _get_embed_client(api_key: str, endpoint: str) -> Any:  # pragma: no cover
+    """Return a cached OpenAI client. Creates a new one if credentials change.
+
+    Production-only — every test that exercises ``embed_batch`` injects a
+    ``client=`` kwarg, bypassing this cache. The cache is reachable only
+    when the production lazy default fires (``client is None``).
+    """
     from kairix.credentials import make_openai_client
 
     global _embed_client, _embed_client_key
@@ -168,6 +190,8 @@ def embed_batch(
     endpoint: str,
     deployment: str,
     dims: int = DEFAULT_DIMS,
+    *,
+    client: Any | None = None,
 ) -> list[list[float]]:
     """
     Embed a batch of texts via Azure OpenAI using the OpenAI SDK.
@@ -175,6 +199,11 @@ def embed_batch(
     Client is reused across batches for connection pooling and rate-limiter
     state persistence. The SDK handles retry with exponential backoff and
     Retry-After headers automatically.
+
+    ``client`` is an injection seam for tests — pass an OpenAI-compatible
+    fake whose ``embeddings.create(...)`` returns a response with ``.data``
+    items carrying ``.index`` and ``.embedding``. Production callers leave
+    it as ``None`` so the cached production client is reused.
 
     Returns list of float vectors in same order as input texts.
     Raises on persistent failures after SDK retries are exhausted.
@@ -185,7 +214,8 @@ def embed_batch(
     if not texts:
         return []
 
-    client = _get_embed_client(api_key, endpoint)
+    if client is None:  # pragma: no cover
+        client = _get_embed_client(api_key, endpoint)
 
     try:
         response = client.embeddings.create(
@@ -205,8 +235,8 @@ def embed_batch(
             mid,
             len(texts) - mid,
         )
-        left = embed_batch(texts[:mid], api_key, endpoint, deployment, dims)
-        right = embed_batch(texts[mid:], api_key, endpoint, deployment, dims)
+        left = embed_batch(texts[:mid], api_key, endpoint, deployment, dims, client=client)
+        right = embed_batch(texts[mid:], api_key, endpoint, deployment, dims, client=client)
         return left + right
 
 
@@ -428,7 +458,7 @@ def run_embed(
 
     Returns dict with: embedded, skipped, failed, duration_s, estimated_cost_usd
     """
-    if deps is None:
+    if deps is None:  # pragma: no cover
         deps = EmbedDependencies()
 
     assert deps.get_document_root is not None
