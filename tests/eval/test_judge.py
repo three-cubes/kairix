@@ -18,7 +18,6 @@ from kairix.quality.eval.judge import (
     JudgeCalibrationError,
     JudgeResult,
     LLMJudge,
-    _parse_grade_response,
     calibrate,
     fetch_llm_credentials,
     judge_batch,
@@ -191,59 +190,113 @@ def test_judge_batch_returns_zeros_when_no_credentials() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _parse_grade_response
+# Grade-parsing scenarios driven through judge_batch's public surface.
+#
+# The chat backend's response string is the parser's input; the resulting
+# JudgeResult.grades dict is the parser's output as observed by callers.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_parse_grade_response_valid_json() -> None:
-    """Valid JSON response is parsed correctly."""
-    content = '{"A": 2, "B": 0, "C": 1}'
-    result = _parse_grade_response(content, ["A", "B", "C"])
-    assert result == {"A": 2, "B": 0, "C": 1}
+def test_pure_json_response_grades_each_candidate_per_label() -> None:
+    """Pure-JSON {"A": 2, "B": 0, "C": 1} → grades reflect label→candidate mapping."""
+    backend = FakeChatBackend(responses=['{"A": 2, "B": 0, "C": 1}'])
+    result = judge_batch(
+        query=_QUERY,
+        candidates=_CANDIDATES,
+        api_key="test-key",
+        endpoint="https://test.openai.azure.com",
+        shuffle=False,
+        chat_backend=backend,
+    )
+    assert result.grades["docker-deployment-guide"] == 2
+    assert result.grades["ci-cd-pipeline-config"] == 0
+    assert result.grades["api-guidelines"] == 1
 
 
 @pytest.mark.unit
-def test_parse_grade_response_json_in_prose() -> None:
-    """JSON embedded in prose text is extracted."""
-    content = 'After reviewing the documents, my assessment is: {"A": 2, "B": 1} as requested.'
-    result = _parse_grade_response(content, ["A", "B"])
-    assert result == {"A": 2, "B": 1}
+def test_json_embedded_in_prose_is_extracted_and_used() -> None:
+    """A JSON object inside prose still drives the grades."""
+    backend = FakeChatBackend(
+        responses=['After reviewing the documents, my assessment is: {"A": 2, "B": 1, "C": 0} as requested.']
+    )
+    result = judge_batch(
+        query=_QUERY,
+        candidates=_CANDIDATES,
+        api_key="test-key",
+        endpoint="https://test.openai.azure.com",
+        shuffle=False,
+        chat_backend=backend,
+    )
+    assert result.grades["docker-deployment-guide"] == 2
+    assert result.grades["ci-cd-pipeline-config"] == 1
+    assert result.grades["api-guidelines"] == 0
 
 
 @pytest.mark.unit
-def test_parse_grade_response_empty_on_no_json() -> None:
-    """No JSON in response → empty dict."""
-    result = _parse_grade_response("I cannot assess these documents.", ["A", "B"])
-    assert result == {}
+def test_response_with_no_json_yields_all_zero_grades() -> None:
+    """No JSON object in the response → every candidate gets 0."""
+    backend = FakeChatBackend(responses=["I cannot assess these documents."])
+    result = judge_batch(
+        query=_QUERY,
+        candidates=_CANDIDATES,
+        api_key="test-key",
+        endpoint="https://test.openai.azure.com",
+        shuffle=False,
+        chat_backend=backend,
+    )
+    assert all(g == 0 for g in result.grades.values())
 
 
 @pytest.mark.unit
-def test_parse_grade_response_ignores_extra_labels() -> None:
-    """Labels not in the expected list are ignored."""
-    content = '{"A": 2, "B": 0, "Z": 1}'  # Z not in labels
-    result = _parse_grade_response(content, ["A", "B"])
-    assert "Z" not in result
-    assert result["A"] == 2
+def test_extra_labels_in_response_are_ignored() -> None:
+    """Labels beyond the candidate count (e.g. ``Z``) are dropped silently."""
+    # Two candidates → labels A, B. The response includes a stray Z which must not surface.
+    backend = FakeChatBackend(responses=['{"A": 2, "B": 0, "Z": 1}'])
+    result = judge_batch(
+        query=_QUERY,
+        candidates=_CANDIDATES[:2],
+        api_key="test-key",
+        endpoint="https://test.openai.azure.com",
+        shuffle=False,
+        chat_backend=backend,
+    )
+    assert set(result.grades.keys()) == {"docker-deployment-guide", "ci-cd-pipeline-config"}
+    assert result.grades["docker-deployment-guide"] == 2
+    assert result.grades["ci-cd-pipeline-config"] == 0
 
 
 @pytest.mark.unit
-def test_parse_grade_response_returns_empty_on_invalid_json_inside_braces() -> None:
-    """A {...} block whose body is not valid JSON returns {}."""
-    # Brace block exists (regex matches) but the body fails json.loads.
-    content = "{A: 2, B: 0}"  # missing quotes — invalid JSON
-    result = _parse_grade_response(content, ["A", "B"])
-    assert result == {}
+def test_invalid_json_inside_braces_yields_all_zero_grades() -> None:
+    """Brace block exists but body fails json.loads → all grades 0 (never raises)."""
+    backend = FakeChatBackend(responses=["{A: 2, B: 0}"])  # missing quotes
+    result = judge_batch(
+        query=_QUERY,
+        candidates=_CANDIDATES[:2],
+        api_key="test-key",
+        endpoint="https://test.openai.azure.com",
+        shuffle=False,
+        chat_backend=backend,
+    )
+    assert all(g == 0 for g in result.grades.values())
 
 
 @pytest.mark.unit
-def test_parse_grade_response_clamps_non_int_grade_to_zero() -> None:
-    """A label with a non-integer-coercible value is clamped to 0, not skipped."""
-    content = '{"A": "high", "B": 1, "C": null}'
-    result = _parse_grade_response(content, ["A", "B", "C"])
-    assert result["A"] == 0  # ValueError on int("high") → 0
-    assert result["B"] == 1  # int conversion ok
-    assert result["C"] == 0  # TypeError on int(None) → 0
+def test_non_int_grade_values_are_clamped_to_zero() -> None:
+    """A non-int-coercible value (string/null) becomes 0 for that candidate only."""
+    backend = FakeChatBackend(responses=['{"A": "high", "B": 1, "C": null}'])
+    result = judge_batch(
+        query=_QUERY,
+        candidates=_CANDIDATES,
+        api_key="test-key",
+        endpoint="https://test.openai.azure.com",
+        shuffle=False,
+        chat_backend=backend,
+    )
+    # int("high") raises ValueError → 0; int(None) raises TypeError → 0; int(1) → 1
+    assert result.grades["docker-deployment-guide"] == 0
+    assert result.grades["ci-cd-pipeline-config"] == 1
+    assert result.grades["api-guidelines"] == 0
 
 
 # ---------------------------------------------------------------------------
