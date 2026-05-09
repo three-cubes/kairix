@@ -20,6 +20,7 @@ import pytest
 from kairix.knowledge.wikilinks.injector import inject_wikilinks, should_inject
 from kairix.knowledge.wikilinks.resolver import WikiEntity
 from kairix.paths import KairixPaths
+from tests.fakes import FakePaths
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -374,3 +375,284 @@ def test_gamma_systems_alias_produces_canonical_link() -> None:
     modified, injected = inject_wikilinks(content, [GAMMA_SYSTEMS])
     assert "[[Gamma-Systems|Gamma Systems]]" in modified
     assert injected == ["Gamma Systems"]
+
+
+# ---------------------------------------------------------------------------
+# should_inject — explicit rejection branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_should_not_inject_oversized_file_at_eligible_prefix(
+    tmp_path: Path, paths: KairixPaths, test_vault_root: str
+) -> None:
+    """A file under an eligible prefix that exceeds MAX_FILE_SIZE is rejected.
+
+    Closes coverage of the ``return False`` after ``os.path.getsize > MAX_FILE_SIZE``
+    in ``should_inject`` (line 98). The previous test for oversize files only
+    exercised it via ``inject_file`` which short-circuits earlier; this test
+    asserts the size branch in ``should_inject`` itself.
+    """
+    # Place a >500KB file at an eligible vault prefix path.
+    path = tmp_path / "vault" / "02-Areas" / "big.md"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"x" * (501 * 1024))
+
+    eligible_paths = FakePaths(
+        document_root=str(tmp_path / "vault"),
+        workspace_root=str(tmp_path / "workspaces"),
+    )
+    assert should_inject(str(path), paths=eligible_paths) is False
+
+
+@pytest.mark.unit
+def test_should_not_inject_path_outside_eligible_prefixes(paths: KairixPaths, test_vault_root: str) -> None:
+    """A .md file outside every eligible prefix returns False.
+
+    Closes coverage of the final ``return False`` after the prefix loop
+    (line 118) — distinct from the workspace-non-memory branch above it.
+    """
+    # Path is not the workspace root, not the document root — fully outside.
+    assert should_inject("/some/other/place/notes.md", paths=paths) is False
+
+
+# ---------------------------------------------------------------------------
+# inject_wikilinks — own-page skip with non-doc-root source path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_inject_skips_own_page_when_source_path_is_relative() -> None:
+    """A relative source_path (not under document_root) is matched against entity vault_path verbatim.
+
+    Closes coverage of the ``rel = source_path`` branch at line 196 — when
+    source_path doesn't start with the doc-root prefix, it's used as-is for
+    the own-page comparison.
+    """
+    entity = make_entity("Acme", "02-Areas/Clients/Acme/Acme.md", link="[[Acme]]")
+    content = "Acme is the client."
+    paths_obj = FakePaths(
+        document_root="/var/lib/kairix-test/vault",
+        workspace_root="/var/lib/kairix-test/workspaces",
+    )
+
+    # source_path is just the relative path — no doc-root prefix.
+    modified, injected = inject_wikilinks(
+        content,
+        [entity],
+        source_path="02-Areas/Clients/Acme/Acme.md",
+        paths=paths_obj,
+    )
+    # The entity is on its own page → no link is injected.
+    assert injected == []
+    assert modified == content
+
+
+# ---------------------------------------------------------------------------
+# _find_already_linked — alias display name branch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_existing_aliased_wikilink_blocks_injection_under_display_name() -> None:
+    """An existing ``[[target|display]]`` wikilink registers BOTH ``target`` and ``display``
+    as already-linked, so a subsequent mention of ``display`` is not re-linked.
+
+    Closes coverage of ``linked.add(display)`` at line 217 inside
+    ``_find_already_linked``.
+    """
+    # The content already contains the aliased form Gamma-Systems with display "Gamma Systems".
+    # A subsequent free-text mention of "Gamma Systems" must not be re-linked.
+    content = "We met [[Gamma-Systems|Gamma Systems]] at lunch. Later Gamma Systems sent a follow-up."
+    modified, injected = inject_wikilinks(content, [GAMMA_SYSTEMS])
+    assert injected == [], f"expected no injection but got: {injected}; modified: {modified}"
+    # The free-text "Gamma Systems" remains unwrapped — proving the alias was recorded.
+    assert "Later Gamma Systems sent" in modified
+
+
+# ---------------------------------------------------------------------------
+# _parse_segments — unclosed fenced code block
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_unclosed_fenced_code_block_is_treated_as_code_to_end_of_file() -> None:
+    """Content with an opening ``` but no closing fence treats the rest as code.
+
+    Closes coverage of the ``segments.append(("fenced_code", ...))`` and the
+    ``pos = n`` short-circuit at lines 262-263. Without that, an unclosed
+    fence would let the rest of the file leak into a "text" segment and get
+    wikilink-injected.
+    """
+    content = "Acme Corp is the client.\n```python\nstill in code\nAcme Corp again\n"  # no closing ```
+    modified, injected = inject_wikilinks(content, [ACME_CORP])
+    # First "Acme Corp" (in text) IS linked.
+    assert injected == ["Acme Corp"]
+    # Second "Acme Corp" (inside the unclosed code block) is NOT linked.
+    code_section = modified.split("```python", 1)[1]
+    assert "[[Acme-Corp]]" not in code_section, (
+        f"unclosed code fence leaked into text injection; code section: {code_section!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# _is_in_code_or_link — cursor inside an open [[ ... region
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_match_inside_unclosed_double_bracket_is_skipped() -> None:
+    """A trigger inside an unclosed ``[[...`` (no matching ``]]``) is not re-wrapped.
+
+    Closes coverage of the ``return True`` branch in ``_is_in_code_or_link``
+    at lines 356-359 — when the cursor is between an open ``[[`` and there is
+    no closing ``]]`` *before* the cursor. This is the "malformed/unclosed
+    wikilink" defensive guard.
+
+    Construction: ``[[Note: about Acme Corp behaviour`` — the ``[[`` opens but
+    is never closed. The pre-scan (_find_already_linked) only matches well-formed
+    ``[[...]]`` so does NOT register Acme Corp as already-linked, leaving
+    _is_in_code_or_link as the gate.
+    """
+    content = "Random ramble [[Note: about Acme Corp behaviour"
+    modified, injected = inject_wikilinks(content, [ACME_CORP])
+    # The malformed [[ is preserved unchanged; Acme Corp inside it is not wrapped.
+    assert injected == [], f"unexpected injection: {injected}; modified: {modified!r}"
+    assert modified == content, f"content mutated unexpectedly: {modified!r}"
+
+
+# ---------------------------------------------------------------------------
+# inject_file — non-md, stat error, read failure, dry-run, log path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_inject_file_returns_empty_for_non_markdown_extension(tmp_path: Path, paths: KairixPaths) -> None:
+    """A .txt file is silently skipped (returns []) without reading."""
+    from kairix.knowledge.wikilinks.injector import inject_file
+
+    txt = tmp_path / "notes.txt"
+    txt.write_text("Acme Corp", encoding="utf-8")
+    result = inject_file(str(txt), [ACME_CORP], paths=paths)
+    assert result == []
+    # The file was not modified.
+    assert txt.read_text(encoding="utf-8") == "Acme Corp"
+
+
+@pytest.mark.unit
+def test_inject_file_returns_empty_when_stat_fails(tmp_path: Path, paths: KairixPaths) -> None:
+    """A path that doesn't exist returns [] (the OSError on stat is caught)."""
+    from kairix.knowledge.wikilinks.injector import inject_file
+
+    missing = tmp_path / "does-not-exist.md"
+    result = inject_file(str(missing), [ACME_CORP], paths=paths)
+    assert result == []
+
+
+@pytest.mark.unit
+def test_inject_file_returns_empty_when_content_is_invalid_utf8(tmp_path: Path, paths: KairixPaths) -> None:
+    """A .md file with non-UTF-8 bytes is silently skipped (UnicodeDecodeError caught)."""
+    from kairix.knowledge.wikilinks.injector import inject_file
+
+    bad = tmp_path / "binary.md"
+    bad.write_bytes(b"\xff\xfe\xfd not utf-8")
+    result = inject_file(str(bad), [ACME_CORP], paths=paths)
+    assert result == []
+
+
+@pytest.mark.unit
+def test_inject_file_writes_modified_content_when_injection_succeeds(tmp_path: Path, paths: KairixPaths) -> None:
+    """When entities are injected and dry_run=False, the modified content is written back."""
+    from kairix.knowledge.wikilinks.injector import inject_file
+
+    md = tmp_path / "page.md"
+    md.write_text("Acme Corp is here.", encoding="utf-8")
+    result = inject_file(str(md), [ACME_CORP], dry_run=False, paths=paths)
+    assert result == ["Acme Corp"]
+    after = md.read_text(encoding="utf-8")
+    assert "[[Acme-Corp]]" in after, f"expected wikilink in file; got: {after!r}"
+
+
+@pytest.mark.unit
+def test_inject_file_does_not_write_when_dry_run(tmp_path: Path, paths: KairixPaths) -> None:
+    """dry_run=True returns the injected names but leaves the file untouched."""
+    from kairix.knowledge.wikilinks.injector import inject_file
+
+    md = tmp_path / "page.md"
+    original = "Acme Corp is here."
+    md.write_text(original, encoding="utf-8")
+    result = inject_file(str(md), [ACME_CORP], dry_run=True, paths=paths)
+    assert result == ["Acme Corp"]
+    assert md.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.unit
+def test_inject_file_returns_empty_when_no_entity_matches(tmp_path: Path, paths: KairixPaths) -> None:
+    """When no entity trigger matches the content, injection list is empty and file is untouched."""
+    from kairix.knowledge.wikilinks.injector import inject_file
+
+    md = tmp_path / "page.md"
+    md.write_text("This document mentions nothing relevant.", encoding="utf-8")
+    result = inject_file(str(md), [ACME_CORP], paths=paths)
+    assert result == []
+    assert md.read_text(encoding="utf-8") == "This document mentions nothing relevant."
+
+
+@pytest.mark.unit
+def test_inject_log_strips_doc_root_prefix_from_file_path(tmp_path: Path) -> None:
+    """When the injected file lives under ``paths.document_root``, the log entry stores
+    the relative document path (not the absolute filesystem path).
+
+    Closes coverage of the doc-root-stripping branch in ``_log_injection`` (line 435).
+    """
+    from kairix.knowledge.wikilinks.injector import inject_file
+
+    doc_root = tmp_path / "vault"
+    doc_root.mkdir()
+    md = doc_root / "02-Areas" / "page.md"
+    md.parent.mkdir(parents=True)
+    md.write_text("Acme Corp is here.", encoding="utf-8")
+
+    log_path = tmp_path / "log.jsonl"
+    paths_obj = FakePaths(
+        document_root=str(doc_root),
+        workspace_root=str(tmp_path / "workspaces"),
+    )
+
+    result = inject_file(str(md), [ACME_CORP], paths=paths_obj, log_path=log_path)
+    assert result == ["Acme Corp"]
+    # Log entry's `file` field is the path with the doc_root prefix stripped.
+    import json as _json
+
+    entries = [_json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert len(entries) == 1
+    assert entries[0]["file"] == "02-Areas/page.md", (
+        f"expected stripped path '02-Areas/page.md'; got: {entries[0]['file']!r}"
+    )
+    assert entries[0]["injected"] == ["Acme Corp"]
+    assert entries[0]["dry_run"] is False
+
+
+@pytest.mark.unit
+def test_inject_log_swallows_os_error_when_log_path_unwritable(tmp_path: Path, paths: KairixPaths) -> None:
+    """A failing log write must not abort the injection (logging is non-fatal).
+
+    Closes coverage of the ``except OSError: pass`` branch in ``_log_injection``
+    (lines 448-449). We point ``log_path`` at a directory — ``open("a")``
+    raises IsADirectoryError (an OSError subclass) so the except branch fires.
+    The injection itself still succeeds.
+    """
+    from kairix.knowledge.wikilinks.injector import inject_file
+
+    md = tmp_path / "page.md"
+    md.write_text("Acme Corp lives here.", encoding="utf-8")
+
+    # The log_path is a directory — opening it for append raises IsADirectoryError.
+    bad_log = tmp_path / "log_dir"
+    bad_log.mkdir()
+
+    result = inject_file(str(md), [ACME_CORP], paths=paths, log_path=bad_log)
+    # Injection succeeded despite log failure.
+    assert result == ["Acme Corp"]
+    after = md.read_text(encoding="utf-8")
+    assert "[[Acme-Corp]]" in after

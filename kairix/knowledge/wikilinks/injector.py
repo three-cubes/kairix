@@ -379,6 +379,7 @@ def inject_file(
     dry_run: bool = False,
     *,
     paths: KairixPaths | None = None,
+    log_path: Path | None = None,
 ) -> list[str]:
     """
     Read file, inject wikilinks, write back (unless dry_run).
@@ -390,11 +391,15 @@ def inject_file(
     - Binary files
 
     Args:
-        path:    Filesystem path to the markdown file.
+        path:     Filesystem path to the markdown file.
         entities: Entities eligible for injection.
-        dry_run: When True, log the would-be injections but don't write.
-        paths:   Injected ``KairixPaths``. When ``None``, falls back to
-                 ``KairixPaths.resolve()`` for backwards compatibility.
+        dry_run:  When True, log the would-be injections but don't write.
+        paths:    Injected ``KairixPaths``. When ``None``, falls back to
+                  ``KairixPaths.resolve()`` for backwards compatibility.
+        log_path: Path for the injection-log JSONL file. When ``None``,
+                  defaults to the production ``_LOG_PATH`` under the user's
+                  cache directory. Tests inject a tmp_path so they don't
+                  scribble on the user's real injection log.
     """
     paths = paths or KairixPaths.resolve()
 
@@ -419,14 +424,21 @@ def inject_file(
 
     if injected and not dry_run:
         p.write_text(modified, encoding="utf-8")
-        _log_injection(path, injected, dry_run=False, paths=paths)
+        _log_injection(path, injected, dry_run=False, paths=paths, log_path=log_path)
     elif injected and dry_run:
-        _log_injection(path, injected, dry_run=True, paths=paths)
+        _log_injection(path, injected, dry_run=True, paths=paths, log_path=log_path)
 
     return injected
 
 
-def _log_injection(file_path: str, injected: list[str], dry_run: bool, paths: KairixPaths) -> None:
+def _log_injection(
+    file_path: str,
+    injected: list[str],
+    dry_run: bool,
+    paths: KairixPaths,
+    *,
+    log_path: Path | None = None,
+) -> None:
     """Append an entry to the injection log."""
     # Use relative document path when possible
     doc_root = f"{paths.document_root}/"
@@ -441,9 +453,9 @@ def _log_injection(file_path: str, injected: list[str], dry_run: bool, paths: Ka
         "dry_run": dry_run,
     }
     try:
-        log_path = Path(_LOG_PATH)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as fh:
+        target = log_path if log_path is not None else Path(_LOG_PATH)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
     except OSError:
         pass  # log failure is non-fatal
