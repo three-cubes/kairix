@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from kairix.core.search.intent import QueryIntent
+from kairix.core.search.intent import classify as _real_classify
 from kairix.paths import KairixPaths
 
 
@@ -77,6 +78,27 @@ class FakeClassifier:
         if self._raises is not None:
             raise self._raises
         return self.intent
+
+
+class RealClassifierAdapter:
+    """Adapter that wires the real ``classify()`` free function as an
+    ``IntentClassifier`` protocol implementation.
+
+    This is not a fake — it delegates to production code. It exists so
+    integration tests can construct a ``SearchPipeline`` whose intent
+    classification is exactly what production runs, without inline adapters
+    in the test file.
+
+    Records every classify call so tests can assert the pipeline reached
+    the classifier.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def classify(self, query: str) -> QueryIntent:
+        self.calls.append(query)
+        return _real_classify(query)
 
 
 class FakeDocumentRepository:
@@ -163,6 +185,12 @@ class FakeGraphRepository:
     Pass ``available=False`` to simulate Neo4j-not-wired.
     Pass ``raises=Exception(...)`` to make ``cypher()`` raise (covers
     the never-raises contract in entity-boost callers).
+    Pass ``cypher_rows=`` to supply explicit Neo4j-shaped rows for ``cypher()``
+    (the ``entity_boost_neo4j`` helper expects ``{vault_path, name, labels,
+    in_degree}`` which the entity-keyed ``_entities`` dict does not carry).
+    Tracks ``available_checks``, ``find_entity_calls``, ``cypher_calls``,
+    ``entity_in_degrees_calls`` so integration tests can assert which code
+    paths reached the graph backend.
     """
 
     def __init__(
@@ -171,6 +199,7 @@ class FakeGraphRepository:
         available: bool = True,
         *,
         raises: BaseException | None = None,
+        cypher_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         self._available = available
         self._raises = raises
@@ -179,20 +208,32 @@ class FakeGraphRepository:
         for entity in entities or []:
             name = entity.get("name", entity.get("id", ""))
             self._entities[name.lower()] = entity
+        self._cypher_rows: list[dict[str, Any]] = list(cypher_rows or [])
+        # Call-tracking — tests inspect these to verify routing.
+        self.available_checks: int = 0
+        self.find_entity_calls: list[str] = []
+        self.cypher_calls: list[tuple[str, dict[str, Any] | None]] = []
+        self.entity_in_degrees_calls: int = 0
 
     @property
     def available(self) -> bool:
+        self.available_checks += 1
         return self._available
 
     def find_entity(self, name: str) -> dict[str, Any] | None:
+        self.find_entity_calls.append(name)
         return self._entities.get(name.lower())
 
     def entity_in_degrees(self) -> list[dict[str, Any]]:
+        self.entity_in_degrees_calls += 1
         return list(self._all_entities)
 
     def cypher(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        self.cypher_calls.append((query, params))
         if self._raises is not None:
             raise self._raises
+        if self._cypher_rows:
+            return list(self._cypher_rows)
         return list(self._all_entities)
 
 
@@ -442,6 +483,51 @@ class FakeBoost:
     def boost(self, results: list[Any], query: str, context: dict[str, Any]) -> list[Any]:
         if self._raises is not None:
             raise self._raises
+        return results
+
+
+class CapturingBoost:
+    """BoostStrategy that records the (query, intent) of every boost call.
+
+    Useful for verifying that ``SearchPipeline`` propagates the classifier's
+    intent into the boost context. Always returns ``results`` unchanged so it
+    composes cleanly with other boosts in a chain.
+    """
+
+    def __init__(self) -> None:
+        self.captured: list[tuple[str, QueryIntent | None]] = []
+
+    def boost(self, results: list[Any], query: str, context: dict[str, Any]) -> list[Any]:
+        self.captured.append((query, context.get("intent")))
+        return results
+
+
+class IntentGatedBoost:
+    """BoostStrategy wrapper that delegates only when ``context['intent']``
+    matches the configured intent.
+
+    This is the canonical adapter used by intent-routing integration tests:
+    wrap any production boost (e.g. ``TemporalDateBoost``, ``ProceduralBoost``,
+    ``EntityBoost``) so it fires only for its target intent. Production wires
+    boosts ungated and relies on internal heuristics; this wrapper makes the
+    intent dispatch explicit so tests can assert routing.
+
+    Tracks ``invocations`` and ``skipped`` counts so tests can verify whether
+    the inner boost actually ran.
+    """
+
+    def __init__(self, inner: Any, intent: QueryIntent) -> None:
+        self._inner = inner
+        self._intent = intent
+        self.invocations: int = 0
+        self.skipped: int = 0
+
+    def boost(self, results: list[Any], query: str, context: dict[str, Any]) -> list[Any]:
+        if context.get("intent") == self._intent:
+            self.invocations += 1
+            inner_result: list[Any] = self._inner.boost(results, query, context)
+            return inner_result
+        self.skipped += 1
         return results
 
 
