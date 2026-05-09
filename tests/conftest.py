@@ -53,6 +53,7 @@ pytest_plugins = [
     "tests.bdd.steps.search_intent_gated_boosts_steps",
     "tests.bdd.steps.search_chunk_date_recency_steps",
     "tests.bdd.steps.search_collection_retrieval_overrides_steps",
+    "tests.bdd.steps.search_cli_steps",
 ]
 
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
