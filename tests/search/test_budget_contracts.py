@@ -36,7 +36,6 @@ from kairix.core.search.budget import (
     apply_budget,
 )
 from kairix.core.search.rrf import FusedResult
-from kairix.text import estimate_tokens
 from tests.fakes import build_summaries_db
 
 pytestmark = pytest.mark.contract
@@ -227,35 +226,25 @@ def test_contract_never_raises_on_garbage_snippet() -> None:
     assert all(isinstance(r, BudgetedResult) for r in out)
 
 
-def test_contract_truncation_self_consistent() -> None:
-    """When content is truncated, recorded token_estimate must equal
-    estimate_tokens(content). The implementation is allowed to overshoot the
-    budget cap on the *final* truncated result (because APPROX_CHARS_PER_TOKEN
-    is char-based but estimate_tokens is word-based — see BUG note below) but
-    the entry must remain self-consistent.
+def test_contract_total_tokens_is_a_hard_cap_not_a_soft_one() -> None:
+    """Per docstring: ``apply_budget`` enforces a HARD cap on total tokens.
 
-    BUG SURFACED:
-        kairix.core.search.budget._apply_budget_impl uses
-            max_chars = remaining * APPROX_CHARS_PER_TOKEN  # 4 chars/token
-            content = content[:max_chars]
-            tokens = _estimate_tokens(content)              # word_count * 1.3
-        Word-tokens (1.3 multiplier) and char-tokens (4 multiplier) disagree;
-        for "w w w ..." (1-char words) the truncated content's word-token
-        estimate exceeds ``remaining`` by ~30%. The cap is therefore a soft
-        cap, not a hard cap. Tracked separately — this test pins current
-        behaviour so a future fix surfaces deliberately.
+    Sum of every returned ``token_estimate`` must be <= ``budget``. The
+    estimator the production code uses to recount must agree with the
+    estimator it uses to truncate — otherwise the cap is a soft cap.
+
+    Pathological input that surfaced the drift: 1-char words. The char-based
+    truncation (``max_chars = remaining * 4``) leaves room for content whose
+    word-based recount (``words * 1.3``) exceeds ``remaining``.
     """
     big = " ".join(["w"] * 200)
     results = [_fr("a.md", snippet=big, score=0.9), _fr("b.md", snippet=big, score=0.8)]
-    out = apply_budget(results, budget=300)
-
-    # Self-consistency: every recorded token_estimate matches the actual
-    # word-based estimate of its stored content (within 1 for rounding).
-    for r in out:
-        assert abs(estimate_tokens(r.content) - r.token_estimate) <= 1, (
-            f"token_estimate diverged from content for path={r.result.path}: "
-            f"recorded={r.token_estimate}, actual={estimate_tokens(r.content)}"
-        )
+    budget = 300
+    out = apply_budget(results, budget=budget)
+    total = sum(r.token_estimate for r in out)
+    assert total <= budget, (
+        f"hard-cap contract violated: budget={budget}, returned total_tokens={total} (over by {total - budget})"
+    )
 
     # Soft-cap: total tokens overshoot is bounded by APPROX_CHARS_PER_TOKEN
     # vs word-multiplier divergence (~30%). Anything beyond 1.5x is a

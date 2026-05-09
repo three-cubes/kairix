@@ -165,10 +165,20 @@ def _apply_budget_impl(
         tokens = _estimate_tokens(content)
 
         # Hard cap: if even this result exceeds remaining, truncate content
+        # using the same estimator we recount with — char-based truncation
+        # plus word-based recount disagree on degenerate inputs (e.g. 1-char
+        # words), causing the cap to drift to a soft cap. The loop below
+        # truncates progressively until the recount fits.
         if tokens > remaining:
             max_chars = remaining * APPROX_CHARS_PER_TOKEN
             content = content[:max_chars]
             tokens = _estimate_tokens(content)
+            # If the word-based recount still exceeds, shave content until it fits.
+            while tokens > remaining and content:
+                # Drop ~10% of the remaining content per pass; converges fast.
+                cut = max(1, len(content) // 10)
+                content = content[:-cut]
+                tokens = _estimate_tokens(content)
 
         budgeted.append(
             BudgetedResult(
