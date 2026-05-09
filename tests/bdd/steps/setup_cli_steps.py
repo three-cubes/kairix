@@ -30,6 +30,7 @@ _DOCUMENTED_FLAGS = (
 
 @dataclass
 class _SetupCliCtx:
+    state_path: Path
     document_root: Path | None = None
     exit_code: int = 0
     stdout: str = ""
@@ -38,11 +39,8 @@ class _SetupCliCtx:
 
 
 @pytest.fixture
-def setup_cli_ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _SetupCliCtx:
-    # Setup wizard writes state under XDG_CONFIG_HOME — redirect to tmp.
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
-    monkeypatch.delenv("CI", raising=False)
-    return _SetupCliCtx()
+def setup_cli_ctx(tmp_path: Path) -> _SetupCliCtx:
+    return _SetupCliCtx(state_path=tmp_path / ".setup-state.json")
 
 
 @given("a temporary document root with one markdown file")
@@ -55,12 +53,23 @@ def _given_doc_root(setup_cli_ctx: _SetupCliCtx, tmp_path: Path) -> None:
 
 def _run_setup(setup_cli_ctx: _SetupCliCtx, args: list[str]) -> None:
     from kairix.platform.setup.cli import main as setup_main
+    from kairix.platform.setup.prompts import SetupContext
+
+    # Construct a deterministic SetupContext directly so the wizard
+    # never reads $XDG_CONFIG_HOME, $CI, or sys.stdout.isatty(). Mirrors
+    # how prod main() builds it from --non-interactive / --json, but
+    # without env-var I/O.
+    ctx = SetupContext(
+        interactive=False,
+        json_mode="--json" in args,
+        state_path=setup_cli_ctx.state_path,
+    )
 
     out = io.StringIO()
     err = io.StringIO()
     try:
         with redirect_stdout(out), redirect_stderr(err):
-            setup_main(args)
+            setup_main(args, ctx=ctx)
         setup_cli_ctx.exit_code = 0
     except SystemExit as e:
         setup_cli_ctx.exit_code = int(e.code) if e.code is not None else 0

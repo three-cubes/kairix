@@ -1,9 +1,10 @@
 """Step definitions for entity_cli.feature.
 
-Drives ``kairix.knowledge.entities.cli.main`` and captures stdout, stderr,
-and exit code. The suggest/validate success paths need spaCy NLP and live
-Wikidata; covered at integration. seed --dry-run with no index is a
-pure CLI-surface contract — no external dependencies.
+Drives ``kairix.knowledge.entities.cli.main`` with an explicit ``db_path``
+pointing at a non-existent file (so the missing-index branch is exercised
+deterministically) instead of monkeypatching ``KAIRIX_DB_PATH``. The
+suggest/validate success paths need spaCy NLP and live Wikidata; covered
+at integration.
 """
 
 from __future__ import annotations
@@ -22,20 +23,17 @@ _SUBCOMMANDS = ("suggest", "validate", "seed")
 
 @dataclass
 class _EntityCliCtx:
+    db_path: Path
     exit_code: int = 0
     stdout: str = ""
     stderr: str = ""
 
 
 @pytest.fixture
-def entity_cli_ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _EntityCliCtx:
-    # Point KAIRIX_DATA_DIR at empty tmp so 'seed' finds no index.
-    monkeypatch.setenv("KAIRIX_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", str(tmp_path / "vault"))
-    (tmp_path / "vault").mkdir(exist_ok=True)
-    for ev in ("KAIRIX_NEO4J_URI", "KAIRIX_NEO4J_USER", "KAIRIX_NEO4J_PASSWORD"):
-        monkeypatch.delenv(ev, raising=False)
-    return _EntityCliCtx()
+def entity_cli_ctx(tmp_path: Path) -> _EntityCliCtx:
+    # tmp_path is empty: no index file at this path → exercises the
+    # 'index not found' branch of cmd_seed without env-var fiddling.
+    return _EntityCliCtx(db_path=tmp_path / "absent.sqlite")
 
 
 def _run_entity(entity_cli_ctx: _EntityCliCtx, args: list[str]) -> None:
@@ -45,7 +43,7 @@ def _run_entity(entity_cli_ctx: _EntityCliCtx, args: list[str]) -> None:
     err = io.StringIO()
     try:
         with redirect_stdout(out), redirect_stderr(err):
-            rc = entity_main(args)
+            rc = entity_main(args, db_path=entity_cli_ctx.db_path)
         entity_cli_ctx.exit_code = rc if rc is not None else 0
     except SystemExit as e:
         entity_cli_ctx.exit_code = int(e.code) if e.code is not None else 0

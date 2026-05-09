@@ -11,9 +11,16 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Any
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, *, neo4j_client: Any = None) -> None:
+    """Entry point for `kairix store`.
+
+    The ``neo4j_client`` keyword lets BDD/integration tests inject a
+    ``FakeNeo4jClient`` instead of letting the CLI call ``get_client()``
+    at the module boundary. Production callers leave it ``None``.
+    """
     parser = argparse.ArgumentParser(
         prog="kairix store",
         description="Document store operations: crawl entities into Neo4j, health check",
@@ -42,9 +49,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.subcommand == "crawl":
-        _cmd_crawl(args)
+        _cmd_crawl(args, neo4j_client=neo4j_client)
     elif args.subcommand == "health":
-        _cmd_health(args)
+        _cmd_health(args, neo4j_client=neo4j_client)
     else:
         parser.print_help()
         sys.exit(1)
@@ -62,7 +69,7 @@ def _resolve_document_root(arg: str | None) -> str:
     sys.exit(1)
 
 
-def _cmd_crawl(args: argparse.Namespace) -> None:
+def _cmd_crawl(args: argparse.Namespace, *, neo4j_client: Any = None) -> None:
     import logging
 
     if args.verbose:
@@ -72,10 +79,12 @@ def _cmd_crawl(args: argparse.Namespace) -> None:
 
     document_root = _resolve_document_root(args.document_root)
 
-    from kairix.knowledge.graph.client import get_client
     from kairix.knowledge.store.crawler import crawl
 
-    neo4j_client = get_client()
+    if neo4j_client is None:
+        from kairix.knowledge.graph.client import get_client
+
+        neo4j_client = get_client()
 
     if not neo4j_client.available and not args.dry_run:
         print("Warning: Neo4j unavailable — running in dry-run mode", file=sys.stderr)
@@ -115,13 +124,15 @@ def _cmd_crawl(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
-def _cmd_health(args: argparse.Namespace) -> None:
-    from kairix.knowledge.graph.client import get_client
+def _cmd_health(args: argparse.Namespace, *, neo4j_client: Any = None) -> None:
     from kairix.knowledge.store.health import run_store_health
 
     document_root = args.document_root  # optional for health check
 
-    neo4j_client = get_client()
+    if neo4j_client is None:
+        from kairix.knowledge.graph.client import get_client
+
+        neo4j_client = get_client()
     report = run_store_health(neo4j_client=neo4j_client, document_root=document_root)
 
     if args.json_out:

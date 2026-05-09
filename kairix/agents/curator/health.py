@@ -284,5 +284,13 @@ def format_report_text(report: HealthReport) -> str:
 
 
 def format_report_json(report: HealthReport) -> str:
-    """Format a HealthReport as indented JSON."""
-    return json.dumps(dataclasses.asdict(report), indent=2)
+    """Format a HealthReport as indented JSON.
+
+    ``dataclasses.asdict`` strips ``@property`` descriptors, so the
+    operator-visible booleans (``ok``, ``issue_count``) are added back
+    in explicitly — operators rely on them for green/red gating.
+    """
+    payload = dataclasses.asdict(report)
+    payload["ok"] = report.ok
+    payload["issue_count"] = report.issue_count
+    return json.dumps(payload, indent=2)

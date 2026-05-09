@@ -1,9 +1,10 @@
 """Step definitions for wikilinks_cli.feature.
 
-Drives ``kairix.knowledge.wikilinks.cli.main`` and captures stdout, stderr,
-and exit code. The inject + audit subcommands need a populated entity
-graph (Neo4j or bootstrap index) — out of scope for BDD; covered by
-integration tests. These scenarios cover the surface contract only.
+Drives ``kairix.knowledge.wikilinks.cli.main`` with an explicit ``FakePaths``
+(canonical pattern from tests/fakes.py) instead of monkeypatching env vars.
+Captures stdout, stderr, and exit code. The inject + audit subcommands
+need a populated entity graph — out of scope for BDD; covered by
+integration tests.
 """
 
 from __future__ import annotations
@@ -17,26 +18,31 @@ from pathlib import Path
 import pytest
 from pytest_bdd import parsers, then, when
 
+from kairix.paths import KairixPaths
+from tests.fakes import FakePaths
+
 _SUBCOMMANDS = ("inject", "audit", "status")
 
 
 @dataclass
 class _WikilinksCliCtx:
+    paths: KairixPaths
     exit_code: int = 0
     stdout: str = ""
     stderr: str = ""
 
 
 @pytest.fixture
-def wikilinks_cli_ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _WikilinksCliCtx:
-    # Point KAIRIX_DATA_DIR at tmp so 'status' doesn't write to ~/.cache;
-    # ensure no Neo4j env vars are set so resolver falls back to empty.
-    monkeypatch.setenv("KAIRIX_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", str(tmp_path / "vault"))
-    (tmp_path / "vault").mkdir(exist_ok=True)
-    for ev in ("KAIRIX_NEO4J_URI", "KAIRIX_NEO4J_USER", "KAIRIX_NEO4J_PASSWORD"):
-        monkeypatch.delenv(ev, raising=False)
-    return _WikilinksCliCtx()
+def wikilinks_cli_ctx(tmp_path: Path) -> _WikilinksCliCtx:
+    vault = tmp_path / "vault"
+    vault.mkdir(exist_ok=True)
+    paths = FakePaths(
+        document_root=vault,
+        db_path=tmp_path / "index.sqlite",
+        log_dir=tmp_path / "logs",
+        workspace_root=tmp_path / "workspaces",
+    )
+    return _WikilinksCliCtx(paths=paths)
 
 
 def _run_wikilinks(wikilinks_cli_ctx: _WikilinksCliCtx, args: list[str]) -> None:
@@ -46,7 +52,7 @@ def _run_wikilinks(wikilinks_cli_ctx: _WikilinksCliCtx, args: list[str]) -> None
     err = io.StringIO()
     try:
         with redirect_stdout(out), redirect_stderr(err):
-            wikilinks_main(args)
+            wikilinks_main(args, paths=wikilinks_cli_ctx.paths)
         wikilinks_cli_ctx.exit_code = 0
     except SystemExit as e:
         wikilinks_cli_ctx.exit_code = int(e.code) if e.code is not None else 0

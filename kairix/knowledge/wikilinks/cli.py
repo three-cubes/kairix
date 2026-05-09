@@ -31,14 +31,14 @@ from kairix.paths import KairixPaths
 _LAST_RUN_PATH = os.environ.get("KAIRIX_DATA_DIR", str(Path.home() / ".cache" / "kairix")) + "/wikilinks-last-run"
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, *, paths: KairixPaths | None = None) -> None:
     """Entry point for `kairix wikilinks` subcommand.
 
     Constructs the runtime ``KairixPaths`` once at the boundary and passes
     it down to every command handler — the only place this CLI module
     calls ``KairixPaths.resolve()``. Subcommands receive ``paths`` as a
-    parameter, so tests can drive the CLI with a ``FakePaths`` injected
-    via ``argv`` parsing or by calling the subcommand handler directly.
+    parameter, so tests inject a ``FakePaths`` via the ``paths`` keyword
+    instead of monkeypatching ``KAIRIX_*`` environment variables.
     """
     if argv is None:
         argv = sys.argv[2:]  # strip "kairix wikilinks"
@@ -47,7 +47,8 @@ def main(argv: list[str] | None = None) -> None:
         print(__doc__)
         sys.exit(0)
 
-    paths = KairixPaths.resolve()
+    if paths is None:
+        paths = KairixPaths.resolve()
 
     subcmd = argv[0]
 

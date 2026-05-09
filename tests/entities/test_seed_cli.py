@@ -33,33 +33,29 @@ class TestSeedCLIParsing:
 
 class TestSeedCLIExecution:
     @pytest.mark.unit
-    def test_exits_1_when_no_index(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_DB_PATH", str(tmp_path / "absent.sqlite"))
-        assert main(["seed"]) == 1
+    def test_exits_1_when_no_index(self, tmp_path) -> None:
+        assert main(["seed"], db_path=tmp_path / "absent.sqlite") == 1
 
     @pytest.mark.unit
-    def test_exits_1_when_index_unpopulated(self, tmp_path, monkeypatch) -> None:
+    def test_exits_1_when_index_unpopulated(self, tmp_path) -> None:
         # File exists but has no documents table — operator gets the same hint.
         db_path = tmp_path / "empty.sqlite"
         sqlite3.connect(str(db_path)).close()
-        monkeypatch.setenv("KAIRIX_DB_PATH", str(db_path))
-        assert main(["seed"]) == 1
+        assert main(["seed"], db_path=db_path) == 1
 
     @pytest.mark.integration
-    def test_dry_run_does_not_seed(self, tmp_path, monkeypatch) -> None:
+    def test_dry_run_does_not_seed(self, tmp_path) -> None:
         db_path = tmp_path / "index.sqlite"
         db = sqlite3.connect(str(db_path))
         db.execute("CREATE TABLE documents (id INTEGER, path TEXT, title TEXT, active INTEGER)")
         db.close()
-        monkeypatch.setenv("KAIRIX_DB_PATH", str(db_path))
         # No rows → 0 candidates → return 0 with "no candidates" message
-        assert main(["seed", "--dry-run"]) == 0
+        assert main(["seed", "--dry-run"], db_path=db_path) == 0
 
     @pytest.mark.integration
-    def test_returns_0_when_no_candidates(self, tmp_path, monkeypatch) -> None:
+    def test_returns_0_when_no_candidates(self, tmp_path) -> None:
         db_path = tmp_path / "index.sqlite"
         db = sqlite3.connect(str(db_path))
         db.execute("CREATE TABLE documents (id INTEGER, path TEXT, title TEXT, active INTEGER)")
         db.close()
-        monkeypatch.setenv("KAIRIX_DB_PATH", str(db_path))
-        assert main(["seed"]) == 0
+        assert main(["seed"], db_path=db_path) == 0

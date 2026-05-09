@@ -1,8 +1,10 @@
 """Step definitions for store_cli.feature.
 
-Drives ``kairix.knowledge.store.cli.main`` via its argv parameter. Substitutes
-TMP in the argv string with the tmp_path so document-root args resolve to a
-controlled location. Captures stdout + exit code.
+Drives ``kairix.knowledge.store.cli.main`` with an explicit ``FakeNeo4jClient``
+(``available=False``, no entities) so tests do not depend on the host's
+``KAIRIX_NEO4J_*`` environment. The document-root flows through the
+``--document-root`` CLI flag — TMP in the scenario argv resolves to the
+fixture's tmp_path-rooted vault.
 """
 
 from __future__ import annotations
@@ -18,25 +20,29 @@ from typing import Any
 import pytest
 from pytest_bdd import given, parsers, then, when
 
+from tests.fixtures.neo4j_mock import FakeNeo4jClient
+
+
+class _UnavailableNeo4jClient(FakeNeo4jClient):
+    """FakeNeo4jClient with available=False — exercises the no-Neo4j fallback."""
+
+    available: bool = False
+
 
 @dataclass
 class _StoreCliCtx:
-    document_root: Path | None = None
+    document_root: Path
+    neo4j_client: Any
     exit_code: int = 0
     stdout: str = ""
     json_output: dict[str, Any] = field(default_factory=dict)
 
 
 @pytest.fixture
-def store_cli_ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _StoreCliCtx:
+def store_cli_ctx(tmp_path: Path) -> _StoreCliCtx:
     docroot = tmp_path / "vault"
     docroot.mkdir()
-    monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", str(docroot))
-    # Ensure Neo4j env vars are not set — the dry-run crawl path is what we
-    # want, and the health check should report neo4j_available=False.
-    for ev in ("KAIRIX_NEO4J_URI", "KAIRIX_NEO4J_USER", "KAIRIX_NEO4J_PASSWORD"):
-        monkeypatch.delenv(ev, raising=False)
-    return _StoreCliCtx(document_root=docroot)
+    return _StoreCliCtx(document_root=docroot, neo4j_client=_UnavailableNeo4jClient(entities=[]))
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +73,7 @@ def _invoke_store(store_cli_ctx: _StoreCliCtx, args: list[str]) -> None:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf):
-            store_main(args)
+            store_main(args, neo4j_client=store_cli_ctx.neo4j_client)
         store_cli_ctx.exit_code = 0
     except SystemExit as e:
         store_cli_ctx.exit_code = int(e.code) if e.code is not None else 0

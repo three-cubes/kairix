@@ -14,17 +14,20 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 
-def _health_cmd(args: argparse.Namespace) -> None:
+def _health_cmd(args: argparse.Namespace, *, neo4j_client: Any = None) -> None:
     from kairix.agents.curator.health import (
         format_report_json,
         format_report_text,
         run_health_check,
     )
-    from kairix.knowledge.graph.client import get_client
 
-    neo4j_client = get_client()
+    if neo4j_client is None:
+        from kairix.knowledge.graph.client import get_client
+
+        neo4j_client = get_client()
 
     report = run_health_check(neo4j_client, staleness_days=args.staleness_days)
 
@@ -39,8 +42,13 @@ def _health_cmd(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
-def main(argv: list[str] | None = None) -> None:
-    """Entry point for `kairix curator` subcommand."""
+def main(argv: list[str] | None = None, *, neo4j_client: Any = None) -> None:
+    """Entry point for `kairix curator` subcommand.
+
+    The ``neo4j_client`` keyword lets BDD/integration tests inject a
+    ``FakeNeo4jClient`` instead of letting the CLI call ``get_client()``
+    at the module boundary.
+    """
     parser = argparse.ArgumentParser(
         prog="kairix curator",
         description="Curator agent: entity graph health monitoring and enrichment.",
@@ -75,7 +83,10 @@ def main(argv: list[str] | None = None) -> None:
     health_parser.set_defaults(func=_health_cmd)
 
     parsed = parser.parse_args(argv)
-    parsed.func(parsed)
+    if parsed.func is _health_cmd:
+        _health_cmd(parsed, neo4j_client=neo4j_client)
+    else:  # pragma: no cover — only one subcommand today
+        parsed.func(parsed)
 
 
 if __name__ == "__main__":
