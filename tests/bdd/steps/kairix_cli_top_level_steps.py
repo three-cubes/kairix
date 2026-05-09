@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import pytest
 from pytest_bdd import parsers, then, when
 
-from kairix.cli import _COMMANDS as _KAIRIX_SUBCOMMANDS
+from kairix.cli import COMMANDS as _KAIRIX_SUBCOMMANDS
 from kairix.cli import main as kairix_main
 
 

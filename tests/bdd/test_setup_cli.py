@@ -19,6 +19,9 @@ def test_setup_invalid_preset() -> None:
 
 
 @pytest.mark.bdd
-@scenario("features/setup_cli.feature", "--non-interactive --json --preset emits a JSON config to stdout")
+@scenario(
+    "features/setup_cli.feature",
+    "--non-interactive --json --preset emits a JSON config rooted at the supplied path",
+)
 def test_setup_non_interactive_json() -> None:
     pass

@@ -13,7 +13,10 @@ def test_store_dry_run_crawl() -> None:
 
 
 @pytest.mark.bdd
-@scenario("features/store_cli.feature", "store health --json emits structured output")
+@scenario(
+    "features/store_cli.feature",
+    "store health --json emits structured output reflecting Neo4j unavailability",
+)
 def test_store_health_json() -> None:
     pass
 

@@ -13,10 +13,11 @@ Feature: kairix curator CLI
     When the operator runs the curator CLI with no arguments
     Then the curator CLI exits with status 2
 
-  Scenario: health --format json emits structured output with ok + total_entities
+  Scenario: health --format json reports neo4j_available=false when Neo4j is offline
     When the operator runs the curator CLI with `health --format json`
     Then the curator CLI exits with status 0
     And the curator CLI stdout is parseable JSON
-    And the curator JSON has an "ok" field
-    And the curator JSON has a "total_entities" field
-    And the curator JSON has a "neo4j_available" field
+    And the curator JSON "neo4j_available" field equals false
+    And the curator JSON "total_entities" field equals 0
+    And the curator JSON "ok" field equals true
+    And the curator JSON "issue_count" field equals 0

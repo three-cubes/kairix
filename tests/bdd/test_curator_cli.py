@@ -19,6 +19,9 @@ def test_curator_no_subcommand() -> None:
 
 
 @pytest.mark.bdd
-@scenario("features/curator_cli.feature", "health --format json emits structured output with ok + total_entities")
+@scenario(
+    "features/curator_cli.feature",
+    "health --format json reports neo4j_available=false when Neo4j is offline",
+)
 def test_curator_health_json() -> None:
     pass

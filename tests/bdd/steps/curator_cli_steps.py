@@ -90,8 +90,29 @@ def _assert_curator_json_parseable(curator_cli_ctx: _CuratorCliCtx) -> None:
     assert curator_cli_ctx.json_output, f"stdout was not parseable JSON; got {curator_cli_ctx.stdout[:300]!r}"
 
 
-@then(parsers.re(r'the curator JSON has an? "(?P<field_name>[^"]+)" field'))
-def _assert_curator_json_has_field(curator_cli_ctx: _CuratorCliCtx, field_name: str) -> None:
+def _curator_json_value(curator_cli_ctx: _CuratorCliCtx, field_name: str) -> Any:
     assert field_name in curator_cli_ctx.json_output, (
         f"missing {field_name!r} in JSON output: {curator_cli_ctx.json_output}"
+    )
+    return curator_cli_ctx.json_output[field_name]
+
+
+@then(parsers.parse('the curator JSON "{field_name}" field equals true'))
+def _assert_curator_json_true(curator_cli_ctx: _CuratorCliCtx, field_name: str) -> None:
+    value = _curator_json_value(curator_cli_ctx, field_name)
+    assert value is True, f"expected {field_name}=true; got {value!r} (type {type(value).__name__})"
+
+
+@then(parsers.parse('the curator JSON "{field_name}" field equals false'))
+def _assert_curator_json_false(curator_cli_ctx: _CuratorCliCtx, field_name: str) -> None:
+    value = _curator_json_value(curator_cli_ctx, field_name)
+    assert value is False, f"expected {field_name}=false; got {value!r} (type {type(value).__name__})"
+
+
+@then(parsers.parse('the curator JSON "{field_name}" field equals {value:d}'))
+def _assert_curator_json_int(curator_cli_ctx: _CuratorCliCtx, field_name: str, value: int) -> None:
+    actual = _curator_json_value(curator_cli_ctx, field_name)
+    assert actual == value, f"expected {field_name}={value}; got {actual!r}"
+    assert isinstance(actual, int) and not isinstance(actual, bool), (
+        f"{field_name} must be a plain int, got {type(actual).__name__}"
     )

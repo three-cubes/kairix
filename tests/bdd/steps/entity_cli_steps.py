@@ -79,6 +79,7 @@ def _assert_lists_subcommands(entity_cli_ctx: _EntityCliCtx) -> None:
 @then("stderr names the missing index")
 def _assert_stderr_names_missing_index(entity_cli_ctx: _EntityCliCtx) -> None:
     err = entity_cli_ctx.stderr
-    assert "index not found" in err.lower() or "not found" in err.lower(), (
-        f"stderr did not name the missing index: {err!r}"
+    assert "kairix index not found" in err, (
+        f"stderr did not name the missing index with the canonical operator phrase: {err!r}"
     )
+    assert "kairix embed" in err, f"stderr did not name the remediation command 'kairix embed': {err!r}"

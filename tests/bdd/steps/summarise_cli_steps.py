@@ -1,10 +1,9 @@
 """Step definitions for summarise_cli.feature.
 
-Drives ``kairix.knowledge.summaries.cli.main`` against an in-memory tmp_path.
-Uses ``monkeypatch.setenv`` to point KAIRIX_DATA_DIR / KAIRIX_DOCUMENT_ROOT
-at the tmp_path — that's pytest-builtin env-var manipulation, not a
-production-module monkeypatch. Captures stdout + exit code so the
-assertions pin operator-visible CLI behaviour.
+Drives ``kairix.knowledge.summaries.cli.main`` with explicit ``document_root``
+and ``db_path`` kw-arguments — no env-var monkeypatch, no private cache
+clears. Captures stdout + exit code so the assertions pin operator-visible
+CLI behaviour.
 """
 
 from __future__ import annotations
@@ -22,49 +21,31 @@ from pytest_bdd import given, parsers, then, when
 
 @dataclass
 class _SummariseCtx:
-    data_dir: Path | None = None
-    document_root: Path | None = None
-    db_path: Path | None = None
+    document_root: Path
+    db_path: Path
     exit_code: int = 0
     stdout: str = ""
 
 
 @pytest.fixture
-def summarise_ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _SummariseCtx:
-    data_dir = tmp_path / "data"
+def summarise_ctx(tmp_path: Path) -> _SummariseCtx:
     document_root = tmp_path / "vault"
-    data_dir.mkdir()
     document_root.mkdir()
-    monkeypatch.setenv("KAIRIX_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", str(document_root))
-    # summaries_db_path() reads its own env var, not KAIRIX_DATA_DIR.
-    monkeypatch.setenv("KAIRIX_SUMMARIES_DB", str(data_dir / "summaries.db"))
-    # Clear any path caches downstream resolvers may hold.
-    try:
-        from kairix import paths as _paths_mod
-
-        if hasattr(_paths_mod, "_resolve_cached"):
-            _paths_mod._resolve_cached.cache_clear()
-    except Exception:
-        pass
-    return _SummariseCtx(data_dir=data_dir, document_root=document_root)
+    db_path = tmp_path / "data" / "summaries.db"
+    return _SummariseCtx(document_root=document_root, db_path=db_path)
 
 
 def _ensure_db(ctx: _SummariseCtx) -> Path:
-    """Initialise an empty summaries DB at the env-var-resolved location."""
-    from kairix.paths import summaries_db_path
+    """Initialise an empty summaries DB at ctx.db_path."""
+    from kairix.knowledge.summaries.staleness import init_summaries_db
 
-    db_path = summaries_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    ctx.db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(ctx.db_path))
     try:
-        from kairix.knowledge.summaries.staleness import init_summaries_db
-
         init_summaries_db(conn)
     finally:
         conn.close()
-    ctx.db_path = db_path
-    return db_path
+    return ctx.db_path
 
 
 # ---------------------------------------------------------------------------
@@ -79,10 +60,10 @@ def _given_empty_db(summarise_ctx: _SummariseCtx) -> None:
 
 @given(parsers.parse("a summaries database populated with:"))
 def _given_populated_db(summarise_ctx: _SummariseCtx, datatable: list[list[str]]) -> None:
-    db_path = _ensure_db(summarise_ctx)
+    _ensure_db(summarise_ctx)
     headers = datatable[0]
     rows = datatable[1:]
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(summarise_ctx.db_path))
     try:
         for row in rows:
             payload = dict(zip(headers, row, strict=True))
@@ -112,7 +93,11 @@ def _run_summarise_cli(summarise_ctx: _SummariseCtx, argv: str) -> None:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf):
-            summarise_main(args)
+            summarise_main(
+                args,
+                document_root=summarise_ctx.document_root,
+                db_path=summarise_ctx.db_path,
+            )
         summarise_ctx.exit_code = 0
     except SystemExit as e:
         summarise_ctx.exit_code = int(e.code) if e.code is not None else 0

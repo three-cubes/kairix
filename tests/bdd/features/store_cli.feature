@@ -9,13 +9,16 @@ Feature: kairix store CLI
     When the operator runs the store CLI with `crawl --document-root TMP --dry-run`
     Then the store CLI exits with status 0
     And the output is in dry-run mode
-    And the output reports the entity counts found
+    And the crawl reports 1 person found
+    And the crawl reports 0 organisations found
 
-  Scenario: store health --json emits structured output
+  Scenario: store health --json emits structured output reflecting Neo4j unavailability
     When the operator runs the store CLI with `health --json`
     Then the store CLI stdout is parseable JSON
-    And the JSON has an "ok" field
-    And the JSON has a "neo4j_available" field
+    And the store JSON "ok" field equals false
+    And the store JSON "neo4j_available" field equals false
+    And the store JSON "total_entities" field equals 0
+    And the store JSON "issues" field contains "Neo4j unavailable"
 
   Scenario: store with no subcommand prints help and exits non-zero
     When the operator runs the store CLI without any subcommand

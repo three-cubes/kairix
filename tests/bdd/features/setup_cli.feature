@@ -14,10 +14,10 @@ Feature: kairix setup CLI
     Then the setup CLI exits with status 2
     And stderr names the bad preset
 
-  Scenario: --non-interactive --json --preset emits a JSON config to stdout
+  Scenario: --non-interactive --json --preset emits a JSON config rooted at the supplied path
     Given a temporary document root with one markdown file
     When the operator runs the setup CLI with `--non-interactive --json --preset general --path TMP`
     Then the setup CLI exits with status 0
     And the setup CLI stdout is parseable JSON
-    And the JSON config has a "paths" section
-    And the JSON config has a "retrieval" section
+    And the JSON config "paths.document_root" matches the supplied path
+    And the JSON config "retrieval" section is a non-empty object

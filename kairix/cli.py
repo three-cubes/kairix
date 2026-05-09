@@ -29,7 +29,7 @@ import sys
 
 # Dispatch table: command name → (module_path, function_name, accepts_args)
 # Lazy imports keep startup fast — only the selected command is imported.
-_COMMANDS: dict[str, tuple[str, str, bool]] = {
+COMMANDS: dict[str, tuple[str, str, bool]] = {
     "embed": ("kairix.core.embed.cli", "main", False),
     "entity": ("kairix.knowledge.entities.cli", "main", True),
     "curator": ("kairix.agents.curator.cli", "main", True),
@@ -66,7 +66,7 @@ def main() -> None:
         print(f"kairix {__version__}")
         sys.exit(0)
 
-    entry = _COMMANDS.get(cmd)
+    entry = COMMANDS.get(cmd)
     if entry is None:
         print(f"Unknown command: {cmd}\n{__doc__}", file=sys.stderr)
         sys.exit(1)

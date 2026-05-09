@@ -116,6 +116,23 @@ def _assert_setup_json_parseable(setup_cli_ctx: _SetupCliCtx) -> None:
     )
 
 
-@then(parsers.parse('the JSON config has a "{section}" section'))
-def _assert_json_has_section(setup_cli_ctx: _SetupCliCtx, section: str) -> None:
-    assert section in setup_cli_ctx.json_output, f"missing {section!r} in JSON output: {setup_cli_ctx.json_output}"
+@then('the JSON config "paths.document_root" matches the supplied path')
+def _assert_paths_document_root(setup_cli_ctx: _SetupCliCtx) -> None:
+    assert "paths" in setup_cli_ctx.json_output, f"missing 'paths' in JSON: {setup_cli_ctx.json_output}"
+    paths = setup_cli_ctx.json_output["paths"]
+    assert isinstance(paths, dict), f"'paths' must be an object, got {type(paths).__name__}"
+    assert "document_root" in paths, f"missing 'document_root' in paths: {paths}"
+    assert setup_cli_ctx.document_root is not None, (
+        "fixture didn't set document_root — feature is missing the Given step"
+    )
+    assert paths["document_root"] == str(setup_cli_ctx.document_root), (
+        f"expected paths.document_root={str(setup_cli_ctx.document_root)!r}; got {paths['document_root']!r}"
+    )
+
+
+@then(parsers.parse('the JSON config "{section}" section is a non-empty object'))
+def _assert_section_non_empty_object(setup_cli_ctx: _SetupCliCtx, section: str) -> None:
+    assert section in setup_cli_ctx.json_output, f"missing {section!r}: {setup_cli_ctx.json_output}"
+    value = setup_cli_ctx.json_output[section]
+    assert isinstance(value, dict), f"{section!r} must be an object, got {type(value).__name__}"
+    assert value, f"{section!r} must be non-empty, got {value!r}"

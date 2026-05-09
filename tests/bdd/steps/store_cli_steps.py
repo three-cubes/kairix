@@ -52,14 +52,13 @@ def store_cli_ctx(tmp_path: Path) -> _StoreCliCtx:
 
 @given("a document store with one entity-shaped document")
 def _given_one_doc(store_cli_ctx: _StoreCliCtx) -> None:
-    assert store_cli_ctx.document_root is not None
-    # The crawler looks for entity-shaped Markdown docs. A minimal one has
-    # frontmatter with a 'type' field; the crawler's exact contract is
-    # documented in kairix.knowledge.store.crawler — for the BDD we only
-    # need *some* doc to exist so the dry-run reports a non-zero count.
-    doc = store_cli_ctx.document_root / "01-People" / "Jordan-Blake.md"
+    # Crawler contract (kairix.knowledge.store.crawler): person nodes are
+    # discovered from .md files inside any directory named "People-Notes"
+    # under the document root. Frontmatter is optional — name falls back
+    # to the filename stem.
+    doc = store_cli_ctx.document_root / "Network" / "People-Notes" / "Jordan-Blake.md"
     doc.parent.mkdir(parents=True, exist_ok=True)
-    doc.write_text("---\ntype: person\nname: Jordan Blake\n---\n\nEngineer at Three Cubes.\n")
+    doc.write_text("---\nname: Jordan Blake\nrole: Engineer\n---\n\nEngineer at Three Cubes.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -116,12 +115,54 @@ def _assert_dry_run(store_cli_ctx: _StoreCliCtx) -> None:
     assert "[DRY RUN]" in store_cli_ctx.stdout, f"expected dry-run banner; got {store_cli_ctx.stdout!r}"
 
 
-@then("the output reports the entity counts found")
-def _assert_counts(store_cli_ctx: _StoreCliCtx) -> None:
-    out = store_cli_ctx.stdout
-    # Production crawler reports four entity types; only check the labels are present.
-    for label in ("Organisations:", "Persons:", "Outcomes:", "Edges:"):
-        assert label in out, f"missing entity-count label {label!r} in output:\n{out}"
+def _parse_count_after_label(stdout: str, label: str) -> int:
+    """Find a 'Label:  N found' line and return N. Asserts the line exists."""
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(label):
+            tail = stripped[len(label) :].strip()
+            # First whitespace-separated token after the label is the integer count.
+            return int(tail.split()[0])
+    raise AssertionError(f"missing line starting with {label!r} in output:\n{stdout}")
+
+
+@then(parsers.parse("the crawl reports {n:d} person found"))
+@then(parsers.parse("the crawl reports {n:d} persons found"))
+def _assert_persons_count(store_cli_ctx: _StoreCliCtx, n: int) -> None:
+    actual = _parse_count_after_label(store_cli_ctx.stdout, "Persons:")
+    assert actual == n, f"expected {n} persons, got {actual}; stdout={store_cli_ctx.stdout!r}"
+
+
+@then(parsers.parse("the crawl reports {n:d} organisation found"))
+@then(parsers.parse("the crawl reports {n:d} organisations found"))
+def _assert_orgs_count(store_cli_ctx: _StoreCliCtx, n: int) -> None:
+    actual = _parse_count_after_label(store_cli_ctx.stdout, "Organisations:")
+    assert actual == n, f"expected {n} organisations, got {actual}; stdout={store_cli_ctx.stdout!r}"
+
+
+@then(parsers.parse('the store JSON "{field_name}" field equals false'))
+def _assert_store_json_false(store_cli_ctx: _StoreCliCtx, field_name: str) -> None:
+    assert field_name in store_cli_ctx.json_output, f"missing {field_name!r}: {store_cli_ctx.json_output}"
+    value = store_cli_ctx.json_output[field_name]
+    assert value is False, f"expected {field_name}=false; got {value!r} (type {type(value).__name__})"
+
+
+@then(parsers.parse('the store JSON "{field_name}" field equals {value:d}'))
+def _assert_store_json_int(store_cli_ctx: _StoreCliCtx, field_name: str, value: int) -> None:
+    assert field_name in store_cli_ctx.json_output, f"missing {field_name!r}: {store_cli_ctx.json_output}"
+    actual = store_cli_ctx.json_output[field_name]
+    assert actual == value, f"expected {field_name}={value}; got {actual!r}"
+    assert isinstance(actual, int) and not isinstance(actual, bool), (
+        f"{field_name} must be a plain int, got {type(actual).__name__}"
+    )
+
+
+@then(parsers.parse('the store JSON "{field_name}" field contains "{needle}"'))
+def _assert_store_json_list_contains(store_cli_ctx: _StoreCliCtx, field_name: str, needle: str) -> None:
+    assert field_name in store_cli_ctx.json_output, f"missing {field_name!r}: {store_cli_ctx.json_output}"
+    items = store_cli_ctx.json_output[field_name]
+    assert isinstance(items, list), f"{field_name} must be a list, got {type(items).__name__}"
+    assert any(needle in str(item) for item in items), f"no item in {field_name} contained {needle!r}; got {items!r}"
 
 
 @then("the store CLI stdout is parseable JSON")
