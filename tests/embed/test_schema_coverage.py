@@ -16,37 +16,13 @@ import pytest
 
 from kairix.core.embed.schema import (
     get_all_chunks_needing_embedding,
-    get_db_path,
     get_pending_chunks,
     migrate_content_vectors,
     save_run_log,
 )
 
-# ---------------------------------------------------------------------------
-# get_db_path
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_get_db_path_uses_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Uses KAIRIX_DB_PATH env var when set."""
-    db_file = tmp_path / "index.sqlite"
-    db_file.touch()
-    monkeypatch.setenv("KAIRIX_DB_PATH", str(db_file))
-    result = get_db_path()
-    assert result == db_file
-
-
-@pytest.mark.unit
-def test_get_db_path_returns_default_when_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Returns default kairix DB path when no DB exists (for fresh installs)."""
-    monkeypatch.delenv("KAIRIX_DB_PATH", raising=False)
-    monkeypatch.delenv("KAIRIX_DB_PATH", raising=False)
-    # Redirect home to tmp_path so default path resolves to a temp location
-    monkeypatch.setenv("HOME", str(tmp_path))
-    result = get_db_path()
-    assert str(result).endswith("kairix/index.sqlite")
-
+# get_db_path coverage moved to tests/db/test_db_init.py (same behaviour,
+# tested through env= and home= DI kwargs without process-env mutation).
 
 # ---------------------------------------------------------------------------
 # get_pending_chunks + get_all_chunks_needing_embedding

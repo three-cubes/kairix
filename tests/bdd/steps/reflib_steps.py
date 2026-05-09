@@ -1,7 +1,8 @@
 """Step definitions for reference_library.feature.
 
-Indexes the 30-document fixture into a temp SQLite DB with FTS5,
-then runs BM25 search against it via KAIRIX_DB_PATH. No external API calls.
+Indexes the 30-document fixture into a temp SQLite DB with FTS5, then runs
+BM25 search against it. The fixture DB path is threaded through the
+``bm25_search(db_path=...)`` kwarg — no env-var monkeypatch.
 """
 
 import sqlite3
@@ -47,15 +48,14 @@ def _build_fixture_db(db_path: Path) -> None:
 
 
 @given("the reference library fixture is indexed")
-def reflib_indexed(monkeypatch):
+def reflib_indexed():
     _build_fixture_db(_DB_PATH)
-    monkeypatch.setenv("KAIRIX_DB_PATH", str(_DB_PATH))
     _state["results"] = None
 
 
 @when(parsers.re(r'I search for "(?P<query>.*)"'))
 def search_for(query):
-    results = bm25_search(query)
+    results = bm25_search(query, db_path=_DB_PATH)
     _state["results"] = results
     _state["query"] = query
 

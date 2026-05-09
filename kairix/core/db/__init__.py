@@ -12,6 +12,7 @@ Public API:
 import logging
 import os
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -23,18 +24,29 @@ _DB_PATH_ENV = "KAIRIX_DB_PATH"
 EMBED_VECTOR_DIMS = int(os.environ.get("KAIRIX_EMBED_DIMS", "1536"))
 
 
-def get_db_path() -> Path:
+def get_db_path(
+    env: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> Path:
     """
     Resolve the kairix database path.
 
     Search order:
       1. ``KAIRIX_DB_PATH`` environment variable (explicit override)
-      2. ``~/.cache/kairix/index.sqlite`` (default kairix location)
+      2. ``<home>/.cache/kairix/index.sqlite`` (default kairix location)
 
     Returns the path (which may not exist yet for fresh installs).
+
+    ``env`` and ``home`` are DI seams; tests pass an explicit mapping +
+    home directory rather than monkeypatching the process environment.
     """
+    if env is None:
+        env = os.environ
+    if home is None:
+        home = Path.home()
+
     # 1. Explicit override
-    env_path = os.environ.get(_DB_PATH_ENV)
+    env_path = env.get(_DB_PATH_ENV)
     if env_path:
         p = Path(env_path)
         if p.exists():
@@ -44,7 +56,7 @@ def get_db_path() -> Path:
         return p
 
     # 2. Default kairix location
-    kairix_db = Path.home() / ".cache" / "kairix" / "index.sqlite"
+    kairix_db = home / ".cache" / "kairix" / "index.sqlite"
     if kairix_db.exists():
         return kairix_db
 

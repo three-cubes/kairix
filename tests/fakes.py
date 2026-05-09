@@ -382,15 +382,27 @@ class FakeEmbedProvider:
 
     Implements ``kairix.platform.llm.embed_provider.EmbedProvider``:
     ``embed_batch(texts, *, model, dims) -> list[list[float]]``.
+
+    Pass ``empty=True`` to return an empty result for every call — exercises
+    the 'no vectors → skip' branch in callers (e.g. RecallChecker).
     """
 
-    def __init__(self, vector: list[float] | None = None, dim: int = 3) -> None:
+    def __init__(
+        self,
+        vector: list[float] | None = None,
+        dim: int = 3,
+        *,
+        empty: bool = False,
+    ) -> None:
         self._vector = vector or [0.0, 0.6, 0.8]
         self._dim = dim
+        self._empty = empty
         self.calls: list[dict[str, Any]] = []
 
     def embed_batch(self, texts: list[str], *, model: str, dims: int) -> list[list[float]]:
         self.calls.append({"texts": list(texts), "model": model, "dims": dims})
+        if self._empty:
+            return []
         return [list(self._vector) for _ in texts]
 
 

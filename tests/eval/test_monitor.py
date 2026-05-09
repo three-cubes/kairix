@@ -484,20 +484,18 @@ def test_naive_timestamps_in_log_are_treated_as_utc_for_baseline_window(tmp_path
 
 
 @pytest.mark.unit
-def test_uses_kairix_monitor_log_env_var_when_log_path_not_passed(tmp_path: Path, monkeypatch) -> None:
-    """When log_path=None, run_monitor uses the KAIRIX_MONITOR_LOG env var."""
-    log_path = tmp_path / "env-monitor.jsonl"
-    monkeypatch.setenv("KAIRIX_MONITOR_LOG", str(log_path))
+def test_run_monitor_writes_to_explicit_log_path(tmp_path: Path) -> None:
+    """run_monitor writes to the explicit log_path argument and creates the parent dir."""
+    log_path = tmp_path / "subdir" / "monitor.jsonl"
 
     run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
-        log_path=None,  # rely on env var
+        log_path=str(log_path),
         suite_loader=_suite_loader_with_n_cases(2),
         benchmark_runner=_benchmark_runner_with_scores(0.6),
     )
 
-    # The env-pointed log file must have been written.
-    assert log_path.exists()
+    assert log_path.exists(), "run_monitor must persist the log to the explicit path"
     entries = _read_log(log_path)
     assert len(entries) == 1
 

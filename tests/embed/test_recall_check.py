@@ -10,7 +10,6 @@ returned result dict (``detail``, ``passed``, ``total``, ``score``).
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from pathlib import Path
 
@@ -474,86 +473,47 @@ def test_run_recall_gate_does_not_invoke_alert_when_callback_is_none(tmp_path: P
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def _kairix_db_at_env_path(tmp_path: Path) -> Path:
-    """Build a documents table at a temp path and point KAIRIX_DB_PATH at it.
+@pytest.mark.unit
+def test_recall_checker_falls_through_to_defaults_when_db_has_no_recall_queries_table(
+    tmp_path: Path,
+) -> None:
+    """A db connection with no recall_queries table falls through to DEFAULT_RECALL_QUERIES.
 
-    Direct ``os.environ`` manipulation rather than ``monkeypatch.setenv`` —
-    KAIRIX_DB_PATH is operator-facing configuration the production CLI sets,
-    not a code-level test seam.
+    Drives the default-queries fallback path explicitly via ``db=`` rather than
+    relying on KAIRIX_DB_PATH env-resolution; the env-fallback chain itself
+    (get_db_path → open_db) is covered separately by tests/test_paths.py.
     """
-    db_path = tmp_path / "kairix.sqlite"
+    db_path = tmp_path / "no-recall-table.sqlite"
     db = sqlite3.connect(str(db_path))
-    db.executescript(
-        """
-        CREATE TABLE documents (id INTEGER PRIMARY KEY, path TEXT, title TEXT, active INTEGER, hash TEXT);
-        INSERT INTO documents (path, title, active, hash) VALUES ('docs/architecture.md', 'architecture', 1, 'h0');
-        """
-    )
+    # Just a documents table — _get_recall_queries probes for a recall_queries
+    # table; absent → returns DEFAULT_RECALL_QUERIES.
+    db.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY, path TEXT)")
     db.commit()
-    db.close()
 
-    prev = os.environ.get("KAIRIX_DB_PATH")
-    os.environ["KAIRIX_DB_PATH"] = str(db_path)
-    yield db_path
-    if prev is None:
-        os.environ.pop("KAIRIX_DB_PATH", None)
-    else:
-        os.environ["KAIRIX_DB_PATH"] = prev
-
-
-@pytest.mark.unit
-def test_recall_checker_check_opens_db_when_db_arg_is_none(_kairix_db_at_env_path: Path) -> None:
-    """When ``db=None``, ``check`` opens the kairix DB at ``KAIRIX_DB_PATH`` and uses adaptive queries."""
-    fake_searcher = FakeVectorSearcher(paths=["docs/architecture.md"])
-    checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=fake_searcher)
-    result = checker.check()
-
-    assert result["total"] == 1
-    assert result["detail"][0]["query"] == "architecture"
-    assert result["detail"][0]["hit"] is True
-
-
-@pytest.mark.unit
-def test_recall_checker_check_falls_through_to_defaults_when_db_path_missing(tmp_path: Path) -> None:
-    """When ``db=None`` and ``KAIRIX_DB_PATH`` points at a non-existent file, falls back to default queries."""
-    # Point at a path that does not exist; production raises FileNotFoundError which
-    # the check() method catches, leaving db=None so the loop uses DEFAULT_RECALL_QUERIES.
-    missing = tmp_path / "this-does-not-exist.sqlite"
-    prev = os.environ.get("KAIRIX_DB_PATH")
-    os.environ["KAIRIX_DB_PATH"] = str(missing)
+    checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=FakeVectorSearcher())
     try:
-        # FakeVectorSearcher returns [] — every default query is recorded as a miss.
-        checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=FakeVectorSearcher())
-        result = checker.check()
-        # The default static queries were used (5 of them).
-        assert result["total"] == len(DEFAULT_RECALL_QUERIES)
+        result = checker.check(db=db)
     finally:
-        if prev is None:
-            os.environ.pop("KAIRIX_DB_PATH", None)
-        else:
-            os.environ["KAIRIX_DB_PATH"] = prev
+        db.close()
+
+    assert result["total"] == len(DEFAULT_RECALL_QUERIES), (
+        f"expected {len(DEFAULT_RECALL_QUERIES)} default queries, got {result['total']}"
+    )
 
 
 @pytest.mark.unit
-def test_run_recall_gate_constructs_default_checker_when_none_supplied(tmp_path: Path) -> None:
-    """When ``checker=None``, ``run_recall_gate`` builds a default ``RecallChecker``.
+def test_run_recall_gate_with_explicit_checker_writes_log(tmp_path: Path) -> None:
+    """run_recall_gate writes a log and returns (passed, result) given an explicit checker.
 
-    The default checker has no embed_provider, so every query is skipped (returns
-    None from the embedding step). The gate still runs end-to-end and writes a log.
+    The 'checker=None → default checker' branch is environment-coupled and is
+    covered by integration tests of the full embed CLI (which legitimately
+    drives env-resolved defaults end-to-end).
     """
-    # No KAIRIX_DB_PATH → the lazy DB open falls through to None, default queries used,
-    # all of them skipped because no embed credentials.
-    prev = os.environ.get("KAIRIX_DB_PATH")
-    os.environ["KAIRIX_DB_PATH"] = str(tmp_path / "no-such-db.sqlite")
-    try:
-        passed, result = run_recall_gate(log_path=tmp_path / "log.json")
-        assert passed is True  # no previous score, no degradation comparison
-        # All default queries skipped because no embed credentials → total=0, score=0.0
-        assert result["total"] == 0
-        assert all(d["skipped"] for d in result["detail"])
-    finally:
-        if prev is None:
-            os.environ.pop("KAIRIX_DB_PATH", None)
-        else:
-            os.environ["KAIRIX_DB_PATH"] = prev
+    # FakeEmbedProvider(empty=True) → embed_batch returns [] → recall_check skips every query.
+    checker = RecallChecker(embed_provider=FakeEmbedProvider(empty=True), vector_searcher=FakeVectorSearcher())
+    passed, result = run_recall_gate(checker=checker, log_path=tmp_path / "log.json")
+
+    assert passed is True  # no previous score → no degradation comparison
+    assert result["total"] == 0
+    assert all(d["skipped"] for d in result["detail"])
+    assert (tmp_path / "log.json").exists(), "run_recall_gate should have persisted the log"

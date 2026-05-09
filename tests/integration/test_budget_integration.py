@@ -18,8 +18,6 @@ Coverage:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from kairix.core.search.backends import BM25SearchBackend, VectorSearchBackend
@@ -38,7 +36,6 @@ from tests.fakes import (
     FakeGraphRepository,
     FakeSearchLogger,
     FakeVectorRepository,
-    build_summaries_db,
 )
 
 pytestmark = pytest.mark.integration
@@ -191,25 +188,13 @@ def test_integration_apply_budget_after_pipeline_fused() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_integration_budget_falls_back_to_snippet_when_summary_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Phase 2: when summaries DB exists but a path has no row, fall back
-    to the snippet rather than emitting empty content.
+def test_integration_budget_falls_back_to_snippet_when_summary_missing() -> None:
+    """Phase 1 (no summary_loader passed): apply_budget returns the snippet
+    as content rather than emitting empty content.
 
-    This is the partial-DB case: we have summaries for some paths, not
-    others. Budget step must remain useful.
+    Drives apply_budget directly with no summary_loader — no env var needed
+    since the pipeline at this point doesn't read KAIRIX_SUMMARIES_DB.
     """
-    db_path = tmp_path / "summaries.db"
-    build_summaries_db(
-        db_path,
-        rows={
-            "areas/has-summary.md": {"l0": "abstract", "l1": None},
-            # NOTE: 'areas/no-summary.md' has no row.
-        },
-    )
-    monkeypatch.setenv("KAIRIX_SUMMARIES_DB", str(db_path))
-
     docs = [
         {
             "file": "areas/no-summary.md",
