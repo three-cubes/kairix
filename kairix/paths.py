@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -224,7 +225,7 @@ def summaries_db_path() -> Path:
     )
 
 
-def agent_memory_path(agent: str) -> Path:
+def agent_memory_path(agent: str, env: Mapping[str, str] | None = None) -> Path:
     """Get the memory directory for an agent.
 
     Default: {document_root}/04-Agent-Knowledge/{agent}/memory
@@ -236,8 +237,13 @@ def agent_memory_path(agent: str) -> Path:
     path as-is rather than double-appending. This is the regression
     guard for the path-doubling bug fixed in #67 / #93 — silently
     handling the misuse with a warning is friendlier than failing.
+
+    ``env`` is a DI seam (defaults to ``os.environ``); tests pass an
+    explicit mapping rather than monkeypatching the process environment.
     """
-    override = os.environ.get("KAIRIX_AGENT_MEMORY_ROOT")
+    if env is None:
+        env = os.environ
+    override = env.get("KAIRIX_AGENT_MEMORY_ROOT")
     if override:
         override_path = Path(override)
         if override_path.parts[-2:] == (agent, "memory"):
