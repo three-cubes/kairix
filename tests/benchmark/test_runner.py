@@ -26,17 +26,15 @@ from kairix.quality.benchmark.runner import (
     format_interpretation,
     score_tier,
 )
-from kairix.quality.eval.metrics import _normalise_title, _stem_from_path
-from kairix.quality.eval.metrics import dcg as _dcg
-from kairix.quality.eval.metrics import hit_at_k_graded as _hit_at_k
-from kairix.quality.eval.metrics import ideal_dcg_graded as _ideal_dcg
-from kairix.quality.eval.metrics import ndcg_graded as _ndcg_score
-from kairix.quality.eval.metrics import reciprocal_rank_graded as _reciprocal_rank
-
-# Aliases for title-based tests — these are the same functions now (unified matching)
-_ndcg_score_by_title = _ndcg_score
-_hit_at_k_by_title = _hit_at_k
-_reciprocal_rank_by_title = _reciprocal_rank
+from kairix.quality.eval.metrics import (
+    _normalise_title,
+    _stem_from_path,
+    dcg,
+    hit_at_k_graded,
+    ideal_dcg_graded,
+    ndcg_graded,
+    reciprocal_rank_graded,
+)
 
 # ---------------------------------------------------------------------------
 # _exact_match
@@ -330,19 +328,19 @@ def test_dcg_perfect_relevance() -> None:
     import math
 
     expected = 2 / math.log2(2) + 1 / math.log2(3)
-    assert _dcg([2, 1, 0], k=3) == pytest.approx(expected)
+    assert dcg([2, 1, 0], k=3) == pytest.approx(expected)
 
 
 @pytest.mark.unit
 def test_dcg_empty_relevances() -> None:
-    assert _dcg([], k=10) == pytest.approx(0.0)
+    assert dcg([], k=10) == pytest.approx(0.0)
 
 
 @pytest.mark.unit
 def test_dcg_k_truncates() -> None:
     import math
 
-    assert _dcg([2, 1, 1], k=1) == pytest.approx(2 / math.log2(2))
+    assert dcg([2, 1, 1], k=1) == pytest.approx(2 / math.log2(2))
 
 
 @pytest.mark.unit
@@ -351,33 +349,33 @@ def test_ideal_dcg_sorts_by_relevance() -> None:
     import math
 
     expected = 2 / math.log2(2) + 1 / math.log2(3)
-    assert _ideal_dcg(gold, k=10) == pytest.approx(expected)
+    assert ideal_dcg_graded(gold, k=10) == pytest.approx(expected)
 
 
 @pytest.mark.unit
 def test_ndcg_score_perfect_retrieval() -> None:
     gold = [{"path": "a.md", "relevance": 2}, {"path": "b.md", "relevance": 1}]
     retrieved = ["a.md", "b.md", "c.md"]
-    assert _ndcg_score(retrieved, gold, k=10) == pytest.approx(1.0)
+    assert ndcg_graded(retrieved, gold, k=10) == pytest.approx(1.0)
 
 
 @pytest.mark.unit
 def test_ndcg_score_no_relevant_retrieved() -> None:
     gold = [{"path": "a.md", "relevance": 2}]
     retrieved = ["x.md", "y.md"]
-    assert _ndcg_score(retrieved, gold, k=10) == pytest.approx(0.0)
+    assert ndcg_graded(retrieved, gold, k=10) == pytest.approx(0.0)
 
 
 @pytest.mark.unit
 def test_ndcg_score_empty_gold() -> None:
-    assert _ndcg_score(["a.md", "b.md"], [], k=10) == pytest.approx(0.0)
+    assert ndcg_graded(["a.md", "b.md"], [], k=10) == pytest.approx(0.0)
 
 
 @pytest.mark.unit
 def test_ndcg_score_partial_retrieval() -> None:
     gold = [{"path": "a.md", "relevance": 2}, {"path": "b.md", "relevance": 1}]
     retrieved = ["b.md"]
-    score = _ndcg_score(retrieved, gold, k=10)
+    score = ndcg_graded(retrieved, gold, k=10)
     assert 0.0 < score < 1.0
 
 
@@ -385,7 +383,7 @@ def test_ndcg_score_partial_retrieval() -> None:
 def test_ndcg_score_case_insensitive() -> None:
     gold = [{"path": "Docs/Alpha.md", "relevance": 2}]
     retrieved = ["docs/alpha.md"]
-    assert _ndcg_score(retrieved, gold, k=10) == pytest.approx(1.0)
+    assert ndcg_graded(retrieved, gold, k=10) == pytest.approx(1.0)
 
 
 @pytest.mark.unit
@@ -398,47 +396,47 @@ def test_ndcg_score_known_value() -> None:
         {"path": "c.md", "relevance": 0},
     ]
     retrieved = ["b.md", "a.md"]
-    idcg = _ideal_dcg(gold, k=10)
+    idcg = ideal_dcg_graded(gold, k=10)
     actual_dcg = 1 / math.log2(2) + 2 / math.log2(3)
     expected = actual_dcg / idcg
-    assert _ndcg_score(retrieved, gold, k=10) == pytest.approx(expected, abs=1e-9)
+    assert ndcg_graded(retrieved, gold, k=10) == pytest.approx(expected, abs=1e-9)
 
 
 @pytest.mark.unit
 def test_hit_at_k_true_when_relevant_in_top_k() -> None:
     gold = [{"path": "a.md", "relevance": 2}]
-    assert _hit_at_k(["x.md", "a.md", "y.md"], gold, k=5) is True
+    assert hit_at_k_graded(["x.md", "a.md", "y.md"], gold, k=5) is True
 
 
 @pytest.mark.unit
 def test_hit_at_k_false_when_outside_k() -> None:
     gold = [{"path": "a.md", "relevance": 2}]
     retrieved = ["x1.md", "x2.md", "x3.md", "x4.md", "x5.md", "a.md"]
-    assert _hit_at_k(retrieved, gold, k=5) is False
+    assert hit_at_k_graded(retrieved, gold, k=5) is False
 
 
 @pytest.mark.unit
 def test_hit_at_k_excludes_zero_relevance() -> None:
     gold = [{"path": "a.md", "relevance": 0}]
-    assert _hit_at_k(["a.md"], gold, k=5) is False
+    assert hit_at_k_graded(["a.md"], gold, k=5) is False
 
 
 @pytest.mark.unit
 def test_reciprocal_rank_first_position() -> None:
     gold = [{"path": "a.md", "relevance": 1}]
-    assert _reciprocal_rank(["a.md", "b.md"], gold, k=10) == pytest.approx(1.0)
+    assert reciprocal_rank_graded(["a.md", "b.md"], gold, k=10) == pytest.approx(1.0)
 
 
 @pytest.mark.unit
 def test_reciprocal_rank_second_position() -> None:
     gold = [{"path": "b.md", "relevance": 1}]
-    assert _reciprocal_rank(["a.md", "b.md", "c.md"], gold, k=10) == pytest.approx(0.5)
+    assert reciprocal_rank_graded(["a.md", "b.md", "c.md"], gold, k=10) == pytest.approx(0.5)
 
 
 @pytest.mark.unit
 def test_reciprocal_rank_not_found() -> None:
     gold = [{"path": "x.md", "relevance": 1}]
-    assert _reciprocal_rank(["a.md", "b.md"], gold, k=10) == pytest.approx(0.0)
+    assert reciprocal_rank_graded(["a.md", "b.md"], gold, k=10) == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +526,7 @@ def test_title_in_retrieved_case_insensitive() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _ndcg_score_by_title
+# ndcg_graded
 # ---------------------------------------------------------------------------
 
 
@@ -536,7 +534,7 @@ def test_title_in_retrieved_case_insensitive() -> None:
 def test_ndcg_by_title_perfect_retrieval() -> None:
     gold = [{"title": "jordan-blake", "relevance": 2}]
     retrieved = ["entities/person/jordan-blake.md", "other/doc.md"]
-    assert _ndcg_score_by_title(retrieved, gold, k=10) == pytest.approx(1.0)
+    assert ndcg_graded(retrieved, gold, k=10) == pytest.approx(1.0)
 
 
 @pytest.mark.unit
@@ -547,7 +545,7 @@ def test_ndcg_by_title_partial_retrieval() -> None:
     ]
     # Only second gold retrieved; first (highest relevance) not found -> NDCG < 1
     retrieved = ["shared/team-overview.md", "other/doc.md"]
-    score = _ndcg_score_by_title(retrieved, gold, k=10)
+    score = ndcg_graded(retrieved, gold, k=10)
     assert 0.0 < score < 1.0
 
 
@@ -555,12 +553,12 @@ def test_ndcg_by_title_partial_retrieval() -> None:
 def test_ndcg_by_title_miss() -> None:
     gold = [{"title": "jordan-blake", "relevance": 2}]
     retrieved = ["some/unrelated/doc.md"]
-    assert _ndcg_score_by_title(retrieved, gold, k=10) == pytest.approx(0.0)
+    assert ndcg_graded(retrieved, gold, k=10) == pytest.approx(0.0)
 
 
 @pytest.mark.unit
 def test_ndcg_by_title_empty_gold() -> None:
-    assert _ndcg_score_by_title(["doc.md"], [], k=10) == pytest.approx(0.0)
+    assert ndcg_graded(["doc.md"], [], k=10) == pytest.approx(0.0)
 
 
 @pytest.mark.unit
@@ -570,58 +568,56 @@ def test_ndcg_by_title_file_moved_still_matches() -> None:
     # Same note, different folder
     original_path = ["04-Agent-Knowledge/builder/patterns.md"]
     moved_path = ["Archive/old-knowledge/patterns.md"]
-    assert _ndcg_score_by_title(original_path, gold, k=10) == pytest.approx(
-        _ndcg_score_by_title(moved_path, gold, k=10)
-    )
+    assert ndcg_graded(original_path, gold, k=10) == pytest.approx(ndcg_graded(moved_path, gold, k=10))
 
 
 # ---------------------------------------------------------------------------
-# _hit_at_k_by_title
+# hit_at_k_graded
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_hit_at_k_by_title_true() -> None:
+def testhit_at_k_graded_true() -> None:
     gold = [{"title": "jordan-blake", "relevance": 1}]
-    assert _hit_at_k_by_title(["entities/person/jordan-blake.md"], gold, k=5) is True
+    assert hit_at_k_graded(["entities/person/jordan-blake.md"], gold, k=5) is True
 
 
 @pytest.mark.unit
-def test_hit_at_k_by_title_false_beyond_k() -> None:
+def testhit_at_k_graded_false_beyond_k() -> None:
     gold = [{"title": "jordan-blake", "relevance": 1}]
     paths = ["a.md", "b.md", "entities/person/jordan-blake.md"]
-    assert _hit_at_k_by_title(paths, gold, k=2) is False
+    assert hit_at_k_graded(paths, gold, k=2) is False
 
 
 @pytest.mark.unit
-def test_hit_at_k_by_title_excludes_zero_relevance() -> None:
+def testhit_at_k_graded_excludes_zero_relevance() -> None:
     gold = [{"title": "jordan-blake", "relevance": 0}]
-    assert _hit_at_k_by_title(["entities/person/jordan-blake.md"], gold, k=5) is False
+    assert hit_at_k_graded(["entities/person/jordan-blake.md"], gold, k=5) is False
 
 
 # ---------------------------------------------------------------------------
-# _reciprocal_rank_by_title
+# reciprocal_rank_graded
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_reciprocal_rank_by_title_first_position() -> None:
+def testreciprocal_rank_graded_first_position() -> None:
     gold = [{"title": "jordan-blake", "relevance": 1}]
     paths = ["entities/person/jordan-blake.md", "other.md"]
-    assert _reciprocal_rank_by_title(paths, gold, k=10) == pytest.approx(1.0)
+    assert reciprocal_rank_graded(paths, gold, k=10) == pytest.approx(1.0)
 
 
 @pytest.mark.unit
-def test_reciprocal_rank_by_title_second_position() -> None:
+def testreciprocal_rank_graded_second_position() -> None:
     gold = [{"title": "jordan-blake", "relevance": 1}]
     paths = ["other.md", "entities/person/jordan-blake.md"]
-    assert _reciprocal_rank_by_title(paths, gold, k=10) == pytest.approx(0.5)
+    assert reciprocal_rank_graded(paths, gold, k=10) == pytest.approx(0.5)
 
 
 @pytest.mark.unit
-def test_reciprocal_rank_by_title_not_found() -> None:
+def testreciprocal_rank_graded_not_found() -> None:
     gold = [{"title": "jordan-blake", "relevance": 1}]
-    assert _reciprocal_rank_by_title(["unrelated.md"], gold, k=10) == pytest.approx(0.0)
+    assert reciprocal_rank_graded(["unrelated.md"], gold, k=10) == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
