@@ -112,7 +112,7 @@ def _validate_weights(weights: tuple[float, float, float]) -> None:
             )
 
 
-def _vector_search(
+def _vector_search(  # pragma: no cover
     query: str,
     collections: list[str] | None = None,
     limit: int = 10,
@@ -121,7 +121,10 @@ def _vector_search(
 
     Module-level helper retained for the deprecated ``pool_candidates``
     wrapper — Phase 4 removes this once all callers route through
-    ``GoldBuilder._retriever``.
+    ``GoldBuilder._retriever``. Production-only path: depends on a real
+    Azure embedding endpoint plus a populated usearch index. Tests use
+    ``FakeRetriever`` injected into ``GoldBuilder`` and never reach this
+    function.
     """
     try:
         import numpy as np
