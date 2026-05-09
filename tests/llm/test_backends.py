@@ -10,6 +10,7 @@ import pytest
 
 from kairix.platform.llm import AzureOpenAIBackend, get_default_backend
 from kairix.platform.llm.protocol import LLMBackend
+from tests.fakes import FakeLLMBackend
 
 # ---------------------------------------------------------------------------
 # Protocol conformance
@@ -103,30 +104,18 @@ def test_caller_accepts_protocol_type() -> None:
     assert result == "Summary."
 
 
-class _MockLLMBackend:
-    """Minimal test double — satisfies the protocol without _azure."""
-
-    def chat(self, messages: list[dict], max_tokens: int = 800) -> str:
-        return "mock response"
-
-    def embed(self, text: str) -> list[float]:
-        return [0.0] * 1536
-
-    def embed_as_bytes(self, text: str) -> bytes | None:
-        import struct
-
-        vec = self.embed(text)
-        return struct.pack(f"<{len(vec)}f", *vec)
+@pytest.mark.unit
+def test_canonical_fake_satisfies_protocol() -> None:
+    """Sanity: the canonical FakeLLMBackend in tests/fakes.py is structurally
+    accepted as an LLMBackend — proves the Protocol contract is open to any
+    matching shape, not tied to AzureOpenAIBackend.
+    """
+    fake = FakeLLMBackend(chat_response="mock response")
+    assert isinstance(fake, LLMBackend)
 
 
 @pytest.mark.unit
-def test_mock_backend_satisfies_protocol() -> None:
-    mock = _MockLLMBackend()
-    assert isinstance(mock, LLMBackend)
-
-
-@pytest.mark.unit
-def test_caller_works_with_mock_backend() -> None:
-    mock = _MockLLMBackend()
-    result = _do_summarise("text", mock)
+def test_caller_works_with_canonical_fake() -> None:
+    fake = FakeLLMBackend(chat_response="mock response")
+    result = _do_summarise("text", fake)
     assert result == "mock response"
