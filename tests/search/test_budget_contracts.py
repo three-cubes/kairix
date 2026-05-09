@@ -11,17 +11,16 @@ Each test pins one documented claim from the module / function docstring:
   - tier ordering invariant: in Phase 1 (no summaries DB) every result is L2.
   - score order preservation: input order is preserved in the output (the
     docstring states "Results are returned in score order").
-  - summary-fallback when full doc would blow the budget: with a summaries DB
-    available, low-budget retrieval prefers L0/L1 over the snippet.
+  - summary-fallback when full doc would blow the budget: with a summaries
+    loader available, low-budget retrieval prefers L0/L1 over the snippet.
   - boundary: budget >> total content keeps every result.
-  - missing summaries: with a summaries DB but no row for the path, fall
-    through to the snippet.
+  - missing summaries: with a loader but no row for the path, fall through
+    to the snippet.
 
 All tests drive apply_budget() through its public surface only (no
 private-function imports, no monkeypatching of kairix internals, no @patch).
-The Phase-2 tier path (summary_loader=...) is exercised by integration tests
-with a FakeSummaryLoader from tests/fakes.py; this contract suite covers
-Phase-1 (summary_loader=None) only.
+Phase-2 tests inject ``FakeSummaryLoader`` from ``tests/fakes.py`` via the
+``summary_loader=`` kwarg.
 """
 
 from __future__ import annotations
@@ -30,10 +29,15 @@ import pytest
 
 from kairix.core.search.budget import (
     DEFAULT_BUDGET,
+    L1_BUDGET_MIN,
+    L1_SCORE_THRESHOLD,
+    L2_BUDGET_MIN,
+    L2_SCORE_THRESHOLD,
     BudgetedResult,
     apply_budget,
 )
 from kairix.core.search.rrf import FusedResult
+from tests.fakes import FakeSummaryLoader
 
 pytestmark = pytest.mark.contract
 
@@ -171,11 +175,62 @@ def test_contract_input_order_preserved_in_output() -> None:
 # ---------------------------------------------------------------------------
 
 
-# Two L0/L1 summary-fallback tests (test_contract_summary_fallback_when_summaries_db_present
-# and test_contract_l1_used_when_score_and_budget_in_l1_band) were dropped at
-# cherry-pick because they probe via the legacy KAIRIX_SUMMARIES_DB env-var path,
-# which doesn't fire when the production code uses the SummaryLoader Protocol seam.
-# Tracked in #159 — rewrite using FakeSummaryLoader from tests/fakes.py.
+def test_contract_summary_fallback_when_summaries_db_present() -> None:
+    """When a SummaryLoader is wired in and a result's score qualifies for L2,
+    apply_budget returns the loader's L2 content path (which falls back to the
+    snippet because L2 is always the snippet in the current implementation).
+
+    Sabotage focus: this test fails if the loader is consulted at the wrong
+    tier or if the snippet path is bypassed entirely. With score >=
+    l2_threshold and ample budget, the production rule is L2 → snippet.
+    """
+    loader = FakeSummaryLoader(
+        l0_by_path={"doc.md": "L0 abstract about the doc."},
+        l1_by_path={"doc.md": "L1 overview with more detail spanning a few sentences."},
+    )
+    # High-score result, budget well above L2_BUDGET_MIN → L2 (snippet).
+    fused = _fr("doc.md", snippet="full snippet body", score=0.9)
+
+    out = apply_budget([fused], budget=DEFAULT_BUDGET, summary_loader=loader)
+
+    assert len(out) == 1
+    # L2 selected (high score + ample budget) — snippet is the L2 content.
+    assert out[0].tier == "L2"
+    assert out[0].content == "full snippet body"
+    # The L0/L1 paths are NOT consulted at L2 — the SummaryLoader spy
+    # verifies this by having empty call lists.
+    assert loader.l0_calls == []
+    assert loader.l1_calls == []
+
+
+def test_contract_l1_used_when_score_and_budget_in_l1_band() -> None:
+    """L1 selection rule: ``L1_BUDGET_MIN <= remaining < L2_BUDGET_MIN`` AND
+    ``score >= L1_SCORE_THRESHOLD`` AND ``score < L2_SCORE_THRESHOLD``.
+
+    Drives the L1 promotion branch in ``_select_tier``. Without the loader,
+    the same input would be L2; with the loader and budget in the L1 band,
+    the production code returns L1's overview text.
+    """
+    # Choose a score in the [l1, l2) band.
+    score_in_l1_band = (L1_SCORE_THRESHOLD + L2_SCORE_THRESHOLD) / 2
+    # Budget in the [L1_BUDGET_MIN, L2_BUDGET_MIN) band so L2 promotion fails.
+    budget_in_l1_band = (L1_BUDGET_MIN + L2_BUDGET_MIN) // 2
+
+    loader = FakeSummaryLoader(
+        l0_by_path={"doc.md": "L0 abstract."},
+        l1_by_path={"doc.md": "L1 overview content."},
+    )
+    fused = _fr("doc.md", snippet="snippet that won't be used", score=score_in_l1_band)
+
+    out = apply_budget([fused], budget=budget_in_l1_band, summary_loader=loader)
+
+    assert len(out) == 1
+    assert out[0].tier == "L1", (
+        f"score={score_in_l1_band} budget={budget_in_l1_band} should select L1; got {out[0].tier}"
+    )
+    # L1 content came from the loader, not the snippet.
+    assert out[0].content == "L1 overview content."
+    assert loader.l1_calls == ["doc.md"]
 
 
 def test_contract_missing_summary_falls_through_to_snippet() -> None:

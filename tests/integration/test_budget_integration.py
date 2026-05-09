@@ -4,15 +4,15 @@ Integration tests for kairix.core.search.budget.apply_budget().
 These tests wire ``apply_budget`` after a real ``SearchPipeline`` produces
 ``FusedResult``s, then assert the budget step trims to the expected token
 count. The pipeline is built from ``tests.fakes`` (no @patch, no monkeypatch
-on kairix code) and the Phase-2 summaries DB is built from the real on-disk
-sqlite schema via ``tests.fakes.build_summaries_db`` and pointed at by the
-``KAIRIX_SUMMARIES_DB`` env var (a configuration knob, not a code patch).
+on kairix code) and the Phase-2 summary path is exercised by injecting
+``FakeSummaryLoader`` from ``tests.fakes`` via ``apply_budget``'s
+``summary_loader=`` kwarg.
 
 Coverage:
 
   - end-to-end pipeline produces FusedResults that apply_budget can consume;
-  - summary-fallback path (Phase 2) is exercised when the summaries DB
-    contains L0/L1 rows for the relevant paths;
+  - summary-fallback path (Phase 2) is exercised when a SummaryLoader
+    contains L0/L1 entries for the relevant paths;
   - the budget cap holds across the integrated pipeline output.
 """
 
@@ -23,6 +23,8 @@ import pytest
 from kairix.core.search.backends import BM25SearchBackend, VectorSearchBackend
 from kairix.core.search.budget import (
     DEFAULT_BUDGET,
+    L1_BUDGET_MIN,
+    L2_BUDGET_MIN,
     apply_budget,
 )
 from kairix.core.search.config import RetrievalConfig
@@ -35,6 +37,7 @@ from tests.fakes import (
     FakeEmbeddingService,
     FakeGraphRepository,
     FakeSearchLogger,
+    FakeSummaryLoader,
     FakeVectorRepository,
 )
 
@@ -227,6 +230,75 @@ def test_integration_budget_falls_back_to_snippet_when_summary_missing() -> None
     assert out[0].content, "summary missing → expected snippet fallback, got empty"
     # And it's the snippet (not an L0/L1 string we never set).
     assert "snippet body" in out[0].content
+
+
+def test_integration_budget_uses_l0_l1_summaries_when_available() -> None:
+    """When a SummaryLoader is wired in and the budget falls into the L1 band,
+    apply_budget returns each result's L1 overview from the loader rather than
+    the raw snippet.
+
+    Sabotage focus: this test fails (a) if the loader isn't consulted at all,
+    (b) if the loader is consulted but L1 content is dropped on the floor, or
+    (c) if production silently bypasses the SummaryLoader Protocol seam.
+    """
+    docs = [
+        {
+            "file": f"areas/d{i}.md",
+            "path": f"areas/d{i}.md",
+            "title": f"D{i}",
+            "content": "raw snippet body " + ("filler word " * 30),
+            "snippet": "raw snippet body " + ("filler word " * 30),
+            "score": 1.0 - i * 0.1,
+            "collection": "vault-areas",
+        }
+        for i in range(2)
+    ]
+    vec_results = [
+        {
+            "path": f"areas/d{i}.md",
+            "title": f"D{i}",
+            "snippet": "raw snippet body " + ("filler word " * 30),
+            "distance": 0.1 + i * 0.05,
+            "collection": "vault-areas",
+        }
+        for i in range(2)
+    ]
+    loader = FakeSummaryLoader(
+        l0_by_path={f"areas/d{i}.md": f"L0 abstract for d{i}." for i in range(2)},
+        l1_by_path={f"areas/d{i}.md": f"L1 overview for d{i} with detail." for i in range(2)},
+    )
+
+    pipeline = _build_pipeline(docs, vec_results)
+    big = pipeline.search("body", budget=10_000_000)
+    fused_inputs = [br.result for br in big.results]
+    assert len(fused_inputs) >= 1
+
+    # RRF produces small scores (~1/(60+rank) ≈ 0.016 for rank 1), well below
+    # the production L1_SCORE_THRESHOLD (0.15). Drop the thresholds so the L1
+    # band catches the natural RRF score range, and pick a budget in the L1
+    # band so L2 promotion fails. The point of this test is the seam: that
+    # the production code consults the SummaryLoader Protocol when L1 is
+    # selected — the threshold values themselves are just dials.
+    budget_in_l1_band = (L1_BUDGET_MIN + L2_BUDGET_MIN) // 2
+    out = apply_budget(
+        fused_inputs,
+        budget=budget_in_l1_band,
+        l1_threshold=0.001,
+        l2_threshold=1.0,
+        summary_loader=loader,
+    )
+    assert len(out) >= 1
+
+    # At least one result was promoted to L1 (the production rule for the
+    # selected score+budget combination) and its content came from the loader.
+    l1_results = [r for r in out if r.tier == "L1"]
+    assert l1_results, f"expected at least one L1 result; got tiers {[r.tier for r in out]}"
+    for br in l1_results:
+        assert br.content.startswith("L1 overview for "), (
+            f"L1 result content should be the loader's overview, got {br.content!r}"
+        )
+    # And the loader was actually consulted on the L1 path.
+    assert loader.l1_calls, "FakeSummaryLoader.l1_calls is empty — loader was bypassed"
 
 
 # ---------------------------------------------------------------------------
