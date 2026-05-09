@@ -116,10 +116,19 @@ def get_all_chunks_needing_embedding(db: sqlite3.Connection) -> list[dict[str, A
     return [{"hash": r[0], "seq": r[1], "pos": r[2], "body": r[3]} for r in rows]
 
 
-def save_run_log(entry: dict[str, Any]) -> None:
-    """Append run metadata to the kairix cache directory."""
-    # Use kairix cache dir
-    log_path = Path.home() / ".cache" / "kairix" / "embed-runs.json"
+def save_run_log(entry: dict[str, Any], log_path: Path | None = None) -> None:
+    """Append run metadata to the kairix cache directory.
+
+    ``log_path`` is an injection seam for tests — pass an explicit path so
+    tests don't have to ``monkeypatch.setattr(Path, "home", ...)`` to redirect
+    the default. Production callers leave it as ``None`` to write to
+    ``~/.cache/kairix/embed-runs.json``.
+    """
+    if log_path is None:  # pragma: no cover
+        # Production-only fallback to the home-cache default. Tests inject an
+        # explicit path; the home() resolution is exercised end-to-end in
+        # production via ``kairix embed``.
+        log_path = Path.home() / ".cache" / "kairix" / "embed-runs.json"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     runs = []
     if log_path.exists():

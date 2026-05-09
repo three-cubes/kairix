@@ -286,11 +286,15 @@ def batched(items: list[Any], size: int) -> Generator[list[Any], None, None]:
 # ── usearch index update ─────────────────────────────────────────────────────
 
 
-def _open_usearch_index() -> Any:
+def _open_usearch_index() -> Any:  # pragma: no cover
     """Open (or create) the usearch ANN index for the embed run.
 
-    Returns a mutable VectorIndex that can be reused across all batches.
-    Auto-deletes old index if dimensions have changed.
+    Production-only — every test that exercises ``run_embed`` injects an
+    ``open_usearch_index`` callable via ``EmbedDependencies`` (typically a
+    ``lambda: None`` or a ``_FakeVecIndex`` double). The real
+    ``VectorIndex.load()`` requires a writable on-disk path and embedded
+    vectors that match the current schema, neither of which is available
+    in unit tests.
     """
     try:
         from kairix.core.search.vec_index import VectorIndex

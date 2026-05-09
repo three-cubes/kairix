@@ -18,6 +18,7 @@ from kairix.core.embed.schema import (
     get_all_chunks_needing_embedding,
     get_db_path,
     get_pending_chunks,
+    migrate_content_vectors,
     save_run_log,
 )
 
@@ -114,35 +115,95 @@ def test_get_all_chunks_needing_embedding_returns_empty_without_content_vectors(
 
 
 @pytest.mark.unit
-def test_save_run_log_creates_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Creates the run log file on first call."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    (tmp_path / ".cache" / "kairix").mkdir(parents=True)
+def test_save_run_log_creates_file_at_injected_path(tmp_path: Path) -> None:
+    """Creates the run log file on first call when given an explicit ``log_path``."""
+    log_path = tmp_path / "embed-runs.json"
 
-    save_run_log({"run": 1, "status": "ok"})
+    save_run_log({"run": 1, "status": "ok"}, log_path=log_path)
 
-    log_path = tmp_path / ".cache" / "kairix" / "embed-runs.json"
     assert log_path.exists()
     runs = json.loads(log_path.read_text())
     assert runs == [{"run": 1, "status": "ok"}]
 
 
 @pytest.mark.unit
-def test_save_run_log_appends_and_rotates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Appends to existing log and rotates to keep last 90 runs."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    log_dir = tmp_path / ".cache" / "kairix"
-    log_dir.mkdir(parents=True)
-    log_path = log_dir / "embed-runs.json"
+def test_save_run_log_creates_parent_directories(tmp_path: Path) -> None:
+    """The injected log path's parent dirs are created on first call."""
+    log_path = tmp_path / "nested" / "subdir" / "embed-runs.json"
 
-    # Write 90 existing entries
+    save_run_log({"run": 1}, log_path=log_path)
+
+    assert log_path.exists()
+
+
+@pytest.mark.unit
+def test_save_run_log_appends_to_existing_log(tmp_path: Path) -> None:
+    """Subsequent calls append rather than overwrite."""
+    log_path = tmp_path / "embed-runs.json"
+    log_path.write_text(json.dumps([{"run": 0}]))
+
+    save_run_log({"run": 1}, log_path=log_path)
+
+    runs = json.loads(log_path.read_text())
+    assert runs == [{"run": 0}, {"run": 1}]
+
+
+@pytest.mark.unit
+def test_save_run_log_rotates_to_keep_last_90_runs(tmp_path: Path) -> None:
+    """A 91st entry pushes run 0 out — only the 90 most-recent runs are kept."""
+    log_path = tmp_path / "embed-runs.json"
     existing = [{"run": i} for i in range(90)]
     log_path.write_text(json.dumps(existing))
 
-    # Add one more — should rotate to 90 total
-    save_run_log({"run": 90})
+    save_run_log({"run": 90}, log_path=log_path)
 
     runs = json.loads(log_path.read_text())
     assert len(runs) == 90
     assert runs[-1] == {"run": 90}
-    assert runs[0] == {"run": 1}  # run 0 was dropped
+    assert runs[0] == {"run": 1}  # run 0 dropped
+
+
+# ---------------------------------------------------------------------------
+# migrate_content_vectors — additive ALTER TABLE migration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_migrate_content_vectors_adds_chunk_date_column_when_missing() -> None:
+    """A pre-migration content_vectors table without chunk_date gets the column added."""
+    db = sqlite3.connect(":memory:")
+    # Pre-migration schema: no chunk_date column.
+    db.execute("CREATE TABLE content_vectors (hash TEXT, seq INTEGER, pos INTEGER, model TEXT, embedded_at INTEGER)")
+    cols_before = {row[1] for row in db.execute("PRAGMA table_info(content_vectors)")}
+    assert "chunk_date" not in cols_before
+
+    migrate_content_vectors(db)
+
+    cols_after = {row[1] for row in db.execute("PRAGMA table_info(content_vectors)")}
+    assert "chunk_date" in cols_after
+
+
+@pytest.mark.unit
+def test_migrate_content_vectors_is_a_noop_when_chunk_date_already_present() -> None:
+    """Running the migration twice does not re-add the column or raise."""
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE content_vectors (hash TEXT, seq INTEGER, pos INTEGER, model TEXT, embedded_at INTEGER)")
+    migrate_content_vectors(db)  # adds chunk_date
+
+    # Second call must be a no-op — would otherwise raise OperationalError on duplicate column.
+    migrate_content_vectors(db)
+
+    cols = [row[1] for row in db.execute("PRAGMA table_info(content_vectors)")]
+    assert cols.count("chunk_date") == 1
+
+
+@pytest.mark.unit
+def test_save_run_log_recovers_from_corrupt_existing_log(tmp_path: Path) -> None:
+    """A corrupt JSON file is replaced rather than crashing the save path."""
+    log_path = tmp_path / "embed-runs.json"
+    log_path.write_text("{garbled JSON")
+
+    save_run_log({"run": 1}, log_path=log_path)
+
+    runs = json.loads(log_path.read_text())
+    assert runs == [{"run": 1}]
