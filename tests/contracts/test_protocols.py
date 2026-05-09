@@ -128,13 +128,16 @@ class TestRealImplementationCompliance:
     @pytest.mark.contract
     def test_usearch_repo_satisfies_protocol(self):
         """UsearchVectorRepository satisfies VectorRepository protocol."""
-        from unittest.mock import MagicMock
-
         from kairix.core.search.vector_repository import UsearchVectorRepository
 
-        mock_index = MagicMock()
-        mock_index.__len__ = MagicMock(return_value=0)
-        repo = UsearchVectorRepository(index=mock_index)
+        # Protocol compliance is structural — the constructor's ``index``
+        # parameter is opaque at this layer. A trivial empty-length stand-in
+        # is sufficient; no behavioural mocking required.
+        class _EmptyIndex:
+            def __len__(self) -> int:
+                return 0
+
+        repo = UsearchVectorRepository(index=_EmptyIndex())
         assert isinstance(repo, VectorRepository)
 
 

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 from pytest_bdd import given, parsers, then, when
 
 from kairix.knowledge.contradict.detector import ContradictionResult
+from tests.fakes import FakeLLMBackend
 
 # Module-level state (simple, test-scoped)
 _state: dict = {}
@@ -43,7 +42,7 @@ def call_tool_contradict(content):
     _state["exception"] = None
     _state["result"] = None
 
-    mock_llm = MagicMock()
+    fake_llm = FakeLLMBackend()
 
     try:
         if _state.get("mock_raises"):
@@ -51,11 +50,11 @@ def call_tool_contradict(content):
             def _failing_contradict(**kwargs):
                 raise RuntimeError("search unavailable")
 
-            _state["result"] = tool_contradict(content=content, llm_backend=mock_llm, contradict_fn=_failing_contradict)
+            _state["result"] = tool_contradict(content=content, llm_backend=fake_llm, contradict_fn=_failing_contradict)
         else:
             _state["result"] = tool_contradict(
                 content=content,
-                llm_backend=mock_llm,
+                llm_backend=fake_llm,
                 contradict_fn=lambda **kwargs: _state["mock_contradictions"],
             )
     except Exception as exc:

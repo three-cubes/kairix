@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 from pytest_bdd import given, then, when
 
 from kairix.agents.research.nodes import evaluate_sufficiency, synthesise
 from kairix.agents.research.state import ResearcherState
+from tests.fakes import FakeLLMBackend
 
 # Module-level state (simple, test-scoped)
 _state: dict = {}
@@ -53,8 +52,7 @@ def given_low_confidence_results():
         }
     )
 
-    mock_llm = MagicMock()
-    mock_llm.chat.return_value = eval_response
+    fake_llm = FakeLLMBackend(chat_response=eval_response)
 
     _state["research_state"] = _base_state(
         query="test question",
@@ -64,14 +62,15 @@ def given_low_confidence_results():
     )
 
     # Run evaluate_sufficiency with injected LLM backend
-    updates = evaluate_sufficiency(_state["research_state"], llm_backend=mock_llm)
+    updates = evaluate_sufficiency(_state["research_state"], llm_backend=fake_llm)
     _state["research_state"].update(updates)
 
-    # Store synthesis LLM mock separately
-    _state["synth_llm"] = MagicMock()
-    _state["synth_llm"].chat.return_value = (
-        "Based on the available documents, the system provides a general overview "
-        "and FAQ. Sources: docs/overview.md, docs/faq.md."
+    # Store the synthesis-stage LLM (a different scripted response) separately
+    _state["synth_llm"] = FakeLLMBackend(
+        chat_response=(
+            "Based on the available documents, the system provides a general overview "
+            "and FAQ. Sources: docs/overview.md, docs/faq.md."
+        )
     )
 
 
