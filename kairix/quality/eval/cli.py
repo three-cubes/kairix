@@ -286,7 +286,7 @@ def _cmd_auto_gold(args: argparse.Namespace) -> int:
 
     try:
         db_path = get_db_path()
-    except FileNotFoundError:
+    except FileNotFoundError:  # pragma: no cover — defensive; ``get_db_path`` does not raise FileNotFoundError under any production configuration (it always returns a Path, existing or not)
         print("ERROR: kairix index not found. Run 'kairix embed' first.", file=sys.stderr)
         return 1
 
