@@ -84,19 +84,28 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_seed(args: argparse.Namespace) -> int:
     """kairix entity seed — discover entities from indexed documents and seed Neo4j."""
+    import sqlite3
     from pathlib import Path
 
     from kairix.core.db import get_db_path, open_db
     from kairix.knowledge.entities.seed import scan_for_entities, seed_graph
 
-    try:
-        db_path = get_db_path()
-    except FileNotFoundError:
+    db_path = Path(get_db_path())
+    if not db_path.exists():
         print("ERROR: kairix index not found. Run 'kairix embed' first.", file=sys.stderr)
         return 1
 
-    db = open_db(Path(db_path))
-    candidates = scan_for_entities(db, limit=args.limit)
+    db = open_db(db_path)
+    try:
+        candidates = scan_for_entities(db, limit=args.limit)
+    except sqlite3.OperationalError as exc:
+        # Index file exists but isn't populated — same operator remediation.
+        print(
+            f"ERROR: kairix index not found or unpopulated ({exc}). Run 'kairix embed' first.",
+            file=sys.stderr,
+        )
+        db.close()
+        return 1
     db.close()
 
     if not candidates:
