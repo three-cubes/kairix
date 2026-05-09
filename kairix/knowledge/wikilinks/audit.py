@@ -194,6 +194,76 @@ def find_unlinked_mentions(
 # ---------------------------------------------------------------------------
 
 
+def _render_broken_links(broken: list[dict[str, Any]]) -> list[str]:
+    """Render the 'Broken Links' section as markdown lines."""
+    lines = ["## Broken Links", ""]
+    if not broken:
+        lines += ["✅ No broken links detected.", ""]
+        return lines
+    lines += [
+        f"Found **{len(broken)}** broken wikilink(s):",
+        "",
+        "| File | Link | Reason |",
+        "|---|---|---|",
+    ]
+    for item in broken[:20]:
+        lines.append(f"| {item['file']} | {item['link']} | {item['reason']} |")
+    if len(broken) > 20:
+        lines.append(f"| _(and {len(broken) - 20} more)_ | | |")
+    lines.append("")
+    return lines
+
+
+def _render_unlinked_mentions(unlinked: list[dict[str, Any]]) -> list[str]:
+    """Render the 'Unlinked Mentions' sample section."""
+    lines = ["## Unlinked Mentions (sample)", ""]
+    if not unlinked:
+        lines += ["✅ No unlinked mentions found in sampled files.", ""]
+        return lines
+    lines += [
+        f"Found **{len(unlinked)}** unlinked entity mention(s) in sampled files:",
+        "",
+        "| File | Entity | Mentions |",
+        "|---|---|---|",
+    ]
+    for item in unlinked[:20]:
+        lines.append(f"| {item['file']} | {item['entity_name']} | {item['mention_count']} |")
+    if len(unlinked) > 20:
+        lines.append(f"| _(and {len(unlinked) - 20} more)_ | | |")
+    lines.append("")
+    return lines
+
+
+def _render_recent_injections(recent: list[dict[str, Any]]) -> list[str]:
+    """Render the 'Recent Injections' summary + per-file table."""
+    lines = ["## Recent Injections (last 7 days)", ""]
+    if not recent:
+        lines += ["No injections recorded in the last 7 days.", ""]
+        return lines
+    injected_count = sum(len(e.get("injected", [])) for e in recent)
+    dry_runs = sum(1 for e in recent if e.get("dry_run"))
+    real_runs = len(recent) - dry_runs
+    lines += [
+        "| Metric | Value |",
+        "|---|---|",
+        f"| Files processed | {len(recent)} |",
+        f"| Real injections | {real_runs} |",
+        f"| Dry runs | {dry_runs} |",
+        f"| Total wikilinks injected | {injected_count} |",
+        "",
+        "### Recent Files",
+        "",
+        "| File | Entities Injected | Mode |",
+        "|---|---|---|",
+    ]
+    for entry in recent[-10:]:
+        mode = "dry-run" if entry.get("dry_run") else "live"
+        injected_list = ", ".join(entry.get("injected", []))
+        lines.append(f"| {entry.get('file', '?')} | {injected_list} | {mode} |")
+    lines.append("")
+    return lines
+
+
 def weekly_report(
     document_root: str,
     entities: list[WikiEntity],
@@ -219,21 +289,14 @@ def weekly_report(
     now = datetime.now(timezone.utc)
     report_date = now.strftime("%Y-%m-%d")
 
-    # Entity stats
     total_entities = len(entities)
     with_vault_path = sum(1 for e in entities if e.vault_path)
     without_vault_path = total_entities - with_vault_path
 
-    # Broken links
     broken = find_broken_links(document_root)
-
-    # Unlinked mentions sample
     unlinked = find_unlinked_mentions(document_root, entities, sample_size=50, paths=paths)
-
-    # Injection log stats (last 7 days)
     recent_injections = _read_recent_log(days=7)
 
-    # Build report
     lines: list[str] = [
         f"# Wikilink Audit Report — {report_date}",
         "",
@@ -248,84 +311,13 @@ def weekly_report(
         f"| Without vault_path (not linked) | {without_vault_path} |",
         "",
     ]
-
-    # Broken links section
-    lines += [
-        "## Broken Links",
-        "",
-    ]
-    if broken:
-        lines += [
-            f"Found **{len(broken)}** broken wikilink(s):",
-            "",
-            "| File | Link | Reason |",
-            "|---|---|---|",
-        ]
-        for item in broken[:20]:  # cap at 20 rows
-            lines.append(f"| {item['file']} | {item['link']} | {item['reason']} |")
-        if len(broken) > 20:
-            lines.append(f"| _(and {len(broken) - 20} more)_ | | |")
-    else:
-        lines.append("✅ No broken links detected.")
-    lines.append("")
-
-    # Unlinked mentions section
-    lines += [
-        "## Unlinked Mentions (sample)",
-        "",
-    ]
-    if unlinked:
-        lines += [
-            f"Found **{len(unlinked)}** unlinked entity mention(s) in sampled files:",
-            "",
-            "| File | Entity | Mentions |",
-            "|---|---|---|",
-        ]
-        for item in unlinked[:20]:
-            lines.append(f"| {item['file']} | {item['entity_name']} | {item['mention_count']} |")
-        if len(unlinked) > 20:
-            lines.append(f"| _(and {len(unlinked) - 20} more)_ | | |")
-    else:
-        lines.append("✅ No unlinked mentions found in sampled files.")
-    lines.append("")
-
-    # Recent injections
-    lines += [
-        "## Recent Injections (last 7 days)",
-        "",
-    ]
-    if recent_injections:
-        injected_count = sum(len(e.get("injected", [])) for e in recent_injections)
-        dry_runs = sum(1 for e in recent_injections if e.get("dry_run"))
-        real_runs = len(recent_injections) - dry_runs
-        lines += [
-            "| Metric | Value |",
-            "|---|---|",
-            f"| Files processed | {len(recent_injections)} |",
-            f"| Real injections | {real_runs} |",
-            f"| Dry runs | {dry_runs} |",
-            f"| Total wikilinks injected | {injected_count} |",
-            "",
-        ]
-        lines += [
-            "### Recent Files",
-            "",
-            "| File | Entities Injected | Mode |",
-            "|---|---|---|",
-        ]
-        for entry in recent_injections[-10:]:
-            mode = "dry-run" if entry.get("dry_run") else "live"
-            injected_list = ", ".join(entry.get("injected", []))
-            lines.append(f"| {entry.get('file', '?')} | {injected_list} | {mode} |")
-    else:
-        lines.append("No injections recorded in the last 7 days.")
-    lines.append("")
-
+    lines += _render_broken_links(broken)
+    lines += _render_unlinked_mentions(unlinked)
+    lines += _render_recent_injections(recent_injections)
     lines += [
         "---",
         "_Report generated by `kairix wikilinks audit`_",
     ]
-
     return "\n".join(lines)
 
 
