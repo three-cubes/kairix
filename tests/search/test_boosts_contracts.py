@@ -53,6 +53,7 @@ from kairix.core.search.config import (
     ProceduralBoostConfig,
     TemporalBoostConfig,
 )
+from kairix.core.search.intent import QueryIntent
 from kairix.core.search.rrf import FusedResult
 from tests.fakes import FakeGraphRepository
 
@@ -113,7 +114,7 @@ class TestEntityBoostDocumentedClaims:
         """Claim: 'All functions return [] on empty inputs. Never raise.'"""
         graph: GraphRepository = FakeGraphRepository(available=True)
         b = EntityBoost(graph=graph)
-        assert b.boost([], "anything", {}) == []
+        assert b.boost([], "anything", {"intent": QueryIntent.ENTITY}) == []
 
     def test_graph_unavailable_returns_unmodified(self) -> None:
         """Claim (rrf.py): 'if Neo4j is unavailable the boost is skipped and
@@ -129,7 +130,7 @@ class TestEntityBoostDocumentedClaims:
             _result("concept/openclaw.md", score=0.3),
             _result("notes/random.md", score=0.4),
         ]
-        out = b.boost(results, "openclaw", {})
+        out = b.boost(results, "openclaw", {"intent": QueryIntent.ENTITY})
 
         for r in out:
             assert r.boosted_score == r.rrf_score, (
@@ -153,7 +154,7 @@ class TestEntityBoostDocumentedClaims:
         b = EntityBoost(graph=graph, config=cfg)
 
         results = [_result("concept/openclaw.md", score=0.5)]
-        out = b.boost(results, "openclaw", {})
+        out = b.boost(results, "openclaw", {"intent": QueryIntent.ENTITY})
 
         assert out[0].boosted_score == pytest.approx(0.5)
         assert out[0].boosted_score == pytest.approx(out[0].rrf_score)
@@ -179,7 +180,7 @@ class TestEntityBoostDocumentedClaims:
         b = EntityBoost(graph=graph)
 
         results = [_result("concept/openclaw.md", score=0.5)]
-        out = b.boost(results, "openclaw", {})
+        out = b.boost(results, "openclaw", {"intent": QueryIntent.ENTITY})
 
         # Direct sabotage-prove value: a strict >, not >=
         assert out[0].boosted_score > 0.5, (
@@ -207,7 +208,7 @@ class TestEntityBoostDocumentedClaims:
         b = EntityBoost(graph=graph)
 
         results = [_result("notes/something_else.md", score=0.5)]
-        out = b.boost(results, "openclaw", {})
+        out = b.boost(results, "openclaw", {"intent": QueryIntent.ENTITY})
 
         assert out[0].boosted_score == pytest.approx(0.5)
         assert out[0].entity_mention_count == 0
@@ -234,7 +235,7 @@ class TestEntityBoostDocumentedClaims:
             _result("notes/other.md", score=0.5),
             _result("concept/openclaw.md", score=0.5),
         ]
-        out = b.boost(results, "openclaw", {})
+        out = b.boost(results, "openclaw", {"intent": QueryIntent.ENTITY})
 
         scores = [r.boosted_score for r in out]
         assert scores == sorted(scores, reverse=True), f"output not sorted desc: {scores}"
@@ -262,7 +263,7 @@ class TestEntityBoostDocumentedClaims:
         b = EntityBoost(graph=graph, config=cfg)
 
         results = [_result("concept/mega.md", score=1.0)]
-        out = b.boost(results, "mega", {})
+        out = b.boost(results, "mega", {"intent": QueryIntent.ENTITY})
 
         # boosted_score / rrf_score must be <= cap
         assert out[0].boosted_score / out[0].rrf_score <= 1.5 + 1e-9
@@ -287,13 +288,13 @@ class TestProceduralBoostProtocolCompliance:
 class TestProceduralBoostDocumentedClaims:
     def test_empty_results_returns_empty(self) -> None:
         """Empty input: returns []. Never raises."""
-        assert ProceduralBoost().boost([], "q", {}) == []
+        assert ProceduralBoost().boost([], "q", {"intent": QueryIntent.PROCEDURAL}) == []
 
     def test_config_disabled_returns_unmodified(self) -> None:
         """Claim: ProceduralBoostConfig.enabled=False is a hard-off."""
         b = ProceduralBoost(config=ProceduralBoostConfig(enabled=False))
         results = [_result("how-to-deploy.md", score=0.5)]
-        out = b.boost(results, "deploy", {})
+        out = b.boost(results, "deploy", {"intent": QueryIntent.PROCEDURAL})
 
         # Hard-off: boosted_score is whatever the input was — not multiplied.
         assert out[0].boosted_score == pytest.approx(0.5)
@@ -307,7 +308,7 @@ class TestProceduralBoostDocumentedClaims:
         """
         b = ProceduralBoost()
         results = [_result("guides/how-to-deploy.md", score=0.5)]
-        out = b.boost(results, "how to deploy", {})
+        out = b.boost(results, "how to deploy", {"intent": QueryIntent.PROCEDURAL})
 
         cfg = ProceduralBoostConfig()
         assert out[0].boosted_score == pytest.approx(0.5 * cfg.factor)
@@ -316,7 +317,7 @@ class TestProceduralBoostDocumentedClaims:
         """Documents not matching procedural patterns are unaffected."""
         b = ProceduralBoost()
         results = [_result("notes/general-musings.md", score=0.5)]
-        out = b.boost(results, "how to deploy", {})
+        out = b.boost(results, "how to deploy", {"intent": QueryIntent.PROCEDURAL})
 
         assert out[0].boosted_score == pytest.approx(0.5)
 
@@ -327,7 +328,7 @@ class TestProceduralBoostDocumentedClaims:
             _result("notes/highscore_but_not_proc.md", score=0.6),
             _result("guides/how-to-x.md", score=0.5),
         ]
-        out = b.boost(results, "how to x", {})
+        out = b.boost(results, "how to x", {"intent": QueryIntent.PROCEDURAL})
 
         scores = [r.boosted_score for r in out]
         assert scores == sorted(scores, reverse=True), f"output not sorted desc: {scores}"
@@ -337,7 +338,7 @@ class TestProceduralBoostDocumentedClaims:
         cfg = ProceduralBoostConfig(factor=2.5)
         b = ProceduralBoost(config=cfg)
         results = [_result("how-to-x.md", score=0.4)]
-        out = b.boost(results, "how to x", {})
+        out = b.boost(results, "how to x", {"intent": QueryIntent.PROCEDURAL})
 
         assert out[0].boosted_score == pytest.approx(0.4 * 2.5)
 
@@ -354,7 +355,7 @@ class TestTemporalDateBoostProtocolCompliance:
 
 class TestTemporalDateBoostDocumentedClaims:
     def test_empty_results_returns_empty(self) -> None:
-        assert TemporalDateBoost().boost([], "yesterday", {}) == []
+        assert TemporalDateBoost().boost([], "yesterday", {"intent": QueryIntent.TEMPORAL}) == []
 
     def test_disabled_by_default_no_op(self) -> None:
         """Claim from TemporalBoostConfig: 'date_path_boost_enabled: bool = False'.
@@ -364,7 +365,7 @@ class TestTemporalDateBoostDocumentedClaims:
         """
         b = TemporalDateBoost()
         results = [_result("daily/2026-04-15.md", score=0.5)]
-        out = b.boost(results, "2026-04-15 standup", {})
+        out = b.boost(results, "2026-04-15 standup", {"intent": QueryIntent.TEMPORAL})
 
         assert out[0].boosted_score == pytest.approx(0.5), "disabled-by-default boost must NOT modify scores"
 
@@ -383,7 +384,7 @@ class TestTemporalDateBoostDocumentedClaims:
             _result("daily/2026-04-15.md", score=0.5),
             _result("daily/2025-09-01.md", score=0.5),
         ]
-        out = b.boost(results, "what happened on 2026-04-15", {})
+        out = b.boost(results, "what happened on 2026-04-15", {"intent": QueryIntent.TEMPORAL})
 
         match = next(r for r in out if "2026-04-15" in r.path)
         non_match = next(r for r in out if "2025-09-01" in r.path)
@@ -398,7 +399,7 @@ class TestTemporalDateBoostDocumentedClaims:
         cfg = TemporalBoostConfig(date_path_boost_enabled=True)
         b = TemporalDateBoost(config=cfg)
         results = [_result("daily/2026-04-15.md", score=0.5)]
-        out = b.boost(results, "architecture decision", {})
+        out = b.boost(results, "architecture decision", {"intent": QueryIntent.TEMPORAL})
 
         assert out[0].boosted_score == pytest.approx(0.5)
 
@@ -415,14 +416,14 @@ class TestChunkDateBoostProtocolCompliance:
 
 class TestChunkDateBoostDocumentedClaims:
     def test_empty_results_returns_empty(self) -> None:
-        assert ChunkDateBoost().boost([], "q", {}) == []
+        assert ChunkDateBoost().boost([], "q", {"intent": QueryIntent.TEMPORAL}) == []
 
     def test_disabled_by_default_no_op(self) -> None:
         """Claim from TemporalBoostConfig: 'chunk_date_boost_enabled: bool = False'."""
         b = ChunkDateBoost()
         qdate = datetime.date(2026, 4, 17)
         results = [_result("notes/x.md", score=0.5, chunk_date="2026-04-15")]
-        out = b.boost(results, "q", {"query_date": qdate})
+        out = b.boost(results, "q", {"intent": QueryIntent.TEMPORAL, "query_date": qdate})
 
         assert out[0].boosted_score == pytest.approx(0.5)
 
@@ -436,7 +437,7 @@ class TestChunkDateBoostDocumentedClaims:
         cfg = TemporalBoostConfig(chunk_date_boost_enabled=True)
         b = ChunkDateBoost(config=cfg)
         results = [_result("notes/x.md", score=0.5, chunk_date="2026-04-15")]
-        out = b.boost(results, "q", {})  # no query_date
+        out = b.boost(results, "q", {"intent": QueryIntent.TEMPORAL})  # no query_date
 
         assert out[0].boosted_score == pytest.approx(0.5)
 
@@ -450,7 +451,7 @@ class TestChunkDateBoostDocumentedClaims:
         b = ChunkDateBoost(config=cfg)
         qdate = datetime.date(2026, 4, 17)
         results = [_result("notes/today.md", score=0.5, chunk_date="2026-04-17")]
-        out = b.boost(results, "q", {"query_date": qdate})
+        out = b.boost(results, "q", {"intent": QueryIntent.TEMPORAL, "query_date": qdate})
 
         # Boost at delta=0 = 1 + exp(0) = 2.0
         assert out[0].boosted_score == pytest.approx(0.5 * 2.0)
@@ -464,7 +465,7 @@ class TestChunkDateBoostDocumentedClaims:
             _result("notes/recent.md", score=0.5, chunk_date="2026-04-15"),
             _result("notes/old.md", score=0.5, chunk_date="2024-01-01"),
         ]
-        out = b.boost(results, "q", {"query_date": qdate})
+        out = b.boost(results, "q", {"intent": QueryIntent.TEMPORAL, "query_date": qdate})
 
         recent = next(r for r in out if "recent" in r.path)
         old = next(r for r in out if "old" in r.path)
@@ -485,7 +486,7 @@ class TestChunkDateBoostDocumentedClaims:
         qdate = datetime.date(2026, 4, 17)
         chunk = (qdate - datetime.timedelta(days=30)).isoformat()
         results = [_result("notes/m.md", score=1.0, chunk_date=chunk)]
-        out = b.boost(results, "q", {"query_date": qdate})
+        out = b.boost(results, "q", {"intent": QueryIntent.TEMPORAL, "query_date": qdate})
 
         # Boost ~ 1.5 ± a little for floating point
         sigma = 30 / 1.177
@@ -508,24 +509,24 @@ class TestBoostsNeverRaise:
         b = EntityBoost(graph=graph)
         # Must not raise — must just return results unchanged.
         results = [_result("anywhere.md", score=0.5)]
-        out = b.boost(results, "weird query !@#$", {})
+        out = b.boost(results, "weird query !@#$", {"intent": QueryIntent.TEMPORAL})
         assert out[0].boosted_score == pytest.approx(0.5)
 
     def test_procedural_boost_garbage_query_does_not_raise(self) -> None:
         b = ProceduralBoost()
-        out = b.boost([_result("how-to-x.md", score=0.5)], "!@#$%^&*()", {})
+        out = b.boost([_result("how-to-x.md", score=0.5)], "!@#$%^&*()", {"intent": QueryIntent.TEMPORAL})
         assert len(out) == 1
 
     def test_temporal_date_boost_garbage_query_does_not_raise(self) -> None:
         cfg = TemporalBoostConfig(date_path_boost_enabled=True)
         b = TemporalDateBoost(config=cfg)
-        out = b.boost([_result("daily/2026-01-01.md", score=0.5)], "", {})
+        out = b.boost([_result("daily/2026-01-01.md", score=0.5)], "", {"intent": QueryIntent.TEMPORAL})
         assert len(out) == 1
 
     def test_chunk_date_boost_with_bad_chunk_date_does_not_raise(self) -> None:
         cfg = TemporalBoostConfig(chunk_date_boost_enabled=True)
         b = ChunkDateBoost(config=cfg)
         results = [_result("notes/x.md", score=0.5, chunk_date="not-a-date")]
-        out = b.boost(results, "q", {"query_date": datetime.date(2026, 4, 17)})
+        out = b.boost(results, "q", {"intent": QueryIntent.TEMPORAL, "query_date": datetime.date(2026, 4, 17)})
         # Bad chunk_date: skipped, score unchanged
         assert out[0].boosted_score == pytest.approx(0.5)

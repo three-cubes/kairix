@@ -302,6 +302,7 @@ def test_entity_boost_after_rrf_promotes_high_in_degree_doc() -> None:
     pipeline = _build_pipeline(
         bm25_docs=bm25_docs,
         vec_results=vec_results,
+        intent=QueryIntent.ENTITY,
         boosts=[EntityBoost(graph=graph, config=config.entity)],
         graph=graph,
         config=config,
@@ -532,98 +533,10 @@ def test_chunk_date_boost_no_op_when_disabled() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_entity_then_procedural_chain_applies_multiplicatively() -> None:
-    """Boost chain is multiplicative: entity boost stacks on top of procedural boost.
-
-    Setup: doc A is rank 1 in RRF (1/61). Doc B is rank 2 (1/62), is procedural
-    (1.4x), and has entity in-degree (≈1.48x at in_degree=10). Combined factor
-    on B ≈ 2.07x → B vastly overtakes A.
-    """
-    bm25_docs = [
-        _bm25_doc("notes/plain.md", snippet="alpha"),
-        _bm25_doc("runbooks/how-to-entity.md", snippet="alpha"),
-    ]
-    graph = FakeGraphRepository(
-        entities=[_entity_row("runbooks/how-to-entity.md", in_degree=10)],
-        available=True,
-    )
-    config = RetrievalConfig(
-        fusion_strategy="rrf",
-        entity=EntityBoostConfig(enabled=True, factor=0.20, cap=2.0),
-        procedural=ProceduralBoostConfig(enabled=True, factor=1.4),
-        temporal=TemporalBoostConfig(),
-    )
-    pipeline = _build_pipeline(
-        bm25_docs=bm25_docs,
-        vec_results=[],
-        intent=QueryIntent.PROCEDURAL,
-        boosts=[
-            EntityBoost(graph=graph, config=config.entity),
-            ProceduralBoost(config=config.procedural),
-        ],
-        graph=graph,
-        config=config,
-    )
-    result = pipeline.search("alpha")
-    fused = _fused_in_order(result)
-    by_path = {f.path: f for f in fused}
-
-    # Baseline RRF score
-    rrf_b = 1.0 / (RRF_K + 2)
-    boosted_b = by_path["runbooks/how-to-entity.md"].boosted_score
-    rrf_a = 1.0 / (RRF_K + 1)
-    boosted_a = by_path["notes/plain.md"].boosted_score
-
-    # plain.md got no entity hit and no procedural hit
-    assert boosted_a == pytest.approx(rrf_a, rel=1e-9)
-    # runbook got entity * procedural — strictly greater than 1.4x alone
-    assert boosted_b > rrf_b * 1.4
-    # Final ordering: runbook beats plain
-    assert _paths_in_order(result)[0] == "runbooks/how-to-entity.md"
-
-
-def test_boost_chain_runs_in_registration_order() -> None:
-    """Each boost sees the output of the previous boost (boosted_score accumulates)."""
-    bm25_docs = [
-        _bm25_doc("runbooks/how-to-x.md", snippet="alpha"),
-    ]
-    graph = FakeGraphRepository(
-        entities=[_entity_row("runbooks/how-to-x.md", in_degree=10)],
-        available=True,
-    )
-    cfg = RetrievalConfig(
-        fusion_strategy="rrf",
-        entity=EntityBoostConfig(enabled=True, factor=0.20, cap=2.0),
-        procedural=ProceduralBoostConfig(enabled=True, factor=1.4),
-        temporal=TemporalBoostConfig(),
-    )
-
-    # Pipeline 1: entity then procedural
-    pipe_ep = _build_pipeline(
-        bm25_docs=bm25_docs,
-        vec_results=[],
-        intent=QueryIntent.PROCEDURAL,
-        boosts=[EntityBoost(graph=graph, config=cfg.entity), ProceduralBoost(config=cfg.procedural)],
-        graph=graph,
-        config=cfg,
-    )
-    # Pipeline 2: procedural only (no entity)
-    pipe_p = _build_pipeline(
-        bm25_docs=bm25_docs,
-        vec_results=[],
-        intent=QueryIntent.PROCEDURAL,
-        boosts=[ProceduralBoost(config=cfg.procedural)],
-        graph=graph,
-        config=cfg,
-    )
-    fused_ep = _fused_in_order(pipe_ep.search("alpha"))
-    fused_p = _fused_in_order(pipe_p.search("alpha"))
-
-    # Both pipelines have the runbook doc. The entity+procedural pipeline should
-    # produce a strictly higher boosted_score because entity boost > 1.0.
-    score_ep = next(f.boosted_score for f in fused_ep if f.path == "runbooks/how-to-x.md")
-    score_p = next(f.boosted_score for f in fused_p if f.path == "runbooks/how-to-x.md")
-    assert score_ep > score_p
+# Two former tests probed an "entity-and-procedural-fire-on-the-same-query"
+# behaviour that the gated boosts contract (#155 fix) explicitly forbids:
+# each boost is now intent-gated, so only one fires per intent. Those tests
+# pinned the bug; they're deleted with the fix.
 
 
 # ---------------------------------------------------------------------------
@@ -656,7 +569,7 @@ def test_bm25_primary_fusion_integrates_with_entity_boost() -> None:
     pipeline = _build_pipeline(
         bm25_docs=bm25_docs,
         vec_results=[],
-        intent=QueryIntent.SEMANTIC,
+        intent=QueryIntent.ENTITY,
         fusion=BM25PrimaryFusion(),
         boosts=[EntityBoost(graph=graph, config=cfg.entity)],
         graph=graph,

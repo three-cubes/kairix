@@ -314,43 +314,10 @@ class TestBoostChainOrder:
     pipeline.py line 159-164.
     """
 
-    def test_chained_entity_then_procedural_compound(self) -> None:
-        """Entity match THEN procedural pattern => both factors apply
-        multiplicatively to boosted_score.
-        """
-        graph = FakeGraphRepository(
-            entities=[
-                {
-                    "name": "OpenClaw",
-                    "vault_path": "guides/how-to-openclaw.md",
-                    "labels": ["concept"],
-                    "in_degree": 8,
-                }
-            ],
-            available=True,
-        )
-
-        bm25 = [_bm25_row("guides/how-to-openclaw.md"), _bm25_row("notes/other.md")]
-        vec = [_vec_row("guides/how-to-openclaw.md"), _vec_row("notes/other.md")]
-
-        pipe = _build_pipeline(
-            intent=QueryIntent.PROCEDURAL,
-            boosts=[
-                EntityBoost(graph=graph),
-                ProceduralBoost(),
-            ],
-            bm25_rows=bm25,
-            vec_rows=vec,
-            graph=graph,
-        )
-        result = pipe.search("how to use openclaw")
-
-        # The entity-and-procedural-matched doc must be top-1.
-        top = result.results[0].result
-        assert top.path == "guides/how-to-openclaw.md"
-        # And its boosted_score must be strictly greater than the rrf_score
-        # by *more* than what procedural alone would produce (factor=1.4).
-        assert top.boosted_score > top.rrf_score * 1.4, "compound boost must exceed procedural-only boost"
+    # Removed: test_chained_entity_then_procedural_compound. It probed an
+    # "entity AND procedural fire on the same intent" behaviour that is now
+    # forbidden by the gated-boost contract (#155 fix). Each boost is gated
+    # to its single matching intent.
 
     def test_fakeboost_in_chain_is_passthrough(self) -> None:
         """FakeBoost (canonical no-op) does not alter scores in the chain."""

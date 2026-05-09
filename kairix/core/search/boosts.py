@@ -14,11 +14,13 @@ from kairix.core.search.config import (
     ProceduralBoostConfig,
     TemporalBoostConfig,
 )
+from kairix.core.search.intent import QueryIntent
 
 
 class EntityBoost:
     """Boost results based on Neo4j entity mention in-degree.
 
+    Gated to ENTITY intent — non-ENTITY queries pass through unchanged.
     Requires a GraphRepository for entity lookup. Documents matching entity
     vault paths receive a log-scaled boost proportional to in-degree.
     """
@@ -32,6 +34,8 @@ class EntityBoost:
         self._config = config
 
     def boost(self, results: list, query: str, context: dict) -> list:
+        if context.get("intent") != QueryIntent.ENTITY:
+            return results
         from kairix.core.search.rrf import entity_boost_neo4j
 
         return entity_boost_neo4j(results, self._graph, config=self._config)
@@ -40,14 +44,17 @@ class EntityBoost:
 class ProceduralBoost:
     """Boost procedural content (how-to guides, runbooks) by path pattern.
 
-    Applied for PROCEDURAL intent queries. Multiplies boosted_score by
-    config.factor for documents whose path matches procedural patterns.
+    Gated to PROCEDURAL intent — non-PROCEDURAL queries pass through unchanged.
+    Multiplies boosted_score by config.factor for documents whose path matches
+    procedural patterns.
     """
 
     def __init__(self, config: ProceduralBoostConfig | None = None) -> None:
         self._config = config
 
     def boost(self, results: list, query: str, context: dict) -> list:
+        if context.get("intent") != QueryIntent.PROCEDURAL:
+            return results
         from kairix.core.search.rrf import procedural_boost
 
         return procedural_boost(results, config=self._config)
@@ -56,14 +63,17 @@ class ProceduralBoost:
 class TemporalDateBoost:
     """Boost documents whose path contains a date matching the query.
 
-    Applied for TEMPORAL intent queries. Boosts documents with explicit date
-    strings or recent dates for relative temporal terms.
+    Gated to TEMPORAL intent — non-TEMPORAL queries pass through unchanged.
+    Boosts documents with explicit date strings or recent dates for relative
+    temporal terms.
     """
 
     def __init__(self, config: TemporalBoostConfig | None = None) -> None:
         self._config = config
 
     def boost(self, results: list, query: str, context: dict) -> list:
+        if context.get("intent") != QueryIntent.TEMPORAL:
+            return results
         from kairix.core.search.rrf import temporal_date_boost
 
         return temporal_date_boost(results, query, config=self._config)
@@ -72,6 +82,7 @@ class TemporalDateBoost:
 class ChunkDateBoost:
     """Boost documents by chunk_date metadata proximity to query date.
 
+    Gated to TEMPORAL intent — non-TEMPORAL queries pass through unchanged.
     Uses Gaussian decay based on the distance between chunk_date and the
     query date. Requires chunk_date to be populated at index time.
     """
@@ -80,6 +91,8 @@ class ChunkDateBoost:
         self._config = config
 
     def boost(self, results: list, query: str, context: dict) -> list:
+        if context.get("intent") != QueryIntent.TEMPORAL:
+            return results
         from kairix.core.search.rrf import chunk_date_boost
 
         query_date = context.get("query_date")
