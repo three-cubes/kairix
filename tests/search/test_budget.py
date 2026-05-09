@@ -21,9 +21,8 @@ Tests cover:
 from __future__ import annotations
 
 import sqlite3
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -40,6 +39,7 @@ from kairix.core.search.budget import (
 )
 from kairix.core.search.rrf import FusedResult
 from kairix.text import strip_frontmatter
+from tests.fakes import FakeSummaryLoader
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -120,13 +120,25 @@ class TestApplyBudget:
 
     @pytest.mark.unit
     def test_unexpected_exception_returns_empty(self) -> None:
-        """apply_budget should never raise — returns [] on internal error."""
-        results = [_fused()]
-        with patch(
-            "kairix.core.search.budget._apply_budget_impl",
-            side_effect=RuntimeError("boom"),
-        ):
-            result = apply_budget(results, budget=3000)
+        """``apply_budget`` swallows internal exceptions and returns [].
+
+        Drives the exception via a ``FusedResult`` whose ``.snippet`` attribute
+        access raises — exercising the outer ``except Exception`` branch
+        without monkey-patching ``_apply_budget_impl``.
+        """
+
+        class _ExplodingResult:
+            path = "x.md"
+            collection = "c"
+            title = "T"
+            rrf_score = 0.5
+            boosted_score = 0.5
+
+            @property
+            def snippet(self) -> str:
+                raise RuntimeError("boom on snippet access")
+
+        result = apply_budget([_ExplodingResult()], budget=3000)  # type: ignore[list-item]
         assert result == []
 
 
@@ -138,37 +150,57 @@ class TestApplyBudget:
 @pytest.mark.unit
 class TestOpenSummariesDb:
     @pytest.mark.unit
-    def test_returns_none_when_path_missing(self) -> None:
-        with patch("kairix.core.search.budget.Path") as mock_path:
-            mock_path.return_value.exists.return_value = False
-            result = _open_summaries_db()
+    def test_returns_none_when_explicit_db_path_does_not_exist(self, tmp_path: Path) -> None:
+        """A non-existent ``db_path=`` resolves the ``not db_path.exists()`` branch to None."""
+        result = _open_summaries_db(db_path=tmp_path / "no-such-summaries.sqlite")
         assert result is None
 
     @pytest.mark.unit
-    def test_returns_connection_when_path_exists(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        # Create a valid sqlite3 db
-        sqlite3.connect(str(tmp_path)).close()
+    def test_returns_open_connection_when_explicit_db_path_exists(self, tmp_path: Path) -> None:
+        """A real SQLite file at ``db_path=`` returns an open connection.
+
+        Asserts the connection is actually usable (executes a trivial query)
+        and points at the path we provided — not a smoke "either-way" check.
+        """
+        db_path = tmp_path / "summaries.sqlite"
+        # Create a real summaries-shaped DB so the count query in the warning
+        # branch succeeds (won't be hit on first call because _summaries_warned
+        # is module-state, but this still proves the connection is real).
+        seed = sqlite3.connect(str(db_path))
+        seed.execute("CREATE TABLE summaries (path TEXT PRIMARY KEY, l0 TEXT, l1 TEXT)")
+        seed.commit()
+        seed.close()
+
+        conn = _open_summaries_db(db_path=db_path)
+        assert conn is not None, "expected a connection for an existing DB"
         try:
-            with patch("kairix.core.search.budget.Path", return_value=tmp_path):
-                conn = _open_summaries_db()
-            # Should return a connection (not None) since path exists
-            if conn is not None:
-                conn.close()
-                assert True, "smoke: connection returned for existing DB"
-            else:
-                assert True, "smoke: mock redirected; no exception raised"
+            # The connection points at the right database — we can read the
+            # ``summaries`` table we just created.
+            row = conn.execute("SELECT COUNT(*) FROM summaries").fetchone()
+            assert row[0] == 0
         finally:
-            tmp_path.unlink(missing_ok=True)
+            conn.close()
 
     @pytest.mark.unit
-    def test_returns_none_when_connect_raises(self) -> None:
-        with patch("kairix.core.search.budget.Path") as mock_path:
-            mock_path.return_value.exists.return_value = True
-            with patch("kairix.core.search.budget.sqlite3") as mock_sqlite:
-                mock_sqlite.connect.side_effect = Exception("cannot open")
-                result = _open_summaries_db()
+    def test_returns_none_when_path_exists_but_is_not_a_database(self, tmp_path: Path) -> None:
+        """A path that exists but isn't a SQLite DB → ``sqlite3.connect`` opens it
+        but the subsequent query raises, surfacing as None via the broad ``except``.
+        """
+        # Write a non-database file at the path. sqlite3.connect succeeds (the
+        # file exists), but the ``COUNT(*) FROM summaries`` query inside the
+        # warning branch raises, which is caught by the outer except.
+        bad = tmp_path / "not-a-db.txt"
+        bad.write_bytes(b"this is not a sqlite database")
+
+        # Reset module-state for this test so the warning branch (which would
+        # otherwise short-circuit) actually executes the query.
+        import kairix.core.search.budget as _budget_mod
+
+        _budget_mod._summaries_warned = False
+        try:
+            result = _open_summaries_db(db_path=bad)
+        finally:
+            _budget_mod._summaries_warned = False
         assert result is None
 
 
@@ -255,78 +287,62 @@ class TestGetContentForTier:
         assert content == ""
 
     @pytest.mark.unit
-    def test_phase2_l0_returns_abstract_when_available(self) -> None:
-        """With summaries_db, L0 tier returns abstract from get_l0."""
-        result = _fused(snippet="fallback snippet")
-        mock_db = MagicMock()
+    def test_phase2_l0_returns_abstract_when_loader_provides_one(self) -> None:
+        """``loader.get_l0`` hit → that abstract is returned.
 
-        mock_loader = MagicMock()
-        mock_loader.get_l0.return_value = "abstract text"
-        mock_loader.get_l1.return_value = None
-
-        with patch.dict("sys.modules", {"kairix.knowledge.summaries.loader": mock_loader}):
-            content = _get_content_for_tier(result, "L0", summaries_db=mock_db)
-
+        Asserts the loader was called exactly once with the expected path,
+        proving the L0 branch was actually taken (not a coincidence of an
+        ``isinstance(content, str)`` weak assertion).
+        """
+        result = _fused(path="docs/x.md", snippet="fallback snippet")
+        loader = FakeSummaryLoader(l0_by_path={"docs/x.md": "abstract text"})
+        content = _get_content_for_tier(result, "L0", summaries_db=MagicMock(), loader=loader)
         assert content == "abstract text"
+        assert loader.l0_calls == ["docs/x.md"]
+        assert loader.l1_calls == []
 
     @pytest.mark.unit
-    def test_phase2_l0_falls_back_to_snippet_when_no_abstract(self) -> None:
-        """With summaries_db, L0 falls back to snippet if get_l0 returns None."""
-        result = _fused(snippet="fallback snippet")
-        mock_db = MagicMock()
-
-        mock_loader = MagicMock()
-        mock_loader.get_l0.return_value = None
-        mock_loader.get_l1.return_value = None
-
-        with patch.dict("sys.modules", {"kairix.knowledge.summaries.loader": mock_loader}):
-            content = _get_content_for_tier(result, "L0", summaries_db=mock_db)
-
+    def test_phase2_l0_falls_back_to_snippet_when_loader_returns_none(self) -> None:
+        """L0 with no abstract → fall through to ``result.snippet`` (frontmatter-stripped)."""
+        result = _fused(path="docs/x.md", snippet="fallback snippet")
+        loader = FakeSummaryLoader()  # no l0/l1 configured → both return None
+        content = _get_content_for_tier(result, "L0", summaries_db=MagicMock(), loader=loader)
         assert content == "fallback snippet"
+        # Loader was queried for L0; not for L1 (the L0 branch doesn't fall back to L1).
+        assert loader.l0_calls == ["docs/x.md"]
+        assert loader.l1_calls == []
 
     @pytest.mark.unit
-    def test_phase2_l1_falls_back_to_l0_when_unavailable(self) -> None:
-        """With summaries_db, L1 tier falls back to L0 abstract if L1 missing."""
-        result = _fused(snippet="fallback snippet")
-        mock_db = MagicMock()
-
-        mock_loader = MagicMock()
-        mock_loader.get_l1.return_value = None
-        mock_loader.get_l0.return_value = "l0 abstract"
-
-        with patch.dict("sys.modules", {"kairix.knowledge.summaries.loader": mock_loader}):
-            content = _get_content_for_tier(result, "L1", summaries_db=mock_db)
-
+    def test_phase2_l1_falls_back_to_l0_when_l1_unavailable(self) -> None:
+        """L1 with no overview → loader is queried for L0 next, and that abstract is returned."""
+        result = _fused(path="docs/x.md", snippet="fallback snippet")
+        loader = FakeSummaryLoader(l0_by_path={"docs/x.md": "l0 abstract"})
+        content = _get_content_for_tier(result, "L1", summaries_db=MagicMock(), loader=loader)
         assert content == "l0 abstract"
+        # Both calls happen in order: L1 first (miss), then L0 (hit).
+        assert loader.l1_calls == ["docs/x.md"]
+        assert loader.l0_calls == ["docs/x.md"]
 
     @pytest.mark.unit
-    def test_phase2_l1_returns_l1_when_available(self) -> None:
-        """With summaries_db, L1 returns L1 overview when available."""
-        result = _fused(snippet="fallback snippet")
-        mock_db = MagicMock()
-
-        mock_loader = MagicMock()
-        mock_loader.get_l1.return_value = "l1 overview"
-        mock_loader.get_l0.return_value = "l0 abstract"
-
-        with patch.dict("sys.modules", {"kairix.knowledge.summaries.loader": mock_loader}):
-            content = _get_content_for_tier(result, "L1", summaries_db=mock_db)
-
+    def test_phase2_l1_returns_l1_overview_when_available(self) -> None:
+        """L1 hit → L1 overview is returned and L0 is NOT queried."""
+        result = _fused(path="docs/x.md", snippet="fallback snippet")
+        loader = FakeSummaryLoader(
+            l0_by_path={"docs/x.md": "l0 abstract"},
+            l1_by_path={"docs/x.md": "l1 overview"},
+        )
+        content = _get_content_for_tier(result, "L1", summaries_db=MagicMock(), loader=loader)
         assert content == "l1 overview"
+        assert loader.l1_calls == ["docs/x.md"]
+        # L0 is not consulted when L1 is found — proves the early-return branch fired.
+        assert loader.l0_calls == []
 
     @pytest.mark.unit
-    def test_phase2_exception_falls_back_to_snippet(self) -> None:
-        """If summary lookup raises, fall back to snippet."""
+    def test_phase2_exception_in_loader_falls_back_to_snippet(self) -> None:
+        """A raising loader → caught by the outer ``except Exception`` → snippet fallback."""
         result = _fused(snippet="safe fallback")
-        mock_db = MagicMock()
-
-        mock_loader = MagicMock()
-        mock_loader.get_l0.side_effect = Exception("DB error")
-        mock_loader.get_l1.side_effect = Exception("DB error")
-
-        with patch.dict("sys.modules", {"kairix.knowledge.summaries.loader": mock_loader}):
-            content = _get_content_for_tier(result, "L0", summaries_db=mock_db)
-
+        loader = FakeSummaryLoader(raises=RuntimeError("loader DB error"))
+        content = _get_content_for_tier(result, "L0", summaries_db=MagicMock(), loader=loader)
         assert content == "safe fallback"
 
     @pytest.mark.unit
@@ -378,3 +394,25 @@ class TestStripFrontmatter:
         """Dashes in the middle of text are not treated as frontmatter."""
         text = "Some text\n---\nnot frontmatter\n---\nmore text"
         assert strip_frontmatter(text) == text
+
+
+# ---------------------------------------------------------------------------
+# _estimate_tokens — empty-string guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_estimate_tokens_returns_zero_for_empty_string() -> None:
+    """Empty / falsy text short-circuits to 0 — caller doesn't need to guard."""
+    from kairix.core.search.budget import _estimate_tokens
+
+    assert _estimate_tokens("") == 0
+
+
+@pytest.mark.unit
+def test_estimate_tokens_returns_positive_for_non_empty_string() -> None:
+    """Non-empty text delegates to the canonical word-based estimator and returns >0."""
+    from kairix.core.search.budget import _estimate_tokens
+
+    n = _estimate_tokens("the quick brown fox jumps over the lazy dog")
+    assert n > 0

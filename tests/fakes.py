@@ -206,6 +206,42 @@ class FakeEmbedProvider:
         return [list(self._vector) for _ in texts]
 
 
+class FakeSummaryLoader:
+    """Deterministic ``SummaryLoader`` for the budget enforcer.
+
+    Implements ``kairix.core.search.budget.SummaryLoader``:
+    ``get_l0(path, db)`` and ``get_l1(path, db)``.
+
+    Configure with ``l0_by_path`` / ``l1_by_path`` dicts. Unset paths return
+    ``None``. Pass ``raises=Exception(...)`` to make every call raise.
+    """
+
+    def __init__(
+        self,
+        *,
+        l0_by_path: dict[str, str] | None = None,
+        l1_by_path: dict[str, str] | None = None,
+        raises: BaseException | None = None,
+    ) -> None:
+        self._l0 = dict(l0_by_path or {})
+        self._l1 = dict(l1_by_path or {})
+        self._raises = raises
+        self.l0_calls: list[str] = []
+        self.l1_calls: list[str] = []
+
+    def get_l0(self, path: str, db: Any) -> str | None:
+        self.l0_calls.append(path)
+        if self._raises is not None:
+            raise self._raises
+        return self._l0.get(path)
+
+    def get_l1(self, path: str, db: Any) -> str | None:
+        self.l1_calls.append(path)
+        if self._raises is not None:
+            raise self._raises
+        return self._l1.get(path)
+
+
 class FakeLLMBackend:
     """Deterministic ``LLMBackend`` for tests.
 

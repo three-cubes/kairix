@@ -24,11 +24,46 @@ import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 from kairix.core.search.rrf import FusedResult
 from kairix.text import APPROX_CHARS_PER_TOKEN, strip_frontmatter
 from kairix.text import estimate_tokens as _estimate_tokens_word
+
+
+@runtime_checkable
+class SummaryLoader(Protocol):
+    """Loader surface for L0 / L1 document summaries.
+
+    Production: ``_DefaultSummaryLoader`` lazily imports
+    ``kairix.knowledge.summaries.loader`` and delegates. Tests pass a
+    ``FakeSummaryLoader`` from ``tests/fakes.py`` instead of patching
+    ``sys.modules`` to substitute the loader module.
+    """
+
+    def get_l0(self, path: str, db: sqlite3.Connection) -> str | None: ...
+
+    def get_l1(self, path: str, db: sqlite3.Connection) -> str | None: ...
+
+
+class _DefaultSummaryLoader:
+    """Production ``SummaryLoader`` — delegates to the real loader module.
+
+    Both methods are ``# pragma: no cover``: they need the real loader module
+    and a populated summaries DB. Tests inject ``FakeSummaryLoader`` instead;
+    integration coverage of the real loader is deferred to Phase 2.
+    """
+
+    def get_l0(self, path: str, db: sqlite3.Connection) -> str | None:  # pragma: no cover
+        from kairix.knowledge.summaries.loader import get_l0
+
+        return get_l0(path, db)
+
+    def get_l1(self, path: str, db: sqlite3.Connection) -> str | None:  # pragma: no cover
+        from kairix.knowledge.summaries.loader import get_l1
+
+        return get_l1(path, db)
+
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +103,10 @@ class BudgetedResult:
 
 
 def _estimate_tokens(text: str) -> int:
-    """Estimate token count using the canonical word-based estimator."""
+    """Estimate token count using the canonical word-based estimator.
+
+    Returns 0 for an empty / falsy text so callers don't need to guard.
+    """
     if not text:
         return 0
     return _estimate_tokens_word(text)
@@ -89,13 +127,19 @@ def _get_summaries_db_path() -> Path:
 _summaries_warned = False
 
 
-def _open_summaries_db() -> sqlite3.Connection | None:
+def _open_summaries_db(db_path: Path | None = None) -> sqlite3.Connection | None:
     """Open the summaries DB if it exists, else return None.
 
     Logs a warning once if the DB is missing or has fewer than 100 entries.
+
+    Args:
+        db_path: Explicit summaries-DB path. When ``None``, resolves via
+                 ``_get_summaries_db_path()``. Tests pass an explicit path to
+                 control whether the DB exists / is openable.
     """
     global _summaries_warned
-    db_path = _get_summaries_db_path()
+    if db_path is None:
+        db_path = _get_summaries_db_path()
     if not db_path.exists():
         if not _summaries_warned:
             logger.info("budget: summaries DB not found — run 'kairix summarise --all' to generate L0 summaries")
@@ -103,7 +147,12 @@ def _open_summaries_db() -> sqlite3.Connection | None:
         return None
     try:
         conn = sqlite3.connect(str(db_path))
-        if not _summaries_warned:
+        # pragma below covers a Phase-2-only warning: the summaries DB never
+        # exists in Phase 1, so the COUNT(*) probe never fires. Tests cover
+        # the path-missing and not-a-database branches via explicit db_path
+        # injection; the count-warning will gain real coverage when summary
+        # generation is enabled.
+        if not _summaries_warned:  # pragma: no cover
             count = conn.execute("SELECT COUNT(*) FROM summaries").fetchone()[0]
             if count < 100:
                 logger.info(
@@ -148,7 +197,9 @@ def apply_budget(
         # exists in Phase 1, so _open_summaries_db() always returns None.
         summaries_db = _open_summaries_db()
         budgeted = _apply_budget_impl(results, budget, l1_threshold, l2_threshold, summaries_db)
-        if summaries_db is not None:
+        # ``_open_summaries_db()`` returns None until Phase 2 summary
+        # generation is enabled, so this close() never fires today.
+        if summaries_db is not None:  # pragma: no cover
             summaries_db.close()
         return budgeted
     except Exception as e:
@@ -230,6 +281,7 @@ def _get_content_for_tier(
     tier: Tier,
     remaining_budget: int = DEFAULT_BUDGET,
     summaries_db: sqlite3.Connection | None = None,
+    loader: SummaryLoader | None = None,
 ) -> str:
     """
     Return content for the given tier.
@@ -237,21 +289,26 @@ def _get_content_for_tier(
     Phase 2+: when summaries_db is available and budget is tight, prefer
     L0 (abstract) or L1 (overview) over the full snippet to conserve tokens.
     Falls back to snippet if no summary is available.
+
+    Args:
+        loader: Summary loader. When ``None``, lazily constructs the
+                production ``_DefaultSummaryLoader``. Tests inject a
+                ``FakeSummaryLoader``.
     """
     if summaries_db is not None:
+        if loader is None:  # pragma: no cover — production-only lazy default; tests inject FakeSummaryLoader
+            loader = _DefaultSummaryLoader()
         try:
-            from kairix.knowledge.summaries.loader import get_l0, get_l1
-
             if tier == "L0":
-                l0 = get_l0(result.path, summaries_db)
+                l0 = loader.get_l0(result.path, summaries_db)
                 if l0:
                     return l0
             elif tier == "L1":
-                l1 = get_l1(result.path, summaries_db)
+                l1 = loader.get_l1(result.path, summaries_db)
                 if l1:
                     return l1
                 # Fall back to L0 if L1 not available
-                l0 = get_l0(result.path, summaries_db)
+                l0 = loader.get_l0(result.path, summaries_db)
                 if l0:
                     return l0
         except Exception as exc:
