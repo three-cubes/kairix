@@ -15,11 +15,11 @@ import pytest
 from kairix.core.embed.embed import embed_batch
 
 
-class _StubHTTPRequest:
+class _FakeHTTPRequest:
     """Stub for ``response.request`` accessed by openai's exception ctor."""
 
 
-class _StubHTTPResponse:
+class _FakeHTTPResponse:
     """Minimal HTTPResponse-shaped object for openai.BadRequestError(response=...).
 
     The openai exception constructor reads ``response.request`` and
@@ -29,7 +29,7 @@ class _StubHTTPResponse:
 
     def __init__(self, status_code: int = 400) -> None:
         self.status_code = status_code
-        self.request = _StubHTTPRequest()
+        self.request = _FakeHTTPRequest()
         self.headers: dict[str, str] = {}
 
 
@@ -150,7 +150,7 @@ class TestEmbedBatchBadRequestSplit:
             if len(texts) > 1:
                 raise openai.BadRequestError(
                     message="batch too large",
-                    response=_StubHTTPResponse(status_code=400),
+                    response=_FakeHTTPResponse(status_code=400),
                     body=None,
                 )
             return _EmbeddingsResponse([_EmbeddingItem(i, 0.1) for i in range(len(texts))])
@@ -172,7 +172,7 @@ class TestEmbedBatchBadRequestSplit:
         def always_bad_request(_texts: list[str]) -> _EmbeddingsResponse:
             raise openai.BadRequestError(
                 message="bad input",
-                response=_StubHTTPResponse(status_code=400),
+                response=_FakeHTTPResponse(status_code=400),
                 body=None,
             )
 

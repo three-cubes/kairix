@@ -147,18 +147,18 @@ def test_preflight_check_propagates_authentication_errors_from_client() -> None:
     """AuthenticationError from the client is not swallowed."""
     import openai
 
-    class _StubRequest:
+    class _FakeRequest:
         pass
 
-    class _StubResponse:
+    class _FakeResponse:
         def __init__(self) -> None:
             self.status_code = 401
-            self.request = _StubRequest()
+            self.request = _FakeRequest()
             self.headers: dict[str, str] = {}
 
     err = openai.AuthenticationError(
         message="HTTP 401",
-        response=_StubResponse(),
+        response=_FakeResponse(),
         body=None,
     )
     client = _FakePreflightClient(raises=err)
