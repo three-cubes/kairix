@@ -169,12 +169,6 @@ def chunk_board(path: str) -> list[TemporalChunk]:
         if not buf:
             return
         card_text = "\n".join(buf).strip()
-        # Defensive: the checklist syntax ``- [ ]`` always strips to non-empty
-        # content, so this branch is unreachable while ``_CARD_LINE_RE``
-        # matches every buffered card.
-        if not card_text:  # pragma: no cover
-            return
-
         card_date, date_field = _extract_date_from_card(card_text)
         card_id = _make_card_id(path, col, idx)
 

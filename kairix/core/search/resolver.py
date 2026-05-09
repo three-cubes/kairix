@@ -91,8 +91,6 @@ class DefaultCollectionResolver:
                 cols = self._all_agent_collections()
             case Scope.EVERYTHING:
                 cols = _dedupe_preserving_order(self._default_shared() + self._all_agent_collections())
-            case _:  # pragma: no cover — defensive; Scope.parse rejects unknowns
-                cols = []
 
         return cols or None
 

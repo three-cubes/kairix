@@ -287,7 +287,12 @@ def score_tier(score: float) -> str:
 
 
 def _category_diagnosis(category: str, score: float) -> str:
-    """Return a brief diagnosis for a low-scoring category."""
+    """Return a brief diagnosis for a low-scoring category.
+
+    ``category`` must be one of CATEGORY_WEIGHTS keys — the only call site,
+    ``format_interpretation``, iterates exactly those keys. Unknown category
+    raises KeyError (caller invariant violation).
+    """
     if score >= CATEGORY_FLOOR:
         return "✅ above floor"
     diagnoses = {
@@ -299,9 +304,7 @@ def _category_diagnosis(category: str, score: float) -> str:
         "procedural": "❌ procedural docs not surfacing — check collection scope",
         "classification": "❌ classification rules not matching — check rules.py patterns",
     }
-    # The dict-default branch is unreachable through ``format_interpretation``,
-    # which iterates only ``CATEGORY_WEIGHTS`` keys (all present in ``diagnoses``).
-    return diagnoses.get(category, f"❌ score {score:.3f} below floor {CATEGORY_FLOOR}")  # pragma: no cover
+    return diagnoses[category]
 
 
 def format_interpretation(result: BenchmarkResult) -> str:
