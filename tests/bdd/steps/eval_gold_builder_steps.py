@@ -119,11 +119,13 @@ def existing_query_suite(query: str) -> None:
 
 @given("an LLM judge that grades the deployment doc as 2 and the pipeline doc as 1")
 def judge_with_graded_results() -> None:
+    # Keys are path_title() output — every segment preserved for uniqueness.
+    # ``/eng/docker-deployment-guide.md`` → ``/eng/docker-deployment-guide``.
     _state["judge"] = FakeLLMJudge(
         grades_by_query={
             _state["query"]: {
-                "eng/docker-deployment-guide": 2,
-                "eng/ci-cd-pipeline": 1,
+                "/eng/docker-deployment-guide": 2,
+                "/eng/ci-cd-pipeline": 1,
             }
         }
     )

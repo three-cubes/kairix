@@ -13,8 +13,10 @@ pytestmark = pytest.mark.unit
 
 class TestPathTitle:
     def test_generates_path_based_title(self) -> None:
+        # Every segment is preserved so distinct paths can never collide on the
+        # same title — including a generic filename in different collections.
         result = path_title("reference-library/engineering/adr-examples/readme.md")
-        assert result == "engineering/adr-examples/readme"
+        assert result == "reference-library/engineering/adr-examples/readme"
 
     def test_short_path(self) -> None:
         result = path_title("docs/readme.md")

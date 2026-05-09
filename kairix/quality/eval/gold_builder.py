@@ -51,24 +51,23 @@ _WEIGHT_PRESETS: dict[str, tuple[float, float, float]] = {
 
 
 def path_title(path: str) -> str:
-    """Build a path-based gold title from a document path.
+    """Build a unique path-based gold title from a document path.
 
-    Uses all path segments after the first (collection root) without the
-    ``.md`` extension, so two different documents never produce the same
-    title — even when filenames are generic (e.g. ``readme.md``).
+    Returns the input path with the ``.md`` extension stripped. Every path
+    segment is preserved so two distinct paths can never collide on the
+    same title — including a generic filename in different collections
+    (``vault/x/readme.md`` vs ``reference-library/x/readme.md``).
 
-    Example: "reference-library/engineering/adr-examples/readme.md"
-           → "engineering/adr-examples/readme"
+    Example: ``reference-library/engineering/adr-examples/readme.md``
+           → ``reference-library/engineering/adr-examples/readme``
 
-    For short paths (1-2 segments) the full path (minus extension) is
-    returned as-is.
+    Previous behaviour dropped the first segment for paths longer than two
+    components, which broke the uniqueness invariant: ``a/b.md`` (kept
+    whole) and ``x/a/b.md`` (first segment dropped) both reduced to
+    ``a/b``. Two distinct documents would then share a single grade from
+    the LLM judge — surfaced by ``path_title`` contract test.
     """
-    parts = Path(path).with_suffix("").parts
-    # Drop the first segment (collection root) to keep the rest unique.
-    # For short paths (<=2 segments) return everything.
-    if len(parts) > 2:
-        return "/".join(parts[1:])
-    return "/".join(parts)
+    return str(Path(path).with_suffix(""))
 
 
 @dataclass

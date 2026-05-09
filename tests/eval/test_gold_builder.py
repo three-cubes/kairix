@@ -295,8 +295,9 @@ class TestGoldBuilderGrade:
     @pytest.mark.unit
     def test_grade_assigns_configured_grades(self) -> None:
         """``grade()`` writes the configured grades onto each candidate."""
-        # Keys are path_title() output: "/path/doc1.md" -> "path/doc1"
-        judge = FakeLLMJudge(grades_by_query={"q1": {"path/doc1": 2, "path/doc2": 1}})
+        # Keys are path_title() output — every segment is preserved for uniqueness.
+        # ``/path/doc1.md`` → ``/path/doc1``.
+        judge = FakeLLMJudge(grades_by_query={"q1": {"/path/doc1": 2, "/path/doc2": 1}})
         builder = GoldBuilder(llm_judge=judge)
 
         candidates = [
@@ -311,7 +312,8 @@ class TestGoldBuilderGrade:
     @pytest.mark.unit
     def test_grade_majority_vote_across_runs(self) -> None:
         """Multi-run grade uses majority vote — same answer twice, grade is fixed."""
-        judge = FakeLLMJudge(grades_by_query={"q": {"a/doc": 2}})
+        # path_title("col/a/doc.md") = "col/a/doc" (every segment preserved).
+        judge = FakeLLMJudge(grades_by_query={"q": {"col/a/doc": 2}})
         builder = GoldBuilder(llm_judge=judge)
         candidates = [PooledCandidate(path="col/a/doc.md", title="Doc", snippet="t", collection="col")]
         result = builder.grade("q", candidates, runs=3)
