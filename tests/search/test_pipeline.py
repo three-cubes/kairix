@@ -218,11 +218,25 @@ def test_pipeline_skip_vector_returns_bm25_only():
 
 @pytest.mark.unit
 def test_pipeline_vec_failure_marks_vec_failed():
-    """Vector search returning empty marks vec_failed=True."""
+    """A genuine vector backend failure (raised exception) sets vec_failed=True.
+
+    An empty result list is NOT a failure — it's a successful no-match —
+    and must NOT trigger vec_failed (operator alerts would otherwise fire on
+    every obscure query). See test_pipeline_contracts.py for the full
+    distinction.
+    """
+
+    class _RaisingVectorRepo:
+        def search(self, *_args, **_kwargs):
+            raise RuntimeError("vector index corrupt")
+
+        def search_with_filter(self, *_args, **_kwargs):
+            raise RuntimeError("vector index corrupt")
+
     docs = [{"path": "a.md", "title": "A", "content": "match", "collection": "c"}]
     pipeline = _test_pipeline(
         bm25=BM25SearchBackend(FakeDocumentRepository(documents=docs)),
-        vector=VectorSearchBackend(FakeEmbeddingService(), FakeVectorRepository()),
+        vector=VectorSearchBackend(FakeEmbeddingService(), _RaisingVectorRepo()),
     )
     result = pipeline.search("match")
     assert result.vec_failed is True

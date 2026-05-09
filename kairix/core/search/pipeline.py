@@ -148,12 +148,18 @@ class SearchPipeline:
             except Exception as e:
                 _logger.warning("pipeline: vector search failed — %s", e)
                 vec_failed = True
+            # An empty result list is a successful no-match, not a failure.
+            # ``vec_failed`` reflects backend failure only — operators consume
+            # this field to triage real outages (e.g. via ``kairix search``'s
+            # ``vec_failed=True`` print, or monitor.py's vec_failed_count).
+            # Conflating empty-and-failed produced false-positive alerts.
 
-            if not vec_results:
-                vec_failed = True
-
-        # 4. Fuse
-        fused = self.fusion.fuse(bm25_results, vec_results)
+        # 4. Fuse — wrap in try/except per the "Never raises" docstring guarantee.
+        try:
+            fused = self.fusion.fuse(bm25_results, vec_results)
+        except Exception as e:
+            _logger.warning("pipeline: fusion failed — %s — falling back to empty fused list", e)
+            fused = []
 
         # 5. Boost chain
         context = {"intent": intent, "query": query, "graph": self.graph}

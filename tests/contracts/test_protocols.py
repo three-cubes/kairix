@@ -793,7 +793,14 @@ class TestVectorSearchBackendAdapter:
         assert results[0]["path"] == "a.md"
 
     @pytest.mark.contract
-    def test_search_returns_empty_when_embedding_fails(self):
+    def test_search_raises_when_embedding_returns_no_vector(self):
+        """An empty embedding from the EmbeddingService is a failure — the
+        backend now propagates instead of silently returning ``[]``, so the
+        pipeline's ``vec_failed`` flag honestly reflects backend health.
+        Previously the silent-empty return masked broken embeddings as
+        successful no-match queries.
+        """
+
         class _FailingEmbedding:
             def embed(self, text: str) -> list[float]:
                 return []
@@ -803,8 +810,8 @@ class TestVectorSearchBackendAdapter:
 
         vector_repo = FakeVectorRepository(results=[{"path": "a.md"}])
         backend = VectorSearchBackend(_FailingEmbedding(), vector_repo)
-        results = backend.search("query")
-        assert results == []
+        with pytest.raises(RuntimeError, match="embedding service returned no vector"):
+            backend.search("query")
 
     @pytest.mark.contract
     def test_search_passes_collections(self):

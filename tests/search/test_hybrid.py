@@ -100,6 +100,7 @@ def _build_test_pipeline(
     intent: QueryIntent = QueryIntent.SEMANTIC,
     bm25_docs: list[dict] | None = None,
     vec_results: list[dict] | None = None,
+    vec_repo: object | None = None,
     graph_available: bool = False,
     config: RetrievalConfig | None = None,
     logger: FakeSearchLogger | None = None,
@@ -107,15 +108,16 @@ def _build_test_pipeline(
     """Build a SearchPipeline with fakes for testing.
 
     Every dependency is wired to a harmless fake. Tests override specific
-    fields via keyword arguments.
+    fields via keyword arguments. ``vec_repo`` lets a test pass a custom
+    VectorRepository (e.g. one that raises) instead of the FakeVectorRepository.
     """
     cfg = config or RetrievalConfig.defaults()
     classifier = FakeClassifier(intent=intent)
     doc_repo = FakeDocumentRepository(documents=bm25_docs or [])
     bm25 = BM25SearchBackend(doc_repo)
     embedding = FakeEmbeddingService()
-    vector_repo = FakeVectorRepository(results=vec_results or [])
-    vector = VectorSearchBackend(embedding, vector_repo)
+    vector_repo = vec_repo if vec_repo is not None else FakeVectorRepository(results=vec_results or [])
+    vector = VectorSearchBackend(embedding, vector_repo)  # type: ignore[arg-type]
     graph = FakeGraphRepository(available=graph_available)
     fusion = RRFFusion(k=cfg.rrf_k)
 
@@ -236,7 +238,7 @@ def test_search_returns_search_result_type() -> None:
 
 @pytest.mark.unit
 def test_search_returns_bm25_results_when_vec_fails() -> None:
-    """Vector search failure -> BM25-only results still returned."""
+    """Vector backend failure -> BM25-only results still returned, vec_failed=True."""
     docs = [
         {
             "path": "/vault/a.md",
@@ -251,16 +253,24 @@ def test_search_returns_bm25_results_when_vec_fails() -> None:
             "collection": "c",
         },
     ]
-    pipeline = _build_test_pipeline(bm25_docs=docs)
+
+    class _RaisingVectorRepo:
+        def search(self, *_args, **_kwargs):
+            raise RuntimeError("vector backend down")
+
+        def search_with_filter(self, *_args, **_kwargs):
+            raise RuntimeError("vector backend down")
+
+    pipeline = _build_test_pipeline(bm25_docs=docs, vec_repo=_RaisingVectorRepo())
     result = pipeline.search("test semantic query about memory systems")
 
     # The exact result count depends on FTS-match shape inside the fake; what
     # the test pins down is that the search returns *something* iterable
-    # without raising even though the vector backend failed. SonarCloud
-    # python:S2178 flagged `len(...) >= 0` as always-true; replaced with an
-    # explicit type/iterability check that captures the real intent.
+    # without raising even though the vector backend failed.
     assert isinstance(result.results, list)
-    assert result.vec_failed is True  # FakeVectorRepository returns []
+    # Genuine backend failure → vec_failed=True (per the new semantics where
+    # vec_failed reflects FAILURE, not empty-result).
+    assert result.vec_failed is True
 
 
 @pytest.mark.unit
@@ -567,12 +577,18 @@ def test_skip_vector_config_produces_no_vec_results() -> None:
 
 
 @pytest.mark.unit
-def test_vector_search_empty_marks_vec_failed() -> None:
-    """Vector search returning empty sets vec_failed=True."""
+def test_vector_search_empty_does_not_mark_vec_failed() -> None:
+    """Vector search returning [] is a successful no-match, not a failure.
+
+    Operator-facing semantics: ``vec_failed`` triggers triage (Azure down,
+    embedding broken). An empty result for a query that just doesn't match
+    anything in the index must NOT trigger vec_failed — see
+    test_pipeline_contracts.py for the full contract.
+    """
     pipeline = _build_test_pipeline()  # FakeVectorRepository returns []
     result = pipeline.search("semantic query about architecture")
 
-    assert result.vec_failed is True
+    assert result.vec_failed is False
     assert result.vec_count == 0
 
 
