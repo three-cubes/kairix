@@ -104,11 +104,25 @@ class RealClassifierAdapter:
 class FakeDocumentRepository:
     """In-memory document store keyed by path.
 
-    Configure with ``documents=`` to populate the substring-search index.
+    Three construction modes (mutually exclusive):
+
+      Default (``documents=...``)
+        ``search_fts`` does a substring match of query against title+content
+        and returns the stored doc dicts.
+
+      Scripted bm25-shaped (``bm25_rows=...``)
+        ``search_fts`` returns the supplied list verbatim, truncated to
+        ``limit``, with optional ``collections`` filter honoured. Used by
+        integration / BDD tests that want exact control over BM25Result-
+        shaped rows fed into the fusion stage.
+
+      Scripted exact (``force_rows=...``)
+        ``search_fts`` returns the supplied list verbatim — used when a
+        contract test needs exact row shapes (e.g. missing keys) without
+        any filtering.
+
     Pass ``raises=Exception(...)`` to make every call raise (covers
     ``never-raises`` contracts in callers).
-    Pass ``force_rows=`` to return a fixed list regardless of query —
-    use when a contract test needs exact row shapes (e.g. missing keys).
     Captures every ``search_fts`` call arg in ``calls`` for assertion.
     """
 
@@ -118,6 +132,7 @@ class FakeDocumentRepository:
         *,
         raises: BaseException | None = None,
         force_rows: list[dict[str, Any]] | None = None,
+        bm25_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         self._docs: dict[str, dict[str, Any]] = {}
         for doc in documents or []:
@@ -125,6 +140,7 @@ class FakeDocumentRepository:
             self._docs[path] = doc
         self._raises = raises
         self._force_rows = force_rows
+        self._bm25_rows: list[dict[str, Any]] | None = list(bm25_rows) if bm25_rows is not None else None
         self.calls: list[tuple[str, list[str] | None, int]] = []
 
     def search_fts(
@@ -138,6 +154,14 @@ class FakeDocumentRepository:
             raise self._raises
         if self._force_rows is not None:
             return list(self._force_rows[:limit])
+        if self._bm25_rows is not None:
+            # Scripted mode: return the configured rows verbatim, truncated
+            # to ``limit``. Optional ``collections`` filter is honoured if
+            # the row carries a ``collection`` field.
+            rows = self._bm25_rows
+            if collections:
+                rows = [r for r in rows if r.get("collection") in collections]
+            return list(rows[:limit])
         results = []
         query_lower = query.lower()
         for doc in self._docs.values():
