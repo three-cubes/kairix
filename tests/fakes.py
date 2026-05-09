@@ -235,10 +235,20 @@ class FakeVectorRepository:
 
 
 class FakeEmbeddingService:
-    """Deterministic embedding service that returns a fixed vector."""
+    """Deterministic embedding service that returns a fixed vector.
+
+    When constructed with ``vector=[]`` (or any empty iterable), every call to
+    ``embed`` returns ``[]`` — useful for exercising backend short-circuit
+    paths that treat empty embeddings as a soft failure.
+    """
 
     def __init__(self, vector: list[float] | None = None, dim: int = 1536) -> None:
-        self._vector = vector or [0.01] * dim
+        # Treat an explicitly-passed empty list as "embed always returns []".
+        # Default (None) -> a normal fixed dim-vector.
+        if vector is None:
+            self._vector: list[float] = [0.01] * dim
+        else:
+            self._vector = list(vector)
 
     def embed(self, text: str) -> list[float]:
         return list(self._vector)
