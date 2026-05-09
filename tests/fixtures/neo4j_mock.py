@@ -48,6 +48,9 @@ class FakeNeo4jClient:
 
     def __init__(self, entities: list[dict] | None = None) -> None:
         self._entities: list[dict] = entities if entities is not None else list(_DEFAULT_ENTITIES)
+        # upsert_node call recorder + return-value knob.
+        self.upsert_node_calls: list[dict] = []
+        self.upsert_node_returns: bool = True
 
     def cypher(self, query: str, params: dict | None = None) -> list[dict]:
         """Pattern-match query string and return appropriate fake results."""
@@ -97,3 +100,8 @@ class FakeNeo4jClient:
     def upsert_edge(self, **kwargs) -> None:
         """Stub — no-op in fake."""
         return None
+
+    def upsert_node(self, *args, **kwargs) -> bool:
+        """Stub — record the call and return ``self.upsert_node_returns``."""
+        self.upsert_node_calls.append({"args": args, "kwargs": kwargs})
+        return self.upsert_node_returns

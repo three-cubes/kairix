@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import sqlite3
-from unittest.mock import MagicMock
 
 import pytest
 
+from tests.fixtures.neo4j_mock import FakeNeo4jClient
+
 pytestmark = pytest.mark.unit
+
+
+class _UnavailableNeo4jClient(FakeNeo4jClient):
+    """FakeNeo4jClient with available=False — exercises the no-Neo4j fallback."""
+
+    available: bool = False
 
 
 def _make_test_db() -> sqlite3.Connection:
@@ -79,9 +86,8 @@ class TestSeedGraph:
     def test_upserts_confirmed_candidates(self) -> None:
         from kairix.knowledge.entities.seed import EntityCandidate, seed_graph
 
-        mock_client = MagicMock()
-        mock_client.available = True
-        mock_client.upsert_node.return_value = True
+        client = FakeNeo4jClient()
+        client.upsert_node_returns = True
 
         candidates = [
             EntityCandidate(
@@ -97,16 +103,15 @@ class TestSeedGraph:
                 source_docs=["alice-chen.md"],
             ),
         ]
-        count = seed_graph(mock_client, candidates)
+        count = seed_graph(client, candidates)
         assert count == 2
-        assert mock_client.upsert_node.call_count == 2
+        assert len(client.upsert_node_calls) == 2
 
     @pytest.mark.unit
     def test_returns_zero_when_neo4j_unavailable(self) -> None:
         from kairix.knowledge.entities.seed import EntityCandidate, seed_graph
 
-        mock_client = MagicMock()
-        mock_client.available = False
+        client = _UnavailableNeo4jClient()
 
         candidates = [
             EntityCandidate(
@@ -116,16 +121,15 @@ class TestSeedGraph:
                 source_docs=["t.md"],
             ),
         ]
-        count = seed_graph(mock_client, candidates)
+        count = seed_graph(client, candidates)
         assert count == 0
 
     @pytest.mark.unit
     def test_handles_upsert_failure_gracefully(self) -> None:
         from kairix.knowledge.entities.seed import EntityCandidate, seed_graph
 
-        mock_client = MagicMock()
-        mock_client.available = True
-        mock_client.upsert_node.return_value = False  # upsert fails
+        client = FakeNeo4jClient()
+        client.upsert_node_returns = False  # every upsert reports failure
 
         candidates = [
             EntityCandidate(
@@ -135,5 +139,5 @@ class TestSeedGraph:
                 source_docs=["f.md"],
             ),
         ]
-        count = seed_graph(mock_client, candidates)
+        count = seed_graph(client, candidates)
         assert count == 0  # failed upserts don't count
