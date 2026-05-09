@@ -486,6 +486,30 @@ def tool_timeline(
                             "score": getattr(inner, "boosted_score", getattr(inner, "score", 0.0)),
                         }
                     )
+                # Diagnostic for #163: when results are non-empty but every row
+                # has an empty path, the upstream pipeline is producing a
+                # malformed result shape. Log enough state to triage the next
+                # occurrence without reproducing live (the CLI is unaffected
+                # because it uses a different code path entirely —
+                # query_temporal_chunks against the structured temporal index).
+                if results_list and all(not r["path"] for r in results_list):
+                    logger.warning(
+                        "mcp.timeline: %d empty-path results returned for query=%r "
+                        "(rewritten=%r, agent=%r, scope=%r). Pipeline diagnostics: "
+                        "bm25_count=%s vec_count=%s fused_count=%s collections=%s "
+                        "vec_failed=%s error=%r — see #163.",
+                        len(results_list),
+                        query[:80],
+                        rewritten[:80] if rewritten != query else "<same>",
+                        agent,
+                        scope.value if hasattr(scope, "value") else str(scope),
+                        getattr(sr, "bm25_count", "?"),
+                        getattr(sr, "vec_count", "?"),
+                        getattr(sr, "fused_count", "?"),
+                        getattr(sr, "collections", "?"),
+                        getattr(sr, "vec_failed", "?"),
+                        getattr(sr, "error", "?"),
+                    )
             except Exception:
                 logger.debug("timeline fallthrough search failed", exc_info=True)
 
