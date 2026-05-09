@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -56,24 +56,16 @@ _VALID_RANGES: dict[str, tuple[float, float]] = {
 }
 
 
-def _resolve_config_path(env: Mapping[str, str] | None = None, cwd: Path | None = None) -> Path | None:
-    """Find the config file path from env var or working directory.
-
-    ``env`` and ``cwd`` are DI seams; tests pass an explicit mapping +
-    working directory rather than mutating the process state.
-    """
-    if env is None:
-        env = os.environ
-    if cwd is None:
-        cwd = Path.cwd()
-    env_path = env.get("KAIRIX_CONFIG_PATH")
+def _resolve_config_path() -> Path | None:
+    """Find the config file path from env var or working directory."""
+    env_path = os.environ.get("KAIRIX_CONFIG_PATH")
     if env_path:
         p = Path(env_path)
         if p.is_file():
             return p
         logger.warning("config_loader: KAIRIX_CONFIG_PATH=%r not found — using defaults", env_path)
         return None
-    cwd_path = cwd / _DEFAULT_CONFIG_FILENAME
+    cwd_path = Path.cwd() / _DEFAULT_CONFIG_FILENAME
     if cwd_path.is_file():
         return cwd_path
     return None
@@ -135,22 +127,16 @@ def _load_cached(config_path: Path | None) -> RetrievalConfig:
         return RetrievalConfig.defaults()
 
 
-def load_config(
-    env: Mapping[str, str] | None = None,
-    cwd: Path | None = None,
-) -> RetrievalConfig:
+def load_config() -> RetrievalConfig:
     """
     Load RetrievalConfig from YAML file or return defaults.
 
     Call this once at startup. Result is cached per process.
 
-    ``env`` and ``cwd`` are DI seams; production callers leave them
-    ``None`` and resolution falls through to ``os.environ``/``Path.cwd()``.
-
     Raises:
         ConfigValidationError: if the config file contains out-of-range values.
     """
-    path = _resolve_config_path(env=env, cwd=cwd)
+    path = _resolve_config_path()
     if path is not None:
         logger.info("config_loader: loading config from %s", path)
     return _load_cached(path)
@@ -315,16 +301,9 @@ def parse_collections(data: dict) -> CollectionsConfig | None:
     )
 
 
-def load_collections(
-    env: Mapping[str, str] | None = None,
-    cwd: Path | None = None,
-) -> CollectionsConfig | None:
-    """Load collections config from YAML. Returns None if not configured.
-
-    ``env`` and ``cwd`` are DI seams; production callers leave them ``None``
-    and resolution falls through to ``os.environ``/``Path.cwd()``.
-    """
-    path = _resolve_config_path(env=env, cwd=cwd)
+def load_collections() -> CollectionsConfig | None:
+    """Load collections config from YAML. Returns None if not configured."""
+    path = _resolve_config_path()
     if path is None:
         return None
     try:

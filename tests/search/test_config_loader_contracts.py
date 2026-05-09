@@ -4,12 +4,13 @@ Each test asserts a single documented claim from a public docstring or the
 boundary behaviour described in the module-level header. All tests drive the
 module through its public surface (``load_config``, ``load_collections``,
 ``parse_collections``, ``resolve_retrieval_config``) — no private helpers
-imported, no inline fakes.
+imported, no monkeypatching of kairix code, no inline fakes.
 
-Tests pass an explicit ``env={...}`` mapping (and ``cwd=tmp_path``) through
-``load_config(env=...)`` / ``load_collections(env=...)`` to drive the
-documented env-var resolution surface without mutating ``os.environ`` /
-``os.chdir``. Cache-clearing is fixture hygiene.
+Tests use ``monkeypatch.setenv`` / ``monkeypatch.chdir`` to control the
+documented env-var-driven resolution surface, and clear the module's
+process-wide ``lru_cache`` between probes so each test sees a fresh
+resolution. Cache-clearing is fixture hygiene; it is not a behavioural
+substitution of kairix code.
 """
 
 from __future__ import annotations
@@ -32,14 +33,18 @@ from kairix.core.search.config_loader import (
 
 
 @pytest.fixture(autouse=True)
-def _isolated_cache() -> None:
-    """Clear the module's process-wide ``lru_cache(maxsize=1)`` before and
-    after each probe so cached configs do not leak between tests.
+def _isolated_cache_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each contract probe gets a fresh load-cache and a clean cwd.
 
-    Tests pass explicit ``env=`` / ``cwd=`` kwargs to drive resolution rather
-    than mutating ``os.environ`` / ``os.chdir``.
+    The module caches the resolved config per process via lru_cache(maxsize=1).
+    For probes to be independent we clear the cache before and after every
+    test, and chdir into an empty tmp_path so the cwd-fallback never picks up
+    a stray ``kairix.config.yaml``. KAIRIX_CONFIG_PATH is unset so each test
+    must opt into env-var-driven behaviour explicitly.
     """
     config_loader._load_cached.cache_clear()
+    monkeypatch.delenv("KAIRIX_CONFIG_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
     yield
     config_loader._load_cached.cache_clear()
 
@@ -62,19 +67,19 @@ class TestLoadConfigContract:
     falls back silently on missing-file and parse-failure cases.
     """
 
-    def test_returns_retrieval_config_instance(self, tmp_path: Path) -> None:
+    def test_returns_retrieval_config_instance(self) -> None:
         """Claim: ``load_config()`` returns a ``RetrievalConfig``."""
-        result = load_config(env={}, cwd=tmp_path)
+        result = load_config()
         assert isinstance(result, RetrievalConfig)
 
-    def test_no_file_returns_defaults_object(self, tmp_path: Path) -> None:
+    def test_no_file_returns_defaults_object(self) -> None:
         """Claim: 'Missing file silently falls back to defaults.'
 
         With no env var and no cwd file, the result must equal
         ``RetrievalConfig.defaults()`` field-for-field — not just be a
         RetrievalConfig.
         """
-        result = load_config(env={}, cwd=tmp_path)
+        result = load_config()
         defaults = RetrievalConfig.defaults()
         assert result == defaults
 
@@ -89,8 +94,8 @@ class TestLoadConfigContract:
               fusion_strategy: bm25_primary
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
-        result = load_config(env=_env)
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
+        result = load_config()
         assert result.fusion_strategy == "bm25_primary"
 
     def test_env_var_wins_over_cwd_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,11 +119,11 @@ class TestLoadConfigContract:
               rrf_k: 11
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(env_file)}
-        result = load_config(env=_env)
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(env_file))
+        result = load_config()
         assert result.rrf_k == 11
 
-    def test_cwd_file_is_picked_up_when_env_unset(self, tmp_path: Path) -> None:
+    def test_cwd_file_is_picked_up_when_env_unset(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Claim: Resolution order step 2 — cwd ``kairix.config.yaml`` is
         loaded when KAIRIX_CONFIG_PATH is unset.
         """
@@ -129,7 +134,8 @@ class TestLoadConfigContract:
               rrf_k: 77
             """,
         )
-        result = load_config(env={}, cwd=tmp_path)
+        monkeypatch.delenv("KAIRIX_CONFIG_PATH", raising=False)
+        result = load_config()
         assert result.rrf_k == 77
 
     def test_partial_config_fills_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,9 +152,9 @@ class TestLoadConfigContract:
                   enabled: false
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
         defaults = RetrievalConfig.defaults()
-        result = load_config(env=_env)
+        result = load_config()
         # Only entity.enabled differs:
         assert result.entity.enabled is False
         # Everything else must equal defaults:
@@ -164,8 +170,8 @@ class TestLoadConfigContract:
         """Claim: 'YAML parse failure logs a warning and falls back to defaults.'"""
         cfg_file = tmp_path / "malformed.yaml"
         cfg_file.write_text("retrieval: { broken: ::: not yaml [")
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
-        result = load_config(env=_env)
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
+        result = load_config()
         assert result == RetrievalConfig.defaults()
 
     def test_malformed_yaml_emits_warning_with_path(
@@ -180,9 +186,9 @@ class TestLoadConfigContract:
         """
         cfg_file = tmp_path / "malformed.yaml"
         cfg_file.write_text("retrieval: { broken: ::: not yaml [")
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
         with caplog.at_level(logging.WARNING, logger="kairix.core.search.config_loader"):
-            load_config(env=_env)
+            load_config()
         warning_messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
         assert any(str(cfg_file) in m for m in warning_messages), (
             f"warning must include the offending path; got: {warning_messages!r}"
@@ -198,9 +204,9 @@ class TestLoadConfigContract:
         AND emits an operator-actionable warning naming the missing path.
         """
         missing = tmp_path / "does-not-exist.yaml"
-        _env = {"KAIRIX_CONFIG_PATH": str(missing)}
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(missing))
         with caplog.at_level(logging.WARNING, logger="kairix.core.search.config_loader"):
-            result = load_config(env=_env)
+            result = load_config()
         assert result == RetrievalConfig.defaults()
         warning_messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
         # The warning must specifically flag KAIRIX_CONFIG_PATH (operator-actionable —
@@ -222,9 +228,9 @@ class TestLoadConfigContract:
                   factor: 999.0
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
         with pytest.raises(ConfigValidationError):
-            load_config(env=_env)
+            load_config()
 
     def test_validation_error_message_names_field(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Claim: validation error must be operator-actionable — the message
@@ -239,9 +245,9 @@ class TestLoadConfigContract:
                   factor: 999.0
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
         with pytest.raises(ConfigValidationError, match=r"entity\.factor"):
-            load_config(env=_env)
+            load_config()
 
     def test_result_is_cached_per_process(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Claim: 'Result is cached per process (lru_cache on resolved path).'
@@ -257,9 +263,9 @@ class TestLoadConfigContract:
               rrf_k: 42
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
-        first = load_config(env=_env)
-        second = load_config(env=_env)
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
+        first = load_config()
+        second = load_config()
         assert first is second
 
 
@@ -400,9 +406,9 @@ class TestLoadCollectionsContract:
     file or no collections section is configured.
     """
 
-    def test_returns_none_when_no_file(self, tmp_path: Path) -> None:
+    def test_returns_none_when_no_file(self) -> None:
         """Claim: 'Returns None if not configured.' — no config file at all."""
-        assert load_collections(env={}, cwd=tmp_path) is None
+        assert load_collections() is None
 
     def test_returns_none_when_file_has_no_collections(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Claim: even with a valid config file, the absence of a
@@ -415,8 +421,8 @@ class TestLoadCollectionsContract:
               fusion_strategy: rrf
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
-        assert load_collections(env=_env) is None
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
+        assert load_collections() is None
 
     def test_loads_shared_collections_from_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Claim: when collections are configured in the YAML resolved by
@@ -431,8 +437,8 @@ class TestLoadCollectionsContract:
                   path: vault/alpha
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
-        result = load_collections(env=_env)
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
+        result = load_collections()
         assert result is not None
         assert len(result.shared) == 1
         assert result.shared[0].name == "alpha"
@@ -501,7 +507,7 @@ class TestResolveRetrievalConfigContract:
                   path: known
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
         sentinel = RetrievalConfig.defaults()
         result = resolve_retrieval_config(collection="not-present", config_fn=lambda: sentinel)
         assert result is sentinel
@@ -525,7 +531,7 @@ class TestResolveRetrievalConfigContract:
                     vec_limit: 30
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
         # Provide a global config whose fusion_strategy / vec_limit clearly
         # differ from the override so the merge is observable.
         global_cfg = RetrievalConfig(
@@ -533,18 +539,7 @@ class TestResolveRetrievalConfigContract:
             vec_limit=7,
             bm25_limit=21,
         )
-
-        def _overrides_fn() -> dict[str, dict]:
-            cfg = load_collections(env=_env)
-            if not cfg:
-                return {}
-            return {c.name: c.retrieval_overrides for c in cfg.shared if c.retrieval_overrides}
-
-        result = resolve_retrieval_config(
-            collection="my-docs",
-            config_fn=lambda: global_cfg,
-            overrides_fn=_overrides_fn,
-        )
+        result = resolve_retrieval_config(collection="my-docs", config_fn=lambda: global_cfg)
         assert result.fusion_strategy == "rrf"  # from override
         assert result.vec_limit == 30  # from override
         assert result.bm25_limit == 21  # preserved from global
@@ -565,7 +560,7 @@ class TestResolveRetrievalConfigContract:
                     vec_limit: 30
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
         explicit = RetrievalConfig.minimal()
         result = resolve_retrieval_config(collection="my-docs", explicit_config=explicit)
         assert result is explicit
@@ -600,9 +595,9 @@ class TestConfigValidationErrorContract:
                 candidate_limit: 101
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
         with pytest.raises(ConfigValidationError, match=r"rerank\.candidate_limit"):
-            load_config(env=_env)
+            load_config()
 
     def test_temporal_recency_window_zero_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Claim: date_path_recency_window_days lower bound is 1.0. A zero
@@ -618,9 +613,9 @@ class TestConfigValidationErrorContract:
                     recency_window_days: 0
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
         with pytest.raises(ConfigValidationError, match=r"date_path_recency_window_days"):
-            load_config(env=_env)
+            load_config()
 
     def test_multiple_validation_errors_listed_together(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Claim: ``_validate_config`` collects ``errors: list[str]`` and
@@ -636,9 +631,9 @@ class TestConfigValidationErrorContract:
                   cap: 0.1
             """,
         )
-        _env = {"KAIRIX_CONFIG_PATH": str(cfg_file)}
+        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
         with pytest.raises(ConfigValidationError) as exc:
-            load_config(env=_env)
+            load_config()
         message = str(exc.value)
         assert "entity.factor" in message
         assert "entity.cap" in message
