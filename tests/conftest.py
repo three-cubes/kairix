@@ -59,6 +59,7 @@ pytest_plugins = [
     "tests.bdd.steps.store_cli_steps",
     "tests.bdd.steps.brief_cli_steps",
     "tests.bdd.steps.setup_cli_steps",
+    "tests.bdd.steps.wikilinks_cli_steps",
 ]
 
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
