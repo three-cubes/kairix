@@ -127,7 +127,10 @@ def _cmd_health(args: argparse.Namespace) -> None:
     if args.json_out:
         import dataclasses
 
-        print(json.dumps(dataclasses.asdict(report), indent=2))
+        payload = dataclasses.asdict(report)
+        payload["ok"] = report.ok
+        payload["total_entities"] = report.total_entities
+        print(json.dumps(payload, indent=2))
     else:
         from kairix.knowledge.store.health import format_health_text
 
