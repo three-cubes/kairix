@@ -5,7 +5,8 @@ Covers:
   - load_suite(): valid YAML loads correctly
   - validate_suite(): missing gold path returns error string
   - validate_suite(): duplicate gold paths returns error string
-  - _exact_match(): case-insensitive substring match
+  - exact-method scoring driven through ``run_benchmark`` (case-insensitive,
+    suffix shortening, top-5 cutoff, empty gold/paths)
   - run_benchmark(): DI retrieve_fn, correct weighted total calculation
 """
 
@@ -19,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from kairix.quality.benchmark.runner import BenchmarkResult, _exact_match, run_benchmark
+from kairix.quality.benchmark.runner import BenchmarkResult, run_benchmark
 from kairix.quality.benchmark.suite import (
     BenchmarkCase,
     BenchmarkSuite,
@@ -373,66 +374,106 @@ def test_validate_suite_non_recall_cases_not_validated(
 
 
 # ---------------------------------------------------------------------------
-# _exact_match() tests
+# Exact-method scoring driven through run_benchmark
+#
+# Each test builds a single-case suite with score_method="exact" and a fixed
+# retrieve_fn output, then asserts on result.cases[0]["score"]. This drives
+# the same code path that production runs hit, instead of importing the
+# scoring helper directly.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_exact_match_returns_1_when_gold_in_top5() -> None:
-    """Returns 1.0 when gold path appears in top-5 results (case-insensitive)."""
-    paths = [
-        "vault/01-projects/arize/research-report.md",
-        "vault/02-areas/foo/bar.md",
-        "vault/04-knowledge/rules.md",
-    ]
-    gold = "01-Projects/Arize/Research-Report.md"
-    assert _exact_match(paths, gold) == pytest.approx(1.0)
+def _exact_case(case_id: str, gold_path: str) -> BenchmarkCase:
+    return BenchmarkCase(
+        id=case_id,
+        category="recall",
+        query="q",
+        gold_path=gold_path,
+        score_method="exact",
+    )
+
+
+def _run_single_exact_case(gold_path: str, retrieved_paths: list[str]) -> float:
+    """Run a one-case exact-method benchmark and return the raw score."""
+    suite = BenchmarkSuite(
+        meta={"agent": "test", "collections": ["vault"]},
+        cases=[_exact_case("R01", gold_path)],
+    )
+    result = run_benchmark(
+        suite,
+        system="hybrid",
+        agent="test",
+        retrieve_fn=_make_retrieve_fn([_mock_retrieve_result(retrieved_paths)]),
+    )
+    return float(result.cases[0]["score"])
 
 
 @pytest.mark.unit
-def test_exact_match_case_insensitive() -> None:
-    """Match is case-insensitive."""
-    paths = ["vault/PATH/TO/DOC.MD"]
-    gold = "path/to/doc.md"
-    assert _exact_match(paths, gold) == pytest.approx(1.0)
+def test_exact_score_is_1_when_gold_path_substring_appears_in_top5_results() -> None:
+    """Gold appears as case-insensitive substring of a top-5 result → score 1.0."""
+    score = _run_single_exact_case(
+        gold_path="01-Projects/Arize/Research-Report.md",
+        retrieved_paths=[
+            "vault/01-projects/arize/research-report.md",
+            "vault/02-areas/foo/bar.md",
+            "vault/04-knowledge/rules.md",
+        ],
+    )
+    assert score == pytest.approx(1.0)
 
 
 @pytest.mark.unit
-def test_exact_match_returns_0_when_gold_not_in_paths() -> None:
-    """Returns 0.0 when gold path is not in the retrieved paths."""
-    paths = [
-        "vault/01-projects/something-else/doc.md",
-        "vault/02-areas/foo/bar.md",
-    ]
-    gold = "01-projects/totally-different/report.md"
-    assert _exact_match(paths, gold) == pytest.approx(0.0)
+def test_exact_score_match_is_case_insensitive() -> None:
+    """An all-uppercase result still matches a lower-case gold."""
+    score = _run_single_exact_case(
+        gold_path="path/to/doc.md",
+        retrieved_paths=["vault/PATH/TO/DOC.MD"],
+    )
+    assert score == pytest.approx(1.0)
 
 
 @pytest.mark.unit
-def test_exact_match_only_checks_top5() -> None:
-    """Only checks the top 5 results, not beyond."""
-    paths = [
-        "vault/doc1.md",
-        "vault/doc2.md",
-        "vault/doc3.md",
-        "vault/doc4.md",
-        "vault/doc5.md",
-        "vault/unique-report-xyz-9999.md",  # position 6 — should NOT match
-    ]
-    gold = "unique-report-xyz-9999.md"
-    assert _exact_match(paths, gold) == pytest.approx(0.0)
+def test_exact_score_is_0_when_gold_path_does_not_appear() -> None:
+    """No retrieved path contains the gold path → score 0.0."""
+    score = _run_single_exact_case(
+        gold_path="01-projects/totally-different/report.md",
+        retrieved_paths=[
+            "vault/01-projects/something-else/doc.md",
+            "vault/02-areas/foo/bar.md",
+        ],
+    )
+    assert score == pytest.approx(0.0)
 
 
 @pytest.mark.unit
-def test_exact_match_empty_paths_returns_0() -> None:
-    """Empty paths list returns 0.0."""
-    assert _exact_match([], "some/path.md") == pytest.approx(0.0)
+def test_exact_score_only_considers_top5_results() -> None:
+    """A match at position 6 does NOT contribute — exact method has a top-5 cutoff."""
+    score = _run_single_exact_case(
+        gold_path="unique-report-xyz-9999.md",
+        retrieved_paths=[
+            "vault/doc1.md",
+            "vault/doc2.md",
+            "vault/doc3.md",
+            "vault/doc4.md",
+            "vault/doc5.md",
+            "vault/unique-report-xyz-9999.md",  # position 6 — outside the top-5 window
+        ],
+    )
+    assert score == pytest.approx(0.0)
 
 
 @pytest.mark.unit
-def test_exact_match_empty_gold_returns_0() -> None:
-    """Empty gold path returns 0.0."""
-    assert _exact_match(["some/path.md"], "") == pytest.approx(0.0)
+def test_exact_score_is_0_when_retriever_returns_empty_paths() -> None:
+    """Empty retrieved paths → score 0.0."""
+    score = _run_single_exact_case(gold_path="some/path.md", retrieved_paths=[])
+    assert score == pytest.approx(0.0)
+
+
+@pytest.mark.unit
+def test_exact_score_is_0_when_case_gold_path_is_empty_string() -> None:
+    """A misconfigured case with gold_path="" still scores 0 (never raises)."""
+    score = _run_single_exact_case(gold_path="", retrieved_paths=["vault/some/path.md"])
+    assert score == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1082,20 +1123,37 @@ def test_load_suite_coerces_date_object_in_gold_paths_to_string(tmp_path: Path) 
 
 
 @pytest.mark.unit
-def test_gold_path_in_index_matches_via_progressive_suffix_shortening() -> None:
-    """``_gold_path_in_index`` matches via the suffix-shortening loop (line 389)."""
-    from kairix.quality.benchmark.suite import _gold_path_in_index
+def test_validate_suite_matches_gold_paths_via_progressive_suffix_shortening() -> None:
+    """validate_suite reports an error iff the gold path's filename has no
+    matching suffix in the documents table.
 
+    Drives the suffix-shortening loop in suite._gold_path_in_index through
+    validate_suite. Four single-case suites — three with shortenable matches
+    against ``engineering/patterns/ralph-loop.md`` (full / leading-prefix /
+    filename-only) all validate clean; the fourth, with no suffix match,
+    surfaces as one error.
+    """
     db = sqlite3.connect(":memory:")
     db.execute("CREATE TABLE documents (path TEXT)")
     db.execute("INSERT INTO documents VALUES ('engineering/patterns/ralph-loop.md')")
     db.commit()
 
-    # Full match works (covered by exact-suffix branch).
-    assert _gold_path_in_index(db, "engineering/patterns/ralph-loop.md") is True
-    # Suffix-shortened match (drops leading "alt-prefix/") via the loop.
-    assert _gold_path_in_index(db, "alt-prefix/engineering/patterns/ralph-loop.md") is True
-    # Filename-only match works as the loop's terminal step.
-    assert _gold_path_in_index(db, "different/dir/ralph-loop.md") is True
-    # No match anywhere returns False (the trailing ``return False``).
-    assert _gold_path_in_index(db, "completely/unrelated.md") is False
+    def _suite_with(gold: str) -> BenchmarkSuite:
+        return BenchmarkSuite(
+            meta={"agent": "test", "collections": ["vault"]},
+            cases=[_exact_case("R01", gold)],
+        )
+
+    # Full match: gold == indexed path → no error.
+    assert validate_suite(_suite_with("engineering/patterns/ralph-loop.md"), db) == []
+    # Leading prefix on the gold path → suffix shortening matches → no error.
+    assert validate_suite(_suite_with("alt-prefix/engineering/patterns/ralph-loop.md"), db) == []
+    # Different middle directory but same filename → final loop step matches → no error.
+    assert validate_suite(_suite_with("different/dir/ralph-loop.md"), db) == []
+
+    # Completely unrelated filename → no suffix matches → exactly one error string,
+    # naming the case and the gold path.
+    errors = validate_suite(_suite_with("completely/unrelated.md"), db)
+    assert len(errors) == 1
+    assert "R01" in errors[0]
+    assert "completely/unrelated.md" in errors[0]
