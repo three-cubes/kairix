@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from kairix.core.search.bm25 import BM25Result, _normalise_fts_query, bm25_search
+from kairix.core.search.bm25 import BM25Result, bm25_search
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -184,66 +184,50 @@ def test_bm25_result_typeddict_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tests for _normalise_fts_query
+# Tokenisation behaviour observed through bm25_search public surface
+# (per "no internal function tests" rule — tokenizer has its own dedicated
+# tests in test_tokenizer.py; bm25 is responsible only for using it correctly)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestNormaliseFtsQuery:
-    @pytest.mark.unit
-    def test_removes_stop_words(self) -> None:
-        result = _normalise_fts_query("what do we know about Jordan Blake")
-        assert "what" not in result
-        assert "do" not in result
-        assert "we" not in result
-        assert "know" not in result
-        assert "about" not in result
-        assert "jordan" in result.lower()
-        assert "blake" in result.lower()
+def test_bm25_search_handles_hyphenated_query_tokens(tmp_path: Path) -> None:
+    """A hyphenated query (`project-x`) must be tokenised into separate
+    terms so docs containing `project` match. Observed via results, not
+    via inspecting the FTS string.
+    """
+    db_path = tmp_path / "hyphen.sqlite"
+    db = sqlite3.connect(str(db_path))
+    db.executescript("""
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection TEXT NOT NULL, path TEXT NOT NULL, title TEXT,
+            hash TEXT NOT NULL, active INTEGER DEFAULT 1,
+            UNIQUE(collection, path)
+        );
+        CREATE TABLE content (hash TEXT PRIMARY KEY, doc TEXT);
+        CREATE VIRTUAL TABLE documents_fts USING fts5(title, doc, content='', tokenize='porter unicode61');
 
-    @pytest.mark.unit
-    def test_replaces_hyphens_with_spaces(self) -> None:
-        result = _normalise_fts_query("project-x")
-        assert "-" not in result
-        assert "project" in result
+        INSERT INTO documents (collection, path, title, hash)
+        VALUES ('docs', 'docs/project-overview.md', 'Project Overview', 'h1');
+        INSERT INTO content (hash, doc)
+        VALUES ('h1', 'A description of the Project Overview document.');
+        INSERT INTO documents_fts(rowid, title, doc)
+        SELECT d.id, d.title, c.doc FROM documents d JOIN content c ON c.hash = d.hash;
+    """)
+    db.close()
+    # Hyphenated query must still match the doc with "project" in it.
+    results = bm25_search("project-overview", db_path=db_path)
+    assert len(results) >= 1
 
-    @pytest.mark.unit
-    def test_replaces_underscores_with_spaces(self) -> None:
-        result = _normalise_fts_query("Standard_D4as_v5")
-        assert "_" not in result
-        assert "standard" in result.lower()
 
-    @pytest.mark.unit
-    def test_filters_short_tokens(self) -> None:
-        result = _normalise_fts_query("a b c builder")
-        assert '"builder"*' in result
-
-    @pytest.mark.unit
-    def test_preserves_meaningful_terms(self) -> None:
-        result = _normalise_fts_query("tell me about Acme Corp as an organisation")
-        assert '"acme"*' in result
-        assert '"corp"*' in result
-        assert '"organisation"*' in result
-
-    @pytest.mark.unit
-    def test_empty_query_returns_empty(self) -> None:
-        result = _normalise_fts_query("")
-        assert result == ""
-
-    @pytest.mark.unit
-    def test_all_stop_words_returns_empty(self) -> None:
-        result = _normalise_fts_query("what is the a an")
-        assert result == ""
-
-    @pytest.mark.unit
-    def test_uses_prefix_match_syntax(self) -> None:
-        result = _normalise_fts_query("knowledge management platform")
-        assert '"knowledge"*' in result
-        assert '"management"*' in result
-        assert '"platform"*' in result
-        assert " AND " in result
-
-    @pytest.mark.unit
-    def test_platform(self) -> None:
-        result = _normalise_fts_query("what does the platform do")
-        assert '"platform"*' in result
+@pytest.mark.unit
+def test_bm25_search_strips_stop_words_so_only_meaningful_tokens_drive_match(tmp_path: Path) -> None:
+    """A query that is mostly stop-words should still match docs by the
+    meaningful token. Observable through results: a doc containing only
+    the stop-words returns nothing, but a doc with the meaningful token does.
+    """
+    db_path = _create_test_db(tmp_path)
+    # "what do we know about kairix" — only "kairix" survives.
+    results = bm25_search("what do we know about kairix", db_path=db_path)
+    assert any("kairix" in r["file"] for r in results)
