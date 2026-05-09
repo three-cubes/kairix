@@ -589,6 +589,52 @@ def tool_research(
         }
 
 
+def _resolve_guide_path(guide_path: Path | None) -> Path:
+    """Resolve the usage-guide markdown file path. Production fallback chain:
+    relative to this module → relative to the installed kairix package.
+    """
+    if guide_path is not None:
+        return guide_path
+    candidate = Path(__file__).parent.parent.parent / "docs" / "agent-usage-guide.md"
+    if candidate.exists():
+        return candidate
+    import kairix as _kairix
+
+    return Path(_kairix.__file__).parent.parent / "docs" / "agent-usage-guide.md"
+
+
+def _extract_topic_sections(full_text: str, topic_lower: str) -> str:
+    """Return the concatenated markdown sections whose heading mentions the topic.
+
+    Sections are demarcated by ``##`` / ``###`` headings. Falls back to a
+    keyword search across all lines when no heading matches.
+    """
+    lines = full_text.splitlines()
+    sections: list[str] = []
+    current: list[str] = []
+    in_section = False
+
+    for line in lines:
+        is_heading = line.startswith("## ") or line.startswith("### ")
+        if is_heading:
+            if in_section and current:
+                sections.append("\n".join(current))
+                current = []
+            in_section = topic_lower in line.lower()
+            if in_section:
+                current = [line]
+        elif in_section:
+            current.append(line)
+
+    if in_section and current:
+        sections.append("\n".join(current))
+
+    if sections:
+        return "\n\n".join(sections)
+    matching_lines = [ln for ln in lines if topic_lower in ln.lower()]
+    return "\n".join(matching_lines[:30]) if matching_lines else full_text[:2000]
+
+
 def tool_usage_guide(topic: str = "", *, guide_path: Path | None = None) -> dict[str, Any]:
     """
     Return the kairix agent usage guide, or a section of it filtered by topic.
@@ -608,58 +654,19 @@ def tool_usage_guide(topic: str = "", *, guide_path: Path | None = None) -> dict
         dict with keys: topic, content (markdown string), error.
     """
     try:
-        if guide_path is None:
-            # Production-default lookup: try relative to this file, then to the
-            # kairix package root.
-            guide_path = Path(__file__).parent.parent.parent / "docs" / "agent-usage-guide.md"
-            if not guide_path.exists():
-                import kairix as _kairix
-
-                guide_path = Path(_kairix.__file__).parent.parent / "docs" / "agent-usage-guide.md"
-
-        if not guide_path.exists():
+        resolved_path = _resolve_guide_path(guide_path)
+        if not resolved_path.exists():
             return {
                 "topic": topic,
                 "content": "",
                 "error": "Usage guide not found. Run: kairix onboard guide --document-root <path>",
             }
 
-        full_text = guide_path.read_text(encoding="utf-8")
-
+        full_text = resolved_path.read_text(encoding="utf-8")
         if not topic:
             return {"topic": "", "content": full_text, "error": ""}
 
-        # Filter to sections matching the topic (heading-level search)
-        topic_lower = topic.lower()
-        lines = full_text.splitlines()
-        sections: list[str] = []
-        in_section = False
-        current: list[str] = []
-
-        for line in lines:
-            is_heading = line.startswith("## ") or line.startswith("### ")
-            if is_heading:
-                if in_section and current:
-                    sections.append("\n".join(current))
-                    current = []
-                if topic_lower in line.lower():
-                    in_section = True
-                    current = [line]
-                else:
-                    in_section = False
-            elif in_section:
-                current.append(line)
-
-        if in_section and current:
-            sections.append("\n".join(current))
-
-        if not sections:
-            # Fallback: search for topic keyword in full text
-            matching_lines = [ln for ln in lines if topic_lower in ln.lower()]
-            content = "\n".join(matching_lines[:30]) if matching_lines else full_text[:2000]
-        else:
-            content = "\n\n".join(sections)
-
+        content = _extract_topic_sections(full_text, topic.lower())
         return {"topic": topic, "content": content, "error": ""}
 
     except Exception as exc:

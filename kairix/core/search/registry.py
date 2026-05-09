@@ -268,6 +268,82 @@ def build_agent_owner_resolver(
     return _resolve
 
 
+def _parse_paths_list(name: str, paths_raw: object) -> list[str]:
+    """Coerce the ``paths:`` YAML field into a list of non-empty strings."""
+    if not isinstance(paths_raw, list):
+        logger.warning("agent %r: 'paths' must be a list — ignoring %r", name, paths_raw)
+        return []
+    return [str(p) for p in paths_raw if p]
+
+
+def _resolve_legacy_collection_name(
+    name: str,
+    item: dict,
+    write_path: str,
+    paths: list[str],
+    default_pattern: str,
+) -> str:
+    """Decide ``AgentDef.legacy_collection_name`` for a parsed YAML entry.
+
+    Rules:
+      - If ``collection:`` is supplied and clashes with a reserved name,
+        log a warning and drop the override.
+      - Otherwise the legacy collection name flows through with a
+        deprecation warning pointing at the multi-path schema.
+      - Fully-default agents (no ``paths``, no ``collection``) keep the
+        ``default_pattern``-derived label so existing benchmarks pinned to
+        ``{agent}-memory`` continue to resolve.
+    """
+    if "collection" in item:
+        candidate = str(item["collection"])
+        if candidate in RESERVED_AGENT_COLLECTION_NAMES:
+            logger.warning(
+                "agent %r: legacy collection name %r clashes with an "
+                "auto-injected collection — ignoring override; the agent "
+                "will use synthetic collection naming instead.",
+                name,
+                candidate,
+            )
+            return ""
+        logger.warning(
+            "agent %r: 'collection: %s' is deprecated — prefer the multi-path "
+            "schema 'paths: [%s]'. The legacy field still parses but will be "
+            "removed in a future release. (#115)",
+            name,
+            candidate,
+            write_path or "/data/workspaces/" + str(name),
+        )
+        return candidate
+    if not paths:
+        return default_pattern.format(agent=str(name))
+    return ""
+
+
+def _parse_one_agent(item: object, default_pattern: str) -> AgentDef | None:
+    """Build a single ``AgentDef`` from one YAML mapping entry, or ``None``
+    when the entry is malformed (non-dict, missing name).
+    """
+    if not isinstance(item, dict):
+        return None
+    name = item.get("name")
+    if not name:
+        return None
+
+    paths = _parse_paths_list(str(name), item.get("paths") or [])
+    write_path = str(item.get("write_path", ""))
+    if not paths and write_path:
+        paths = [write_path]
+
+    legacy_name = _resolve_legacy_collection_name(str(name), item, write_path, paths, default_pattern)
+    return AgentDef(
+        name=str(name),
+        paths=paths,
+        write_path=write_path,
+        read_only=bool(item.get("read_only", False)),
+        legacy_collection_name=legacy_name,
+    )
+
+
 def parse_agent_registry(data: dict, *, default_pattern: str = "{agent}-memory") -> ConfigDrivenAgentRegistry:
     """Parse the ``agents:`` section out of a top-level YAML dict.
 
@@ -309,63 +385,7 @@ def parse_agent_registry(data: dict, *, default_pattern: str = "{agent}-memory")
 
     agents: list[AgentDef] = []
     for item in agents_raw:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name")
-        if not name:
-            continue
-
-        # Read surface — paths > write_path-as-paths > default
-        paths_raw = item.get("paths") or []
-        if not isinstance(paths_raw, list):
-            logger.warning("agent %r: 'paths' must be a list — ignoring %r", name, paths_raw)
-            paths_raw = []
-        paths = [str(p) for p in paths_raw if p]
-
-        write_path = str(item.get("write_path", ""))
-        if not paths and write_path:
-            # Legacy single-path deployment: the write zone is also the read scope.
-            paths = [write_path]
-
-        # Legacy collection: keep the operator-chosen name on the first synthetic
-        # collection. ``collection`` is no longer a structural field; it's a label
-        # override. Names that clash with an auto-injected collection (see
-        # ``RESERVED_AGENT_COLLECTION_NAMES``) are dropped so the agent gets the
-        # synthetic ``{name}-{i}`` shape and the auto-injected collection keeps
-        # routing correctly.
-        legacy_name = ""
-        if "collection" in item:
-            candidate = str(item["collection"])
-            if candidate in RESERVED_AGENT_COLLECTION_NAMES:
-                logger.warning(
-                    "agent %r: legacy collection name %r clashes with an "
-                    "auto-injected collection — ignoring override; the agent "
-                    "will use synthetic collection naming instead.",
-                    name,
-                    candidate,
-                )
-            else:
-                legacy_name = candidate
-                logger.warning(
-                    "agent %r: 'collection: %s' is deprecated — prefer the multi-path "
-                    "schema 'paths: [%s]'. The legacy field still parses but will be "
-                    "removed in a future release. (#115)",
-                    name,
-                    candidate,
-                    write_path or "/data/workspaces/" + str(name),
-                )
-        elif not paths:
-            # Fully-default agent: the legacy default_pattern still applies as a
-            # label so existing benchmarks pinned to ``{agent}-memory`` keep working.
-            legacy_name = default_pattern.format(agent=str(name))
-
-        agents.append(
-            AgentDef(
-                name=str(name),
-                paths=paths,
-                write_path=write_path,
-                read_only=bool(item.get("read_only", False)),
-                legacy_collection_name=legacy_name,
-            )
-        )
+        parsed = _parse_one_agent(item, default_pattern)
+        if parsed is not None:
+            agents.append(parsed)
     return ConfigDrivenAgentRegistry(agents=agents)
