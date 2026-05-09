@@ -17,6 +17,7 @@ from kairix.core.search.intent import QueryIntent
 from kairix.core.search.pipeline import SearchPipeline, SearchResult
 from kairix.core.search.scope import Scope
 from tests.fakes import (
+    FakeBoost,
     FakeClassifier,
     FakeCollectionResolver,
     FakeDocumentRepository,
@@ -53,42 +54,9 @@ def _build_pipeline(**overrides: Any) -> SearchPipeline:
 # ---------------------------------------------------------------------------
 
 
-class _RaisingClassifier:
-    def classify(self, _query: str) -> QueryIntent:
-        raise RuntimeError("classifier blew up")
-
-
-class _RaisingDocumentRepository:
-    """Doc repo whose every method raises — ensures BM25 backend swallows it."""
-
-    def search_fts(self, *_args: Any, **_kwargs: Any) -> list[dict]:
-        raise RuntimeError("bm25 backend down")
-
-    def search_fts_weighted(self, *_args: Any, **_kwargs: Any) -> list[dict]:
-        raise RuntimeError("bm25 backend down")
-
-
-class _RaisingFusion:
-    def fuse(self, _bm25: list, _vec: list) -> list:
-        raise RuntimeError("fusion blew up")
-
-
-class _RaisingBoost:
-    def boost(self, _fused: list, _query: str, _ctx: dict) -> list:
-        raise RuntimeError("boost blew up")
-
-
-class _RaisingLogger:
-    def log_search(self, _event: dict) -> None:
-        raise RuntimeError("logger blew up")
-
-    def log_query(self, _event: dict) -> None:  # pragma: no cover — pipeline doesn't call log_query
-        raise RuntimeError("logger blew up")
-
-
 @pytest.mark.unit
 def test_pipeline_search_never_raises_when_classifier_raises() -> None:
-    pipeline = _build_pipeline(classifier=_RaisingClassifier())
+    pipeline = _build_pipeline(classifier=FakeClassifier(raises=RuntimeError("classifier blew up")))
     result = pipeline.search("anything")
     # Docstring: "returns SearchResult with empty results on any failure".
     assert isinstance(result, SearchResult)
@@ -98,7 +66,7 @@ def test_pipeline_search_never_raises_when_classifier_raises() -> None:
 
 @pytest.mark.unit
 def test_pipeline_search_never_raises_when_bm25_backend_raises() -> None:
-    pipeline = _build_pipeline(bm25=BM25SearchBackend(_RaisingDocumentRepository()))
+    pipeline = _build_pipeline(bm25=BM25SearchBackend(FakeDocumentRepository(raises=RuntimeError("bm25 backend down"))))
     result = pipeline.search("anything")
     assert isinstance(result, SearchResult)
     assert result.bm25_count == 0
@@ -110,7 +78,7 @@ def test_pipeline_search_never_raises_when_fusion_raises() -> None:
     The docstring says "Never raises". If fusion raises and the pipeline
     propagates, the docstring contract is broken.
     """
-    pipeline = _build_pipeline(fusion=_RaisingFusion())
+    pipeline = _build_pipeline(fusion=FakeFusion(raises=RuntimeError("fusion blew up")))
     # Per the "Never raises" guarantee, this must not propagate.
     result = pipeline.search("anything")
     assert isinstance(result, SearchResult)
@@ -118,7 +86,7 @@ def test_pipeline_search_never_raises_when_fusion_raises() -> None:
 
 @pytest.mark.unit
 def test_pipeline_search_never_raises_when_logger_raises() -> None:
-    pipeline = _build_pipeline(logger=_RaisingLogger())
+    pipeline = _build_pipeline(logger=FakeSearchLogger(raises=RuntimeError("logger blew up")))
     result = pipeline.search("anything")
     assert isinstance(result, SearchResult)
 
@@ -136,7 +104,7 @@ def test_pipeline_search_continues_through_chain_when_one_boost_raises() -> None
             return fused
 
     counting = _CountingBoost()
-    pipeline = _build_pipeline(boosts=[_RaisingBoost(), counting])
+    pipeline = _build_pipeline(boosts=[FakeBoost(raises=RuntimeError("boost blew up")), counting])
 
     result = pipeline.search("anything")
     assert isinstance(result, SearchResult)
@@ -255,15 +223,12 @@ def test_pipeline_vec_failed_is_false_when_vector_returns_empty_results_without_
 @pytest.mark.unit
 def test_pipeline_vec_failed_is_true_when_vector_backend_raises() -> None:
     """When vector.search raises, vec_failed=True (the genuine failure case)."""
-
-    class _RaisingVectorRepo:
-        def search(self, *_args: Any, **_kwargs: Any) -> list:
-            raise RuntimeError("vector index corrupt")
-
-        def search_with_filter(self, *_args: Any, **_kwargs: Any) -> list:
-            raise RuntimeError("vector index corrupt")
-
-    pipeline = _build_pipeline(vector=VectorSearchBackend(FakeEmbeddingService(), _RaisingVectorRepo()))
+    pipeline = _build_pipeline(
+        vector=VectorSearchBackend(
+            FakeEmbeddingService(),
+            FakeVectorRepository(raises=RuntimeError("vector index corrupt")),
+        )
+    )
     result = pipeline.search("anything")
     assert result.vec_failed is True
 
@@ -290,15 +255,10 @@ def test_pipeline_fallback_used_is_true_when_bm25_empty_and_vector_returns_resul
     back to vector". Test setup: BM25 backend returns []; vector backend
     returns one result.
     """
-
-    class _StaticVectorRepo:
-        def search(self, *_args: Any, **_kwargs: Any) -> list:
-            return [{"path": "/v.md", "title": "v", "snippet": "s", "collection": "c", "distance": 0.1}]
-
-        def search_with_filter(self, *_args: Any, **_kwargs: Any) -> list:
-            return [{"path": "/v.md", "title": "v", "snippet": "s", "collection": "c", "distance": 0.1}]
-
-    pipeline = _build_pipeline(vector=VectorSearchBackend(FakeEmbeddingService(), _StaticVectorRepo()))
+    vec_repo = FakeVectorRepository(
+        results=[{"path": "/v.md", "title": "v", "snippet": "s", "collection": "c", "distance": 0.1}]
+    )
+    pipeline = _build_pipeline(vector=VectorSearchBackend(FakeEmbeddingService(), vec_repo))
     result = pipeline.search("anything")
 
     assert result.bm25_count == 0

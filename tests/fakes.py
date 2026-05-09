@@ -58,12 +58,24 @@ def FakePaths(  # noqa: N802 — factory function returning KairixPaths; named l
 
 
 class FakeClassifier:
-    """Fake IntentClassifier that returns a fixed intent."""
+    """Fake IntentClassifier that returns a fixed intent.
 
-    def __init__(self, intent: QueryIntent = QueryIntent.SEMANTIC) -> None:
+    Pass ``raises=`` to make ``classify()`` raise — covers never-raises
+    contracts in callers that wrap the classifier.
+    """
+
+    def __init__(
+        self,
+        intent: QueryIntent = QueryIntent.SEMANTIC,
+        *,
+        raises: BaseException | None = None,
+    ) -> None:
         self.intent = intent
+        self._raises = raises
 
     def classify(self, query: str) -> QueryIntent:
+        if self._raises is not None:
+            raise self._raises
         return self.intent
 
 
@@ -185,11 +197,21 @@ class FakeGraphRepository:
 
 
 class FakeVectorRepository:
-    """In-memory vector store that returns configured results."""
+    """In-memory vector store that returns configured results.
 
-    def __init__(self, results: list[dict[str, Any]] | None = None) -> None:
+    Pass ``raises=`` to make ``search()`` raise — covers never-raises
+    contracts in vector-backend callers.
+    """
+
+    def __init__(
+        self,
+        results: list[dict[str, Any]] | None = None,
+        *,
+        raises: BaseException | None = None,
+    ) -> None:
         self._results: list[dict[str, Any]] = results or []
         self._vectors: list[tuple[str, list[float]]] = []
+        self._raises = raises
 
     def search(
         self,
@@ -197,6 +219,8 @@ class FakeVectorRepository:
         k: int,
         collections: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        if self._raises is not None:
+            raise self._raises
         if collections:
             filtered = [r for r in self._results if r.get("collection") in collections]
             return filtered[:k]
@@ -380,16 +404,34 @@ class FakeVectorSearcher:
 
 
 class FakeFusion:
-    """Pass-through fusion: concatenates BM25 and vector results."""
+    """Pass-through fusion: concatenates BM25 and vector results.
+
+    Pass ``raises=`` to make ``fuse()`` raise — covers never-raises
+    contracts in pipeline callers.
+    """
+
+    def __init__(self, *, raises: BaseException | None = None) -> None:
+        self._raises = raises
 
     def fuse(self, bm25: list[Any], vec: list[Any]) -> list[Any]:
+        if self._raises is not None:
+            raise self._raises
         return bm25 + vec
 
 
 class FakeBoost:
-    """No-op boost: returns results unmodified."""
+    """No-op boost: returns results unmodified.
+
+    Pass ``raises=`` to make ``boost()`` raise — covers never-raises
+    contracts in pipeline callers.
+    """
+
+    def __init__(self, *, raises: BaseException | None = None) -> None:
+        self._raises = raises
 
     def boost(self, results: list[Any], query: str, context: dict[str, Any]) -> list[Any]:
+        if self._raises is not None:
+            raise self._raises
         return results
 
 
@@ -404,15 +446,24 @@ class FakeScorer:
 
 
 class FakeSearchLogger:
-    """In-memory search logger that captures events."""
+    """In-memory search logger that captures events.
 
-    def __init__(self) -> None:
+    Pass ``raises=`` to make every log call raise — covers never-raises
+    contracts in pipeline callers that wrap the logger.
+    """
+
+    def __init__(self, *, raises: BaseException | None = None) -> None:
         self.events: list[dict[str, Any]] = []
+        self._raises = raises
 
     def log_search(self, event: dict[str, Any]) -> None:
+        if self._raises is not None:
+            raise self._raises
         self.events.append(event)
 
     def log_query(self, event: dict[str, Any]) -> None:
+        if self._raises is not None:
+            raise self._raises
         self.events.append(event)
 
 
