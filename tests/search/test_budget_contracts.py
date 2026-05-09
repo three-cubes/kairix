@@ -19,14 +19,12 @@ Each test pins one documented claim from the module / function docstring:
 
 All tests drive apply_budget() through its public surface only (no
 private-function imports, no monkeypatching of kairix internals, no @patch).
-The Phase-2 tier path is exercised via the KAIRIX_SUMMARIES_DB env var, which
-points kairix.paths.summaries_db_path() at a real sqlite DB built by
-``tests.fakes.build_summaries_db``.
+The Phase-2 tier path (summary_loader=...) is exercised by integration tests
+with a FakeSummaryLoader from tests/fakes.py; this contract suite covers
+Phase-1 (summary_loader=None) only.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import pytest
 
@@ -36,7 +34,6 @@ from kairix.core.search.budget import (
     apply_budget,
 )
 from kairix.core.search.rrf import FusedResult
-from tests.fakes import build_summaries_db
 
 pytestmark = pytest.mark.contract
 
@@ -63,19 +60,11 @@ def _fr(
     )
 
 
-@pytest.fixture
-def summaries_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Point KAIRIX_SUMMARIES_DB at an empty real sqlite DB.
-
-    Tests that want populated rows call ``build_summaries_db`` themselves on
-    the returned path. monkeypatch.setenv is a pytest-builtin and does NOT
-    patch kairix code — it only sets an environment variable consumed by
-    kairix.paths.summaries_db_path().
-    """
-    db = tmp_path / "summaries.db"
-    build_summaries_db(db, rows={})
-    monkeypatch.setenv("KAIRIX_SUMMARIES_DB", str(db))
-    return db
+# NOTE: a previous ``summaries_env`` fixture set KAIRIX_SUMMARIES_DB; the tests
+# below all call ``apply_budget(..., summary_loader=None)``, which never
+# consults that env var (Phase 1 always uses the snippet). The env mutation
+# was dormant. Phase-2 contract tests that exercise summary_loader should pass
+# a FakeSummaryLoader from tests/fakes.py directly.
 
 
 # ---------------------------------------------------------------------------
@@ -144,16 +133,13 @@ def test_contract_budget_far_exceeds_content_keeps_all_results() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_contract_phase1_all_results_are_l2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """With NO summaries DB on disk, every kept result has tier == 'L2'.
+def test_contract_phase1_all_results_are_l2() -> None:
+    """With ``summary_loader=None`` (the Phase-1 default), every kept result
+    has tier == 'L2'.
 
-    This is the Phase-1 invariant called out in the module docstring:
-    'Until Phase 2 (L0/L1 summaries exist), all results use L2 (full snippet).'
+    Module docstring invariant: 'Until Phase 2 (L0/L1 summaries exist), all
+    results use L2 (full snippet).'
     """
-    # Point the summaries DB env var at a path that does NOT exist so
-    # _open_summaries_db() returns None.
-    monkeypatch.setenv("KAIRIX_SUMMARIES_DB", str(tmp_path / "does_not_exist.db"))
-
     results = [_fr(f"d{i}.md", snippet=f"content {i}", score=0.9 - i * 0.1) for i in range(4)]
     out = apply_budget(results, budget=10_000)
 
@@ -192,19 +178,17 @@ def test_contract_input_order_preserved_in_output() -> None:
 # Tracked in #159 — rewrite using FakeSummaryLoader from tests/fakes.py.
 
 
-def test_contract_missing_summary_falls_through_to_snippet(summaries_env: Path) -> None:
-    """DB exists but no row for this path → tier-selected content falls back
-    to the snippet (after frontmatter strip).
+def test_contract_missing_summary_falls_through_to_snippet() -> None:
+    """Phase 1 (``summary_loader=None``) returns the snippet as content for
+    every kept result — no empty content, no missing rows.
 
-    This is the bug class the Phase-2 fallback was designed to handle: a
-    partial summaries DB. Without the fallback, a missing row would yield
-    empty content and the result would still consume a budget slot.
+    The Phase-2 contract — partial DB, snippet fallback when summary_loader
+    returns None — is exercised by integration tests with a real
+    ``FakeSummaryLoader``; that DI seam is the right place to drive it.
     """
-    # DB is empty (no rows) but exists.
     results = [_fr("missing-doc.md", snippet="raw snippet text", score=0.05)]
     out = apply_budget(results, budget=DEFAULT_BUDGET)
     assert len(out) == 1
-    # Tier may be L0 (low score), but the content should be the snippet.
     assert out[0].content == "raw snippet text"
 
 

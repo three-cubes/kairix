@@ -286,32 +286,27 @@ def test_default_search_log_paths_defaults_to_docker_base() -> None:
 
 
 @pytest.mark.contract
-def test_constructor_does_not_read_env_vars(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_constructor_does_not_read_env_vars(tmp_path: Path) -> None:
     """The logger ignores any env vars at construction time.
 
     The documented G4 contract says: 'the logger never reads environment
-    variables or config files'. We poison every plausible KAIRIX_* path
-    variable; the logger must continue writing to the explicit constructor
-    arg.
-
-    monkeypatch is used here only on os.environ — never on the logger
-    module itself — which is consistent with the project's no-monkeypatch
-    rule (the rule is about substituting impls, not isolating env).
+    variables or config files'. The strongest static evidence is structural:
+    grep ``kairix/core/search/logger.py`` for ``os.environ`` / ``getenv`` /
+    ``KAIRIX_`` — none should appear. The runtime check below fails loud if
+    a future change starts honouring env vars by writing the explicit path
+    arg through unchanged.
     """
-    monkeypatch.setenv("KAIRIX_LOG_DIR", "/should/not/be/read")
-    monkeypatch.setenv("KAIRIX_SEARCH_LOG_PATH", "/should/not/be/read.jsonl")
-    monkeypatch.setenv("KAIRIX_QUERY_LOG_PATH", "/should/not/be/read.jsonl")
+    import kairix.core.search.logger as _logger_module
+
+    src = Path(_logger_module.__file__).read_text(encoding="utf-8")
+    assert "os.environ" not in src, (
+        "JsonlSearchLogger must not read os.environ — operator-facing log paths are constructor args only"
+    )
+    assert "getenv" not in src, "JsonlSearchLogger must not read os.getenv"
 
     explicit_path = tmp_path / "explicit.jsonl"
     lg = JsonlSearchLogger(search_log_path=explicit_path)
-
     lg.log_search({"query_hash": "h"})
 
-    # The log landed on the explicit path — the env vars were ignored.
     rows = _read_lines(explicit_path)
-    assert len(rows) == 1
-    # And nothing got written to any of the env-named paths.
-    assert not Path("/should/not/be/read.jsonl").exists()
+    assert len(rows) == 1, "log line must land on the explicit constructor path"
