@@ -24,6 +24,8 @@ Key files:
 
 Ralph pattern: fine-grained file-scoped work, parallel agents with embedded backpressure loops, `safe-commit.sh` in each loop. 10-15 loops/hour target. See [engineering hub](https://github.com/three-cubes/engineering-hub/tree/main/ralph).
 
+**Subagents commit straight to develop. Do NOT use `isolation="worktree"` when delegating** — it creates orphan branches and locked working trees the user has to clean up. Dispatch agents sequentially against the live `develop` branch; each agent runs `safe-commit.sh` in its loop and pushes when green.
+
 ## Naming
 
 - Code: `snake_case` functions, `PascalCase` classes, `UPPER_SNAKE_CASE` constants
