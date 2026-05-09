@@ -385,3 +385,169 @@ class TestLoadCachedEdgeCases:
         ):
             cfg = _load_cached(config_file)
         assert isinstance(cfg, RetrievalConfig)
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage — load_collections file loading + merge branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def kairix_config_file(tmp_path):
+    """Write a kairix.config.yaml at a temp path and point KAIRIX_CONFIG_PATH at it.
+
+    Uses direct ``os.environ`` manipulation rather than ``monkeypatch.setenv`` —
+    KAIRIX_CONFIG_PATH is operator-facing config, not a code-level test seam.
+    """
+    import os
+
+    config_path = tmp_path / "kairix.config.yaml"
+    config_path.write_text(
+        """
+collections:
+  shared:
+    - name: home
+      path: 00-Home
+      glob: "**/*.md"
+    - name: archive
+      path: 06-Archive
+      glob: "**/*.md"
+      in_default: false
+      retrieval:
+        bm25_limit: 25
+        boosts:
+          entity:
+            factor: 2.5
+""",
+        encoding="utf-8",
+    )
+    prev = os.environ.get("KAIRIX_CONFIG_PATH")
+    os.environ["KAIRIX_CONFIG_PATH"] = str(config_path)
+    yield config_path
+    if prev is None:
+        os.environ.pop("KAIRIX_CONFIG_PATH", None)
+    else:
+        os.environ["KAIRIX_CONFIG_PATH"] = prev
+
+
+@pytest.mark.unit
+def test_load_collections_returns_parsed_config_when_file_exists(kairix_config_file):
+    """``load_collections`` reads the YAML and returns a populated ``CollectionsConfig``."""
+    from kairix.core.search.config_loader import load_collections
+
+    cfg = load_collections()
+    assert cfg is not None
+    names = {c.name for c in cfg.shared}
+    assert names == {"home", "archive"}
+    archive = next(c for c in cfg.shared if c.name == "archive")
+    assert archive.in_default is False
+    assert archive.retrieval_overrides == {
+        "bm25_limit": 25,
+        "boosts": {"entity": {"factor": 2.5}},
+    }
+
+
+@pytest.mark.unit
+def test_load_collections_returns_none_when_yaml_unparseable(tmp_path):
+    """When the configured path is unparseable YAML, ``load_collections`` returns None.
+
+    Closes coverage of the ``except Exception: return None`` branch.
+    """
+    import os
+
+    yaml_garbage = tmp_path / "garbage.yaml"
+    # Conflicting block-mapping keys make yaml.safe_load raise.
+    yaml_garbage.write_text("collections:\n  shared:\n    - name: x\n  - bogus_top: bad\n", encoding="utf-8")
+    prev = os.environ.get("KAIRIX_CONFIG_PATH")
+    os.environ["KAIRIX_CONFIG_PATH"] = str(yaml_garbage)
+    try:
+        from kairix.core.search.config_loader import load_collections
+
+        cfg = load_collections()
+    finally:
+        if prev is None:
+            os.environ.pop("KAIRIX_CONFIG_PATH", None)
+        else:
+            os.environ["KAIRIX_CONFIG_PATH"] = prev
+    assert cfg is None
+
+
+@pytest.mark.unit
+def test_get_collection_overrides_returns_only_collections_with_overrides(kairix_config_file):
+    """``_get_collection_overrides`` returns the per-collection override dicts."""
+    from kairix.core.search.config_loader import _get_collection_overrides
+
+    overrides = _get_collection_overrides()
+    # Only 'archive' has retrieval_overrides in the fixture; 'home' has none.
+    assert set(overrides.keys()) == {"archive"}
+    assert overrides["archive"] == {
+        "bm25_limit": 25,
+        "boosts": {"entity": {"factor": 2.5}},
+    }
+
+
+@pytest.mark.unit
+def test_get_collection_overrides_returns_empty_when_no_config_loaded():
+    """When no kairix.config.yaml is found, the override map is empty."""
+    import os
+
+    prev = os.environ.pop("KAIRIX_CONFIG_PATH", None)
+    try:
+        from kairix.core.search.config_loader import _get_collection_overrides
+
+        overrides = _get_collection_overrides()
+        assert overrides == {}
+    finally:
+        if prev is not None:
+            os.environ["KAIRIX_CONFIG_PATH"] = prev
+
+
+@pytest.mark.unit
+def test_merge_retrieval_config_applies_temporal_boost_overrides():
+    """A ``boosts.temporal`` override merges with the base config's temporal sub-config.
+
+    Uses the same nested shape ``_parse_temporal`` consumes from full-config
+    YAML (``date_path_boost: {factor, ...}``) so per-collection overrides
+    look identical to top-level defaults.
+    """
+    from kairix.core.search.config_loader import _merge_retrieval_config
+
+    base = RetrievalConfig()
+    overrides = {
+        "boosts": {
+            "temporal": {
+                "date_path_boost": {
+                    "factor": 5.0,
+                    "recency_window_days": 14,
+                }
+            }
+        }
+    }
+    merged = _merge_retrieval_config(base, overrides)
+    # Specifically-overridden values are applied.
+    assert merged.temporal.date_path_boost_factor == 5.0
+    assert merged.temporal.date_path_recency_window_days == 14
+    # Non-overridden values within the same sub-block fall back to BASE — not
+    # to the parser's hard defaults. This was the bug surfaced by adding the
+    # test: the previous merge produced flat-key dicts the parser couldn't
+    # read, so non-overridden fields silently returned hard defaults.
+    assert merged.temporal.date_path_boost_enabled == base.temporal.date_path_boost_enabled
+    # And the entirely-untouched sub-block stays at base.
+    assert merged.temporal.chunk_date_boost_enabled == base.temporal.chunk_date_boost_enabled
+    assert merged.temporal.chunk_date_decay_halflife_days == base.temporal.chunk_date_decay_halflife_days
+    # Other top-level fields untouched.
+    assert merged.fusion_strategy == base.fusion_strategy
+
+
+@pytest.mark.unit
+def test_merge_retrieval_config_applies_rerank_overrides():
+    """A ``rerank`` override merges with the base config's rerank sub-config."""
+    from kairix.core.search.config_loader import _merge_retrieval_config
+
+    base = RetrievalConfig()
+    overrides = {"rerank": {"enabled": True, "candidate_limit": 50}}
+    merged = _merge_retrieval_config(base, overrides)
+    assert merged.rerank.enabled is True
+    assert merged.rerank.candidate_limit == 50
+    # Non-overridden rerank sub-field (model) keeps base default.
+    assert merged.rerank.model == base.rerank.model

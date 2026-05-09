@@ -153,11 +153,15 @@ def derive_gold_path_from_gold_lists(
         return gold_path
 
     if gold_paths and isinstance(gold_paths, list):
-        best = max(gold_paths, key=lambda g: g.get("relevance", 0), default=None)
+        # _coerce_gold_list allows non-dict scalars through; filter to dicts here
+        # so the relevance-based max doesn't AttributeError on a string item.
+        dict_paths = [g for g in gold_paths if isinstance(g, dict)]
+        best = max(dict_paths, key=lambda g: g.get("relevance", 0), default=None)
         if best:
             return best.get("path")
     elif gold_titles and isinstance(gold_titles, list):
-        best_t = max(gold_titles, key=lambda g: g.get("relevance", 0), default=None)
+        dict_titles = [g for g in gold_titles if isinstance(g, dict)]
+        best_t = max(dict_titles, key=lambda g: g.get("relevance", 0), default=None)
         if best_t:
             return best_t.get("title")  # title as path-equivalent for display
     elif gold_title:

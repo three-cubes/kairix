@@ -396,12 +396,26 @@ def _merge_retrieval_config(base: RetrievalConfig, overrides: dict) -> Retrieval
         }
         top_fields["procedural"] = _parse_procedural(merged)
     if "temporal" in boosts:
-        merged = {
-            "date_path_boost_enabled": base.temporal.date_path_boost_enabled,
-            "date_path_boost_factor": base.temporal.date_path_boost_factor,
-            "chunk_date_boost_enabled": base.temporal.chunk_date_boost_enabled,
-            **boosts["temporal"],
+        # ``_parse_temporal`` expects the nested ``date_path_boost: {factor, ...}``
+        # shape, not the flat field names — so the base-fallback dict has to
+        # mirror that shape and per-key overrides have to deep-merge on top.
+        base_temporal_dict = {
+            "date_path_boost": {
+                "enabled": base.temporal.date_path_boost_enabled,
+                "factor": base.temporal.date_path_boost_factor,
+                "recency_window_days": base.temporal.date_path_recency_window_days,
+            },
+            "chunk_date_boost": {
+                "enabled": base.temporal.chunk_date_boost_enabled,
+                "decay_halflife_days": base.temporal.chunk_date_decay_halflife_days,
+                "guard_explicit_only": base.temporal.chunk_date_boost_guard_explicit_only,
+            },
         }
+        user_temporal = boosts["temporal"] or {}
+        merged = dict(base_temporal_dict)
+        for sub_key in ("date_path_boost", "chunk_date_boost"):
+            if sub_key in user_temporal:
+                merged[sub_key] = {**base_temporal_dict[sub_key], **user_temporal[sub_key]}
         top_fields["temporal"] = _parse_temporal(merged)
 
     rerank = overrides.get("rerank", {})
