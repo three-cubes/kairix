@@ -261,6 +261,51 @@ class FakeGraphRepository:
         return list(self._all_entities)
 
 
+
+class FakePlannerGraphClient:
+    """Fake Neo4j-style client for the QueryPlanner ``neo4j_graph_context`` flow.
+
+    Implements ``available``, ``find_by_name(name) -> list[dict]`` and
+    ``related_entities(entity_id, max_hops) -> list[dict]`` — the surface the
+    planner uses through duck-typing. Constructor-driven test data; never
+    raises unless explicitly configured to.
+    """
+
+    def __init__(
+        self,
+        entities_by_word: dict[str, list[dict[str, Any]]] | None = None,
+        related_by_id: dict[str, list[dict[str, Any]]] | None = None,
+        available: bool = True,
+        find_raises: BaseException | None = None,
+        related_raises: BaseException | None = None,
+    ) -> None:
+        self._entities_by_word: dict[str, list[dict[str, Any]]] = {
+            k.lower(): list(v) for k, v in (entities_by_word or {}).items()
+        }
+        self._related_by_id: dict[str, list[dict[str, Any]]] = dict(related_by_id or {})
+        self._available = available
+        self._find_raises = find_raises
+        self._related_raises = related_raises
+        self.find_calls: list[str] = []
+        self.related_calls: list[str] = []
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def find_by_name(self, name: str) -> list[dict[str, Any]]:
+        self.find_calls.append(name)
+        if self._find_raises is not None:
+            raise self._find_raises
+        return list(self._entities_by_word.get(name.lower(), []))
+
+    def related_entities(self, entity_id: str, max_hops: int = 1) -> list[dict[str, Any]]:
+        self.related_calls.append(entity_id)
+        if self._related_raises is not None:
+            raise self._related_raises
+        return list(self._related_by_id.get(entity_id, []))
+
+
 class FakeVectorRepository:
     """In-memory vector store that returns configured results.
 
