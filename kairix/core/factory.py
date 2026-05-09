@@ -63,12 +63,23 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
     hard dependency at module load.
 
     Args:
-        config: Explicit retrieval config. If None, uses sweep-optimised defaults.
+        config: Explicit retrieval config. When ``None``, the factory loads
+                the top-level ``retrieval:`` section from
+                ``kairix.config.yaml`` via :func:`load_config`. If no YAML is
+                present, falls back to ``RetrievalConfig.defaults()``.
 
     Returns:
         A fully wired SearchPipeline ready for search() calls.
     """
-    cfg = config or RetrievalConfig.defaults()
+    if config is not None:
+        cfg = config
+    else:
+        # Honour kairix.config.yaml's top-level retrieval section. Falls back
+        # to RetrievalConfig.defaults() when no YAML is present (load_config's
+        # own fallback). Closes #112: factory previously ignored the YAML.
+        from kairix.core.search.config_loader import load_config
+
+        cfg = load_config()
 
     # Intent classifier — rule-based
     from kairix.core.search.intent import classify as _classify_fn
