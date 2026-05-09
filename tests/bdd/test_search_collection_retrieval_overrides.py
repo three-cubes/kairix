@@ -12,7 +12,7 @@ from pytest_bdd import scenario
     "A collection-level retrieval override merges over the global config",
 )
 def test_per_collection_override_merges() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
@@ -21,7 +21,7 @@ def test_per_collection_override_merges() -> None:
     "Searches against unconfigured collections still get the global default",
 )
 def test_unconfigured_collection_uses_global() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
@@ -30,4 +30,4 @@ def test_unconfigured_collection_uses_global() -> None:
     "Multi-collection searches do NOT apply per-collection overrides",
 )
 def test_multi_collection_uses_global() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""

@@ -93,7 +93,11 @@ jobs:
           cache: pip
 
       - name: Install package + dev deps
-        run: pip install -e ".[dev]" pytest-timeout
+        # The agents extras (mcp>=1.20) are required for
+        # tests/integration/test_mcp_build_server.py — those probes exercise
+        # the production build_server() wiring and need the real FastMCP
+        # package, not a stub.
+        run: pip install -e ".[dev,agents]" pytest-timeout
 
       - name: Run integration tests
         run: |

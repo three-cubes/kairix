@@ -131,7 +131,7 @@ def generate_query_for_document(doc: dict, category: str) -> dict:
     }
 
     query_templates = templates.get(category, templates["recall"])
-    # NOSONAR(python:S2245): non-security template selection for benchmark
+    # NOSONAR: non-security template selection for benchmark
     # query generation; deterministic via random.seed() in build_suite().
     query_text = random.choice(query_templates)
 
@@ -173,7 +173,7 @@ def build_suite(
         if not available:
             available = list(TARGET_DISTRIBUTION.keys())
 
-        # NOSONAR(python:S2245): non-security category selection for
+        # NOSONAR: non-security category selection for
         # benchmark distribution; deterministic via random.seed() above.
         category = random.choice(available)
         case = generate_query_for_document(doc, category)

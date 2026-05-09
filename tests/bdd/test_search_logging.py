@@ -11,16 +11,16 @@ FEATURE = str(Path(__file__).parent / "features" / "search_logging.feature")
 @pytest.mark.bdd
 @scenario(FEATURE, "A search call appends a JSONL event the SRE can grep")
 def test_search_call_appends_jsonl() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "Multiple searches each append their own line")
 def test_multiple_searches_append_each() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "Logging failure does not break search")
 def test_logging_failure_does_not_break_search() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""

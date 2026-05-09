@@ -135,7 +135,7 @@ def find_unlinked_mentions(
 
     # Sample
     if len(eligible) > sample_size:
-        # NOSONAR(python:S2245): non-security audit sampling — picking a
+        # NOSONAR: non-security audit sampling — picking a
         # representative subset of files for human review; no security boundary.
         sampled = random.sample(eligible, sample_size)
     else:

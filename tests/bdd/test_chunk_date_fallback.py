@@ -11,7 +11,7 @@ FEATURE = str(Path(__file__).parent / "features" / "chunk_date_fallback.feature"
 @pytest.mark.bdd
 @scenario(FEATURE, "Documents with a date field use that date")
 def test_frontmatter_date():
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
@@ -20,10 +20,10 @@ def test_frontmatter_date():
     "Documents without a date field still get a date from when the file was last changed",
 )
 def test_mtime_fallback():
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "A date in the filename is preferred over the file modification date")
 def test_path_date_priority():
-    pass
+    """Body populated by @scenario from the .feature file."""

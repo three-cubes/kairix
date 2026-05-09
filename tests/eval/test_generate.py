@@ -1082,7 +1082,9 @@ def test_build_generation_prompt_strips_newlines_in_caller_supplied_content() ->
 @pytest.mark.unit
 def test_empty_generation_result_returns_zero_counts() -> None:
     """The early-exit helper returns a GenerationResult with all-zero counts."""
-    result = _empty_generation_result("/tmp/x.yaml", calibration_passed=False, errors=["e"])
+    # Opaque path label — never opened. Avoid /tmp to satisfy "publicly
+    # writable directory" hotspot rule even though no file is ever written.
+    result = _empty_generation_result("fixtures/x.yaml", calibration_passed=False, errors=["e"])
     assert result.n_generated == 0
     assert result.n_accepted == 0
     assert result.n_rejected == 0

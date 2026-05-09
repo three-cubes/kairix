@@ -54,7 +54,7 @@ def _run_wikilinks(wikilinks_cli_ctx: _WikilinksCliCtx, args: list[str]) -> None
         with redirect_stdout(out), redirect_stderr(err):
             wikilinks_main(args, paths=wikilinks_cli_ctx.paths)
         wikilinks_cli_ctx.exit_code = 0
-    except SystemExit as e:
+    except SystemExit as e:  # NOSONAR — BDD test captures CLI exit code; reraising would defeat the test
         wikilinks_cli_ctx.exit_code = int(e.code) if e.code is not None else 0
     wikilinks_cli_ctx.stdout = out.getvalue()
     wikilinks_cli_ctx.stderr = err.getvalue()

@@ -9,13 +9,13 @@ from pytest_bdd import scenario
 @pytest.mark.bdd
 @scenario("features/setup_cli.feature", "--help documents every flag operators need")
 def test_setup_help() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario("features/setup_cli.feature", "An invalid preset is rejected by argparse")
 def test_setup_invalid_preset() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
@@ -24,4 +24,4 @@ def test_setup_invalid_preset() -> None:
     "--non-interactive --json --preset emits a JSON config rooted at the supplied path",
 )
 def test_setup_non_interactive_json() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""

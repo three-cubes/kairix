@@ -40,17 +40,17 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
 # ---------------------------------------------------------------------------
 
 # YAML frontmatter block — \A anchor ensures match only at string start
-# NOSONAR(python:S5852): non-greedy `.*?` bounded by literal `\n---\s*\n`
+# NOSONAR: non-greedy `.*?` bounded by literal `\n---\s*\n`
 # terminator; input is markdown frontmatter (file-bounded, not user request).
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 # Same pattern without capture group, for strip_frontmatter
-# NOSONAR(python:S5852): same rationale as _FRONTMATTER_RE — bounded input.
+# NOSONAR: same rationale as _FRONTMATTER_RE — bounded input.
 _FRONTMATTER_STRIP_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
 
 # First markdown heading — `(.+)` is anchored to a single line via re.MULTILINE
 # so backtracking is bounded by line length.
-# NOSONAR(python:S5852): single-line input via re.MULTILINE — no polynomial blowup.
+# NOSONAR: single-line input via re.MULTILINE — no polynomial blowup.
 _FIRST_HEADING_RE = re.compile(r"^#{1,3}\s+(.+)$", re.MULTILINE)
 
 

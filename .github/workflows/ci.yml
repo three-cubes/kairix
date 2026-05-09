@@ -247,7 +247,11 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # The agents extras (mcp>=1.20) are required for
+        # tests/integration/test_mcp_build_server.py — those probes exercise
+        # the production build_server() wiring and need the real FastMCP
+        # package, not a stub.
+        run: pip install -e ".[dev,agents]"
 
       - name: Integration tests
         run: |

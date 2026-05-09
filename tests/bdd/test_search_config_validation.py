@@ -11,16 +11,16 @@ FEATURE = str(Path(__file__).parent / "features" / "search_config_validation.fea
 @pytest.mark.bdd
 @scenario(FEATURE, "A retrieval override typo names the bad key")
 def test_retrieval_override_typo() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "An agent_pattern missing the placeholder is named explicitly")
 def test_agent_pattern_missing_placeholder() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "Two agents writing to overlapping paths are both named")
 def test_overlapping_write_paths() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""

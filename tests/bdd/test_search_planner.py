@@ -17,16 +17,16 @@ FEATURE = str(Path(__file__).parent / "features" / "search_planner.feature")
 @pytest.mark.bdd
 @scenario(FEATURE, "A multi-hop comparison query is decomposed into multiple sub-queries")
 def test_multi_hop_decomposes() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "A simple single-topic query passes through unchanged")
 def test_simple_passthrough() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "A failing LLM falls back to the original query")
 def test_failing_llm_fallback() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""

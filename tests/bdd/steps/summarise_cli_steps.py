@@ -99,7 +99,7 @@ def _run_summarise_cli(summarise_ctx: _SummariseCtx, argv: str) -> None:
                 db_path=summarise_ctx.db_path,
             )
         summarise_ctx.exit_code = 0
-    except SystemExit as e:
+    except SystemExit as e:  # NOSONAR — BDD test captures CLI exit code; reraising would defeat the test
         summarise_ctx.exit_code = int(e.code) if e.code is not None else 0
     summarise_ctx.stdout = buf.getvalue()
 

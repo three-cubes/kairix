@@ -12,7 +12,7 @@ from pytest_bdd import scenario
     "A TEMPORAL query with an explicit date lifts the doc whose chunk_date matches",
 )
 def test_temporal_query_lifts_recency_matched_doc() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
@@ -21,4 +21,4 @@ def test_temporal_query_lifts_recency_matched_doc() -> None:
     "Production factory.build_search_pipeline wires the temporal boost classes",
 )
 def test_factory_wires_temporal_boosts() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""

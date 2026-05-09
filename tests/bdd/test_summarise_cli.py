@@ -9,10 +9,10 @@ from pytest_bdd import scenario
 @pytest.mark.bdd
 @scenario("features/summarise_cli.feature", "Status reports zero coverage on an empty summaries database")
 def test_status_empty() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario("features/summarise_cli.feature", "Status reports the count of stored L0 and L1 summaries")
 def test_status_populated() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""

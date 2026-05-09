@@ -12,7 +12,7 @@ from pytest_bdd import scenario
     "A SEMANTIC question is not re-ordered by the procedural booster",
 )
 def test_semantic_not_reordered_by_procedural() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
@@ -21,7 +21,7 @@ def test_semantic_not_reordered_by_procedural() -> None:
     "A PROCEDURAL question lifts the runbook into top-1",
 )
 def test_procedural_lifts_runbook() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
@@ -30,7 +30,7 @@ def test_procedural_lifts_runbook() -> None:
     "A TEMPORAL query with an explicit date in the path gets the date-matched doc to top-1",
 )
 def test_temporal_lifts_dated_doc() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
@@ -39,4 +39,4 @@ def test_temporal_lifts_dated_doc() -> None:
     "A PROCEDURAL query does NOT get a TEMPORAL boost",
 )
 def test_procedural_query_no_temporal_lift() -> None:
-    pass
+    """Body populated by @scenario from the .feature file."""

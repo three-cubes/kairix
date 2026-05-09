@@ -305,7 +305,14 @@ def load_previous_score(log_path: Path = RECALL_LOG) -> float | None:
 
 
 def save_recall_result(result: dict[str, Any], log_path: Path = RECALL_LOG) -> None:
-    """Append recall result to the log. Keep last 90 entries."""
+    """Append recall result to the log. Keep last 90 entries.
+
+    ``log_path`` is a kairix-internal path. The default
+    (``~/.cache/kairix/recall-check.json``) is fixed at module load; tests
+    inject a tmp_path-scoped path. The parameter is not exposed via any
+    user-facing CLI flag — it is an internal injection seam, not user
+    input.
+    """
     runs: list[dict[str, Any]] = []
     if log_path.exists():
         try:
@@ -315,6 +322,7 @@ def save_recall_result(result: dict[str, Any], log_path: Path = RECALL_LOG) -> N
     runs.append(result)
     runs = runs[-90:]
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    # NOSONAR — internal log path; not user-controlled (see docstring).
     log_path.write_text(json.dumps(runs, indent=2))
 
 

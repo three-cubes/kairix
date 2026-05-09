@@ -45,7 +45,7 @@ def _run_entity(entity_cli_ctx: _EntityCliCtx, args: list[str]) -> None:
         with redirect_stdout(out), redirect_stderr(err):
             rc = entity_main(args, db_path=entity_cli_ctx.db_path)
         entity_cli_ctx.exit_code = rc if rc is not None else 0
-    except SystemExit as e:
+    except SystemExit as e:  # NOSONAR — BDD test captures CLI exit code; reraising would defeat the test
         entity_cli_ctx.exit_code = int(e.code) if e.code is not None else 0
     entity_cli_ctx.stdout = out.getvalue()
     entity_cli_ctx.stderr = err.getvalue()

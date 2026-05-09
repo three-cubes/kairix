@@ -77,7 +77,7 @@ def acquire_lock() -> IO[str]:
         # signal 0 is documented as a process-existence probe — does not
         # deliver a real signal. Used here to detect a stale lockfile from a
         # dead PID before taking it over.
-        os.kill(holder_pid, 0)  # NOSONAR(python:S4828) — signal 0 is a process-existence probe, not a delivered signal
+        os.kill(holder_pid, 0)  # NOSONAR — signal 0 is a process-existence probe, not a delivered signal
         # Process is alive — genuine contention
         logging.error(
             "Could not acquire lock after %ds — PID %d is still running",

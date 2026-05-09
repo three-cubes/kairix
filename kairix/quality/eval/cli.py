@@ -143,18 +143,16 @@ def _cmd_report(args: argparse.Namespace) -> int:
         # CLI trust boundary: --output is user-supplied. The kairix CLI runs
         # with the calling user's filesystem permissions and operates inside
         # the local-process trust model; the user can already write anywhere
-        # their account permits via shell redirection. The NOSONAR is on the
-        # statement that resolves the path because that's where S2083 fires.
-        output_path = (
-            Path(args.output).expanduser().resolve()
-        )  # NOSONAR(python:S2083) — CLI trust boundary, see comment above
+        # their account permits via shell redirection. NOSONAR markers cover
+        # both the path resolution and the write where S2083 fires.
+        output_path = Path(args.output).expanduser().resolve()  # NOSONAR
         if not output_path.parent.exists():
             print(
                 f"Error: parent directory {output_path.parent} does not exist",
                 file=sys.stderr,
             )
             return 1
-        output_path.write_text(report, encoding="utf-8")
+        output_path.write_text(report, encoding="utf-8")  # NOSONAR — CLI trust boundary, see comment above
         print(f"Report written to {output_path}")
     else:
         print(report)

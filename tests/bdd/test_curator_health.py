@@ -11,16 +11,16 @@ FEATURE = str(Path(__file__).parent / "features" / "curator_health.feature")
 @pytest.mark.bdd
 @scenario(FEATURE, "Healthy graph passes all checks")
 def test_healthy_graph():
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "Unavailable Neo4j returns graceful report")
 def test_unavailable_neo4j():
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "Entity with missing vault_path is flagged")
 def test_missing_vault_path():
-    pass
+    """Body populated by @scenario from the .feature file."""

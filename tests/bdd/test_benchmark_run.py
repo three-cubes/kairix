@@ -11,22 +11,22 @@ FEATURE = str(Path(__file__).parent / "features" / "benchmark_run.feature")
 @pytest.mark.bdd
 @scenario(FEATURE, "Mock benchmark produces category scores and gates")
 def test_mock_benchmark_produces_scores_and_gates():
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "Perfect mock scores pass all gates")
 def test_perfect_mock_scores_pass_all_gates():
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "Zero-match suite fails phase1 gate")
 def test_zero_match_suite_fails_phase1_gate():
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "NDCG cases produce hit rate and MRR metrics")
 def test_ndcg_cases_produce_metrics():
-    pass
+    """Body populated by @scenario from the .feature file."""

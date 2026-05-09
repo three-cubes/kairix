@@ -522,7 +522,7 @@ class TestFakeBoost:
         # `is` is intentional — the contract is that no-op boost returns the
         # same list object, not just an equal one. SonarCloud python:S6738
         # flags this; rule is a false positive in this case.
-        assert b.boost(items, "q", {}) is items  # NOSONAR(python:S6738) — identity check is the contract
+        assert b.boost(items, "q", {}) is items  # NOSONAR — identity check is the contract
 
 
 @pytest.mark.contract

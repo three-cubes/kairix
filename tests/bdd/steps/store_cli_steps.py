@@ -74,7 +74,7 @@ def _invoke_store(store_cli_ctx: _StoreCliCtx, args: list[str]) -> None:
         with redirect_stdout(buf):
             store_main(args, neo4j_client=store_cli_ctx.neo4j_client)
         store_cli_ctx.exit_code = 0
-    except SystemExit as e:
+    except SystemExit as e:  # NOSONAR — BDD test captures CLI exit code; reraising would defeat the test
         store_cli_ctx.exit_code = int(e.code) if e.code is not None else 0
     store_cli_ctx.stdout = buf.getvalue()
     if "--json" in args:

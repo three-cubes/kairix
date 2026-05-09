@@ -40,7 +40,7 @@ def _run_mcp(mcp_cli_ctx: _McpCliCtx, args: list[str]) -> None:
         with redirect_stdout(out), redirect_stderr(err):
             mcp_main(args)
         mcp_cli_ctx.exit_code = 0
-    except SystemExit as e:
+    except SystemExit as e:  # NOSONAR — BDD test captures CLI exit code; reraising would defeat the test
         mcp_cli_ctx.exit_code = int(e.code) if e.code is not None else 0
     mcp_cli_ctx.stdout = out.getvalue()
     mcp_cli_ctx.stderr = err.getvalue()

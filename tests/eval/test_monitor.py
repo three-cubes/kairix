@@ -82,7 +82,9 @@ def _make_log_entry(weighted_ndcg: float, days_ago: float = 0.0, regression: boo
     ts = (datetime.now(tz=timezone.utc) - timedelta(days=days_ago)).isoformat()
     return {
         "ts": ts,
-        "suite_path": "/tmp/canary.yaml",  # opaque label — never read as a real path
+        # Opaque label — never read as a real path. Avoid /tmp to satisfy
+        # "publicly writable directory" hotspot rule.
+        "suite_path": "fixtures/canary.yaml",
         "n_cases": 10,
         "ndcg_by_category": {"recall": weighted_ndcg},
         "weighted_ndcg": weighted_ndcg,

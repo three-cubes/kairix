@@ -39,7 +39,7 @@ class _LoggingScenarioCtx:
     log_path: Path | None = None
     pipeline: SearchPipeline | None = None
     last_result: SearchResult | None = None
-    last_exception: BaseException | None = None
+    last_exception: Exception | None = None
     results: list[SearchResult] = field(default_factory=list)
 
 
@@ -125,7 +125,10 @@ def _run_search(
         result = pipeline.search(query, agent=agent, scope=parsed_scope)
         logging_ctx.last_result = result
         logging_ctx.results.append(result)
-    except BaseException as exc:
+    except Exception as exc:
+        # SearchPipeline.search documents "Never raises". Capture only
+        # programming-error-shaped exceptions so KeyboardInterrupt /
+        # SystemExit still propagate and can stop the test runner.
         logging_ctx.last_exception = exc
 
 

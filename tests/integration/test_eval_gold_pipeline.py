@@ -188,6 +188,9 @@ def test_build_independent_gold_end_to_end_writes_yaml(kairix_db: Path, tmp_path
     output_path = tmp_path / "gold.yaml"
     yaml.safe_dump(input_suite, input_path.open("w", encoding="utf-8"))
 
+    # Test paths use realistic kairix path style (no leading slash) so
+    # path_title() produces a key that matches the grades_by_query dict.
+    # path_title("eng/docker-deployment-guide.md") -> "eng/docker-deployment-guide".
     judge = FakeLLMJudge(
         grades_by_query={
             "docker deployment": {
@@ -201,13 +204,13 @@ def test_build_independent_gold_end_to_end_writes_yaml(kairix_db: Path, tmp_path
             "docker deployment": SimpleNamespace(
                 results=[
                     {
-                        "path": "/eng/docker-deployment-guide.md",
+                        "path": "eng/docker-deployment-guide.md",
                         "title": "Docker Deployment Guide",
                         "snippet": "Deploy Docker containers...",
                         "collection": "engineering",
                     },
                     {
-                        "path": "/eng/ci-cd-pipeline.md",
+                        "path": "eng/ci-cd-pipeline.md",
                         "title": "CI CD Pipeline",
                         "snippet": "GitHub Actions runs tests...",
                         "collection": "engineering",
