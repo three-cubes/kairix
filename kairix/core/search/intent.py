@@ -1,7 +1,7 @@
 """
 Query intent classifier for the kairix hybrid search pipeline.
 
-Classifies a query string into one of five intent types. Pure function — no I/O,
+Classifies a query string into one of six intent types. Pure function — no I/O,
 no external dependencies. Rule-based with defined priority order.
 
 Intent types and their dispatch in hybrid.py:
@@ -13,7 +13,7 @@ Intent types and their dispatch in hybrid.py:
   MULTI_HOP  → QueryPlanner decomposes into sub-queries, each runs hybrid
 
 Priority order (first match wins):
-  TEMPORAL > ENTITY > PROCEDURAL > KEYWORD > SEMANTIC
+  TEMPORAL > MULTI_HOP > ENTITY > PROCEDURAL > KEYWORD > SEMANTIC
 
 Failure mode: never raises; returns SEMANTIC on any unexpected input.
 """

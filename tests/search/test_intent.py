@@ -1,8 +1,9 @@
 """
 Tests for kairix.core.search.intent — query intent classifier.
 
-20 labelled examples covering all five intent classes.
-Priority order tested: TEMPORAL > ENTITY > PROCEDURAL > KEYWORD > SEMANTIC.
+Labelled examples covering all six intent classes (TEMPORAL, MULTI_HOP, ENTITY,
+PROCEDURAL, KEYWORD, SEMANTIC).
+Priority order tested: TEMPORAL > MULTI_HOP > ENTITY > PROCEDURAL > KEYWORD > SEMANTIC.
 """
 
 import pytest
@@ -21,6 +22,10 @@ CASES: list[tuple[str, QueryIntent]] = [
     ("what has been done recently", QueryIntent.TEMPORAL),
     ("show me items completed on 2026-03-22", QueryIntent.TEMPORAL),
     ("what happened over the last 30 days", QueryIntent.TEMPORAL),
+    # --- MULTI_HOP (3 cases) ---
+    ("how does the embed loop relate to the budget trim", QueryIntent.MULTI_HOP),
+    ("explain the tradeoffs between BM25 and vector retrieval", QueryIntent.MULTI_HOP),
+    ("what is the connection between intent classification and rerank cost", QueryIntent.MULTI_HOP),
     # --- ENTITY (4 cases) ---
     ("tell me about Jordan Blake", QueryIntent.ENTITY),
     ("what has Builder done", QueryIntent.ENTITY),
@@ -96,6 +101,26 @@ def test_temporal_beats_entity() -> None:
     # "tell me about" is ENTITY but "recently" is TEMPORAL → TEMPORAL wins
     result = classify("tell me about what BuilderCo did recently")
     assert result == QueryIntent.TEMPORAL
+
+
+@pytest.mark.unit
+def test_temporal_beats_multi_hop() -> None:
+    """TEMPORAL takes priority over MULTI_HOP signals in the same query.
+    Per docstring priority: TEMPORAL > MULTI_HOP.
+    """
+    # "tradeoffs" is MULTI_HOP, "last week" is TEMPORAL → TEMPORAL wins.
+    result = classify("what tradeoffs did we discuss last week")
+    assert result == QueryIntent.TEMPORAL
+
+
+@pytest.mark.unit
+def test_multi_hop_beats_entity() -> None:
+    """MULTI_HOP takes priority over ENTITY in the same query.
+    Per docstring priority: MULTI_HOP > ENTITY.
+    """
+    # "tell me about" is ENTITY, "tradeoffs" is MULTI_HOP → MULTI_HOP wins.
+    result = classify("tell me about the tradeoffs in our retrieval pipeline")
+    assert result == QueryIntent.MULTI_HOP
 
 
 @pytest.mark.unit
