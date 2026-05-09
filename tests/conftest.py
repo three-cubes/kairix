@@ -42,6 +42,7 @@ pytest_plugins = [
     "tests.bdd.steps.eval_judge_steps",
     "tests.bdd.steps.eval_generate_steps",
     "tests.bdd.steps.eval_gold_builder_steps",
+    "tests.bdd.steps.eval_monitor_steps",
 ]
 
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
