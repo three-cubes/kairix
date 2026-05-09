@@ -22,6 +22,7 @@ import logging
 import os
 import shutil
 import subprocess
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,9 +45,15 @@ class CheckResult:
 # ---------------------------------------------------------------------------
 
 
-def check_kairix_on_path() -> CheckResult:
-    """kairix is findable via PATH."""
-    path = shutil.which("kairix")
+def check_kairix_on_path(which_fn: Callable[[str], str | None] | None = None) -> CheckResult:
+    """kairix is findable via PATH.
+
+    ``which_fn`` is a DI seam (defaults to ``shutil.which``); tests pass
+    a callable returning the desired result so PATH doesn't need mutating.
+    """
+    if which_fn is None:
+        which_fn = shutil.which
+    path = which_fn("kairix")
     if path is None:
         return CheckResult(
             name="kairix_on_path",
@@ -61,18 +68,31 @@ def check_kairix_on_path() -> CheckResult:
     return CheckResult(name="kairix_on_path", ok=True, detail=f"kairix found at {path}")
 
 
-def check_wrapper_installed() -> CheckResult:
-    """The kairix symlink points to a shell wrapper, not the raw Python binary."""
-    from kairix.paths import _is_docker
+def check_wrapper_installed(
+    is_docker_fn: Callable[[], bool] | None = None,
+    which_fn: Callable[[str], str | None] | None = None,
+) -> CheckResult:
+    """The kairix symlink points to a shell wrapper, not the raw Python binary.
 
-    if _is_docker():
+    ``is_docker_fn`` and ``which_fn`` are DI seams; production callers leave
+    them ``None`` and the implementation defaults to the kairix paths helper
+    and ``shutil.which``.
+    """
+    if is_docker_fn is None:
+        from kairix.paths import _is_docker as _default_is_docker
+
+        is_docker_fn = _default_is_docker
+    if which_fn is None:
+        which_fn = shutil.which
+
+    if is_docker_fn():
         return CheckResult(
             name="wrapper_installed",
             ok=True,
             detail="Running in Docker — wrapper check skipped (pip install in image)",
         )
 
-    path = shutil.which("kairix")
+    path = which_fn("kairix")
     if path is None:
         return CheckResult(
             name="wrapper_installed",
@@ -147,10 +167,16 @@ def _secrets_file_keys_present(path: Path, keys: tuple[str, ...]) -> set[str]:
     return found
 
 
-def check_secrets_loaded() -> CheckResult:
-    """LLM credentials are available in the environment or a secrets file."""
-    api_key = os.environ.get("KAIRIX_LLM_API_KEY", "")
-    endpoint = os.environ.get("KAIRIX_LLM_ENDPOINT", "")
+def check_secrets_loaded(env: Mapping[str, str] | None = None) -> CheckResult:
+    """LLM credentials are available in the environment or a secrets file.
+
+    ``env`` is a DI seam (defaults to ``os.environ``); tests pass an
+    explicit mapping rather than monkeypatching the process environment.
+    """
+    if env is None:
+        env = os.environ
+    api_key = env.get("KAIRIX_LLM_API_KEY", "")
+    endpoint = env.get("KAIRIX_LLM_ENDPOINT", "")
 
     # Tier 1 — credentials in process environment (wrapper loaded them)
     if api_key and endpoint:
@@ -163,7 +189,7 @@ def check_secrets_loaded() -> CheckResult:
 
     # Tier 2 — probe secrets file directly (credentials present but not yet in env;
     # load_secrets() is called lazily on first kairix._azure import)
-    secrets_file_env = os.environ.get("KAIRIX_SECRETS_FILE", "")
+    secrets_file_env = env.get("KAIRIX_SECRETS_FILE", "")
     probe_paths: tuple[str, ...] = (
         (secrets_file_env, *_SECRETS_FILE_PROBE_PATHS) if secrets_file_env else _SECRETS_FILE_PROBE_PATHS
     )
@@ -211,9 +237,15 @@ def check_secrets_loaded() -> CheckResult:
     )
 
 
-def check_document_root_configured() -> CheckResult:
-    """KAIRIX_DOCUMENT_ROOT is set and the directory exists."""
-    doc_root = os.environ.get("KAIRIX_DOCUMENT_ROOT", "")
+def check_document_root_configured(env: Mapping[str, str] | None = None) -> CheckResult:
+    """KAIRIX_DOCUMENT_ROOT is set and the directory exists.
+
+    ``env`` is a DI seam (defaults to ``os.environ``); tests pass an
+    explicit mapping rather than monkeypatching the process environment.
+    """
+    if env is None:
+        env = os.environ
+    doc_root = env.get("KAIRIX_DOCUMENT_ROOT", "")
     if not doc_root:
         return CheckResult(
             name="document_root_configured",
@@ -697,7 +729,7 @@ def check_mcp_service() -> CheckResult:
 # ---------------------------------------------------------------------------
 
 
-ALL_CHECKS = [
+ALL_CHECKS: list[Callable[..., CheckResult]] = [
     check_kairix_on_path,
     check_wrapper_installed,
     check_secrets_loaded,
