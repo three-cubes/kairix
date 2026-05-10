@@ -549,6 +549,30 @@ class FakeVectorSearcher:
         return list(self._paths[:limit])
 
 
+def FakeCredentials(  # noqa: N802 — factory function returning real Credentials; named like a class for call-site clarity
+    *,
+    api_key: str = "fake-api-key",
+    endpoint: str = "https://fake.openai.azure.com",
+    model: str = "text-embedding-3-large",
+    dims: int = 1536,
+) -> Any:
+    """Construct a real ``kairix.credentials.Credentials`` from explicit args.
+
+    The canonical replacement for "monkey-patch ``get_credentials``" in tests.
+    Tests inject ``creds_resolver=lambda: FakeCredentials(...)`` (or
+    ``lambda: None``, or ``lambda: FakeCredentials(api_key="")`` to drive
+    the missing-credentials skip path) into ``RecallChecker`` rather than
+    mutating module-level state.
+
+    Returns a real ``Credentials`` instance — the production code's
+    ``isinstance(creds, Credentials)`` check passes, so tests exercise the
+    same control flow production runs.
+    """
+    from kairix.credentials import Credentials
+
+    return Credentials(api_key=api_key, endpoint=endpoint, model=model, dims=dims)
+
+
 class FakeFusion:
     """Pass-through fusion: concatenates BM25 and vector results.
 
