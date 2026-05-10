@@ -1,45 +1,45 @@
 # Release checklist (develop → main)
 
-Manual ad-hoc release flow. Track [#170](https://github.com/quanyeomans/kairix/issues/170) to automate this.
+Tag-creation, GitHub-Release authoring, and CHANGELOG-section extraction
+are automated by the **`5 · Release`** workflow (`.github/workflows/release.yml`).
+This checklist covers the parts a human still drives — develop→main merge,
+post-release CHANGELOG bump, and the deploy/UAT loop.
 
 ## Pre-merge
 
-- [ ] PR #134 (or current release PR) all 38 checks SUCCESS.
-- [ ] `codecov/patch` shows non-regression.
-- [ ] SonarCloud Quality Gate passes.
+- [ ] Release PR all checks SUCCESS — including `SonarCloud Code Analysis` + `codecov/patch`.
 - [ ] CHANGELOG.md `[Unreleased]` section is fully populated (no empty sub-sections).
 - [ ] Version label matches calendar version: `vYYYY.M.D[.N]` where N is the same-day suffix.
 
 ## Merge
 
 ```bash
-# Confirm PR is mergeable
-gh pr view 134 --json mergeable,mergeStateStatus
-
-# Merge with merge-commit (preserves history) or squash (cleaner main log).
-# Kairix convention: merge-commit on release PRs to preserve fitness-function
-# baseline ratchets; squash for feature PRs.
-gh pr merge 134 --merge --delete-branch=false  # release PR keeps develop alive
+# Confirm PR is mergeable; squash-merge if the repo is configured to allow only squash.
+gh pr view <N> --json mergeable,mergeStateStatus
+gh pr merge <N> --squash --delete-branch=false  # release PR keeps develop alive
 ```
 
-## Tag and release
+## Tag + release (automated)
 
 ```bash
-# Tag from main HEAD
-git checkout main
-git pull origin main
-TAG="v2026.5.9"
-git tag -a "$TAG" -m "kairix $TAG"
-git push origin "$TAG"
+# Trigger the release workflow with the version label.
+# Inputs:
+#   version: vYYYY.M.D[.N]
+#   changelog_label: Unreleased   (default — the [Unreleased] section)
+gh workflow run "5 · Release (tag + GitHub release from CHANGELOG)" \
+    -f version=v2026.5.9 \
+    -f changelog_label=Unreleased
 
-# Create the GitHub Release — derives notes from CHANGELOG.md.
-# The Docker publish + PyPI publish workflows fire automatically on
-# release creation.
-gh release create "$TAG" \
-    --title "kairix $TAG" \
-    --notes-from-tag \
-    --verify-tag
+# Watch the run.
+gh run watch
 ```
+
+The workflow:
+1. Validates the version matches CalVer (`vYYYY.M.D[.N]`) and isn't already tagged.
+2. Extracts the `[Unreleased]` (or supplied) CHANGELOG section as release notes.
+3. Tags `main` HEAD and pushes the tag.
+4. Creates the GitHub Release with the extracted notes — which fires the
+   downstream `3 · Docker publish (release)` and `4 · PyPI publish (release)` workflows.
 
 ## Post-release
 
