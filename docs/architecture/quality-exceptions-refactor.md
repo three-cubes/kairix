@@ -240,15 +240,26 @@ each agent owns one production file. Dispatch with `isolation="worktree"`,
 all in parallel, all in the same Agent message. Each agent runs
 `safe-commit.sh` in its loop and reports SHA + branch when green.
 
-Because `develop` is now the default branch and the main checkout sits
-on `develop`, `git worktree add` without an explicit branch starts at
-develop's HEAD — agent branches share a base with develop. Verified
-2026-05-10. Default integration is therefore **PR + auto-merge**: each
-agent's branch is pushed and opened as a PR against develop; CI gates
-the merge; auto-merge lands them in completion order. Cherry-pick is
-the fallback for the case where develop has advanced enough that
-re-merging would be churn — in that case rebase the agent branch onto
-develop and continue, or cherry-pick the SHA.
+**Worktree base (verified 2026-05-10 from real Wave-1 dispatch):** the
+`Agent` tool's `isolation="worktree"` branches off **main** (latest
+tagged release), not develop. This is different from a manual shell
+`git worktree add` which uses the parent's HEAD. The default-branch
+change does not affect the `Agent` tool's behaviour.
+
+Implications:
+- Each agent must `git fetch origin && git rebase origin/develop` in
+  its worktree before doing work, or it runs against stale fakes /
+  baselines.
+- For **file-localised work** (agent only modifies files no recent
+  develop commit touched), `gh pr merge --merge` produces a clean
+  merge into develop — GitHub computes a merge commit whose tree is
+  develop's HEAD plus the agent's diffs; develop work is not reverted.
+  Wave-1 PRs #205, #206, #207 are the existence proof.
+- For **work that overlaps with recent develop changes** (e.g. another
+  agent already added the same fake to `tests/fakes.py`), rebase the
+  agent branch onto `origin/develop` first, OR cherry-pick the agent
+  SHA onto develop. Reading the PR diff before merging is mandatory —
+  the diff is the merge plan.
 
 Recommended Wave-1 batch (one issue ↔ one agent):
 
