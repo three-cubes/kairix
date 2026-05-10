@@ -2,6 +2,3 @@ kairix/knowledge/contradict/detector.py
 kairix/knowledge/summaries/generate.py
 kairix/platform/llm/backends.py
 kairix/platform/onboard/check.py
-kairix/platform/setup/wizard.py
-kairix/quality/eval/retrieval.py
-kairix/worker.py

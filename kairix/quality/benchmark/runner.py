@@ -320,8 +320,9 @@ def retrieve(
                   to verify the resolved RetrievalConfig flows through.
                   ``None`` means use the production pipeline.
     """
-    from kairix.quality.eval.retrieval import retrieve
+    from kairix.quality.eval.retrieval import RetrievalDeps, retrieve
 
+    deps = RetrievalDeps(searcher=searcher) if searcher is not None else None
     result = retrieve(
         query=query,
         system=system,
@@ -330,7 +331,7 @@ def retrieve(
         db_path=db_path,
         collection=collection,
         fusion_override=fusion_override,
-        search_fn=searcher,
+        deps=deps,
     )
     return result.paths, result.snippets, result.meta
 
