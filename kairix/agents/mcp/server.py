@@ -399,140 +399,50 @@ def tool_timeline(
     anchor_date: str | None = None,
     agent: str | None = None,
     scope: Scope = DEFAULT_SCOPE,
-    *,
-    extract_fn: Callable[..., Any] | None = None,
-    rewrite_fn: Callable[..., Any] | None = None,
-    search_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Date-aware retrieval: rewrite a temporal query and fetch results.
 
-    Behaviour matches the CLI's ``kairix timeline`` (closes the WS2-C asymmetry
-    flagged in the 2026-05-02 dogfood):
-
-      - When the query contains a temporal expression ("last week", "April 2026"),
-        the rewriter expands it into a date range; ``rewritten_query`` carries
-        the expanded form.
-      - When no temporal expression is found, ``is_temporal=False`` and
-        ``fell_back=True``; the search is performed against the original query
-        rather than returning nothing useful.
-      - Either way, ``results`` carries the search hits when ``search_fn`` is
-        provided. Tests that don't want the search side-effect omit ``search_fn``
-        and get an empty ``results`` list.
-
-    Args:
-        extract_fn: Injectable time window extraction for testing. Defaults to
-            extract_time_window in production via build_server wiring.
-        rewrite_fn: Injectable temporal rewriter for testing.
-        search_fn:  Injectable search function. When None, no search is
-            performed (rewriter-only mode for unit tests). Production
-            invocations from build_server pass a wired SearchPipeline.search.
+    Thin adapter around ``kairix.use_cases.timeline.run_timeline``. CLI and
+    MCP both call the same use case so behaviour is identical (closes #163,
+    Phase 1 of #168). The use case extracts a time window from the query
+    (or accepts explicit since/until), tries the temporal-chunks index
+    first, then falls through to the search pipeline.
     """
-    try:
-        from datetime import date as _date
+    from datetime import date as _date
 
-        if extract_fn is None:
-            from kairix.core.temporal.rewriter import extract_time_window
+    from kairix.use_cases.timeline import run_timeline
 
-            extract_fn = extract_time_window
-        if rewrite_fn is None:
-            from kairix.core.temporal.rewriter import rewrite_temporal_query
-
-            rewrite_fn = rewrite_temporal_query
-
-        anchor: _date | None = None
-        if anchor_date:
-            try:
-                anchor = _date.fromisoformat(anchor_date)
-            except ValueError:
-                pass
-
-        # Detect temporal intent from BOTH relative ("last week") and absolute ("April 2026") expressions
-        time_window: dict[str, str] = {}
+    anchor: _date | None = None
+    if anchor_date:
         try:
-            start, end = extract_fn(query=query, reference_date=anchor)
-            if start or end:
-                time_window = {
-                    "start": str(start) if start else "",
-                    "end": str(end) if end else "",
-                }
-        except Exception:
-            start, end = None, None
-            logger.debug("extract_time_window failed", exc_info=True)
+            anchor = _date.fromisoformat(anchor_date)
+        except ValueError:
+            pass
 
-        is_temporal = bool(time_window)
-        rewritten = rewrite_fn(query=query, reference_date=anchor) if is_temporal else query
-        rewritten = rewritten if rewritten is not None else query
+    result = run_timeline(
+        query,
+        anchor_date=anchor,
+        agent=agent,
+        scope=scope,
+    )
 
-        # Fallthrough search: when search_fn is wired, always run a search using
-        # the (possibly rewritten) query so MCP callers get results even on
-        # non-temporal queries. fell_back signals the rewrite was a no-op.
-        # Result items are BudgetedResult — fields live on .result; .content
-        # is the boundary-trimmed snippet. Earlier code shape-mismatched and
-        # produced empty placeholders (Shape's 2026-05-05 MCP path report).
-        results_list: list[dict[str, Any]] = []
-        if search_fn is not None:
-            try:
-                sr = search_fn(query=rewritten, budget=3000, agent=agent, scope=scope)
-                for budgeted in getattr(sr, "results", []):
-                    inner = getattr(budgeted, "result", None)
-                    if inner is None:
-                        continue
-                    snippet = getattr(budgeted, "content", "") or getattr(inner, "snippet", "")
-                    results_list.append(
-                        {
-                            "path": getattr(inner, "path", ""),
-                            "title": getattr(inner, "title", ""),
-                            "snippet": snippet[:300],
-                            "score": getattr(inner, "boosted_score", getattr(inner, "score", 0.0)),
-                        }
-                    )
-                # Diagnostic for #163: when results are non-empty but every row
-                # has an empty path, the upstream pipeline is producing a
-                # malformed result shape. Log enough state to triage the next
-                # occurrence without reproducing live (the CLI is unaffected
-                # because it uses a different code path entirely —
-                # query_temporal_chunks against the structured temporal index).
-                if results_list and all(not r["path"] for r in results_list):
-                    logger.warning(
-                        "mcp.timeline: %d empty-path results returned for query=%r "
-                        "(rewritten=%r, agent=%r, scope=%r). Pipeline diagnostics: "
-                        "bm25_count=%s vec_count=%s fused_count=%s collections=%s "
-                        "vec_failed=%s error=%r — see #163.",
-                        len(results_list),
-                        query[:80],
-                        rewritten[:80] if rewritten != query else "<same>",
-                        agent,
-                        scope.value if hasattr(scope, "value") else str(scope),
-                        getattr(sr, "bm25_count", "?"),
-                        getattr(sr, "vec_count", "?"),
-                        getattr(sr, "fused_count", "?"),
-                        getattr(sr, "collections", "?"),
-                        getattr(sr, "vec_failed", "?"),
-                        getattr(sr, "error", "?"),
-                    )
-            except Exception:
-                logger.debug("timeline fallthrough search failed", exc_info=True)
-
-        return {
-            "original_query": query,
-            "rewritten_query": rewritten,
-            "is_temporal": is_temporal,
-            "fell_back": not is_temporal,
-            "time_window": time_window,
-            "results": results_list,
-            "error": "",
-        }
-    except Exception as exc:
-        logger.warning("mcp.timeline failed: %s", exc, exc_info=True)
-        return {
-            "original_query": query,
-            "rewritten_query": query,
-            "is_temporal": False,
-            "fell_back": True,
-            "time_window": {},
-            "results": [],
-            "error": "Timeline processing failed — check server logs for details.",
-        }
+    return {
+        "original_query": result.original_query,
+        "rewritten_query": result.rewritten_query,
+        "is_temporal": result.is_temporal,
+        "fell_back": result.fell_back,
+        "time_window": result.time_window,
+        "results": [
+            {
+                "path": h.path,
+                "title": h.title,
+                "snippet": h.snippet,
+                "score": h.score,
+            }
+            for h in result.results
+        ],
+        "error": result.error,
+    }
 
 
 def tool_research(
@@ -812,15 +722,11 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Temporal query rewriting + date-aware retrieval."""
-        from kairix.core.factory import build_search_pipeline
-
-        _timeline_pipeline = build_search_pipeline()
         return tool_timeline(
             query=query,
             anchor_date=anchor_date,
             agent=agent,
             scope=scope,
-            search_fn=_timeline_pipeline.search,
         )
 
     @server.tool()
