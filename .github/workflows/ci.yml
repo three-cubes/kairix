@@ -218,17 +218,6 @@ jobs:
             --junitxml=results-unit.xml \
             -v --tb=short
 
-      - name: Preserve .coverage as .coverage.unit (for F9 union)
-        # pytest-cov writes the data file to .coverage by default. We
-        # rename it to .coverage.unit so it can be uploaded alongside
-        # the integration job's .coverage.integration and combined in
-        # Stage 5. Cannot use COVERAGE_FILE env var for this — pytest-cov
-        # behaviour with non-default data_file paths is inconsistent
-        # between coverage report shapes (in particular, integration
-        # job's --cov-fail-under=0 path drops the data file).
-        if: matrix.python-version == '3.12'
-        run: |
-          if [ -f .coverage ]; then cp .coverage .coverage.unit; fi
 
       - name: F7 — per-file coverage floor (85%)
         # Repo-wide coverage averages can hide files at 0%. F7 requires every
@@ -278,13 +267,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-data
-          # `include-hidden-files: true` is required because upload-artifact@v4
-          # excludes dotfiles by default — `.coverage.unit` is a dotfile and
-          # would silently be dropped from the artifact, breaking F9.
-          include-hidden-files: true
-          path: |
-            .coverage.unit
-            coverage.xml
+          path: coverage.xml
           retention-days: 7
 
   # ── Coverage delta PR comment ─────────────────────────────────────────────
@@ -357,22 +340,19 @@ jobs:
             --cov-fail-under=0 \
             --junitxml=results-integration.xml
 
-      - name: Preserve .coverage as .coverage.integration (for F9 union)
-        # See unit-and-type job's matching step for why we copy after the
-        # run rather than using COVERAGE_FILE env var.
-        if: ${{ !cancelled() }}
-        run: |
-          if [ -f .coverage ]; then cp .coverage .coverage.integration; fi
-
-      - name: Upload integration coverage data (for F9 union)
+      - name: Upload integration coverage XML (for F9 union)
+        # F9 reads the XML reports from unit + integration and merges
+        # them per-line in Python (scripts/checks/merge_coverage_xml.py).
+        # We deliberately upload the XML rather than the .coverage data
+        # file — the XML is not a hidden file (no `include-hidden-files`
+        # workaround needed), and the merge tool reads Cobertura XML
+        # directly so we don't depend on `coverage combine`'s data-file
+        # behaviour.
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-data-integration
-          # See unit-and-type job: dotfiles are excluded by default in
-          # upload-artifact@v4 — required for `.coverage.integration`.
-          include-hidden-files: true
-          path: .coverage.integration
+          path: coverage-integration.xml
           retention-days: 7
 
       - name: Upload integration coverage to Codecov
@@ -431,25 +411,31 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install coverage tooling
-        run: pip install coverage>=7
-
-      - name: Download unit coverage data
+      - name: Download unit coverage XML
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: coverage-data
 
-      - name: Download integration coverage data
+      - name: Download integration coverage XML
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: coverage-data-integration
 
-      - name: Combine unit + integration coverage
-        # `--keep` preserves both inputs in case a follow-up step wants
-        # to inspect them. Output is the default `.coverage` database.
+      - name: Merge unit + integration coverage XMLs
+        # We merge the Cobertura XML reports per-line instead of running
+        # `coverage combine` on .coverage data files. Reasons:
+        #   1. .coverage is a hidden dotfile; upload-artifact@v4 excludes
+        #      dotfiles by default — workarounds were unreliable.
+        #   2. pytest-cov's data-file behaviour differs subtly between
+        #      unit and integration invocations (notably with
+        #      --cov-fail-under=0), making `.coverage` an inconsistent
+        #      target.
+        #   3. The XML is the source of truth that F7 already consumes,
+        #      so reusing it keeps the data path identical for both
+        #      gates.
+        # The merger lives at scripts/checks/merge_coverage_xml.py.
         run: |
-          coverage combine --keep .coverage.unit .coverage.integration
-          coverage xml -o coverage-union.xml
+          python3 scripts/checks/merge_coverage_xml.py coverage.xml coverage-integration.xml coverage-union.xml
 
       - name: F9 -- per-file 85% floor on union coverage
         run: |
