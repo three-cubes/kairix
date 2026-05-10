@@ -42,6 +42,14 @@ services:
       timeout: 30s
       retries: 3
       start_period: 30s
+    # Resource limits — sized for the v2026.5.10.5 async-tool refactor
+    # which lets concurrent /mcp calls run on separate threads (#177).
+    # Steady-state RSS observed at ~1.2 GB; 3 GB allows headroom for
+    # bursts and rerank-model loading. CPU cap prevents kairix from
+    # monopolising the host when neo4j or other tenants need compute.
+    mem_limit: 3g
+    mem_reservation: 1500m
+    cpus: 4.0
 
   kairix-worker:
     image: ghcr.io/quanyeomans/kairix:latest
@@ -63,6 +71,11 @@ services:
       neo4j:
         condition: service_healthy
     restart: unless-stopped
+    # Worker steady-state RSS observed at ~150 MB. 1 GB cap is plenty;
+    # cpus: 2.0 lets the embed pipeline burst without saturating the host.
+    mem_limit: 1g
+    mem_reservation: 256m
+    cpus: 2.0
 
   neo4j:
     image: neo4j:5-community
@@ -83,6 +96,12 @@ services:
     # ports:
     #   - "7474:7474"
     #   - "7687:7687"
+    # Neo4j heap is configured via NEO4J_server_memory_heap_max_size (set
+    # via env var if you tune it). Container hard cap below provides a
+    # backstop so a runaway neo4j can't OOM the host.
+    mem_limit: 2g
+    mem_reservation: 512m
+    cpus: 2.0
 
 volumes:
   kairix-data:
