@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 EMBED_INTERVAL = 3600  # 1 hour
 ENTITY_SEED_INTERVAL = 86400  # 24 hours
 HEALTH_CHECK_INTERVAL = 21600  # 6 hours
+WIKILINKS_INTERVAL = 3600  # 1 hour — runs after embed; --changed mtime-filters
 
 
 def _default_embed() -> EmbedPipelineResult:
@@ -57,6 +58,18 @@ def _default_entity_seed() -> None:
             os.environ.get("KAIRIX_DOCUMENT_ROOT", str(Path.home() / "Documents")),
         ]
     )
+
+
+def _default_wikilinks_inject() -> None:
+    """Default wikilinks inject — runs ``kairix wikilinks inject --changed``.
+
+    The CLI's ``main`` may raise ``SystemExit`` (e.g. when no entities
+    are loaded yet, before the entity seed has run). The worker's
+    ``run_wikilinks_inject`` catches that to keep the worker alive.
+    """
+    from kairix.knowledge.wikilinks.cli import main as wikilinks_main
+
+    wikilinks_main(["inject", "--changed"])
 
 
 def _default_health_check() -> list[Any]:
@@ -145,6 +158,32 @@ def run_entity_seed(entity_seed_fn: Callable[[], None] | None = None) -> None:
         logger.warning("worker: entity seed failed — %s", exc)
 
 
+def run_wikilinks_inject(wikilinks_fn: Callable[[], None] | None = None) -> None:
+    """Inject ``[[wikilinks]]`` on first mention into agent-written documents.
+
+    Closes #100 — the host cron's nightly ``kairix wikilinks inject
+    --changed`` was lost in the Docker migration. The worker now runs
+    it on the same cadence as embed (hourly) so new agent-written notes
+    get linked to known entities.
+
+    Treats every outcome as non-fatal: the wikilinks CLI may
+    ``sys.exit(1)`` when entities aren't loaded yet (pre-first-seed
+    bootstrapping), and that must NOT terminate the worker. Same
+    ``(Exception, SystemExit)`` discipline as ``run_embed``.
+
+    ``wikilinks_fn`` is the injection seam tests use; production passes
+    ``_default_wikilinks_inject``.
+    """
+    if wikilinks_fn is None:
+        wikilinks_fn = _default_wikilinks_inject
+    try:
+        logger.info("worker: starting wikilinks inject")
+        wikilinks_fn()
+        logger.info("worker: wikilinks inject complete")
+    except (Exception, SystemExit) as exc:
+        logger.warning("worker: wikilinks inject raised — %s", exc)
+
+
 def run_health_check(health_check_fn: Callable[[], list[Any]] | None = None) -> None:
     """Log a health check.
 
@@ -168,10 +207,12 @@ def main(
     embed_fn: Callable[[], None] | None = None,
     entity_seed_fn: Callable[[], None] | None = None,
     health_check_fn: Callable[[], list[Any]] | None = None,
+    wikilinks_fn: Callable[[], None] | None = None,
     sleep_fn: Callable[[float], None] | None = None,
     embed_interval: int | None = None,
     entity_seed_interval: int | None = None,
     health_check_interval: int | None = None,
+    wikilinks_interval: int | None = None,
 ) -> None:
     """Run the worker loop.
 
@@ -186,18 +227,21 @@ def main(
     _embed_interval = embed_interval if embed_interval is not None else EMBED_INTERVAL
     _entity_interval = entity_seed_interval if entity_seed_interval is not None else ENTITY_SEED_INTERVAL
     _health_interval = health_check_interval if health_check_interval is not None else HEALTH_CHECK_INTERVAL
+    _wikilinks_interval = wikilinks_interval if wikilinks_interval is not None else WIKILINKS_INTERVAL
     _sleep = sleep_fn if sleep_fn is not None else time.sleep
 
     logger.info(
-        "kairix worker starting — embed every %ds, entity seed every %ds",
+        "kairix worker starting — embed every %ds, entity seed every %ds, wikilinks every %ds",
         _embed_interval,
         _entity_interval,
+        _wikilinks_interval,
     )
 
     # Track when each task last ran
     last_embed = 0.0
     last_entity = 0.0
     last_health = 0.0
+    last_wikilinks = 0.0
 
     # Graceful shutdown
     running = True
@@ -228,6 +272,10 @@ def main(
         if now - last_health >= _health_interval:
             run_health_check(health_check_fn)
             last_health = now
+
+        if now - last_wikilinks >= _wikilinks_interval:
+            run_wikilinks_inject(wikilinks_fn)
+            last_wikilinks = now
 
         # Sleep 60 seconds between checks
         for _ in range(60):

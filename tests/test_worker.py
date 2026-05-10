@@ -22,10 +22,12 @@ from kairix.worker import (
     EMBED_INTERVAL,
     ENTITY_SEED_INTERVAL,
     HEALTH_CHECK_INTERVAL,
+    WIKILINKS_INTERVAL,
     main,
     run_embed,
     run_entity_seed,
     run_health_check,
+    run_wikilinks_inject,
 )
 
 pytestmark = pytest.mark.unit
@@ -325,3 +327,73 @@ def test_shutdown_handler_via_sigint() -> None:
     )
 
     assert call_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# run_wikilinks_inject() — Phase 3 of #100
+# ---------------------------------------------------------------------------
+
+
+def test_run_wikilinks_inject_calls_wikilinks_fn() -> None:
+    called = False
+
+    def _inject() -> None:
+        nonlocal called
+        called = True
+
+    run_wikilinks_inject(wikilinks_fn=_inject)
+    assert called
+
+
+def test_run_wikilinks_inject_catches_exceptions() -> None:
+    def _failing() -> None:
+        raise RuntimeError("kapow")
+
+    run_wikilinks_inject(wikilinks_fn=_failing)  # must not raise
+
+
+def test_run_wikilinks_inject_survives_systemexit() -> None:
+    """The wikilinks CLI raises SystemExit when entities aren't loaded.
+    The worker must catch it (same discipline as run_embed).
+    """
+
+    def _exits() -> None:
+        raise SystemExit(1)
+
+    run_wikilinks_inject(wikilinks_fn=_exits)  # must not propagate
+
+
+def test_main_loop_calls_wikilinks_at_interval() -> None:
+    """When the wikilinks interval has elapsed, main() invokes it once per cycle."""
+    call_counts = {"embed": 0, "wikilinks": 0}
+
+    def _embed_then_shutdown() -> None:
+        call_counts["embed"] += 1
+        if call_counts["embed"] >= 2:
+            import os
+
+            # NOSONAR: self-signal so the loop exits after we observe wikilinks running.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def _wikilinks() -> None:
+        call_counts["wikilinks"] += 1
+
+    main(
+        embed_fn=_embed_then_shutdown,
+        entity_seed_fn=lambda: None,
+        health_check_fn=lambda: [],
+        wikilinks_fn=_wikilinks,
+        sleep_fn=lambda _s: None,
+        embed_interval=0,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=0,
+    )
+
+    assert call_counts["embed"] >= 1
+    assert call_counts["wikilinks"] >= 1
+
+
+def test_wikilinks_interval_constant_matches_embed() -> None:
+    """Per #100 the inject runs on the same hourly cadence as embed."""
+    assert WIKILINKS_INTERVAL == EMBED_INTERVAL
