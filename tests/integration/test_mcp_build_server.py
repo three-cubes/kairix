@@ -32,6 +32,7 @@ _EXPECTED_TOOLS = {
     "research",
     "contradict",
     "usage_guide",
+    "brief",
 }
 
 
@@ -46,7 +47,7 @@ def _call_tool(server: Any, name: str, arguments: dict[str, Any]) -> Any:
 
 
 @pytest.mark.integration
-def test_build_server_returns_fastmcp_with_all_seven_kairix_tools() -> None:
+def test_build_server_returns_fastmcp_with_all_kairix_tools() -> None:
     """The constructed server must register every kairix tool by name."""
     from mcp.server.fastmcp import FastMCP
 

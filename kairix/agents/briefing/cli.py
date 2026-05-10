@@ -2,24 +2,24 @@
 kairix brief — session briefing synthesis.
 
 Usage:
-  kairix brief <agent>
+  kairix brief <agent> [--print] [--memory-root PATH]
 
-Generates a session briefing at /data/kairix/briefing/<agent>-latest.md
-and prints the path and first 30 lines to stdout.
+Generates a session briefing at the configured briefing dir and prints
+the path and first 30 lines to stdout.
+
+Adapter only — business logic lives in
+``kairix.use_cases.brief.run_brief``.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 
+from kairix.use_cases.brief import BriefDeps, BriefOutput, run_brief
 
-def main(args: list[str] | None = None) -> None:
-    """Entry point for `kairix brief`."""
-    import argparse
 
-    if args is None:
-        args = sys.argv[2:]  # strip 'kairix brief'
-
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kairix brief",
         description="Generate a session briefing for an agent.",
@@ -41,48 +41,47 @@ def main(args: list[str] | None = None) -> None:
         default=None,
         help="Root directory containing agent subdirectories (e.g. /path/to/04-Agent-Knowledge).",
     )
+    return parser
 
-    parsed = parser.parse_args(args)
-    agent = parsed.agent.lower().strip()
+
+def format_output(out: BriefOutput, *, print_full: bool) -> str:
+    """Render the operator-facing stdout — preview or full content."""
+    if not out.content:
+        return ""
+    if print_full:
+        return out.content
+    lines = out.content.splitlines()
+    preview = "\n".join(lines[:30])
+    if len(lines) > 30:
+        preview = f"{preview}\n\n... ({len(lines) - 30} more lines — see {out.path})"
+    return preview
+
+
+def main(args: list[str] | None = None, *, deps: BriefDeps | None = None) -> None:
+    """Entry point for ``kairix brief``.
+
+    The optional ``deps`` parameter forwards a ``BriefDeps`` directly
+    to the use case — production callers leave it None.
+    """
+    if args is None:
+        args = sys.argv[2:]  # strip 'kairix brief'
+    parsed = build_parser().parse_args(args)
 
     if parsed.memory_root:
         import os
 
         os.environ["KAIRIX_AGENT_MEMORY_ROOT"] = parsed.memory_root
 
-    valid_agents = {"builder", "shape", "growth", "consultant"}
-    if agent not in valid_agents:
-        print(
-            f"Error: invalid agent {agent!r}. Must be one of: {sorted(valid_agents)}",
-            file=sys.stderr,
-        )
+    print(f"Generating briefing for agent: {parsed.agent} ...", file=sys.stderr)
+    out = run_brief(parsed.agent, deps=deps)
+
+    if out.error:
+        print(f"Error generating briefing: {out.error}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Generating briefing for agent: {agent} ...", file=sys.stderr)
+    if out.path:
+        print(f"Briefing written to: {out.path}", file=sys.stderr)
 
-    try:
-        from kairix.agents.briefing.pipeline import generate_briefing
-        from kairix.agents.briefing.writer import BRIEFING_DIR
-
-        content = generate_briefing(agent)
-
-        out_path = BRIEFING_DIR / f"{agent}-latest.md"
-        print(f"Briefing written to: {out_path}", file=sys.stderr)
-
-        if parsed.print_output:
-            print(
-                content
-            )  # lgtm[py/clear-text-logging-sensitive-data] — intentional: user requested --print-output flag; briefing is user's own document
-        else:
-            # Print first 30 lines to stdout
-            lines = content.splitlines()
-            preview = "\n".join(lines[:30])
-            print(
-                preview
-            )  # lgtm[py/clear-text-logging-sensitive-data] — intentional: CLI preview output for user review
-            if len(lines) > 30:
-                print(f"\n... ({len(lines) - 30} more lines — see {out_path})")
-
-    except Exception as e:
-        print(f"Error generating briefing: {e}", file=sys.stderr)
-        sys.exit(1)
+    rendered = format_output(out, print_full=parsed.print_output)
+    if rendered:
+        print(rendered)  # lgtm[py/clear-text-logging-sensitive-data] — intentional CLI output of user's own briefing

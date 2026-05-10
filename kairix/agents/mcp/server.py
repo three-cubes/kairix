@@ -491,6 +491,26 @@ def tool_contradict(
     return contradict_output_to_envelope(out)
 
 
+def tool_brief(
+    agent: str,
+    *,
+    deps: Any = None,
+) -> dict[str, Any]:
+    """Generate a session briefing and return its content + path.
+
+    Thin adapter around ``kairix.use_cases.brief.run_brief``. Use before
+    starting work — gives an agent the operator's recent decisions,
+    notes, and entity stub in one structured payload.
+
+    The optional ``deps`` parameter forwards a ``BriefDeps`` directly to
+    the use case — production callers leave it None.
+    """
+    from kairix.use_cases.brief import brief_output_to_envelope, run_brief
+
+    out = run_brief(agent, deps=deps)
+    return brief_output_to_envelope(out)
+
+
 # ---------------------------------------------------------------------------
 # FastMCP server — only constructed when mcp package is available
 # ---------------------------------------------------------------------------
@@ -594,5 +614,11 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     def usage_guide(topic: str = "") -> dict[str, Any]:
         """Return the kairix agent usage guide. Call this when unsure how to use kairix."""
         return tool_usage_guide(topic=topic)
+
+    @server.tool()
+    @async_tool_handler
+    def brief(agent: str) -> dict[str, Any]:
+        """Generate a session briefing for an agent. Returns content + on-disk path."""
+        return tool_brief(agent=agent)
 
     return server
