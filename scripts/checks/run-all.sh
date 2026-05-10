@@ -31,6 +31,9 @@ bash "${SCRIPT_DIR}/check-no-internal-patches.sh" || overall=1
 # F2
 bash "${SCRIPT_DIR}/check-no-env-monkeypatch.sh" || overall=1
 
+# F4
+bash "${SCRIPT_DIR}/check-env-reads-stay-in-paths.sh" || overall=1
+
 # F3
 bash "${SCRIPT_DIR}/check-suppressions-have-rationale.sh" || overall=1
 

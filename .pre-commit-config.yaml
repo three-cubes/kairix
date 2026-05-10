@@ -52,6 +52,13 @@ repos:
         pass_filenames: false
         files: ^tests/.*\.py$
 
+      - id: arch-env-reads-in-paths
+        name: "arch F4: os.environ KAIRIX_* reads stay in paths.py/secrets.py"
+        entry: bash scripts/checks/check-env-reads-stay-in-paths.sh
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
       - id: arch-suppressions-have-rationale
         name: "arch F3: suppressions require rationale"
         entry: bash scripts/checks/check-suppressions-have-rationale.sh

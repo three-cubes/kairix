@@ -24,7 +24,7 @@ document needs an update.
    - [F5 — No internal-name imports in tests](#f5--no-internal-name-imports-in-tests)
    - [F6 — No `*_fn=None` test-only kwargs in production](#f6--no-_fnnone-test-only-kwargs-in-production)
    - [F7 — Per-file coverage floor at 85%](#f7--per-file-coverage-floor-at-85)
-   - [F4 (reserved)](#f4-reserved)
+   - [F4 — No `os.environ.get("KAIRIX_*")` outside `paths.py` / `secrets.py`](#f4--no-osenvirongetkairix_-outside-pathspy--secretspy)
 5. [SDLC integration map](#sdlc-integration-map)
 6. [Harness architecture](#harness-architecture)
 7. [GitHub Actions integration](#github-actions-integration)
@@ -148,7 +148,7 @@ fully enforced; new violations anywhere in the codebase block.
 | F1 | No `@patch` on kairix internal code | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | `no-internal-patches-files.txt` |
 | F2 | No `monkeypatch.setenv("KAIRIX_*")` in tests | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | `no-env-monkeypatch-files.txt` |
 | F3 | Suppressions require inline rationale | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | `suppressions-have-rationale-files.txt` |
-| F4 | (reserved — `os.environ.get("KAIRIX_*")` outside `paths.py`/`secrets.py`) | — | — | — | — |
+| F4 | No `os.environ.get("KAIRIX_*")` outside `paths.py`/`secrets.py` | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | `env-reads-in-paths-files.txt` |
 | F5 | No internal-name imports in tests | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-internal-test-imports-files.txt` |
 | F6 | No `*_fn=None` test-only kwargs in production | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-test-only-kwargs-files.txt` |
 | F7 | Per-file coverage floor at 85% | coverage report | Python + Cobertura XML | CI unit-and-type | `per-file-coverage-floor-files.txt` |
@@ -594,15 +594,84 @@ pragma to defeat F7 should be a last resort.
 
 ---
 
-### F4 (reserved)
+### F4 — No `os.environ.get("KAIRIX_*")` outside `paths.py` / `secrets.py`
 
-**Statement (planned):** `os.environ.get("KAIRIX_*")` may only appear
-in `kairix/paths.py` and `kairix/secrets.py`. Anywhere else is
-bypassing the canonical `KairixPaths` boundary.
+#### Statement
 
-**Status:** designed but not yet implemented. F2 partially overlaps
-(it catches the test side); F4 catches the production side. Tracked
-for the next fitness-function expansion.
+Production files in `kairix/*` MUST NOT read `KAIRIX_*` environment
+variables anywhere except `kairix/paths.py` (paths) and
+`kairix/secrets.py` (credentials).
+
+#### Why
+
+Per the boundary-only `KairixPaths` pattern (#139), env vars are read
+**once at the boundary**. F2 catches the test side
+(`monkeypatch.setenv("KAIRIX_*")`); F4 catches the production side
+(scattered `os.environ.get("KAIRIX_*")` calls).
+
+A `KAIRIX_*` read in any other module means the production code is
+bypassing `KairixPaths` — which leaks env-var coupling across modules
+and prevents tests from injecting paths cleanly. Both anti-patterns
+are documented in #139's closure.
+
+#### Detection
+
+`scripts/checks/check-env-reads-stay-in-paths.sh`:
+
+```bash
+grep -rEl 'os\.environ.*KAIRIX_' kairix/ --include='*.py' \
+    | grep -vE '^kairix/(paths|secrets)\.py$'
+```
+
+Matches `os.environ.get("KAIRIX_X")`, `os.environ["KAIRIX_X"]`, and
+`os.environ.pop("KAIRIX_X")` — any read or mutation of a `KAIRIX_*`
+key. Allow-listed locations are `kairix/paths.py` and
+`kairix/secrets.py`.
+
+#### Examples
+
+```python
+# REJECTED — production module other than paths.py/secrets.py
+# kairix/agents/briefing/cli.py
+default_root = os.environ.get("KAIRIX_AGENT_MEMORY_ROOT", "/data/agents")
+
+# ACCEPTED — kairix/paths.py is the canonical boundary
+def _resolve_cached() -> KairixPaths:
+    document_root = Path(
+        os.environ.get("KAIRIX_DOCUMENT_ROOT")
+        or _config_path("document_root")
+        or str(_default_document_root())
+    ).expanduser()
+    ...
+
+# ACCEPTED — kairix/secrets.py for credentials
+api_key = os.environ.get("KAIRIX_AZURE_API_KEY", "")
+```
+
+#### Fix pattern
+
+Move the env-var read into `KairixPaths.resolve()` (or
+`secrets.get_credentials()` for secrets) and expose the resolved value
+as a field. Inner code reads `KairixPaths.resolve().<field>`:
+
+```python
+# Before
+# kairix/agents/briefing/cli.py
+default_root = os.environ.get("KAIRIX_AGENT_MEMORY_ROOT")
+
+# After
+# kairix/paths.py — single env-var read, exposed as a field
+@dataclass(frozen=True)
+class KairixPaths:
+    agent_memory_root: Path
+    ...
+    @classmethod
+    def resolve(cls):
+        return _resolve_cached()  # reads KAIRIX_AGENT_MEMORY_ROOT once
+
+# kairix/agents/briefing/cli.py — uses the resolved value
+default_root = KairixPaths.resolve().agent_memory_root
+```
 
 ---
 
@@ -612,15 +681,15 @@ Each fitness function fires at multiple lifecycle stages. The same
 script is invoked everywhere — there's no drift between local and CI
 enforcement.
 
-| Stage | When | F1 | F2 | F3 | F5 | F6 | F7 |
-|---|---|---|---|---|---|---|---|
-| **IDE** | edit | — | — | — | — | — | — |
-| **`git commit`** | every commit (via `.pre-commit-config.yaml`) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| **`bash scripts/safe-commit.sh`** | pre-push / pre-PR | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| **CI Stage 0 — Architecture fitness** | every PR push | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| **CI unit-and-type** | every PR push | — | — | — | — | — | ✓ |
-| **CI gate (fan-in)** | every PR push | requires Stage 0 ✓ |  |  |  |  |  |
-| **Branch protection** | merge attempt | enforced via CI gate |  |  |  |  |  |
+| Stage | When | F1 | F2 | F3 | F4 | F5 | F6 | F7 |
+|---|---|---|---|---|---|---|---|---|
+| **IDE** | edit | — | — | — | — | — | — | — |
+| **`git commit`** | every commit (via `.pre-commit-config.yaml`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| **`bash scripts/safe-commit.sh`** | pre-push / pre-PR | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| **CI Stage 0 — Architecture fitness** | every PR push | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| **CI unit-and-type** | every PR push | — | — | — | — | — | — | ✓ |
+| **CI gate (fan-in)** | every PR push | requires Stage 0 ✓ |  |  |  |  |  |  |
+| **Branch protection** | merge attempt | enforced via CI gate |  |  |  |  |  |  |
 
 **Reading this table:** F1–F6 fire at three layers (commit, manual gate,
 CI). F7 fires only in CI because it needs the test runtime. The CI
@@ -724,6 +793,30 @@ bash scripts/checks/check-no-env-monkeypatch.sh  # expect ok
 If a check passes the sabotage test on the first commit but starts
 quietly missing violations later, the script is the source of truth
 for the rule and needs to be debugged.
+
+### Sabotage-test evidence — harness landing
+
+Every fitness function below was sabotage-tested before its harness
+commit. The evidence is reproducible (each row gives the plant + the
+expected check output):
+
+| Rule | Plant | Detected | Notes |
+|---|---|---|---|
+| F1 | `tests/_sabotage.py` with `with patch("kairix.core.search.bm25.bm25_search"):` | ✓ | Initial check missed single-quoted form (`patch('kairix.…')`); regex widened to `["']` so both forms match |
+| F1 | `tests/_sabotage.py` with `with patch('kairix.core.search.bm25.bm25_search'):` | ✓ | Single-quote form caught by widened regex |
+| F2 | `tests/_sabotage.py` with `monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/x")` | ✓ |  |
+| F3 | `tests/_sabotage.py` with `x = 1  # NOSONAR` (no rationale) | ✓ |  |
+| F4 | `kairix/_sabotage.py` with `os.environ.get("KAIRIX_DOCUMENT_ROOT")` | ✓ | Confirmed `paths.py` and `secrets.py` (allow-list) still pass |
+| F5 | `tests/_sabotage.py` with `from kairix.quality.eval.gold_builder import _validate_weights` | ✓ |  |
+| F6 | `kairix/_sabotage.py` with `def render(data, *, format_fn=None):` | ✓ |  |
+| F7 | `coverage.xml` injected with `<class filename="_sabotage_f7.py" line-rate="0.50">` | ✓ |  |
+
+After each plant, the file was removed and the check re-run to confirm
+the baseline state was preserved. The runner script lives at
+`/tmp/sabotage_runner.sh` during development; it is not committed
+because it intentionally writes to the repo. New fitness functions
+must include a sabotage-test entry in this table at the time they
+land.
 
 ---
 
@@ -1017,6 +1110,13 @@ fitness_functions:
     script: scripts/checks/check-suppressions-have-rationale.sh
     baseline: .architecture/baseline/suppressions-have-rationale-files.txt
     precommit_hook: arch-suppressions-have-rationale
+    layer: [pre-commit, safe-commit, ci-stage0]
+
+  - id: F4
+    name: env-reads-in-paths
+    script: scripts/checks/check-env-reads-stay-in-paths.sh
+    baseline: .architecture/baseline/env-reads-in-paths-files.txt
+    precommit_hook: arch-env-reads-in-paths
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F5
