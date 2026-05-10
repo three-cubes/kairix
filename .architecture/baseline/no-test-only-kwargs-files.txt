@@ -1,0 +1,14 @@
+kairix/agents/briefing/pipeline.py
+kairix/agents/mcp/server.py
+kairix/agents/research/graph.py
+kairix/agents/research/nodes.py
+kairix/core/embed/embed.py
+kairix/core/search/config_loader.py
+kairix/knowledge/contradict/detector.py
+kairix/knowledge/summaries/generate.py
+kairix/platform/llm/backends.py
+kairix/platform/onboard/check.py
+kairix/platform/setup/wizard.py
+kairix/quality/benchmark/runner.py
+kairix/quality/eval/retrieval.py
+kairix/worker.py

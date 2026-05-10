@@ -1,0 +1,9 @@
+kairix/agents/mcp/server.py
+kairix/core/embed/embed.py
+kairix/core/embed/recall_check.py
+kairix/core/embed/schema.py
+kairix/core/search/budget.py
+kairix/core/search/config_loader.py
+kairix/quality/eval/cli.py
+kairix/quality/eval/gold_builder.py
+kairix/quality/eval/monitor.py

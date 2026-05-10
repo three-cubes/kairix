@@ -72,6 +72,28 @@ jobs:
 
   # ── Stage 1: Contracts (fast -- <30s) ──────────────────────────────────────
   # Engineering hub: "Stop pipeline on failure. Contract tests must execute in <30s."
+  # ── Stage 0: Architecture fitness functions ───────────────────────────────
+  # Block at PR time on any net-new violation of the architectural rules
+  # encoded in scripts/checks/. Pre-existing files are grandfathered in
+  # .architecture/baseline/ and the baseline is expected to shrink over
+  # time. See docs/architecture/fitness-functions.md.
+  arch-fitness:
+    name: "Stage 0 -- Architecture fitness"
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Run F1-F6 (no test runtime needed)
+        run: bash scripts/checks/run-all.sh --skip-coverage
+
   contracts:
     name: "Stage 1 -- Contracts"
     runs-on: ubuntu-latest
@@ -176,6 +198,17 @@ jobs:
             --cov-fail-under=80 \
             --junitxml=results-unit.xml \
             -v --tb=short
+
+      - name: F7 — per-file coverage floor (85%)
+        # Repo-wide coverage averages can hide files at 0%. F7 requires every
+        # file in coverage.xml to clear the 85% floor; pre-existing files
+        # below the floor are grandfathered in
+        # .architecture/baseline/per-file-coverage-floor-files.txt and the
+        # baseline is expected to shrink over time. Runs only on 3.12 to
+        # match the Codecov upload step (XML uses Python-version-specific
+        # paths in some configs).
+        if: matrix.python-version == '3.12'
+        run: python3 scripts/checks/check_per_file_coverage.py coverage.xml
 
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -442,6 +475,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - changes
+      - arch-fitness
       - pre-commit
       - contracts
       - unit-and-type
@@ -453,6 +487,7 @@ jobs:
     steps:
       - name: Evaluate job results
         env:
+          RESULT_ARCH: ${{ needs.arch-fitness.result }}
           RESULT_PRECOMMIT: ${{ needs.pre-commit.result }}
           RESULT_CONTRACTS: ${{ needs.contracts.result }}
           RESULT_UNIT: ${{ needs.unit-and-type.result }}
@@ -461,6 +496,7 @@ jobs:
           RESULT_SECURITY: ${{ needs.security.result }}
           RESULT_DOCKER: ${{ needs.docker.result }}
         run: |
+          echo "arch-fitness:  $RESULT_ARCH"
           echo "pre-commit:    $RESULT_PRECOMMIT"
           echo "contracts:     $RESULT_CONTRACTS"
           echo "unit-and-type: $RESULT_UNIT"
@@ -471,6 +507,7 @@ jobs:
 
           # Fail if any required job failed (skipped is OK -- path filter)
           for result in \
+            "$RESULT_ARCH" \
             "$RESULT_PRECOMMIT" \
             "$RESULT_CONTRACTS" \
             "$RESULT_UNIT" \
@@ -478,8 +515,9 @@ jobs:
             "$RESULT_SECURITY" \
             "$RESULT_DOCKER"; do
             # Note: RESULT_COVERAGE excluded from gate — coverage enforcement
-            # is done by --cov-fail-under=80 in the unit test job. The coverage
-            # report action only posts a PR comment (non-critical).
+            # is done by --cov-fail-under=80 in the unit test job and per-file
+            # 85% floor (F7) inside arch-fitness. The coverage report action
+            # only posts a PR comment (non-critical).
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "FAILED: at least one required job did not succeed ($result)"
               exit 1

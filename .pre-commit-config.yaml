@@ -31,3 +31,44 @@ repos:
     hooks:
       - id: detect-secrets
         args: [--baseline, .secrets.baseline]
+
+  # ── Architecture fitness functions ─────────────────────────────────────────
+  # Each check fails the commit on net-new violations. Pre-existing files
+  # are grandfathered via .architecture/baseline/ and the baseline is
+  # expected to shrink over time. See docs/architecture/fitness-functions.md.
+  - repo: local
+    hooks:
+      - id: arch-no-internal-patches
+        name: "arch F1: no @patch on kairix internals"
+        entry: bash scripts/checks/check-no-internal-patches.sh
+        language: system
+        pass_filenames: false
+        files: ^tests/.*\.py$
+
+      - id: arch-no-env-monkeypatch
+        name: "arch F2: no monkeypatch.setenv(KAIRIX_*)"
+        entry: bash scripts/checks/check-no-env-monkeypatch.sh
+        language: system
+        pass_filenames: false
+        files: ^tests/.*\.py$
+
+      - id: arch-suppressions-have-rationale
+        name: "arch F3: suppressions require rationale"
+        entry: bash scripts/checks/check-suppressions-have-rationale.sh
+        language: system
+        pass_filenames: false
+        files: \.py$
+
+      - id: arch-no-internal-test-imports
+        name: "arch F5: no internal-name imports in tests"
+        entry: python3 scripts/checks/check_no_internal_imports.py
+        language: system
+        pass_filenames: false
+        files: ^tests/.*\.py$
+
+      - id: arch-no-test-only-kwargs
+        name: "arch F6: no *_fn=None test-only kwargs in production"
+        entry: python3 scripts/checks/check_no_test_only_kwargs.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
