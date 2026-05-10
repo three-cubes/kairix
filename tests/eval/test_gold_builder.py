@@ -547,20 +547,15 @@ def test_build_independent_gold_handles_legacy_gold_paths_field(tmp_path: Path) 
 
 
 @pytest.mark.unit
-def test_pool_returns_empty_when_db_path_does_not_open(tmp_path: Path) -> None:
+def test_pool_returns_empty_when_db_cannot_be_opened(tmp_path: Path) -> None:
     """``GoldBuilder.pool`` (BM25 system) returns ``[]`` rather than raising
-    when the database cannot be opened. Drives the never-raises contract
-    via the public ``db_path=`` injection seam — no env-var mutation.
+    when the constructor-injected ``db_path`` cannot be opened. Pins the
+    never-raises contract on the public surface; the seam is the same
+    constructor injection used for ``llm_judge`` and ``retriever``.
     """
     bad_path = tmp_path / "subdir" / "missing.sqlite"  # parent dir does not exist
-    builder = GoldBuilder()
-    pooled = builder.pool(
-        "docker",
-        systems=["bm25-equal"],
-        collections=None,
-        limit_per_system=5,
-        db_path=bad_path,
-    )
+    builder = GoldBuilder(db_path=bad_path)
+    pooled = builder.pool("docker", systems=["bm25-equal"])
     assert pooled == [], "BM25 search must return empty when DB cannot be opened"
 
 
@@ -568,8 +563,8 @@ def test_pool_returns_empty_when_db_path_does_not_open(tmp_path: Path) -> None:
 def test_pool_returns_empty_when_fts_table_missing(tmp_path: Path) -> None:
     """``GoldBuilder.pool`` (BM25 system) returns ``[]`` rather than raising
     when the FTS5 virtual table is absent from the database. Pinned via
-    the public ``db_path=`` seam against a real SQLite file we set up
-    explicitly to lack the FTS table.
+    constructor injection against a real SQLite file set up explicitly
+    to lack the FTS table.
     """
     import sqlite3
 
@@ -583,14 +578,8 @@ def test_pool_returns_empty_when_fts_table_missing(tmp_path: Path) -> None:
     conn.commit()
     conn.close()
 
-    builder = GoldBuilder()
-    pooled = builder.pool(
-        "docker",
-        systems=["bm25-equal"],
-        collections=None,
-        limit_per_system=5,
-        db_path=db_path,
-    )
+    builder = GoldBuilder(db_path=db_path)
+    pooled = builder.pool("docker", systems=["bm25-equal"])
     assert pooled == [], "BM25 search must return empty when FTS5 SELECT raises"
 
 

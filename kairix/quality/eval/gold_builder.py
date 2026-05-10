@@ -192,9 +192,14 @@ class GoldBuilder:
         *,
         llm_judge: LLMJudgeProtocol | None = None,
         retriever: RetrieverProtocol | None = None,
+        db_path: Path | None = None,
     ) -> None:
         self._llm_judge = llm_judge
         self._retriever = retriever
+        # Production resolves the DB path lazily via ``get_db_path()`` when
+        # this is ``None``; tests pass an explicit ``tmp_path``-rooted file.
+        # Same constructor-injection shape as ``llm_judge`` / ``retriever``.
+        self._db_path = db_path
 
     # ------------------------------------------------------------------
     # Internal default-dependency construction (lazy — production only)
@@ -230,17 +235,12 @@ class GoldBuilder:
         weights: tuple[float, float, float],
         collections: list[str] | None = None,
         limit: int = 10,
-        *,
-        db_path: Path | None = None,
     ) -> list[dict[str, str]]:
         """Run BM25 search with specific column weights.
 
-        Returns list of {path, title, snippet, collection} dicts.
-
-        ``db_path`` is an injection seam: when omitted, resolves via
-        :func:`kairix.core.db.get_db_path` (production default). Tests
-        pass an explicit ``tmp_path``-rooted SQLite file to exercise
-        DB-open and SQL failure paths without env mutation.
+        Returns list of {path, title, snippet, collection} dicts. DB path
+        comes from the constructor-injected ``self._db_path`` or falls
+        back to :func:`kairix.core.db.get_db_path` for production callers.
 
         TODO(#143 Phase 5): lift this onto ``DocumentRepository`` as a
         ``search_fts_weighted`` method so gold_builder no longer reaches
@@ -259,7 +259,7 @@ class GoldBuilder:
             return []
 
         try:
-            resolved_db_path = db_path if db_path is not None else Path(get_db_path())
+            resolved_db_path = self._db_path if self._db_path is not None else Path(get_db_path())
             db = open_db(resolved_db_path)
         except Exception as e:
             logger.warning("gold_builder: cannot open DB — %s", e)
@@ -394,18 +394,13 @@ class GoldBuilder:
         systems: list[str],
         collections: list[str] | None = None,
         limit_per_system: int = 10,
-        *,
-        db_path: Path | None = None,
     ) -> list[PooledCandidate]:
         """Pool top-k results from multiple retrieval systems for a query.
 
         Deduplicates by path. Records which systems retrieved each document.
-        BM25 variants run against SQLite FTS5; the ``vector`` system routes
-        through the injected ``Retriever``.
-
-        ``db_path`` is an injection seam threaded through to the BM25
-        backend — production resolves the kairix DB lazily, tests pass an
-        explicit ``tmp_path``-rooted file.
+        BM25 variants run against SQLite FTS5 (using the constructor's
+        ``db_path``); the ``vector`` system routes through the injected
+        ``Retriever``.
         """
         candidates: dict[str, PooledCandidate] = {}
 
@@ -413,13 +408,7 @@ class GoldBuilder:
             if system == "vector":
                 results = self._vector_retrieve(query, collections, limit_per_system)
             elif system in _WEIGHT_PRESETS:
-                results = self._bm25_search_with_weights(
-                    query,
-                    _WEIGHT_PRESETS[system],
-                    collections,
-                    limit_per_system,
-                    db_path=db_path,
-                )
+                results = self._bm25_search_with_weights(query, _WEIGHT_PRESETS[system], collections, limit_per_system)
             else:
                 logger.warning("gold_builder: unknown system %r — skipping", system)
                 continue
