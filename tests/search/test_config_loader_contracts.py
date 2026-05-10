@@ -566,6 +566,75 @@ class TestResolveRetrievalConfigContract:
         result = resolve_retrieval_config(collection="my-docs", explicit_config=explicit)
         assert result is explicit
 
+    def test_per_collection_temporal_chunk_date_override_deep_merges(self) -> None:
+        """Claim: nested temporal sub-blocks (date_path_boost, chunk_date_boost)
+        deep-merge over the global config rather than replacing it. Setting
+        only ``decay_halflife_days`` on chunk_date_boost preserves the global
+        ``enabled`` and ``guard_explicit_only`` flags.
+
+        Drives the public surface via the documented ``overrides_fn=``
+        injection seam; no env-var monkeypatching, no YAML file on disk.
+        """
+        result = resolve_retrieval_config(
+            collection="dated-notes",
+            config_fn=RetrievalConfig.defaults,
+            overrides_fn=lambda: {
+                "dated-notes": {"boosts": {"temporal": {"chunk_date_boost": {"decay_halflife_days": 7}}}},
+            },
+        )
+        defaults = RetrievalConfig.defaults()
+        # Override applied: halflife from per-collection block.
+        assert result.temporal.chunk_date_decay_halflife_days == 7
+        # Deep-merge preserved: enabled / guard_explicit_only inherit from global.
+        assert result.temporal.chunk_date_boost_enabled == defaults.temporal.chunk_date_boost_enabled
+        guard = defaults.temporal.chunk_date_boost_guard_explicit_only
+        assert result.temporal.chunk_date_boost_guard_explicit_only == guard
+
+    def test_per_collection_temporal_date_path_override_deep_merges(self) -> None:
+        """Claim: the date_path_boost sub-block follows the same deep-merge
+        rule as chunk_date_boost. Sabotage probe for the symmetric branch.
+        """
+        result = resolve_retrieval_config(
+            collection="dated-notes",
+            config_fn=RetrievalConfig.defaults,
+            overrides_fn=lambda: {
+                "dated-notes": {"boosts": {"temporal": {"date_path_boost": {"factor": 1.7}}}},
+            },
+        )
+        defaults = RetrievalConfig.defaults()
+        assert result.temporal.date_path_boost_factor == 1.7
+        assert result.temporal.date_path_boost_enabled == defaults.temporal.date_path_boost_enabled
+
+    def test_per_collection_rerank_override_merges_over_global(self) -> None:
+        """Claim: a per-collection ``rerank:`` block merges over the global
+        rerank config rather than replacing it. Setting only ``model``
+        preserves the global ``enabled`` and ``candidate_limit`` flags.
+        """
+        from dataclasses import replace as dc_replace
+
+        defaults = RetrievalConfig.defaults()
+        global_cfg = dc_replace(
+            defaults,
+            rerank=dc_replace(
+                defaults.rerank,
+                enabled=True,
+                model="cross-encoder/ms-marco-MiniLM-L-6-v2",
+                candidate_limit=42,
+            ),
+        )
+        result = resolve_retrieval_config(
+            collection="noisy-docs",
+            config_fn=lambda: global_cfg,
+            overrides_fn=lambda: {
+                "noisy-docs": {"rerank": {"model": "cross-encoder/ms-marco-TinyBERT-L-2-v2"}},
+            },
+        )
+        # Override applied: model from per-collection block.
+        assert result.rerank.model == "cross-encoder/ms-marco-TinyBERT-L-2-v2"
+        # Deep-merge preserved: enabled and candidate_limit from global.
+        assert result.rerank.enabled is True
+        assert result.rerank.candidate_limit == 42
+
 
 # ---------------------------------------------------------------------------
 # ConfigValidationError — documented behaviour

@@ -230,10 +230,17 @@ class GoldBuilder:
         weights: tuple[float, float, float],
         collections: list[str] | None = None,
         limit: int = 10,
+        *,
+        db_path: Path | None = None,
     ) -> list[dict[str, str]]:
         """Run BM25 search with specific column weights.
 
         Returns list of {path, title, snippet, collection} dicts.
+
+        ``db_path`` is an injection seam: when omitted, resolves via
+        :func:`kairix.core.db.get_db_path` (production default). Tests
+        pass an explicit ``tmp_path``-rooted SQLite file to exercise
+        DB-open and SQL failure paths without env mutation.
 
         TODO(#143 Phase 5): lift this onto ``DocumentRepository`` as a
         ``search_fts_weighted`` method so gold_builder no longer reaches
@@ -252,8 +259,8 @@ class GoldBuilder:
             return []
 
         try:
-            db_path = get_db_path()
-            db = open_db(Path(db_path))
+            resolved_db_path = db_path if db_path is not None else Path(get_db_path())
+            db = open_db(resolved_db_path)
         except Exception as e:
             logger.warning("gold_builder: cannot open DB — %s", e)
             return []
@@ -387,12 +394,18 @@ class GoldBuilder:
         systems: list[str],
         collections: list[str] | None = None,
         limit_per_system: int = 10,
+        *,
+        db_path: Path | None = None,
     ) -> list[PooledCandidate]:
         """Pool top-k results from multiple retrieval systems for a query.
 
         Deduplicates by path. Records which systems retrieved each document.
-        BM25 variants use ``_bm25_search_with_weights``; the ``vector``
-        system routes through the injected ``Retriever``.
+        BM25 variants run against SQLite FTS5; the ``vector`` system routes
+        through the injected ``Retriever``.
+
+        ``db_path`` is an injection seam threaded through to the BM25
+        backend — production resolves the kairix DB lazily, tests pass an
+        explicit ``tmp_path``-rooted file.
         """
         candidates: dict[str, PooledCandidate] = {}
 
@@ -400,7 +413,13 @@ class GoldBuilder:
             if system == "vector":
                 results = self._vector_retrieve(query, collections, limit_per_system)
             elif system in _WEIGHT_PRESETS:
-                results = self._bm25_search_with_weights(query, _WEIGHT_PRESETS[system], collections, limit_per_system)
+                results = self._bm25_search_with_weights(
+                    query,
+                    _WEIGHT_PRESETS[system],
+                    collections,
+                    limit_per_system,
+                    db_path=db_path,
+                )
             else:
                 logger.warning("gold_builder: unknown system %r — skipping", system)
                 continue

@@ -254,9 +254,23 @@ jobs:
         run: pip install -e ".[dev,agents]"
 
       - name: Integration tests
+        # Coverage collected and uploaded so production-wiring code
+        # exercised only at integration scope (factory.build_search_pipeline,
+        # mcp.server.build_server, db.repository SQL surface) is measured.
         run: |
           pytest tests/ -m integration -v --tb=short --maxfail=3 \
+            --cov=kairix \
+            --cov-report=xml:coverage-integration.xml \
             --junitxml=results-integration.xml
+
+      - name: Upload integration coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage-integration.xml
+          flags: integration
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Verify core imports
         run: |
