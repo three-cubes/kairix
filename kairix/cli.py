@@ -15,6 +15,7 @@ Subcommands:
   classify    Auto-classify memory writes
   brief       Session briefing synthesis
   prep        Tiered L0/L1 context summary for a topic
+  research    Iterative research over the knowledge store with LLM synthesis
   benchmark   Run retrieval quality benchmark
   wikilinks   Inject [[wikilinks]] on first mention in agent-written document store files
   reference-library  Reference library: install entities, check status, run extraction
@@ -42,6 +43,7 @@ COMMANDS: dict[str, tuple[str, str, bool]] = {
     "classify": ("kairix.core.classify.cli", "main", True),
     "brief": ("kairix.agents.briefing.cli", "main", True),
     "prep": ("kairix.agents.prep.cli", "main", True),
+    "research": ("kairix.agents.research.cli", "main", True),
     "contradict": ("kairix.knowledge.contradict.cli", "main", True),
     "store": ("kairix.knowledge.store.cli", "main", True),
     "vault": ("kairix.knowledge.store.cli", "main", True),  # backwards-compat alias

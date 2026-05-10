@@ -33,4 +33,5 @@ kairix/use_cases/_brief_defaults.py
 kairix/use_cases/_contradict_defaults.py
 kairix/use_cases/_entity_defaults.py
 kairix/use_cases/_prep_defaults.py
+kairix/use_cases/_research_defaults.py
 kairix/use_cases/_search_defaults.py
