@@ -74,7 +74,7 @@ def test_tool_entity_neo4j_not_found_returns_error() -> None:
     result = tool_entity(name="Unknown Entity", neo4j_client=fake)
 
     assert result["id"] == ""
-    assert "not found" in result["error"].lower()
+    assert result["error"].startswith("EntityNotFound:")
 
 
 @pytest.mark.unit
@@ -213,7 +213,7 @@ def test_tool_usage_guide_returns_error_when_explicit_guide_path_missing(tmp_pat
     missing = tmp_path / "no-such-guide.md"
     result = tool_usage_guide(topic="anything", guide_path=missing)
     assert result["content"] == ""
-    assert "Usage guide not found" in result["error"]
+    assert result["error"].startswith("UsageGuideNotFound:")
     assert result["topic"] == "anything"
 
 

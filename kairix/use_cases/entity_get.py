@@ -33,9 +33,10 @@ class EntityGetOutput:
             populated.
         vault_path: On-disk path to the entity's markdown file in the
             vault. Empty when the entity has no associated file.
-        error: Empty on success; ``"Entity not found: <name>"`` when
+        error: Empty on success; ``"EntityNotFound: <name>"`` when
             the lookup returned no rows; structured ``"<Class>: <msg>"``
-            on top-level failure.
+            on top-level failure (#165: every error string is
+            class-prefixed so agents can switch on the prefix).
     """
 
     id: str = ""
@@ -76,7 +77,7 @@ def run_entity_get(
         return EntityGetOutput(name=name, error=f"{type(exc).__name__}: {exc}")
 
     if card is None:
-        return EntityGetOutput(name=name, error=f"Entity not found: {name}")
+        return EntityGetOutput(name=name, error=f"EntityNotFound: {name}")
 
     return EntityGetOutput(
         id=str(card.get("id", "") or ""),

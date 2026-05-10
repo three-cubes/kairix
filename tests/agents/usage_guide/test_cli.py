@@ -53,7 +53,7 @@ def test_format_text_with_topic_adds_heading() -> None:
 
 
 def test_format_text_short_circuits_on_error() -> None:
-    out = UsageGuideOutput(error="Usage guide not found.")
+    out = UsageGuideOutput(error="UsageGuideNotFound: missing")
     assert format_text(out).startswith("error:")
 
 

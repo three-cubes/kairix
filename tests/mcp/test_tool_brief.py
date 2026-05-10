@@ -37,7 +37,7 @@ def test_tool_brief_happy_path_returns_envelope_dict() -> None:
 def test_tool_brief_invalid_agent_returns_error_envelope() -> None:
     deps = BriefDeps()
     result = tool_brief(agent="rogue", deps=deps)
-    assert result["error"].startswith("invalid agent")
+    assert result["error"].startswith("InvalidAgent")
     assert result["content"] == ""
 
 

@@ -111,7 +111,7 @@ def run_usage_guide(
         if not resolved.exists():
             return UsageGuideOutput(
                 topic=topic,
-                error="Usage guide not found. Run: kairix onboard guide --document-root <path>",
+                error="UsageGuideNotFound: run 'kairix onboard guide --document-root <path>' to install it",
             )
 
         full_text = resolved.read_text(encoding="utf-8")

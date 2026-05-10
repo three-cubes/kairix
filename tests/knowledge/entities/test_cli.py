@@ -336,7 +336,7 @@ def test_format_get_output_renders_unknown_for_empty_fields() -> None:
 
 
 def test_format_get_output_short_circuits_on_error() -> None:
-    out = EntityGetOutput(name="X", error="Entity not found: X")
+    out = EntityGetOutput(name="X", error="EntityNotFound: X")
     assert format_get_output(out).startswith("error:")
 
 
@@ -362,7 +362,7 @@ def test_cmd_get_returns_one_on_not_found() -> None:
     deps = EntityGetDeps(fetch_fn=lambda name: None)
     rc, stdout, _ = _capture(lambda: cmd_get(args, deps=deps))
     assert rc == 1
-    assert "Entity not found" in stdout
+    assert "EntityNotFound" in stdout
 
 
 def test_cmd_get_json_format_emits_envelope() -> None:

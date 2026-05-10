@@ -70,7 +70,7 @@ def test_format_output_print_full_returns_complete_content() -> None:
 
 
 def test_format_output_empty_content_returns_empty_string() -> None:
-    out = BriefOutput(agent="x", content="", error="invalid agent")
+    out = BriefOutput(agent="x", content="", error="InvalidAgent: 'x'")
     assert format_output(out, print_full=False) == ""
 
 
@@ -102,7 +102,7 @@ def test_main_invalid_agent_exits_nonzero() -> None:
     exit_code, _stdout, stderr = _run(["rogue"], _build_deps())
     assert exit_code == 1
     assert "Error generating briefing" in stderr
-    assert "invalid agent" in stderr
+    assert "InvalidAgent" in stderr
 
 
 def test_main_happy_path_prints_path_and_preview() -> None:

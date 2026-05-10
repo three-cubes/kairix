@@ -14,7 +14,7 @@ Feature: MCP agent entity lookup
   Scenario: Unknown entity returns structured not-found
     Given Neo4j has no entity named "Nonexistent Corp"
     When the agent calls tool_entity with name "Nonexistent Corp"
-    Then the entity response error contains "not found"
+    Then the entity response error contains "EntityNotFound"
 
   Scenario: Entity lookup never raises
     When the agent calls tool_entity with name ""

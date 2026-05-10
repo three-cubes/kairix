@@ -44,7 +44,7 @@ def test_card_present_projects_into_output() -> None:
 
 def test_card_none_returns_not_found_error() -> None:
     out = run_entity_get("Bogus", deps=_build_deps(card=None))
-    assert out.error == "Entity not found: Bogus"
+    assert out.error == "EntityNotFound: Bogus"
     assert out.id == ""
     # Name preserved from the caller for the operator's error message.
     assert out.name == "Bogus"
