@@ -381,6 +381,13 @@ def _merge_retrieval_config(base: RetrievalConfig, overrides: dict) -> Retrieval
         if key in overrides:
             top_fields[key] = type(getattr(base, key))(overrides[key])
 
+    # rerank_intents is a tuple[str, ...] — coerce list/None from YAML into the
+    # right shape. Per-collection override (e.g. reference-library: only
+    # 'conceptual' triggers rerank, not 'multi_hop') closes #74.
+    if "rerank_intents" in overrides:
+        intents = overrides["rerank_intents"] or []
+        top_fields["rerank_intents"] = tuple(str(x) for x in intents)
+
     boosts = overrides.get("boosts", {}) or {}
     if "entity" in boosts:
         merged = {

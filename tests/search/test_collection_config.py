@@ -66,6 +66,31 @@ class TestMergeRetrievalConfig:
         assert merged.entity.enabled is False
         assert merged.procedural.enabled is False
 
+    @pytest.mark.unit
+    def test_rerank_intents_override(self) -> None:
+        """Per-collection rerank_intents override (closes #74) — operators can
+        narrow which intents trigger rerank for a specific collection. e.g.
+        reference-library benchmarks show rerank helps conceptual but hurts
+        multi_hop, so reflib's collection should override the global default
+        of ('multi_hop', 'semantic') to ('conceptual',) only.
+        """
+        base = RetrievalConfig.defaults()
+        # Default is ("multi_hop", "semantic") on RetrievalConfig.
+        merged = _merge_retrieval_config(base, {"rerank_intents": ["conceptual"]})
+        assert merged.rerank_intents == ("conceptual",)
+        # Other fields unchanged.
+        assert merged.fusion_strategy == base.fusion_strategy
+
+    @pytest.mark.unit
+    def test_rerank_intents_empty_disables_per_intent_rerank(self) -> None:
+        """An empty list disables rerank entirely for the collection — the
+        rerank trigger requires intent-membership, so empty == always-off
+        unless ``rerank.enabled`` is True (the global force-on lever).
+        """
+        base = RetrievalConfig.defaults()
+        merged = _merge_retrieval_config(base, {"rerank_intents": []})
+        assert merged.rerank_intents == ()
+
 
 class TestResolveRetrievalConfig:
     @pytest.mark.unit
