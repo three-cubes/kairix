@@ -358,7 +358,16 @@ jobs:
         # run rather than using COVERAGE_FILE env var.
         if: ${{ !cancelled() }}
         run: |
-          if [ -f .coverage ]; then cp .coverage .coverage.integration; fi
+          echo "=== DEBUG: workspace files after integration tests ==="
+          ls -la
+          echo "=== .coverage* files ==="
+          ls -la .coverage* 2>/dev/null || echo "no .coverage files"
+          if [ -f .coverage ]; then
+            cp .coverage .coverage.integration
+            echo "=== copied .coverage to .coverage.integration ==="
+          else
+            echo "=== ERROR: .coverage not found after pytest --cov ==="
+          fi
 
       - name: Upload integration coverage data (for F9 union)
         if: ${{ !cancelled() }}
