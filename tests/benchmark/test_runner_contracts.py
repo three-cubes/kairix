@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from kairix.quality.benchmark.runner import (
+    BenchmarkDeps,
     BenchmarkResult,
     aggregate_ndcg_metrics,
     aggregate_scores_by_category,
@@ -210,7 +211,7 @@ def test_run_benchmark_summary_carries_documented_fields() -> None:
     NDCG aggregate fields (ndcg_at_10, hit_rate_at_5, mrr_at_10).
     """
     suite = _suite(BenchmarkCase(id="R1", category="recall", query="q", gold_path="x.md", score_method="exact"))
-    result = run_benchmark(suite, retrieve_fn=_retrieve_fn_returning(["vault/x.md"]))
+    result = run_benchmark(suite, deps=BenchmarkDeps(retrieve=_retrieve_fn_returning(["vault/x.md"])))
 
     assert "weighted_total" in result.summary
     assert "category_scores" in result.summary
@@ -224,7 +225,7 @@ def test_run_benchmark_summary_carries_documented_fields() -> None:
 def test_run_benchmark_gates_dict_carries_each_phase_gate() -> None:
     """The summary.gates dict must map every PHASE_GATES key → bool."""
     suite = _suite(BenchmarkCase(id="R1", category="recall", query="q", gold_path="x.md", score_method="exact"))
-    result = run_benchmark(suite, retrieve_fn=_retrieve_fn_returning(["vault/x.md"]))
+    result = run_benchmark(suite, deps=BenchmarkDeps(retrieve=_retrieve_fn_returning(["vault/x.md"])))
 
     gates = result.summary["gates"]
     assert set(gates.keys()) == set(PHASE_GATES.keys())
@@ -240,7 +241,7 @@ def test_run_benchmark_diagnostics_category_counts_reflects_scored_cases() -> No
         BenchmarkCase(id="E1", category="entity", query="q3", gold_path="c.md", score_method="exact"),
     ]
     suite = _suite(*cases)
-    result = run_benchmark(suite, retrieve_fn=_retrieve_fn_returning([]))
+    result = run_benchmark(suite, deps=BenchmarkDeps(retrieve=_retrieve_fn_returning([])))
 
     counts = result.diagnostics["category_counts"]
     assert counts["recall"] == 2
@@ -270,7 +271,7 @@ def test_run_benchmark_case_id_is_not_overwritten_by_retrieval_meta_collision() 
         return ["vault/x.md"], ["s"], {"id": "OVERWRITE", "score": 999, "category": "OVERWRITE"}
 
     suite = _suite(BenchmarkCase(id="R1", category="recall", query="q", gold_path="x.md", score_method="exact"))
-    result = run_benchmark(suite, retrieve_fn=_evil_retrieve)
+    result = run_benchmark(suite, deps=BenchmarkDeps(retrieve=_evil_retrieve))
 
     case = result.cases[0]
     assert case["id"] == "R1", f"case id was overwritten by retrieval_meta: got {case['id']!r}"

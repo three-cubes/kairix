@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -53,17 +53,24 @@ class ContentClassifier(Protocol):
     def classify_with_llm(self, query: str, agent: str) -> Any: ...
 
 
-class _DefaultContentClassifier:
-    """Production ``ContentClassifier`` — delegates to the real classify modules."""
+class DefaultContentClassifier:
+    """Production ``ContentClassifier`` — delegates to the real classify modules.
 
-    def classify_rules(
-        self, query: str, agent: str
-    ) -> Any:  # pragma: no cover — needs the real classify_content; deferred to integration coverage
+    The two-step lookup is exercised end-to-end by unit tests that call
+    ``classification_score`` without injecting a classifier:
+      - a positive query hits ``classify_rules`` → ``classify_content`` (rule
+        match returns a typed result).
+      - an empty query produces ``unknown`` from rules, falling through to
+        ``classify_with_llm`` → ``classify_with_llm("")``, which short-circuits
+        to ``unknown`` without an API call.
+    """
+
+    def classify_rules(self, query: str, agent: str) -> Any:
         from kairix.core.classify.rules import classify_content
 
         return classify_content(query, agent=agent)
 
-    def classify_with_llm(self, query: str, agent: str) -> Any:  # pragma: no cover — same as above
+    def classify_with_llm(self, query: str, agent: str) -> Any:
         from kairix.core.classify.judge import classify_with_llm
 
         return classify_with_llm(query, agent=agent)
@@ -113,6 +120,57 @@ class BenchmarkResult:
     cases: list[dict[str, Any]]
 
 
+def _default_retrieve(
+    query: str,
+    system: str,
+    agent: str | None,
+    db_path: str | None,
+    collection: str | None,
+    fusion_override: str | None,
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    """Production retrieve callable — delegates to ``runner.retrieve``.
+
+    Wrapper exists so ``BenchmarkDeps.retrieve`` has a stable, typed
+    default that doesn't import ``runner.retrieve`` at module-import time
+    (avoids the circular-import risk callers historically tripped on).
+    """
+    return retrieve(
+        query=query,
+        system=system,
+        agent=agent or "",
+        db_path=db_path,
+        collection=collection,
+        fusion_override=fusion_override,
+    )
+
+
+def _default_chat_backend() -> ChatBackend:
+    """Construct the production chat backend — Azure-hosted gpt-4o-mini."""
+    from kairix._azure import AzureChatBackend
+
+    return AzureChatBackend()
+
+
+@dataclass
+class BenchmarkDeps:
+    """Injectable dependencies for ``run_benchmark`` and its helpers.
+
+    Each field defaults to a production implementation; tests construct
+    ``BenchmarkDeps`` with fakes from ``tests/fakes.py``.
+
+    The dataclass replaces the per-helper ``*_fn=None`` substitution kwargs
+    that previously threaded through ``run_benchmark`` / ``retrieve_case`` /
+    ``score_case`` (the F6 violation that the issue resolves). All three
+    boundary collaborators are now reified as one typed bag.
+    """
+
+    classifier: ContentClassifier = field(default_factory=DefaultContentClassifier)
+    chat_backend: ChatBackend = field(default_factory=_default_chat_backend)
+    retrieve: Callable[..., tuple[list[str], list[str], dict[str, Any]]] = field(
+        default_factory=lambda: _default_retrieve
+    )
+
+
 # ---------------------------------------------------------------------------
 # Score helpers
 # ---------------------------------------------------------------------------
@@ -149,12 +207,12 @@ def classification_score(
     classifier. Returns 0.0 on any exception.
 
     Tests pass a ``FakeContentClassifier`` from tests/fakes.py to control both
-    steps; production uses ``_DefaultContentClassifier`` which delegates to the
+    steps; production uses ``DefaultContentClassifier`` which delegates to the
     real classify modules.
     """
     try:
         if classifier is None:
-            classifier = _DefaultContentClassifier()
+            classifier = DefaultContentClassifier()
         result = classifier.classify_rules(query, agent="shared")
         if result.type == "unknown":
             result = classifier.classify_with_llm(query, agent="shared")
@@ -200,9 +258,11 @@ def llm_judge(
     try:
         if not paths:
             return 0.0
-        if (
-            chat_backend is None
-        ):  # pragma: no cover — production-only lazy AzureChatBackend construction; tests inject FakeChatBackend
+        if chat_backend is None:
+            # Lazy production default — covered by a unit test that drops
+            # the kwarg and asserts the wider try/except returns 0.0 on
+            # the inevitable credential-resolution failure. Tests that
+            # exercise the success path inject FakeChatBackend.
             from kairix._azure import AzureChatBackend
 
             chat_backend = AzureChatBackend()
@@ -250,14 +310,15 @@ def retrieve(
     db_path: str | None = None,
     collection: str | None = None,
     fusion_override: str | None = None,
-    search_fn: Callable | None = None,
+    searcher: Callable[..., Any] | None = None,
 ) -> tuple[list[str], list[str], dict[str, Any]]:
     """
     Run retrieval and return (paths, snippets, metadata).
 
     Args:
-        search_fn: Injectable search function for testing.
-                   Defaults to the production hybrid search.
+        searcher: Pre-bound search callable. Tests pass a ``_CapturingSearch``
+                  to verify the resolved RetrievalConfig flows through.
+                  ``None`` means use the production pipeline.
     """
     from kairix.quality.eval.retrieval import retrieve
 
@@ -269,7 +330,7 @@ def retrieve(
         db_path=db_path,
         collection=collection,
         fusion_override=fusion_override,
-        search_fn=search_fn,
+        search_fn=searcher,
     )
     return result.paths, result.snippets, result.meta
 
@@ -361,13 +422,20 @@ def score_case(
     paths: list[str],
     snippets: list[str],
     retrieval_meta: dict[str, Any],
+    deps: BenchmarkDeps | None = None,
 ) -> tuple[float, dict[str, Any]]:
     """Dispatch to the correct score method for a single benchmark case.
 
     Returns (score, ndcg_detail) where ndcg_detail is non-empty only for NDCG cases.
+
+    ``deps`` carries the classifier (for ``classification`` cases) and the
+    chat backend (for ``llm`` cases). When ``None``, production defaults are
+    constructed — the unit-test path always passes deps with fakes.
     """
+    deps = deps if deps is not None else BenchmarkDeps()
+
     if case.score_method == "classification":
-        return classification_score(case.query, case.expected_type or ""), {}
+        return classification_score(case.query, case.expected_type or "", classifier=deps.classifier), {}
 
     if case.score_method == "exact":
         if case.gold_title:
@@ -397,7 +465,7 @@ def score_case(
         return score, ndcg_detail
 
     # llm fallback
-    return llm_judge(query=case.query, paths=paths, snippets=snippets), {}
+    return llm_judge(query=case.query, paths=paths, snippets=snippets, chat_backend=deps.chat_backend), {}
 
 
 def retrieve_case(
@@ -407,14 +475,18 @@ def retrieve_case(
     db_path: str | None,
     collection: str | None,
     fusion_override: str | None,
-    retrieve_fn: Callable[..., tuple[list[str], list[str], dict[str, Any]]] | None,
+    deps: BenchmarkDeps | None = None,
 ) -> tuple[list[str], list[str], dict[str, Any]]:
-    """Wrap retrieval with error handling; classification cases skip retrieval."""
+    """Wrap retrieval with error handling; classification cases skip retrieval.
+
+    The retrieval callable lives on ``deps.retrieve``; production calls land
+    on ``runner.retrieve`` (delegating to the shared retrieval module).
+    """
     if case.score_method == "classification":
         return [], [], {"scored_by": "classification"}
+    deps = deps if deps is not None else BenchmarkDeps()
     try:
-        _retrieve = retrieve_fn or retrieve
-        return _retrieve(
+        return deps.retrieve(
             query=case.query,
             system=system,
             agent=case.agent or agent,
@@ -516,7 +588,7 @@ def run_benchmark(
     db_path: str | None = None,
     collection: str | None = None,
     fusion_override: str | None = None,
-    retrieve_fn: Callable[..., tuple[list[str], list[str], dict[str, Any]]] | None = None,
+    deps: BenchmarkDeps | None = None,
 ) -> BenchmarkResult:
     """
     Run all benchmark cases and return a BenchmarkResult.
@@ -528,12 +600,17 @@ def run_benchmark(
         output_dir: If set, write JSON result file here.
         db_path:    Optional path to a specific database. Propagated to the retrieval
                     backend so it can target a specific store. None means use the default.
+        deps:       Injectable boundary collaborators (classifier, chat backend,
+                    retrieve). ``None`` means construct production defaults; tests
+                    pass ``BenchmarkDeps(retrieve=fake_retrieve, classifier=...)``.
 
     Returns:
         BenchmarkResult with summary, category scores, and per-case results.
     """
     # Validate suite prerequisites
     _validate_suite_prerequisites(suite)
+
+    deps = deps if deps is not None else BenchmarkDeps()
 
     case_results: list[dict[str, Any]] = []
     all_categories = set(CATEGORY_WEIGHTS.keys()) | {"classification"}
@@ -549,9 +626,9 @@ def run_benchmark(
             db_path,
             collection,
             fusion_override,
-            retrieve_fn,
+            deps,
         )
-        score, ndcg_detail = score_case(case, paths, snippets, retrieval_meta)
+        score, ndcg_detail = score_case(case, paths, snippets, retrieval_meta, deps)
         elapsed_ms = (time.time() - t0) * 1000
 
         cat = CATEGORY_ALIASES.get(case.category, case.category)

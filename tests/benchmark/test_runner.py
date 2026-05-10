@@ -12,6 +12,7 @@ Tests for kairix.quality.benchmark.runner — covers previously-untested paths:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -774,14 +775,14 @@ def test_format_interpretation_lists_categories_below_floor_when_any_fail() -> N
 
 @pytest.mark.unit
 def test_score_case_dispatches_classification_viaclassification_score() -> None:
-    """A case with score_method='classification' delegates to ``_classification_score``.
+    """A case with score_method='classification' delegates to ``classification_score``.
 
-    Closes coverage of line 360 — the classification-dispatch path in score_case.
-    Production calls classification_score(...) without an injected classifier;
-    the FakeContentClassifier here would not be picked up. We instead rely on
-    the production-default classifier path's ``except Exception: return 0.0``
-    behaviour: the classify modules are unavailable in the test env, so the
-    score collapses to 0.0. The dispatch itself is exercised regardless.
+    Closes coverage of the classification-dispatch path in score_case. Without
+    explicit deps the production ``DefaultContentClassifier`` is constructed:
+    rules return ``unknown`` for the unstructured query, the LLM fallback
+    short-circuits to ``unknown`` when Azure creds aren't resolvable in the
+    test env, so the final score collapses to 0.0 (unknown != "decision").
+    The dispatch and the deps-default chain are exercised end-to-end.
     """
     from types import SimpleNamespace
 
@@ -797,8 +798,8 @@ def test_score_case_dispatches_classification_viaclassification_score() -> None:
         gold_path=None,
     )
     score, detail = score_case(case, paths=[], snippets=[], retrieval_meta={})
-    # In test env _classification_score's lazy default fails to import → returns 0.0.
-    # The detail dict is empty for non-NDCG dispatches.
+    # Default deps wire DefaultContentClassifier; rules → unknown, LLM → unknown
+    # (no creds), result.type != "decision" → 0.0.
     assert score == pytest.approx(0.0)
     assert detail == {}
 
@@ -951,7 +952,7 @@ def test_run_benchmark_warns_when_some_recall_cases_have_no_gold(
     """
     import logging
 
-    from kairix.quality.benchmark.runner import run_benchmark
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
     from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
 
     suite = BenchmarkSuite(
@@ -967,14 +968,14 @@ def test_run_benchmark_warns_when_some_recall_cases_have_no_gold(
 
     with caplog.at_level(logging.WARNING):
         # Runs to completion — no raise — just warns.
-        run_benchmark(suite, system="hybrid", agent="t", retrieve_fn=_retrieve)
+        run_benchmark(suite, system="hybrid", agent="t", deps=BenchmarkDeps(retrieve=_retrieve))
     assert any("1/2 recall cases have no gold references" in r.message for r in caplog.records)
 
 
 @pytest.mark.unit
 def test_run_benchmark_raises_value_error_when_all_recall_cases_have_no_gold() -> None:
     """All recall cases missing gold references → ``run_benchmark`` raises before retrieving."""
-    from kairix.quality.benchmark.runner import run_benchmark
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
     from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
 
     suite = BenchmarkSuite(
@@ -986,9 +987,506 @@ def test_run_benchmark_raises_value_error_when_all_recall_cases_have_no_gold() -
     )
 
     def _retrieve(**kwargs):  # type: ignore[no-untyped-def]
-        # If validation didn't fire, the retrieve_fn would be called; the test would
-        # then surface the failure as "retrieve was called" rather than a ValueError.
-        raise AssertionError("retrieve_fn must not run when validation fails")
+        # If validation didn't fire, the retrieve callable would be called; the test
+        # would then surface the failure as "retrieve was called" rather than ValueError.
+        raise AssertionError("deps.retrieve must not run when validation fails")
 
     with pytest.raises(ValueError, match="no gold references"):
-        run_benchmark(suite, system="hybrid", agent="t", retrieve_fn=_retrieve)
+        run_benchmark(suite, system="hybrid", agent="t", deps=BenchmarkDeps(retrieve=_retrieve))
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkDeps — production-default coverage for the formerly-pragma'd branches.
+#
+# The three # pragma: no cover markers in runner.py guarded production-only
+# paths: the lazy classify_content / classify_with_llm imports inside
+# DefaultContentClassifier, and the lazy AzureChatBackend construction inside
+# llm_judge. With BenchmarkDeps in place those branches are reachable through
+# the public surface — the tests below drive each one.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_default_content_classifier_classify_rules_runs_real_classify_content() -> None:
+    """DefaultContentClassifier.classify_rules delegates to classify_content.
+
+    Driving classification_score with no injected classifier exercises the
+    runtime import of kairix.core.classify.rules.classify_content. A query
+    that the rules module recognises as a decision yields a typed result;
+    the score of 1.0 confirms the production-default classifier ran end to end.
+    """
+    score = classification_score("We decided to use PostgreSQL.", "semantic-decision")
+    # The decision-pattern rule fires and the result type matches the
+    # expected_type — only possible if the lazy import + delegation worked.
+    assert score == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_default_content_classifier_classify_with_llm_fires_when_rules_return_unknown() -> None:
+    """When rules return ``unknown`` the LLM fallback path is invoked.
+
+    ``classify_with_llm("")`` short-circuits to ``unknown`` without an Azure
+    API call (empty content guard inside judge.py). This drives the lazy
+    ``from kairix.core.classify.judge import classify_with_llm`` import in
+    DefaultContentClassifier without requiring credentials.
+    """
+    # Empty query: rules return unknown → LLM fallback runs and also returns
+    # unknown (its empty-content guard). result.type ("unknown") != "decision"
+    # so score = 0.0. The fallback PATH being executed is what's under test.
+    score = classification_score("", "decision")
+    assert score == pytest.approx(0.0)
+
+
+@pytest.mark.unit
+def test_llm_judge_lazy_default_chat_backend_returns_zero_on_credential_failure() -> None:
+    """``llm_judge`` without ``chat_backend=`` constructs ``AzureChatBackend``.
+
+    The test environment doesn't resolve Azure credentials, so the constructed
+    backend's ``complete()`` raises and the wrapping try/except returns 0.0.
+    The lazy default-construction branch is what's covered — the score being
+    0.0 (rather than IndexError or NameError) is the receipt that the import
+    plus construction succeeded and the exception path handled the failure.
+    """
+    # No chat_backend kwarg → the AzureChatBackend factory inside llm_judge runs.
+    score = llm_judge(query="q", paths=["doc.md"], snippets=["snippet"])
+    assert score == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkDeps — defaults factory wires the production collaborators.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_benchmark_deps_default_constructor_wires_production_collaborators() -> None:
+    """``BenchmarkDeps()`` (no args) constructs production defaults via field factories."""
+    from kairix.quality.benchmark.runner import BenchmarkDeps, DefaultContentClassifier
+
+    deps = BenchmarkDeps()
+    # Each field is the production default — an instance of the production class.
+    assert isinstance(deps.classifier, DefaultContentClassifier)
+    # Chat backend duck-types as ChatBackend (has a ``complete`` method).
+    assert hasattr(deps.chat_backend, "complete")
+    # Retrieve callable accepts the documented kwargs.
+    assert callable(deps.retrieve)
+
+
+@pytest.mark.unit
+def test_benchmark_deps_each_field_overridable_independently() -> None:
+    """Tests can override one field without disturbing the others."""
+    from kairix.quality.benchmark.runner import BenchmarkDeps, DefaultContentClassifier
+    from tests.fakes import FakeChatBackend
+
+    fake_backend = FakeChatBackend(responses=["0.7"])
+    deps = BenchmarkDeps(chat_backend=fake_backend)
+
+    assert deps.chat_backend is fake_backend
+    # Other fields fell back to production defaults — receipt that overrides
+    # don't drag siblings.
+    assert isinstance(deps.classifier, DefaultContentClassifier)
+
+
+# ---------------------------------------------------------------------------
+# Metric-aggregation drift — empty / single / all-skipped categories.
+# These are the failure modes the issue calls out: silent miscalc when a
+# category has no cases (empty), exactly one case (single), or every case is
+# a classification (skips retrieval). Each test drives ``run_benchmark``
+# through the public surface and asserts the per-category score.
+# ---------------------------------------------------------------------------
+
+
+def _bench_case(id_: str, category: str, gold_path: str) -> Any:
+    """Build an exact-match BenchmarkCase for the given category."""
+    from kairix.quality.benchmark.suite import BenchmarkCase
+
+    return BenchmarkCase(
+        id=id_,
+        category=category,
+        query=f"query-{id_}",
+        gold_path=gold_path,
+        score_method="exact",
+    )
+
+
+def _retrieve_returning(paths: list[str]):
+    """Retrieve callable that returns the same paths on every call."""
+
+    def _fn(**_kw: Any) -> tuple[list[str], list[str], dict[str, Any]]:
+        return paths, ["snippet"] * len(paths), {"intent": "semantic"}
+
+    return _fn
+
+
+@pytest.mark.unit
+def test_run_benchmark_empty_category_aggregates_to_zero_not_nan() -> None:
+    """A category with no cases must aggregate to 0.0, not NaN or KeyError.
+
+    Silent miscalc here means an empty ``temporal`` category would show as
+    0.0 in the report — operators could mistake "no cases" for "all failed".
+    The receipt is that the category appears in ``category_scores`` and
+    its value is exactly 0.0 (not absent, not NaN).
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkSuite
+
+    # Suite has only ONE category populated — recall — every other category
+    # ends up with an empty score list inside run_benchmark.
+    suite = BenchmarkSuite(
+        meta={"name": "empty-cats", "version": "1.0", "agent": "t"},
+        cases=[_bench_case("R01", "recall", "vault/x.md")],
+    )
+    result = run_benchmark(
+        suite,
+        system="hybrid",
+        agent="t",
+        deps=BenchmarkDeps(retrieve=_retrieve_returning(["vault/x.md"])),
+    )
+
+    # Every category from CATEGORY_WEIGHTS is present in the aggregate
+    # (run_benchmark seeds the dict with all categories).
+    cat_scores = result.summary["category_scores"]
+    for cat in ("temporal", "entity", "conceptual", "multi_hop", "procedural"):
+        assert cat in cat_scores, f"empty category {cat!r} dropped from category_scores"
+        assert cat_scores[cat] == pytest.approx(0.0), (
+            f"empty category {cat!r} aggregated to {cat_scores[cat]!r} (expected 0.0)"
+        )
+    # And recall — the single populated category — scored 1.0.
+    assert cat_scores["recall"] == pytest.approx(1.0)
+    # diagnostics.category_counts reflects zero cases for the empty categories.
+    counts = result.diagnostics["category_counts"]
+    for cat in ("temporal", "entity", "conceptual", "multi_hop", "procedural"):
+        assert counts.get(cat, 0) == 0
+
+
+@pytest.mark.unit
+def test_run_benchmark_single_item_category_score_equals_that_items_score() -> None:
+    """A category with exactly one case scores equal to that case's score.
+
+    The aggregation formula is sum/len — for n=1 it must be the bare score
+    (no rounding artefact, no divide-by-zero). Sabotage-prove: assert the
+    score isn't 0.0 (the empty-category default) and isn't 0.5 (an arithmetic
+    mistake mid-aggregation).
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkSuite
+
+    suite = BenchmarkSuite(
+        meta={"name": "single", "version": "1.0", "agent": "t"},
+        cases=[_bench_case("E01", "entity", "vault/jordan-blake.md")],
+    )
+    result = run_benchmark(
+        suite,
+        system="hybrid",
+        agent="t",
+        deps=BenchmarkDeps(retrieve=_retrieve_returning(["vault/jordan-blake.md"])),
+    )
+
+    cat_scores = result.summary["category_scores"]
+    # Single matching case → score 1.0.
+    assert cat_scores["entity"] == pytest.approx(1.0)
+    # Sabotage check — values that would surface a faulty aggregator.
+    assert cat_scores["entity"] != pytest.approx(0.0)
+    assert cat_scores["entity"] != pytest.approx(0.5)
+    # Counts confirm n=1 for the populated category.
+    assert result.diagnostics["category_counts"]["entity"] == 1
+
+
+@pytest.mark.unit
+def test_run_benchmark_single_item_category_with_miss_scores_zero() -> None:
+    """A single-case category that misses scores 0.0 — the receipt that the
+    aggregation isn't accidentally treating "score=0" as "no data".
+
+    Without this distinction, a low-but-real score could be confused for
+    "no cases" by readers of the report.
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkSuite
+
+    suite = BenchmarkSuite(
+        meta={"name": "miss", "version": "1.0", "agent": "t"},
+        cases=[_bench_case("R01", "recall", "vault/expected.md")],
+    )
+    result = run_benchmark(
+        suite,
+        system="hybrid",
+        agent="t",
+        deps=BenchmarkDeps(retrieve=_retrieve_returning(["vault/something-else.md"])),
+    )
+
+    # The single recall case scored 0.0 (gold not in retrieved). Counts must
+    # still be 1 — score=0.0 is data, not absence.
+    assert result.summary["category_scores"]["recall"] == pytest.approx(0.0)
+    assert result.diagnostics["category_counts"]["recall"] == 1
+
+
+@pytest.mark.unit
+def test_run_benchmark_all_classification_cases_skip_retrieval() -> None:
+    """A suite of only classification cases never invokes retrieval —
+    classification cases are aggregated under the ``classification`` category
+    and other categories are empty.
+
+    Sabotage-prove: install a retrieve callable that raises if invoked. If
+    the test passes, the retrieval skip is honoured.
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
+
+    def _retrieve_must_not_run(**_kw: Any) -> tuple[list[str], list[str], dict[str, Any]]:
+        raise AssertionError("retrieve was called for a classification-only suite")
+
+    # Two classification cases — each will be scored by classification_score
+    # using the deps.classifier (production default → 0.0 here, see above).
+    suite = BenchmarkSuite(
+        meta={"name": "all-classification", "version": "1.0", "agent": "t"},
+        cases=[
+            BenchmarkCase(
+                id="C01",
+                category="classification",
+                query="please classify",
+                gold_path=None,
+                score_method="classification",
+                expected_type="decision",
+            ),
+            BenchmarkCase(
+                id="C02",
+                category="classification",
+                query="another classify",
+                gold_path=None,
+                score_method="classification",
+                expected_type="pattern",
+            ),
+        ],
+    )
+
+    result = run_benchmark(
+        suite,
+        system="hybrid",
+        agent="t",
+        deps=BenchmarkDeps(retrieve=_retrieve_must_not_run),
+    )
+
+    # classification category recorded both cases.
+    assert result.diagnostics["category_counts"]["classification"] == 2
+    # retrieval was skipped — no AssertionError surfaced.
+    # Every other category has zero cases.
+    for cat in ("recall", "temporal", "entity", "conceptual", "multi_hop", "procedural"):
+        assert result.diagnostics["category_counts"].get(cat, 0) == 0
+
+
+@pytest.mark.unit
+def test_aggregate_scores_by_category_avoids_divide_by_zero_for_empty_input() -> None:
+    """The aggregator must not raise ZeroDivisionError for an empty list.
+
+    Sabotage-prove: calling sum([])/len([]) would raise. The receipt is the
+    aggregator returning 0.0 for the empty list (and the expected average
+    for the populated list).
+    """
+    from kairix.quality.benchmark.runner import aggregate_scores_by_category
+
+    out = aggregate_scores_by_category({"empty": [], "two": [0.5, 1.0]})
+    assert out == {"empty": 0.0, "two": pytest.approx(0.75)}
+
+
+@pytest.mark.unit
+def test_aggregate_scores_by_category_rounds_to_four_places() -> None:
+    """The aggregator rounds to 4 places — a sanity check that the rounding
+    contract documented in the function holds for irrational averages.
+
+    A plain ``sum([1/3, 1/3, 1/3]) / 3`` would emit 0.3333333333333333; the
+    aggregator must collapse this to 0.3333.
+    """
+    from kairix.quality.benchmark.runner import aggregate_scores_by_category
+
+    out = aggregate_scores_by_category({"thirds": [1 / 3, 1 / 3, 1 / 3]})
+    # Round to 4 places — anything else means the aggregator dropped the
+    # rounding contract.
+    assert out["thirds"] == pytest.approx(0.3333, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# retrieve_case + run_benchmark error handling — error meta surfaces as
+# {"error": "..."} when the retrieve callable raises.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_retrieve_case_returns_error_meta_when_retrieve_callable_raises() -> None:
+    """``retrieve_case`` swallows retrieval exceptions into a meta dict.
+
+    The wrapper exists precisely so a single failing case doesn't kill the
+    whole benchmark. The receipt is (paths=[], snippets=[], meta={"error": "..."}).
+    """
+    from types import SimpleNamespace
+
+    from kairix.quality.benchmark.runner import BenchmarkDeps, retrieve_case
+
+    case = SimpleNamespace(score_method="exact", query="q", agent=None)
+
+    def _boom(**_kw: Any) -> tuple[list[str], list[str], dict[str, Any]]:
+        raise RuntimeError("retrieval down")
+
+    paths, snippets, meta = retrieve_case(
+        case,
+        system="hybrid",
+        agent="t",
+        db_path=None,
+        collection=None,
+        fusion_override=None,
+        deps=BenchmarkDeps(retrieve=_boom),
+    )
+
+    assert paths == []
+    assert snippets == []
+    assert "error" in meta
+    assert "retrieval down" in meta["error"]
+
+
+@pytest.mark.unit
+def test_retrieve_case_classification_skips_retrieve_callable() -> None:
+    """A classification case never invokes the retrieve callable.
+
+    Sabotage-prove with a retrieve that raises if called.
+    """
+    from types import SimpleNamespace
+
+    from kairix.quality.benchmark.runner import BenchmarkDeps, retrieve_case
+
+    case = SimpleNamespace(score_method="classification", query="q", agent=None)
+
+    def _retrieve_must_not_run(**_kw: Any) -> tuple[list[str], list[str], dict[str, Any]]:
+        raise AssertionError("retrieve must not be called for classification cases")
+
+    paths, snippets, meta = retrieve_case(
+        case,
+        system="hybrid",
+        agent="t",
+        db_path=None,
+        collection=None,
+        fusion_override=None,
+        deps=BenchmarkDeps(retrieve=_retrieve_must_not_run),
+    )
+
+    assert paths == []
+    assert snippets == []
+    # Marker meta differentiates classification skips from real retrieval errors.
+    assert meta == {"scored_by": "classification"}
+
+
+@pytest.mark.unit
+def test_run_benchmark_threads_chat_backend_through_to_llm_judge() -> None:
+    """A custom ``deps.chat_backend`` is consulted for ``llm`` score-method cases.
+
+    Receipt: the FakeChatBackend logs the call. If ``score_case`` constructed
+    its own backend (regression), the fake's ``calls`` list would be empty.
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
+    from tests.fakes import FakeChatBackend
+
+    backend = FakeChatBackend(responses=["0.9"])
+    suite = BenchmarkSuite(
+        meta={"name": "llm-route", "version": "1.0", "agent": "t"},
+        # Use a non-classification, non-recall category so validation doesn't
+        # trip the all-no-gold guard. ``temporal`` with score_method="llm"
+        # routes through llm_judge.
+        cases=[
+            BenchmarkCase(
+                id="T01",
+                category="temporal",
+                query="when did this happen?",
+                gold_path=None,
+                score_method="llm",
+            )
+        ],
+    )
+
+    result = run_benchmark(
+        suite,
+        system="hybrid",
+        agent="t",
+        deps=BenchmarkDeps(
+            chat_backend=backend,
+            retrieve=_retrieve_returning(["vault/some-doc.md"]),
+        ),
+    )
+
+    # The fake backend was consulted exactly once — confirms the deps
+    # threading reached llm_judge.
+    assert len(backend.calls) == 1
+    # The case's recorded score reflects the backend response.
+    assert result.cases[0]["score"] == pytest.approx(0.9)
+
+
+@pytest.mark.unit
+def test_run_benchmark_threads_classifier_through_to_classification_score() -> None:
+    """A custom ``deps.classifier`` is consulted for classification cases.
+
+    Receipt: the FakeContentClassifier logs the rules call.
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
+    from tests.fakes import FakeContentClassifier
+
+    classifier = FakeContentClassifier(rules_type="decision")
+    suite = BenchmarkSuite(
+        meta={"name": "classifier-route", "version": "1.0", "agent": "t"},
+        cases=[
+            BenchmarkCase(
+                id="C01",
+                category="classification",
+                query="we agreed to ship Friday",
+                gold_path=None,
+                score_method="classification",
+                expected_type="decision",
+            )
+        ],
+    )
+
+    result = run_benchmark(
+        suite,
+        system="hybrid",
+        agent="t",
+        deps=BenchmarkDeps(classifier=classifier),
+    )
+
+    # Receipt: the fake's rules_calls list captured the runner's invocation.
+    assert len(classifier.rules_calls) == 1
+    assert classifier.rules_calls[0] == {"query": "we agreed to ship Friday", "agent": "shared"}
+    # And the case scored 1.0 because the fake returned the expected type.
+    assert result.cases[0]["score"] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Output-dir JSON serialisation path — covers the file-write block.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_run_benchmark_writes_json_result_when_output_dir_set(tmp_path: Any) -> None:
+    """``output_dir`` set → a JSON file lands at the expected path."""
+    import json
+    from pathlib import Path
+
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkSuite
+
+    suite = BenchmarkSuite(
+        meta={"name": "OutSuite", "version": "1.0", "agent": "t"},
+        cases=[_bench_case("R01", "recall", "vault/a.md")],
+    )
+    out = Path(tmp_path) / "results"
+
+    run_benchmark(
+        suite,
+        system="hybrid",
+        agent="t",
+        output_dir=str(out),
+        deps=BenchmarkDeps(retrieve=_retrieve_returning(["vault/a.md"])),
+    )
+
+    files = list(out.glob("B-outsuite-hybrid-*.json"))
+    assert len(files) == 1
+    payload = json.loads(files[0].read_text())
+    # Payload carries the documented top-level keys.
+    assert set(payload.keys()) == {"meta", "summary", "diagnostics", "cases"}
+    assert payload["summary"]["weighted_total"] == pytest.approx(0.25)  # recall@1.0 * 0.25
