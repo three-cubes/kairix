@@ -188,9 +188,121 @@ Once the baselines are at zero, ratchet:
 - **Tier 3 exceptions** documented above (Azure/Neo4j adapters, optional-dep `importorskip`, fixture-credential `pragma: allowlist secret`, regex-bounded `NOSONAR`). These are the architecturally-correct exceptions. They survive — but each gets a rationale comment so the next reviewer sees why.
 - **Sonar issue-ignore rules.** Already minimal (5) and version-controlled in `sonar-project.properties`. Each has a rationale comment.
 
+## Parallelisation strategy (Ralph + worktrees)
+
+This refactor is unusually well-suited to Ralph-method parallelisation
+because most of the work is **file-scoped** — one production file per
+backfill, one rule per refactor — and the CI/CD pipeline as it stands
+today gives us strong, automated guarantees that misbehaving parallel
+work cannot land:
+
+- `develop` is the integration branch; HITL on `main` and release tags.
+- Branch protection denies rebase/squash; merge commits only — agent
+  commits arrive on develop as discrete merges, history stays legible.
+- Auto-merge is on; head branches are deleted on merge — no manual
+  shepherding once a PR is green.
+- F7 (per-file 85%) and F9 (union 85%) only fail on **net-new**
+  violations vs. baseline. Removing an entry from baseline ratchets the
+  floor — it cannot regress later.
+- Codecov `unit` + `integration` carryforward: a PR that only ships unit
+  changes still gets a correct merged dashboard.
+- SonarCloud branch analysis runs on every PR — agents iterate against
+  the Sonar gate, not only `safe-commit.sh`.
+
+### Conflict-surface matrix
+
+The only files multiple agents are likely to touch concurrently are
+the test scaffolding and the rule-specific baselines:
+
+| Surface | Phase 2 (coverage) | Phase 3a (F2) | Phase 3b (F1/F5) | Phase 4 (F6) | Phase 5 | Phase 6 |
+|---|---|---|---|---|---|---|
+| Prod files | disjoint per-file | none | none | disjoint per-file | broad | config |
+| `tests/fakes.py` | possible adds | heavy use | possible adds | possible adds | possible | none |
+| `tests/conftest.py` | rare | heavy edits | possible | possible | possible | none |
+| Per-rule baseline | F7, F9 (line-remove) | F2 (line-remove) | F1, F5 (line-remove) | F6 (line-remove) | F3 | none |
+
+Line-removal in baseline files is conflict-trivial. The real contention
+is `tests/fakes.py` and `tests/conftest.py`. Resolve by **combining
+both sides** — both adds belong (per Ralph default in `CLAUDE.md`).
+
+### Wave plan
+
+**Wave 0 — Foundation (sequential, one PR on develop, no isolation).**
+Add any Fake* classes the upcoming waves will share — at minimum
+`FakeCredentials` for recall_check and embed work, and `FakeEmbedProviderFactory`
+if multiple agents need it. Single agent on the main checkout, direct
+push to develop. Eliminates the most common Wave-1 conflict before it
+starts. ~30-60 min.
+
+**Wave 1 — Coverage backfill + F6 conversions in parallel (worktrees, 4-6 agents).**
+File-scoped issues from Phase 2c, 2a, and Phase 4 are independent —
+each agent owns one production file. Dispatch with `isolation="worktree"`,
+all in parallel, all in the same Agent message. Each agent runs
+`safe-commit.sh` in its loop and reports SHA + branch when green.
+
+From the main checkout (on `develop`), `git cherry-pick <sha>` each
+agent's commit in completion order. Do **not** merge worktree branches
+directly — worktrees branch off `main` (latest tagged release), not
+current `develop`, so a direct merge reverts session work. Push after
+each cherry-pick; auto-merge is irrelevant because we're committing
+direct.
+
+Recommended Wave-1 batch (one issue ↔ one agent):
+
+1. Phase 2c — `kairix/core/embed/recall_check.py` (7 pragmas, alarm code)
+2. Phase 2c — `kairix/quality/benchmark/runner.py` (3 pragmas + F6)
+3. Phase 2c — `kairix/core/embed/embed.py` (6 pragmas, hot path)
+4. Phase 2a — `kairix/core/search/rerank.py` (F7, perf)
+5. Phase 2a — `kairix/core/search/vector_repository.py` (F7, perf)
+6. Phase 4  — F6 conversions (12 files; can split across 2-3 agents,
+   each owning a subset, since each F6 conversion is file-scoped)
+
+Run all 6+ agents in one parallel dispatch. Expected wall clock: 1-2
+hours of agent time, ~30 min of cherry-pick + conflict resolution.
+
+**Wave 2 — F2 env-monkeypatch elimination (sequential, single PR).**
+Phase 3a touches 9 test files plus `tests/fakes.py`/`conftest.py`
+plumbing. The refactor is uniform (`monkeypatch.setenv("KAIRIX_*", ...)`
+→ inject `FakePaths`), so a single agent on the main checkout produces
+one cohesive PR. Run after Wave 1 lands so the FakePaths plumbing
+doesn't conflict with concurrent fake additions.
+
+**Wave 3 — F1 + F5 elimination (sequential, single PR).**
+Phase 3b removes `@patch` on kairix internals and internal-name imports
+from tests. Touches tests broadly, but the change is mechanical (replace
+`@patch("kairix.foo.bar")` with constructor injection of a fake). Single
+agent, single PR. Run after Wave 2 because some F1/F5 violations sit
+above F2 violations in the same test files — resolve F2 first.
+
+**Wave 4 — Per-line suppression audit (sequential, exploratory).**
+Phase 5 strips every `# noqa` / `# pragma: no cover` / `# type: ignore`
+that fires no rule, and adds rationale comments to the rest. Touches
+everything; do not parallelise — let one agent walk file-by-file.
+
+**Wave 5 — Ratchet (sequential, single config PR).**
+Phase 6 lifts F7/F9 floors 85→90, `fail_under` 80→90, adds the new
+F-rules for un-rationaled silencers. Config-only.
+
+### What changes from the default delegation playbook
+
+The session's standing instruction (from
+`feedback_subagent_dispatch.md`) is "batches ≥2 use parallel worktrees +
+cherry-pick; singletons go sequential on main checkout." That still
+applies — the wave plan above is just an instance of it, scaled to a
+multi-week effort. Two non-default points worth flagging:
+
+- **Wave 0 is sequential by design.** Even though it's "just adding
+  fakes," front-loading it removes the conflict that would otherwise
+  hit every Wave-1 cherry-pick.
+- **No agent gets autonomy over the merge.** Auto-merge is on for the
+  repo, but agents in worktrees commit to their own branches and we
+  cherry-pick from the main checkout — agent PRs do **not** auto-merge.
+  This is an explicit constraint from the worktree pattern, not a
+  weakness of auto-merge.
+
 ## Tracking
 
 This document is the source of truth for the refactor. Each phase below
 should be tracked as a sub-issue under a parent #issue, with a checkbox
 ticked when the corresponding baseline entries / suppressions drop. The
-parent issue acts as the burndown.
+parent issue (#193) acts as the burndown.

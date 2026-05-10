@@ -491,6 +491,7 @@ def run_embed(
     assert deps.preflight_check is not None
     assert deps.migrate_content_vectors is not None
     assert deps.open_usearch_index is not None
+    assert deps.embed_batch is not None
 
     doc_root = deps.get_document_root()
 
