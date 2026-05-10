@@ -7,7 +7,17 @@ drops more than ``DEGRADATION_THRESHOLD`` from the previous run.
 
 Adaptive mode: when the database is provided and contains indexed
 documents, the recall queries are derived from a random sample of
-document titles. Otherwise the static ``DEFAULT_RECALL_QUERIES`` are used.
+document titles. The sample is **persisted** to
+``~/.cache/kairix/recall-canaries.json`` on first build and reused on
+every subsequent run. Without persistence, each run picks a different
+random sample and the run-over-run delta is meaningless — that was
+the design bug behind the worker restart-loop fixed in v2026.5.10.
+
+The static ``DEFAULT_RECALL_QUERIES`` are used when the database has
+no indexed documents (no corpus to sample from).
+
+To force a re-sample after major corpus changes, delete the canary
+cache file or pass ``rebuild_canaries=True`` to ``check()``.
 
 The ``RecallChecker`` class is the only seam: tests inject a ``FakeEmbedProvider``
 and a ``FakeVectorSearcher`` via the constructor; production callers build
@@ -34,6 +44,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 RECALL_LOG = Path.home() / ".cache" / "kairix" / "recall-check.json"
+CANARY_CACHE = Path.home() / ".cache" / "kairix" / "recall-canaries.json"
+CANARY_CACHE_VERSION = 1
 
 # Static fallback recall queries, used when the database has no indexed
 # documents. Each tuple is (id, query, expected_title_fragment).
@@ -60,17 +72,48 @@ class VectorSearcher(Protocol):
     def search_vectors(self, vector: np.ndarray, *, limit: int) -> list[str]: ...
 
 
-def _get_recall_queries(db: sqlite3.Connection | None = None) -> list[tuple[str, str, str]]:
-    """Return recall queries — adaptive corpus sample if the DB has documents, otherwise defaults."""
+def _get_recall_queries(
+    db: sqlite3.Connection | None = None,
+    *,
+    cache_path: Path | None = CANARY_CACHE,
+    rebuild: bool = False,
+) -> list[tuple[str, str, str]]:
+    """Return recall queries — load from cache, sample fresh on first run.
+
+    First call: build from a random sample of corpus titles, persist to
+    ``cache_path``. Subsequent calls: load from cache so the same queries
+    run every cycle (deterministic degradation comparisons).
+
+    ``cache_path=None`` disables the cache entirely (always build fresh)
+    — used by tests that exercise the adaptive-sampling logic directly.
+
+    ``rebuild=True`` forces a re-sample (e.g. after major corpus change).
+    Falls back to ``DEFAULT_RECALL_QUERIES`` when there is no DB or the
+    DB has no indexed documents.
+    """
+    if cache_path is not None and not rebuild:
+        cached = load_canary_cache(cache_path)
+        if cached:
+            return cached
+
     if db is not None:
         adaptive = _build_adaptive_queries(db)
         if adaptive:
+            if cache_path is not None:
+                save_canary_cache(adaptive, cache_path)
             return adaptive
+
     return list(DEFAULT_RECALL_QUERIES)
 
 
 def _build_adaptive_queries(db: sqlite3.Connection) -> list[tuple[str, str, str]]:
-    """Build recall queries from a random sample of indexed document titles."""
+    """Build recall queries from a random sample of indexed document titles.
+
+    Called once per canary cache lifetime. The randomness here is fine
+    because the result is **persisted** by ``save_canary_cache`` and
+    reused across runs — same five queries keep firing until the cache
+    is rebuilt.
+    """
     try:
         rows = db.execute(
             """
@@ -94,6 +137,54 @@ def _build_adaptive_queries(db: sqlite3.Connection) -> list[tuple[str, str, str]
         stem = Path(path).stem.lower()
         queries.append((f"A{i:02d}", readable, stem))
     return queries
+
+
+def load_canary_cache(cache_path: Path = CANARY_CACHE) -> list[tuple[str, str, str]] | None:
+    """Load persisted canary queries; return None if cache missing or
+    schema-incompatible."""
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        logger.warning("recall-canaries: cache unreadable; re-building")
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != CANARY_CACHE_VERSION:
+        logger.warning("recall-canaries: cache schema mismatch; re-building")
+        return None
+    queries = payload.get("queries", [])
+    if not isinstance(queries, list) or not queries:
+        return None
+    out: list[tuple[str, str, str]] = []
+    for entry in queries:
+        try:
+            out.append((str(entry["id"]), str(entry["query"]), str(entry["gold_fragment"])))
+        except (KeyError, TypeError):
+            return None
+    return out
+
+
+def save_canary_cache(
+    queries: list[tuple[str, str, str]],
+    cache_path: Path = CANARY_CACHE,
+    *,
+    corpus_size: int | None = None,
+) -> None:
+    """Persist canary queries to disk.
+
+    The persisted document includes a schema version, a timestamp, and
+    optional ``corpus_size`` so future readers can decide whether the
+    cache is still meaningful or warrants a rebuild.
+    """
+    payload = {
+        "version": CANARY_CACHE_VERSION,
+        "created_at": int(time.time()),
+        "corpus_size_at_creation": corpus_size,
+        "queries": [{"id": qid, "query": q, "gold_fragment": gf} for qid, q, gf in queries],
+    }
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    logger.info("recall-canaries: cached %d queries to %s", len(queries), cache_path)
 
 
 def _embed_query(
@@ -214,12 +305,21 @@ class RecallChecker:
         *,
         db: sqlite3.Connection | None = None,
         recall_queries: list[tuple[str, str, str]] | None = None,
+        canary_cache_path: Path | None = CANARY_CACHE,
+        rebuild_canaries: bool = False,
     ) -> dict[str, Any]:
         """Run the recall check.
 
         Returns ``{score, passed, total, timestamp, detail}`` where
         ``score`` is the fraction of non-skipped queries whose gold fragment
         appeared in the top-k results.
+
+        ``recall_queries`` lets tests inject a deterministic suite. In
+        production it is None and the queries come from the persistent
+        canary cache (``canary_cache_path``); the cache is built on
+        first run from a corpus sample and reused thereafter so the
+        run-over-run delta is meaningful. Pass ``rebuild_canaries=True``
+        to discard the cache and re-sample.
         """
         close_db = False
         if db is None:
@@ -234,7 +334,10 @@ class RecallChecker:
             except FileNotFoundError:  # pragma: no cover
                 db = None
 
-        queries = recall_queries if recall_queries is not None else _get_recall_queries(db)
+        if recall_queries is not None:
+            queries = recall_queries
+        else:
+            queries = _get_recall_queries(db, cache_path=canary_cache_path, rebuild=rebuild_canaries)
         passed = 0
         detail: list[dict[str, Any]] = []
 
@@ -286,9 +389,10 @@ def check_recall(
     db: sqlite3.Connection | None = None,
     *,
     recall_queries: list[tuple[str, str, str]] | None = None,
+    rebuild_canaries: bool = False,
 ) -> dict[str, Any]:
     """Production-default shim — see ``RecallChecker.check``."""
-    return RecallChecker().check(db=db, recall_queries=recall_queries)
+    return RecallChecker().check(db=db, recall_queries=recall_queries, rebuild_canaries=rebuild_canaries)
 
 
 def load_previous_score(log_path: Path = RECALL_LOG) -> float | None:
@@ -330,6 +434,7 @@ def run_recall_gate(
     *,
     checker: RecallChecker | None = None,
     log_path: Path = RECALL_LOG,
+    rebuild_canaries: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     """Run the recall gate end-to-end.
 
@@ -337,12 +442,17 @@ def run_recall_gate(
     than ``DEGRADATION_THRESHOLD`` since the previous run the gate fails
     and ``alert_callback`` is invoked with a human-readable message.
 
+    The canary suite is sourced from a persistent on-disk cache so the
+    same queries fire on every run — see ``_get_recall_queries``. Pass
+    ``rebuild_canaries=True`` (or run ``kairix embed --rebuild-canaries``)
+    to discard the cache and re-sample.
+
     ``checker`` and ``log_path`` are injection seams used by tests. Production
     leaves them as defaults — ``RecallChecker()`` resolves to Azure + usearch.
     """
     if checker is None:
         checker = RecallChecker()
-    result = checker.check()
+    result = checker.check(rebuild_canaries=rebuild_canaries)
     prev_score = load_previous_score(log_path)
     save_recall_result(result, log_path)
 

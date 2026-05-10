@@ -1,0 +1,79 @@
+# systemd unit for kairix on a self-hosted VM.
+#
+# Copy to /etc/systemd/system/kairix.service, edit the placeholders, and:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now kairix-fetch-secrets.service kairix.service
+#
+# Why this file ships with kairix:
+# v2026.5.10 hardens the deployment story per #167. The previous unit
+# definition was hand-rolled per host; mistakes in `Requires=` /
+# `After=` ordering let kairix.service start before secrets had been
+# hydrated, leaving vector search broken until manual intervention.
+# This file pins the correct ordering.
+
+[Unit]
+Description=Kairix — private knowledge retrieval for AI agents
+Documentation=https://github.com/quanyeomans/kairix
+After=network-online.target docker.service kairix-fetch-secrets.service
+# Strict: kairix MUST NOT start until /run/secrets/kairix.env has been
+# written. Without this, vector search comes up degraded (BM25 only).
+Requires=docker.service kairix-fetch-secrets.service
+
+[Service]
+# ---------------------------------------------------------------------------
+# Runtime identity
+# ---------------------------------------------------------------------------
+# The service user must be able to read /opt/kairix/app/.env. Create
+# the user once during install:
+#
+#   sudo useradd --system --home-dir /opt/kairix --shell /usr/sbin/nologin kairix
+#   sudo chown -R kairix:kairix /opt/kairix
+#   sudo chmod 640 /opt/kairix/app/.env
+#
+# scripts/install/permissions-preflight.sh idempotently fixes these.
+User=kairix
+Group=kairix
+WorkingDirectory=/opt/kairix/app
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+# Operator config (paths, KV name, non-secret settings)
+EnvironmentFile=-/opt/kairix/service.env
+
+# Pre-fetched Azure secrets (populated by kairix-fetch-secrets.service)
+EnvironmentFile=-/run/secrets/kairix.env
+
+# Fallback location for non-Docker deployments
+EnvironmentFile=-/opt/kairix/secrets.env
+
+# ---------------------------------------------------------------------------
+# Process
+# ---------------------------------------------------------------------------
+# Preflight: ensure host-side prerequisites are valid before docker compose
+# touches anything. The script exits non-zero with an actionable message
+# if .env / secrets / required env vars are missing — surfacing the
+# failure here is far more diagnostic than docker compose's
+# "permission denied" cycle.
+ExecStartPre=/opt/kairix/bin/permissions-preflight.sh
+
+ExecStart=/usr/bin/docker compose up --remove-orphans
+ExecStop=/usr/bin/docker compose down
+
+# Restart only on actual failure (not clean shutdown). Limit retry storm.
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# ---------------------------------------------------------------------------
+# Hardening (override per host as needed)
+# ---------------------------------------------------------------------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/kairix /var/lib/kairix /run/secrets
+
+[Install]
+WantedBy=multi-user.target
