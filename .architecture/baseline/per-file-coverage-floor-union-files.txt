@@ -6,6 +6,7 @@ kairix/agents/mcp/cli.py
 kairix/cli.py
 kairix/core/classify/cli.py
 kairix/core/db/repository.py
+kairix/core/embed/_pipeline_defaults.py
 kairix/core/embed/cli.py
 kairix/core/embed/deps.py
 kairix/core/factory.py
