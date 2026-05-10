@@ -58,7 +58,9 @@ def test_recall_checker_uses_adaptive_queries_against_real_schema(tmp_path: Path
     # Vector searcher returns the architecture path back so the architecture query hits.
     searcher = FakeVectorSearcher(paths=["docs/architecture.md"])
     checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=searcher)
-    result = checker.check(db=db)
+    # canary_cache_path=None: bypass the persistent canary cache so this
+    # integration test exercises adaptive sampling end-to-end.
+    result = checker.check(db=db, canary_cache_path=None)
 
     db.close()
 

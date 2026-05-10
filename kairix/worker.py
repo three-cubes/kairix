@@ -18,7 +18,10 @@ import signal
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kairix.core.embed.use_cases import EmbedPipelineResult
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +31,19 @@ ENTITY_SEED_INTERVAL = 86400  # 24 hours
 HEALTH_CHECK_INTERVAL = 21600  # 6 hours
 
 
-def _default_embed() -> None:
-    """Default embed implementation — lazy-imports and runs embed CLI."""
-    from kairix.core.embed.cli import main as embed_main
+def _default_embed() -> EmbedPipelineResult:
+    """Default embed implementation — runs the embed use case directly.
 
-    embed_main()
+    Returns the structured ``EmbedPipelineResult`` so the worker can log
+    structured outcomes (embed counts, recall score, alerts) without
+    depending on CLI exit-code semantics. Critically, this DOES NOT call
+    the CLI ``main()`` — that path raises ``SystemExit`` on recall-gate
+    failures and would terminate the worker process. The use case raises
+    only on truly unrecoverable conditions.
+    """
+    from kairix.core.embed.use_cases import run_incremental_embed_pipeline
+
+    return run_incremental_embed_pipeline()
 
 
 def _default_entity_seed() -> None:
@@ -55,21 +66,66 @@ def _default_health_check() -> list[Any]:
     return run_all_checks()
 
 
-def run_embed(embed_fn: Callable[[], None] | None = None) -> None:
+def run_embed(embed_fn: Callable[[], Any] | None = None) -> None:
     """Run incremental embed — indexes new and changed documents.
 
-    Args:
-        embed_fn: Callable that performs the embed. Defaults to the production
-                  embed CLI entry point.
+    The worker treats every outcome of the embed pipeline as
+    non-fatal: failed chunks, recall-gate alerts, and unexpected
+    exceptions are all logged and the worker continues to the next
+    interval. This decoupling is deliberate — the worker's job is to
+    KEEP RUNNING on a schedule; the embed use case's job is to do the
+    work and report what happened.
+
+    The pre-v2026.5.10 worker called the embed CLI which used
+    ``sys.exit()`` to signal recall-gate failures. ``SystemExit`` is
+    not caught by ``except Exception``, so any gate alert killed the
+    worker process. That coupling is removed here: the use case
+    returns a ``EmbedPipelineResult`` dataclass; we inspect it and log.
+
+    ``embed_fn`` injection seam: tests pass a callable returning either
+    the result dataclass or None (legacy). Production passes
+    ``_default_embed`` which runs the use case.
     """
     if embed_fn is None:
         embed_fn = _default_embed
     try:
         logger.info("worker: starting incremental embed")
-        embed_fn()
-        logger.info("worker: embed complete")
-    except Exception as exc:
-        logger.warning("worker: embed failed — %s", exc)
+        result = embed_fn()
+        if result is None:
+            logger.info("worker: embed complete")
+            return
+        # The defensive getattr() chain accommodates legacy test stubs
+        # that return ad-hoc objects without the full result dataclass.
+        embedded = getattr(result, "embedded", None)
+        failed = getattr(result, "failed", None)
+        recall_score = getattr(result, "recall_score", None)
+        recall_passed = getattr(result, "recall_passed", None)
+        recall_alert = getattr(result, "recall_alert", None)
+        diagnostics = getattr(result, "diagnostics", None) or []
+        logger.info(
+            "worker: embed complete — embedded=%s failed=%s recall=%s",
+            embedded,
+            failed,
+            f"{recall_score:.0%}" if isinstance(recall_score, float) else "n/a",
+        )
+        if isinstance(failed, int) and failed > 0:
+            logger.warning("worker: %d chunks failed during embed", failed)
+        if recall_passed is False:
+            logger.warning(
+                "worker: recall gate alert — %s",
+                recall_alert or "search quality degraded; see kairix onboard check",
+            )
+        for diag in diagnostics:
+            logger.warning("worker: %s", diag)
+    # Catch (Exception, SystemExit) — a SystemExit from the embed step
+    # (e.g. legacy CLI calling sys.exit(1) on recall-gate failure) must
+    # NOT terminate the worker. Graceful shutdown is signal-driven via
+    # SIGTERM/SIGINT in main(), which sets ``running = False`` rather
+    # than raising. KeyboardInterrupt is intentionally NOT caught — if
+    # signals fail and a Ctrl+C reaches us mid-call, propagation is the
+    # right behaviour for a developer running locally.
+    except (Exception, SystemExit) as exc:
+        logger.warning("worker: embed pipeline raised — %s", exc)
 
 
 def run_entity_seed(entity_seed_fn: Callable[[], None] | None = None) -> None:

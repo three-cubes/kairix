@@ -222,6 +222,37 @@ docker compose up -d
 
 See `docker/docker-compose.yml` for the full service definition. `kairix onboard check` runs inside the container on startup.
 
+### systemd unit (recommended for reboot-survivable VM deployments)
+
+If you run kairix as a systemd-managed Docker stack on a long-running VM, copy the example units from `scripts/install/` and tailor them. They pin the correct dependency ordering (kairix.service → kairix-fetch-secrets.service → docker.service) so the deployment self-heals after a reboot rather than crash-looping when `/run/secrets/kairix.env` is empty (resolved in v2026.5.10, see #167).
+
+```bash
+sudo install -m 0644 scripts/install/kairix.service.example /etc/systemd/system/kairix.service
+sudo install -m 0644 scripts/install/kairix-fetch-secrets.service.example /etc/systemd/system/kairix-fetch-secrets.service
+sudo install -m 0755 scripts/install/permissions-preflight.sh /opt/kairix/bin/permissions-preflight.sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now kairix-fetch-secrets.service kairix.service
+```
+
+`permissions-preflight.sh` runs as `ExecStartPre=` and:
+
+- Fixes `.env` ownership/mode if root + service-user mismatch (the #167 root cause).
+- Fails fast if `/run/secrets/kairix.env` is missing or empty.
+- Verifies that `KAIRIX_LLM_API_KEY`, `KAIRIX_LLM_ENDPOINT`, `KAIRIX_EMBED_API_KEY`, `KAIRIX_EMBED_ENDPOINT` are all populated when the service-env and secrets file are merged.
+
+A failed preflight surfaces as an actionable journalctl line — far more useful than docker compose's "permission denied" loop.
+
+### Health probes
+
+Kairix exposes two health endpoints from the MCP HTTP transport:
+
+| Endpoint | Purpose | Body shape |
+|---|---|---|
+| `GET /healthz` | Basic liveness — process up, started_at clock past zero. Back-compat. | `{"ready": bool, "uptime_s": int}` |
+| `GET /healthz/ready` | Layered readiness — granular capability checks. Use this from your load balancer. | `{"live": bool, "ready": bool, "uptime_s": int, "checks": {"secrets_loaded": bool, "vector_search_capable": bool, "bm25_search_capable": bool, "detail": {...}}}` |
+
+`/healthz/ready` is the actionable signal: `ready=true` means the deployment is fully operational (secrets loaded AND vector search capable). A degraded deployment that has lost vector search will report `ready=false` with `vector_search_capable=false` and a `detail` message — far better than the pre-v2026.5.10 behaviour where `/healthz` returned `ready=true` while semantic search was silently broken (#167).
+
 ### Alternative: pip install
 
 For environments where Docker is unavailable, kairix can be installed as a pip package.

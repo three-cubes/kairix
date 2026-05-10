@@ -18,9 +18,8 @@ from typing import IO
 
 from kairix.core.db import get_db_path, open_db
 
-from .embed import DEFAULT_BATCH_SIZE, run_embed
+from .embed import DEFAULT_BATCH_SIZE
 from .recall_check import run_recall_gate
-from .schema import save_run_log, validate_schema
 
 LOG_FILE = Path(
     os.environ.get(
@@ -96,129 +95,59 @@ def release_lock(lock_fh: IO[str]) -> None:
 
 
 def cmd_embed(args: argparse.Namespace) -> int:
-    """Run the embedding pipeline."""
-    logging.info(f"kairix embed starting — force={args.force} limit={args.limit} batch_size={args.batch_size}")
+    """Run the embedding pipeline.
 
-    lock_fh = acquire_lock()
-    db_path = get_db_path()
-    start = time.time()
-    result = None
+    Thin shim over ``run_incremental_embed_pipeline``. The use case
+    encapsulates schema/scan/embed/gate; this function only maps its
+    structured result to a process exit code so other CLI semantics
+    (e.g. logging behaviour) stay testable in isolation.
+
+    Exit codes:
+      0  — embed succeeded and recall gate passed (or was skipped)
+      1  — embed had failed chunks OR recall gate fired an alert
+      2  — pipeline raised (DB unreachable, schema migration, etc.)
+    """
+    from kairix.core.embed.use_cases import run_incremental_embed_pipeline
 
     try:
-        db = open_db(Path(db_path))
-        try:
-            from kairix.core.db.schema import create_schema
-
-            create_schema(db)
-            validate_schema(db)
-
-            # Scan document store for new/changed documents before embedding.
-            # This ensures first-run embed works without a separate scan step.
-            from kairix.core.db.scanner import CollectionConfig, DocumentScanner
-            from kairix.core.search.config_loader import _resolve_config_path, load_collections
-            from kairix.core.search.registry import build_agent_owner_resolver, parse_agent_registry
-            from kairix.paths import document_root
-
-            droot = document_root()
-
-            # Build agent_owner resolver from the agents: section of kairix.config.yaml
-            # so each scanned document is tagged with its owning agent (#114).
-            # Documents not under any agent's write_path get agent_owner=NULL.
-            agent_resolver = None
-            try:
-                config_path = _resolve_config_path()
-                if config_path is not None:
-                    import yaml as _yaml
-
-                    with config_path.open(encoding="utf-8") as _f:
-                        _raw_yaml = _yaml.safe_load(_f) or {}
-                    _registry = parse_agent_registry(_raw_yaml)
-                    if _registry.list_agents():
-                        agent_resolver = build_agent_owner_resolver(_registry)
-            except Exception as _exc:
-                logging.warning("embed: agent_owner resolver unavailable — %s", _exc)
-
-            scanner = DocumentScanner(db, document_root=droot, agent_owner_resolver=agent_resolver)
-
-            # Load collections from config; fall back to scanning entire document root
-            collections_cfg = load_collections()
-            if collections_cfg and collections_cfg.shared:
-                scan_collections = [
-                    CollectionConfig(name=c.name, path=c.path, glob=c.glob) for c in collections_cfg.shared
-                ]
-                logging.info("Using %d configured collections", len(scan_collections))
-            else:
-                scan_collections = [CollectionConfig(name="default", path=".")]
-
-            # Auto-append reference library if present (ships inside Docker container)
-            from kairix.paths import reference_library_root
-
-            reflib_root = reference_library_root()
-            if reflib_root.is_dir():
-                scan_collections.append(
-                    CollectionConfig(name="reference-library", path=str(reflib_root), glob="**/*.md")
-                )
-
-            scan_report = scanner.scan(scan_collections)
-            if scan_report.new > 0 or scan_report.updated > 0:
-                logging.info(
-                    "Scanned documents: %d new, %d updated, %d unchanged",
-                    scan_report.new,
-                    scan_report.updated,
-                    scan_report.unchanged,
-                )
-                # Rebuild FTS index after scanning new/changed documents
-                from kairix.core.db.fts import rebuild_fts
-
-                fts_count = rebuild_fts(db)
-                logging.info("FTS index rebuilt: %d documents", fts_count)
-
-            result = run_embed(
-                db=db,
-                force=args.force,
-                batch_size=args.batch_size,
-                limit=args.limit,
-            )
-
-            result["command"] = "embed"
-            result["db_path"] = str(db_path)
-            result["timestamp"] = int(start)
-            save_run_log(result)
-
-            logging.info(
-                f"Done — embedded={result['embedded']} failed={result['failed']} "
-                f"duration={result['duration_s']}s cost=${result['estimated_cost_usd']:.4f}"
-            )
-
-            if result["failed"] > 0:
-                logging.warning(f"{result['failed']} chunks failed. Re-run without --force to retry failed chunks.")
-        finally:
-            db.close()
-
+        result = run_incremental_embed_pipeline(
+            force=args.force,
+            batch_size=args.batch_size,
+            limit=args.limit,
+            skip_recall_check=args.skip_recall_check,
+            rebuild_canaries=getattr(args, "rebuild_canaries", False),
+        )
     except Exception:
         logging.exception("Embed failed")
         return 2
-    finally:
-        release_lock(lock_fh)
+
+    logging.info(
+        f"Done — embedded={result.embedded} failed={result.failed} "
+        f"duration={result.duration_s}s cost=${result.cost_usd:.4f}"
+    )
+    if result.failed > 0:
+        logging.warning(f"{result.failed} chunks failed. Re-run without --force to retry failed chunks.")
 
     if args.skip_recall_check:
         logging.info("Skipping recall check (--skip-recall-check)")
-        return 0 if result["failed"] == 0 else 1
+    elif result.recall_score is not None:
+        logging.info(
+            "Recall: %.0f%% (gate %s)",
+            result.recall_score * 100,
+            "passed" if result.recall_passed else "FAILED",
+        )
+        if result.recall_passed is False:
+            logging.error("Recall gate FAILED — search quality degraded. Check logs.")
 
-    # Recall gate
-    logging.info("Running post-embed recall check...")
-    gate_passed, recall_result = run_recall_gate()
-    logging.info(f"Recall: {recall_result['passed']}/{recall_result['total']} ({recall_result['score']:.0%})")
-
-    if not gate_passed:
-        logging.error("Recall gate FAILED — search quality degraded. Check logs.")
-        return 1
-
-    # Post-embed summarise — generate L0 summaries for stale/new docs
+    # Post-embed summarise — non-critical; failures only logged
     if not args.skip_summarise:
         _run_post_embed_summarise()
 
-    return 0 if result["failed"] == 0 else 1
+    if not result.success:
+        return 1
+    if result.recall_passed is False:
+        return 1
+    return 0
 
 
 def _run_post_embed_summarise() -> None:
@@ -347,6 +276,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     embed_p.add_argument("--skip-recall-check", action="store_true", help="Skip post-embed quality gate")
     embed_p.add_argument(
+        "--rebuild-canaries",
+        action="store_true",
+        help=(
+            "Discard the persisted recall canary suite and sample fresh from "
+            "the corpus. Use after a major index rebuild."
+        ),
+    )
+    embed_p.add_argument(
         "--skip-summarise",
         action="store_true",
         help="Skip post-embed L0 summary generation",
@@ -368,6 +305,7 @@ def main(argv: list[str] | None = None) -> None:
             args.limit = None
             args.batch_size = DEFAULT_BATCH_SIZE
             args.skip_recall_check = False
+            args.rebuild_canaries = False
             args.skip_summarise = False
         sys.exit(cmd_embed(args))
     elif args.command == "recall-check":

@@ -65,6 +65,72 @@ def test_run_embed_calls_embed_fn() -> None:
     assert len(calls) == 1
 
 
+def test_run_embed_survives_systemexit_from_embed_fn() -> None:
+    """A ``SystemExit`` from the embed step MUST NOT propagate.
+
+    This pins the v2026.5.10 fix: pre-fix, the worker called the embed
+    CLI which used ``sys.exit(1)`` on recall-gate failure. SystemExit
+    is not caught by ``except Exception``, so the worker process died
+    on every gate alert. The fix catches ``(Exception, SystemExit)``;
+    this test fires SystemExit and asserts run_embed returns cleanly.
+    """
+
+    def _exiting_embed() -> None:
+        raise SystemExit(1)
+
+    # Must not raise — SystemExit is caught and logged, worker continues.
+    run_embed(embed_fn=_exiting_embed)
+
+
+def test_run_embed_logs_recall_alert_from_pipeline_result(caplog: pytest.LogCaptureFixture) -> None:
+    """When the embed function returns an EmbedPipelineResult with
+    ``recall_passed=False``, the worker logs the alert and continues.
+    """
+    from kairix.core.embed.use_cases import EmbedPipelineResult
+
+    result = EmbedPipelineResult(
+        embedded=10,
+        failed=0,
+        skipped=0,
+        duration_s=1.0,
+        cost_usd=0.0,
+        db_path="/tmp/test",
+        timestamp=0,
+        recall_score=0.20,
+        recall_passed=False,
+        recall_alert="Recall degraded: 20% (was 80%, delta -60%).",
+    )
+
+    with caplog.at_level("WARNING"):
+        run_embed(embed_fn=lambda: result)
+
+    assert any("recall gate alert" in rec.message for rec in caplog.records), (
+        f"expected 'recall gate alert' in logs; got: {[r.message for r in caplog.records]}"
+    )
+
+
+def test_run_embed_logs_failed_chunk_count_from_pipeline_result(caplog: pytest.LogCaptureFixture) -> None:
+    """A non-zero ``failed`` count is surfaced as a warning, not silent."""
+    from kairix.core.embed.use_cases import EmbedPipelineResult
+
+    result = EmbedPipelineResult(
+        embedded=5,
+        failed=3,
+        skipped=0,
+        duration_s=1.0,
+        cost_usd=0.0,
+        db_path="/tmp/test",
+        timestamp=0,
+    )
+
+    with caplog.at_level("WARNING"):
+        run_embed(embed_fn=lambda: result)
+
+    assert any("3 chunks failed" in rec.message for rec in caplog.records), (
+        f"expected '3 chunks failed' in logs; got: {[r.message for r in caplog.records]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # run_entity_seed() tests
 # ---------------------------------------------------------------------------
