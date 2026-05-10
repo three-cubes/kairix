@@ -110,3 +110,17 @@ def test_generate_summaries_returns_list(tmp_path):
     # invoked and raised on missing Azure credentials — so this also locks
     # in that we never reach the production callable in the test path.
     assert all(r.l0 == "Summary text." for r in result)
+
+
+@pytest.mark.unit
+def test_summaries_deps_default_factory_returns_default_chat():
+    """SummariesDeps() (no kwargs) wires .chat to default_chat via default_factory.
+
+    Sabotage-prove: identity check, not just callable. Swapping the lambda
+    body to `lambda: lambda *a, **k: ""` would silently pass a `callable()`
+    check; identity to `default_chat` makes substitution impossible.
+    """
+    from kairix.knowledge.summaries.generate import default_chat
+
+    deps = SummariesDeps()
+    assert deps.chat is default_chat

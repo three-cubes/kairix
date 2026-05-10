@@ -71,7 +71,7 @@ def _first_n_words(text: str, n: int) -> str:
     return " ".join(words[:n])
 
 
-def _default_chat(messages: list[dict], max_tokens: int) -> str:  # pragma: no cover — prod wrapper around kairix._azure
+def default_chat(messages: list[dict], max_tokens: int) -> str:  # pragma: no cover — prod wrapper around kairix._azure
     """Production chat callable — delegates to ``kairix._azure.chat_completion``.
 
     Wrapper exists so ``SummariesDeps.chat`` has a stable, typed default
@@ -91,7 +91,7 @@ class SummariesDeps:
     threading per-helper ``chat_fn=None`` substitution kwargs.
     """
 
-    chat: Callable[..., str] = field(default_factory=lambda: _default_chat)
+    chat: Callable[..., str] = field(default_factory=lambda: default_chat)
 
 
 def _call_chat(
