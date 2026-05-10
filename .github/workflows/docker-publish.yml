@@ -21,19 +21,58 @@ env:
   IMAGE: ghcr.io/quanyeomans/kairix
 
 jobs:
+  sonar-gate:
+    name: SonarCloud Quality Gate (release)
+    # Hard gate. Only required on release events — develop pushes
+    # already go through the CI gate which enforces the QG. Skipped
+    # for develop pushes to avoid duplicate checks.
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: SonarCloud quality gate verdict for release
+        env:
+          PROJECT_KEY: quanyeomans_kairix
+          BRANCH_REF: main
+        run: |
+          set -euo pipefail
+          URL="https://sonarcloud.io/api/qualitygates/project_status?projectKey=${PROJECT_KEY}&branch=${BRANCH_REF}"
+          for i in 1 2 3 4 5 6; do
+              RESPONSE=$(curl -fsS --max-time 10 "$URL" || echo '{}')
+              STATUS=$(echo "$RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('projectStatus',{}).get('status','MISSING'))" 2>/dev/null || echo "MISSING")
+              if [ "$STATUS" = "OK" ]; then
+                  echo "SonarCloud Quality Gate OK for ${BRANCH_REF}"
+                  exit 0
+              fi
+              if [ "$STATUS" = "ERROR" ]; then
+                  echo "SonarCloud Quality Gate ERROR — release blocked."
+                  echo "$RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$RESPONSE"
+                  echo
+                  echo "Triage at https://sonarcloud.io/project/issues?id=${PROJECT_KEY}"
+                  exit 1
+              fi
+              echo "SonarCloud verdict not ready (status=${STATUS}); attempt ${i}/6, sleeping 15 s..."
+              sleep 15
+          done
+          echo "FAILED: SonarCloud Quality Gate verdict still unavailable after 90 s — release blocked."
+          exit 1
+
   build-and-push:
+    needs: sonar-gate
+    if: ${{ always() && (needs.sonar-gate.result == 'success' || needs.sonar-gate.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -53,7 +92,7 @@ jobs:
           fi
 
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
           push: true
