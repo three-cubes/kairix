@@ -220,7 +220,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           files: coverage.xml
           fail_ci_if_error: false
@@ -254,7 +254,7 @@ jobs:
         with:
           name: coverage-data
 
-      - uses: py-cov-action/python-coverage-comment-action@v3
+      - uses: py-cov-action/python-coverage-comment-action@53ff7553078bad69030786e486677315346c2dd2 # v3
         with:
           GITHUB_TOKEN: ${{ github.token }}
           MINIMUM_GREEN: 80
@@ -297,7 +297,7 @@ jobs:
             --junitxml=results-integration.xml
 
       - name: Upload integration coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           files: coverage-integration.xml
           flags: integration
@@ -417,7 +417,7 @@ jobs:
         continue-on-error: true
 
       - name: SonarCloud Scan
-        uses: SonarSource/sonarqube-scan-action@v6
+        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         continue-on-error: true

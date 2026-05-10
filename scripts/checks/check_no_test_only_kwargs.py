@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _arch_lib import REPO_ROOT, gate, python_files, repo_relative  # noqa: E402
+from _arch_lib import REPO_ROOT, gate, python_files, repo_relative
 
 REMEDIATION = """Refactor:
   - If the function has multiple stateful collaborators, extract a class and
@@ -46,11 +46,7 @@ _ALLOW_FILE = REPO_ROOT / ".architecture" / "baseline" / "test-only-kwargs-allow
 def _read_allow_list() -> set[str]:
     if not _ALLOW_FILE.exists():
         return set()
-    return {
-        line.strip()
-        for line in _ALLOW_FILE.read_text().splitlines()
-        if line.strip() and not line.startswith("#")
-    }
+    return {line.strip() for line in _ALLOW_FILE.read_text().splitlines() if line.strip() and not line.startswith("#")}
 
 
 def _is_none_constant(node: ast.expr | None) -> bool:
@@ -87,9 +83,9 @@ def file_has_violation(path: Path, allow: set[str]) -> bool:
         # Pair each arg with its default. Defaults align to the *tail* of args.
         positional = args.args
         defaults = args.defaults
-        positional_with_default = list(zip(positional[len(positional) - len(defaults):], defaults))
+        positional_with_default = list(zip(positional[len(positional) - len(defaults) :], defaults, strict=True))
 
-        kw_only = list(zip(args.kwonlyargs, args.kw_defaults))
+        kw_only = list(zip(args.kwonlyargs, args.kw_defaults, strict=True))
 
         all_with_default = positional_with_default + kw_only
 
@@ -109,11 +105,7 @@ def file_has_violation(path: Path, allow: set[str]) -> bool:
 
 def main() -> int:
     allow = _read_allow_list()
-    violations = {
-        repo_relative(p)
-        for p in python_files("kairix")
-        if file_has_violation(p, allow)
-    }
+    violations = {repo_relative(p) for p in python_files("kairix") if file_has_violation(p, allow)}
     return gate("no-test-only-kwargs", violations, REMEDIATION)
 
 

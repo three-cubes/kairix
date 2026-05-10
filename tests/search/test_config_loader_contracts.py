@@ -602,7 +602,7 @@ class TestResolveRetrievalConfigContract:
             },
         )
         defaults = RetrievalConfig.defaults()
-        assert result.temporal.date_path_boost_factor == 1.7
+        assert result.temporal.date_path_boost_factor == pytest.approx(1.7)
         assert result.temporal.date_path_boost_enabled == defaults.temporal.date_path_boost_enabled
 
     def test_per_collection_rerank_override_merges_over_global(self) -> None:

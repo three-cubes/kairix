@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _arch_lib import gate, python_files, repo_relative  # noqa: E402
+from _arch_lib import gate, python_files, repo_relative
 
 REMEDIATION = """Refactor: rewrite the test to drive the public function/class
 that calls the private helper. If the public surface doesn't reach the

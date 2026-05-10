@@ -26,10 +26,10 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from xml.etree import ElementTree as ET  # noqa: N817 — stdlib alias
+from xml.etree import ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _arch_lib import gate, repo_relative  # noqa: E402
+from _arch_lib import gate
 
 FLOOR = 85.0  # per-file coverage percentage threshold
 

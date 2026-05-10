@@ -61,10 +61,7 @@ def gate(name: str, current: set[Path], remediation: str) -> int:
 
     remaining = len(baseline)
     if remaining > 0:
-        print(
-            f"{_YELLOW}ok [arch:{name}]{_RESET} — "
-            f"{remaining} grandfathered file(s) still present in baseline."
-        )
+        print(f"{_YELLOW}ok [arch:{name}]{_RESET} — {remaining} grandfathered file(s) still present in baseline.")
     else:
         print(f"{_GREEN}ok [arch:{name}]{_RESET} — clean.")
     return 0

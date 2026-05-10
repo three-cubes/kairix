@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _arch_lib import gate, python_files, repo_relative  # noqa: E402
+from _arch_lib import gate, python_files, repo_relative
 
 # Category markers from pyproject.toml's `[tool.pytest.ini_options].markers`.
 KNOWN_MARKERS = frozenset({"unit", "bdd", "contract", "integration", "e2e", "slow"})
@@ -143,9 +143,8 @@ def file_has_violation(path: Path) -> bool:
             # Class is "marked" if it has a class-level pytestmark
             # assignment OR a class-level @pytest.mark.<category>
             # decorator (which pytest applies to every test method).
-            class_marked = (
-                _scope_has_pytestmark(top_level.body)
-                or any(_decorator_is_category_marker(d) for d in top_level.decorator_list)
+            class_marked = _scope_has_pytestmark(top_level.body) or any(
+                _decorator_is_category_marker(d) for d in top_level.decorator_list
             )
             for member in top_level.body:
                 if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
