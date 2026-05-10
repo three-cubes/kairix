@@ -102,3 +102,88 @@ def test_sync_fts_empty_list() -> None:
     db = _create_test_db()
     rebuild_fts(db)
     assert sync_fts(db, []) == 0
+
+
+@pytest.mark.unit
+def test_rebuild_fts_is_atomic_under_failure() -> None:
+    """If an INSERT fails mid-rebuild, the OLD documents_fts must still exist.
+
+    Regression for #223: previously rebuild_fts ran DROP, CREATE, INSERT as
+    three separate auto-commit steps. A reader between DROP and CREATE saw
+    "no such table: documents_fts" and BM25 silently degraded to vector-only.
+
+    Sabotage-prove: drop the ``content`` table mid-rebuild so the INSERT's
+    JOIN fails; assert documents_fts is still queryable with the old data.
+    Without the BEGIN IMMEDIATE / rollback wrapping, the DROP would have
+    committed and the assertion would fail.
+    """
+    db = _create_test_db()
+    rebuild_fts(db)
+
+    # Snapshot pre-rebuild state — used to confirm rollback restores it.
+    pre_count = db.execute("SELECT COUNT(*) FROM documents_fts").fetchone()[0]
+    assert pre_count == 2
+
+    # Force the next rebuild to fail mid-flight by removing a JOINed table.
+    db.execute("DROP TABLE content")
+
+    with pytest.raises(sqlite3.OperationalError):
+        rebuild_fts(db)
+
+    # The old documents_fts MUST still be queryable. Without atomic
+    # rebuild, the DROP TABLE IF EXISTS would have committed and this
+    # query would raise "no such table: documents_fts".
+    rows = db.execute("SELECT rowid FROM documents_fts").fetchall()
+    assert len(rows) == pre_count
+
+
+@pytest.mark.unit
+def test_rebuild_fts_no_visibility_gap_for_concurrent_reader() -> None:
+    """A second connection on the same DB must always see documents_fts
+    while a rebuild is in progress.
+
+    Regression for #223. Uses a temp-file database (in-memory connections
+    can't be shared across cursors with WAL semantics). The reader runs on
+    a separate connection and queries documents_fts AFTER rebuild_fts has
+    committed; the queryability must be maintained across the rebuild.
+    """
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
+        path = tmp.name
+
+    writer = sqlite3.connect(path)
+    writer.executescript("""
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection TEXT NOT NULL,
+            path TEXT NOT NULL,
+            title TEXT,
+            hash TEXT NOT NULL,
+            active INTEGER DEFAULT 1,
+            UNIQUE(collection, path)
+        );
+        CREATE TABLE content (hash TEXT PRIMARY KEY, doc TEXT, created_at TEXT);
+        INSERT INTO documents (collection, path, title, hash, active) VALUES ('vault', 'a.md', 'A', 'h1', 1);
+        INSERT INTO content (hash, doc) VALUES ('h1', 'alpha bravo charlie');
+    """)
+    rebuild_fts(writer)
+
+    reader = sqlite3.connect(path)
+    pre_rows = reader.execute("SELECT COUNT(*) FROM documents_fts").fetchone()[0]
+    assert pre_rows == 1
+
+    # Rebuild and re-query through the reader. With atomic rebuild, the
+    # reader never sees a "no such table" gap.
+    writer.execute(
+        "INSERT INTO documents (collection, path, title, hash, active) VALUES ('vault', 'b.md', 'B', 'h2', 1)"
+    )
+    writer.execute("INSERT INTO content (hash, doc) VALUES ('h2', 'delta echo foxtrot')")
+    writer.commit()
+    rebuild_fts(writer)
+
+    post_rows = reader.execute("SELECT COUNT(*) FROM documents_fts").fetchone()[0]
+    assert post_rows == 2
+
+    reader.close()
+    writer.close()
