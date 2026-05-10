@@ -10,6 +10,7 @@ from kairix.knowledge.summaries.generate import (
     SummariesDeps,
     _first_n_words,
     generate_l0,
+    generate_l1,
     generate_summaries,
 )
 
@@ -124,3 +125,93 @@ def test_summaries_deps_default_factory_returns_default_chat():
 
     deps = SummariesDeps()
     assert deps.chat is default_chat
+
+
+@pytest.mark.unit
+def test_generate_l1_returns_string():
+    """generate_l1 returns the structured overview from the chat callable."""
+    expected = "Topic: testing.\nKey points: alpha, beta.\nStatus: stable."
+    overview = generate_l1(
+        path="docs/test.md",
+        content="Hello world content.",
+        api_key="k",
+        endpoint="https://ep",
+        deps=SummariesDeps(chat=lambda msgs, max_tokens=600: expected),
+    )
+    assert overview == expected
+
+
+@pytest.mark.unit
+def test_generate_l1_uses_first_2000_words():
+    """generate_l1 truncates content to the first 2000 words before sending."""
+    long_content = "word " * 5000
+    captured: dict = {}
+
+    def capture_chat(messages: list[dict], max_tokens: int = 600) -> str:
+        captured["msg"] = messages[1]["content"]
+        return "ok"
+
+    generate_l1(
+        path="docs/long.md",
+        content=long_content,
+        api_key="k",
+        endpoint="https://ep",
+        deps=SummariesDeps(chat=capture_chat),
+    )
+    word_count = captured["msg"].count("word")
+    assert word_count <= 2010  # 2000 + a few from the prompt boilerplate
+
+
+@pytest.mark.unit
+def test_generate_summaries_with_l1():
+    """generate_summaries with include_l1=True produces both L0 and L1 per file."""
+    import tempfile
+    from pathlib import Path as _P
+
+    with tempfile.TemporaryDirectory() as td:
+        p = _P(td) / "doc.md"
+        p.write_text("Hello world content about testing.")
+
+        result = generate_summaries(
+            [str(p)],
+            api_key="k",
+            endpoint="https://ep",
+            include_l1=True,
+            sleep_ms=0,
+            deps=SummariesDeps(chat=lambda msgs, max_tokens=150: "L0/L1 stub."),
+        )
+
+    assert len(result) == 1
+    assert result[0].l0 == "L0/L1 stub."
+    assert result[0].l1 == "L0/L1 stub."  # same fake returns same content
+
+
+@pytest.mark.unit
+def test_generate_summaries_skips_missing_file(caplog):
+    """Missing files are warned and skipped — never raise."""
+    result = generate_summaries(
+        ["/nonexistent/path.md"],
+        api_key="k",
+        endpoint="https://ep",
+        sleep_ms=0,
+        deps=SummariesDeps(chat=lambda msgs, max_tokens=150: "ignored"),
+    )
+    assert result == []
+
+
+@pytest.mark.unit
+def test_generate_summaries_logs_per_file_failure(caplog, tmp_path):
+    """Per-file failure: chat raises → logged, skipped, never propagated."""
+    (tmp_path / "boom.md").write_text("content")
+
+    def boom(msgs: list[dict], max_tokens: int = 150) -> str:
+        raise RuntimeError("simulated chat failure")
+
+    result = generate_summaries(
+        [str(tmp_path / "boom.md")],
+        api_key="k",
+        endpoint="https://ep",
+        sleep_ms=0,
+        deps=SummariesDeps(chat=boom),
+    )
+    assert result == []
