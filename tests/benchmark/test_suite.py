@@ -864,6 +864,7 @@ def test_gold_titles_highest_relevance_derives_gold_path(tmp_path: Path) -> None
     assert suite.cases[0].gold_path == "projects"
 
 
+@pytest.mark.unit
 def test_gold_titles_with_unquoted_iso_date_coerces_to_str(tmp_path: Path) -> None:
     """Regression for #103. PyYAML parses unquoted ISO date titles as datetime.date,
     which crashes downstream scoring (str.endswith on a date object).
@@ -898,6 +899,7 @@ def test_gold_titles_with_unquoted_iso_date_coerces_to_str(tmp_path: Path) -> No
     assert case.gold_titles[0]["title"] == "2026-04-07"
 
 
+@pytest.mark.unit
 def test_gold_paths_with_unquoted_iso_date_coerces_to_str(tmp_path: Path) -> None:
     """Regression for #103. Same coercion guarantee for gold_paths."""
     import textwrap
@@ -926,6 +928,7 @@ def test_gold_paths_with_unquoted_iso_date_coerces_to_str(tmp_path: Path) -> Non
     assert all(isinstance(g["path"], str) for g in case.gold_paths)
 
 
+@pytest.mark.unit
 def test_all_bundled_suites_load_without_errors() -> None:
     """Every YAML in suites/ must load via load_suite — guards against the
     #104 footgun where a bundled suite fails schema validation only at runtime.

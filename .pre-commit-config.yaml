@@ -79,3 +79,10 @@ repos:
         language: system
         pass_filenames: false
         files: ^kairix/.*\.py$
+
+      - id: arch-test-markers
+        name: "arch F8: every test_* function has a category marker"
+        entry: python3 scripts/checks/check_test_markers.py
+        language: system
+        pass_filenames: false
+        files: ^tests/.*\.py$

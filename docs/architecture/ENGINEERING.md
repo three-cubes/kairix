@@ -29,11 +29,14 @@ Every merge to `main` must pass all four CI stages. No exceptions without a docu
 | Type checking | mypy (strict) | Zero errors | ✅ Yes |
 | Linting | ruff | Zero errors | ✅ Yes |
 | Unit tests | pytest | 100% pass | ✅ Yes |
-| Test coverage | pytest-cov | ≥ 80% overall | ✅ Yes |
+| Test coverage (per-file) | F7 | ≥ 85% on every kairix/* file (ratcheted) | ✅ Yes |
 | SAST | bandit | Zero HIGH findings | ✅ Yes |
 | Dependency CVEs | pip-audit | Zero CVEs with fixes | ✅ Yes |
 | Contract tests | pytest -m contract | Zero failures | ✅ Yes |
+| Architecture fitness functions | F1–F6, F8 | Zero net-new violations | ✅ Yes |
 | Build | pip install -e . | Succeeds | ✅ Yes |
+
+**Architecture fitness functions** are mechanical, blocking checks that encode rejected patterns (e.g. forbidden monkeypatching, internal-name imports in tests, unmarked tests). They run at three layers — pre-commit, `safe-commit.sh`, and CI Stage 0. Pre-existing violations are grandfathered in `.architecture/baseline/`; net-new violations block. Canonical reference: [`fitness-functions.md`](./fitness-functions.md).
 
 **Per-module coverage targets:**
 - `embed/`: ≥ 90%

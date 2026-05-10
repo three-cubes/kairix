@@ -25,6 +25,7 @@ document needs an update.
    - [F6 — No `*_fn=None` test-only kwargs in production](#f6--no-_fnnone-test-only-kwargs-in-production)
    - [F7 — Per-file coverage floor at 85%](#f7--per-file-coverage-floor-at-85)
    - [F4 — No `os.environ.get("KAIRIX_*")` outside `paths.py` / `secrets.py`](#f4--no-osenvirongetkairix_-outside-pathspy--secretspy)
+   - [F8 — Every `test_*` function has a category marker](#f8--every-test_-function-has-a-category-marker)
 5. [SDLC integration map](#sdlc-integration-map)
 6. [Harness architecture](#harness-architecture)
 7. [GitHub Actions integration](#github-actions-integration)
@@ -152,6 +153,7 @@ fully enforced; new violations anywhere in the codebase block.
 | F5 | No internal-name imports in tests | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-internal-test-imports-files.txt` |
 | F6 | No `*_fn=None` test-only kwargs in production | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-test-only-kwargs-files.txt` |
 | F7 | Per-file coverage floor at 85% | coverage report | Python + Cobertura XML | CI unit-and-type | `per-file-coverage-floor-files.txt` |
+| F8 | Every `test_*` function carries a category marker | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
 
 ---
 
@@ -675,26 +677,143 @@ default_root = KairixPaths.resolve().agent_memory_root
 
 ---
 
+### F8 — Every `test_*` function has a category marker
+
+#### Statement
+
+Every test function pytest would collect MUST declare its category via
+a marker in the recognised set: `unit`, `bdd`, `contract`, `integration`,
+`e2e`, `slow` (the marker list registered in
+`[tool.pytest.ini_options]` in `pyproject.toml`).
+
+A test function passes when AT LEAST ONE of the following carries a
+recognised marker:
+
+  - The function: `@pytest.mark.<category>` decorator.
+  - The enclosing class: `@pytest.mark.<category>` class decorator OR
+    `pytestmark = pytest.mark.<category>` (or list-form) class attribute.
+  - The module: `pytestmark = pytest.mark.<category>` (or list-form)
+    module-level assignment.
+
+Pytest fixtures (`@pytest.fixture`-decorated functions) are excluded
+even when their name starts with `test_` — pytest distinguishes by
+decorator, not by name.
+
+#### Why
+
+The test-pyramid filter (`pytest -m unit`, `pytest -m contract`, etc.)
+is only meaningful when every test declares its category. An unmarked
+test runs in EVERY filter, defeating the pyramid: a "unit-only" run
+silently picks up integration tests; a "contract-only" run picks up
+unit tests. The selectivity collapses.
+
+This is not theoretical: kairix relies on pyramid filters in
+`safe-commit.sh` (`-m "unit or bdd or contract"`) and across CI stages
+(unit-and-type, contracts, integration). One unmarked test
+contaminates every selection it lives in.
+
+#### Detection
+
+Python AST walk over `tests/**.py`, in
+`scripts/checks/check_test_markers.py`. For each module:
+
+  1. If the module has a category-marker `pytestmark` assignment, it
+     passes (covers all tests in the file).
+  2. Otherwise, for each top-level `def test_*` (excluding fixtures):
+     check for a category-marker decorator on the function.
+  3. For each top-level `class`: check whether the class is marked
+     (class-level `pytestmark` OR class-level `@pytest.mark.<category>`
+     decorator). If marked, every method passes; if not, each
+     `def test_*` method must carry its own decorator.
+
+Markers other than the recognised set (e.g. `@pytest.mark.parametrize`,
+`@pytest.mark.skipif`) do NOT count — only the registered category
+markers do.
+
+#### Examples
+
+Rejected:
+```python
+# tests/foo/test_bar.py — unmarked test
+def test_load_config_returns_value():     # ❌ no category marker
+    ...
+
+@pytest.mark.parametrize("x", [1, 2])     # ❌ parametrize is not a category
+def test_xs(x):
+    ...
+```
+
+Allowed:
+```python
+# Function-level marker
+@pytest.mark.unit
+def test_load_config_returns_value():
+    ...
+
+# Module-level marker covers every test in the file
+import pytest
+pytestmark = pytest.mark.contract
+
+def test_protocol_compliance():            # ✅ inherits module mark
+    ...
+
+# Class-level decorator covers every method in the class
+@pytest.mark.contract
+class TestCollectionDefaults:
+    def test_default_collection(self):     # ✅ inherits class mark
+        ...
+
+# Fixture named test_* is fine — pytest never collects it as a test
+@pytest.fixture
+def test_vault_root(tmp_path):             # ✅ fixture, not a test
+    return tmp_path / "vault"
+```
+
+#### Fix pattern
+
+Pick the marker that matches the test's tier:
+
+| Tier | Marker | Where it lives |
+|------|--------|----------------|
+| Pure unit, no I/O | `unit` | `tests/unit/`, most of `tests/` |
+| Behaviour-driven scenarios | `bdd` | `tests/bdd/` |
+| Protocol compliance | `contract` | `tests/contracts/` |
+| Real DB / external | `integration` | `tests/integration/` |
+| End-to-end pipelines | `e2e` | `tests/e2e/` |
+| Anything > 5s | `slow` | (orthogonal — combine with tier) |
+
+If every test in a file is the same tier, prefer module-level
+`pytestmark` over decorating each function.
+
+#### Allowed exceptions
+
+None by default — F8 ships with a clean (zero-file) baseline. If a
+genuinely uncategorisable test exists, append the file to
+`.architecture/baseline/test-markers-files.txt` with a PR-description
+rationale. Expect pushback at review.
+
+---
+
 ## SDLC integration map
 
 Each fitness function fires at multiple lifecycle stages. The same
 script is invoked everywhere — there's no drift between local and CI
 enforcement.
 
-| Stage | When | F1 | F2 | F3 | F4 | F5 | F6 | F7 |
-|---|---|---|---|---|---|---|---|---|
-| **IDE** | edit | — | — | — | — | — | — | — |
-| **`git commit`** | every commit (via `.pre-commit-config.yaml`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| **`bash scripts/safe-commit.sh`** | pre-push / pre-PR | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| **CI Stage 0 — Architecture fitness** | every PR push | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| **CI unit-and-type** | every PR push | — | — | — | — | — | — | ✓ |
-| **CI gate (fan-in)** | every PR push | requires Stage 0 ✓ |  |  |  |  |  |  |
-| **Branch protection** | merge attempt | enforced via CI gate |  |  |  |  |  |  |
+| Stage | When | F1 | F2 | F3 | F4 | F5 | F6 | F7 | F8 |
+|---|---|---|---|---|---|---|---|---|---|
+| **IDE** | edit | — | — | — | — | — | — | — | — |
+| **`git commit`** | every commit (via `.pre-commit-config.yaml`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| **`bash scripts/safe-commit.sh`** | pre-push / pre-PR | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| **CI Stage 0 — Architecture fitness** | every PR push | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| **CI unit-and-type** | every PR push | — | — | — | — | — | — | ✓ | — |
+| **CI gate (fan-in)** | every PR push | requires Stage 0 ✓ |  |  |  |  |  |  |  |
+| **Branch protection** | merge attempt | enforced via CI gate |  |  |  |  |  |  |  |
 
-**Reading this table:** F1–F6 fire at three layers (commit, manual gate,
-CI). F7 fires only in CI because it needs the test runtime. The CI
-gate fans-in on the Stage 0 result — a failing fitness function blocks
-merge regardless of whether other jobs pass.
+**Reading this table:** F1–F6 and F8 fire at three layers (commit,
+manual gate, CI). F7 fires only in CI because it needs the test
+runtime. The CI gate fans-in on the Stage 0 result — a failing fitness
+function blocks merge regardless of whether other jobs pass.
 
 ---
 
@@ -810,6 +929,11 @@ expected check output):
 | F5 | `tests/_sabotage.py` with `from kairix.quality.eval.gold_builder import _validate_weights` | ✓ |  |
 | F6 | `kairix/_sabotage.py` with `def render(data, *, format_fn=None):` | ✓ |  |
 | F7 | `coverage.xml` injected with `<class filename="_sabotage_f7.py" line-rate="0.50">` | ✓ |  |
+| F8 | `tests/_sabotage_f8.py` with `def test_unmarked_function_should_fail_f8(): ...` (no marker) | ✓ |  |
+| F8 | `tests/_sabotage_f8_unknown.py` with `@pytest.mark.someothermarker` (non-category marker) | ✓ | Confirms only the registered category set counts |
+| F8 | `tests/_sabotage_f8_fixture.py` with `@pytest.fixture` named `test_*` | passed (no false positive) | Fixtures named `test_*` correctly excluded |
+| F8 | `tests/_sabotage_f8_modulemark.py` with module-level `pytestmark = pytest.mark.unit` and unmarked function | passed (no false positive) | Module-level mark inheritance works |
+| F8 | `tests/_sabotage_f8_listmark.py` with class-level `pytestmark = [pytest.mark.contract]` | passed (no false positive) | List-form pytestmark accepted |
 
 After each plant, the file was removed and the check re-run to confirm
 the baseline state was preserved. The runner script lives at
@@ -1061,10 +1185,6 @@ enforcement mechanism (review, runtime check, or human judgement):
   possible (attribute-access tracking) but expensive. CLAUDE.md
   flags it as a smell.
 
-- **Test pyramid contribution.** "Every test has a marker" is in
-  CLAUDE.md; could be grep-enforced (pytest collects unmarked tests,
-  ruff/pylint plugins exist), not yet implemented.
-
 - **Documentation drift.** This file claims to be canonical; only
   reviewer attention keeps it in sync with the scripts.
 
@@ -1140,4 +1260,11 @@ fitness_functions:
     baseline: .architecture/baseline/per-file-coverage-floor-files.txt
     precommit_hook: null  # CI-only (needs coverage.xml)
     layer: [ci-unit-and-type]
+
+  - id: F8
+    name: test-markers
+    script: scripts/checks/check_test_markers.py
+    baseline: null  # ships clean — no grandfathered files
+    precommit_hook: arch-test-markers
+    layer: [pre-commit, safe-commit, ci-stage0]
 ```

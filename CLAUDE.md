@@ -40,14 +40,17 @@ Every agent runs `safe-commit.sh` in its loop and only commits (and pushes, in n
 
 Mechanical, blocking checks encode rejected patterns into automation:
 F1 no `@patch` on kairix internals, F2 no `monkeypatch.setenv("KAIRIX_*")`,
-F3 suppressions require rationale, F5 no internal-name imports in tests,
+F3 suppressions require rationale, F4 no `os.environ.get("KAIRIX_*")`
+outside `paths.py`/`secrets.py`, F5 no internal-name imports in tests,
 F6 no `*_fn=None` test-only kwargs in production, F7 per-file coverage
-≥ 85%. Pre-existing violations are grandfathered in
-`.architecture/baseline/`; net-new violations block at pre-commit, in
-`safe-commit.sh`, and in CI's Stage 0. **Canonical reference:**
+≥ 85%, F8 every `test_*` carries a category marker
+(`unit`/`bdd`/`contract`/`integration`/`e2e`/`slow`). Pre-existing
+violations are grandfathered in `.architecture/baseline/`; net-new
+violations block at pre-commit, in `safe-commit.sh`, and in CI's
+Stage 0. **Canonical reference:**
 [docs/architecture/fitness-functions.md](docs/architecture/fitness-functions.md).
 Read this before adding `@patch`, `monkeypatch.setenv`, `*_fn=None`,
-or any new suppression — the gate will reject them.
+a new suppression, or an unmarked test — the gate will reject them.
 
 ## CI
 

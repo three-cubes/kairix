@@ -9,6 +9,7 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ### Added
 
+- **Architecture fitness function harness (F1–F8)** — eight blocking quality gates wired into pre-commit, `safe-commit.sh`, and CI Stage 0. Each gate uses ratcheting baselines: pre-existing violations are grandfathered in `.architecture/baseline/`, but a single net-new violation blocks the commit/PR. Detects forbidden patching of internal code (F1), env-var monkeypatching in tests (F2), un-rationalised suppressions (F3), env-var reads outside `paths.py`/`secrets.py` (F4), private-name imports in tests (F5), `*_fn=None` test-only kwargs in production (F6), files below 85% line coverage (F7), and unmarked `test_*` functions (F8). Canonical reference: [`docs/architecture/fitness-functions.md`](docs/architecture/fitness-functions.md).
 - **`uv.lock` shipped with the source tree** — pinned, hash-verified dependency resolution. CI installs and Docker image bakes resolve identically across runs; the same source tree always pulls the same package versions. Operators can audit the exact wheel SHAs they're consuming.
 
 ### Changed

@@ -43,6 +43,9 @@ python3 "${SCRIPT_DIR}/check_no_internal_imports.py" || overall=1
 # F6 — AST-based
 python3 "${SCRIPT_DIR}/check_no_test_only_kwargs.py" || overall=1
 
+# F8 — AST-based
+python3 "${SCRIPT_DIR}/check_test_markers.py" || overall=1
+
 # F7 — needs coverage.xml. Skip if not present or skip flag set.
 if [ "$skip_coverage" -eq 0 ]; then
     if [ -f "${REPO_ROOT}/coverage.xml" ]; then
