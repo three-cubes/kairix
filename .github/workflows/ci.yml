@@ -544,10 +544,13 @@ jobs:
         continue-on-error: true  # artifact missing on path-filtered runs; Sonar still scans without it
 
       - name: SonarCloud Scan
+        # NO continue-on-error here. If SonarCloud is unavailable or the
+        # scan fails to upload, the security stage fails, the CI gate
+        # fails, and the merge is blocked. Releasing without a Sonar
+        # verdict is not allowed — wait for Sonar to recover.
         uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        continue-on-error: true  # gate is the separate "SonarCloud Code Analysis" check; this step's failure is benign
 
   # ── Docker build verification ──────────────────────────────────────────────
   docker:
