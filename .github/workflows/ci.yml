@@ -547,7 +547,6 @@ jobs:
         uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        continue-on-error: true  # gate is the separate "SonarCloud Code Analysis" check; this step's failure is benign
 
   # ── Docker build verification ──────────────────────────────────────────────
   docker:
