@@ -33,11 +33,44 @@ Flags:
 
 ## Health
 
+Kairix exposes two health endpoints. Use `/healthz` for liveness, `/healthz/ready` for layered readiness (v2026.5.10+).
+
+### `/healthz` — basic liveness
+
 ```bash
 curl http://127.0.0.1:8182/healthz
 ```
 
 Returns `{"ready": true, "uptime_s": N}` once kairix has finished cold-starting (Neo4j driver, vector index, LLM clients). Tool calls before ready return a structured `{"error": "kairix-initializing", "retry_after_ms": 1500}` rather than crashing — clients can retry with backoff.
+
+### `/healthz/ready` — layered readiness
+
+```bash
+curl http://127.0.0.1:8182/healthz/ready
+```
+
+Returns granular capability detail so a load balancer can distinguish "process up but degraded" from "fully operational":
+
+```json
+{
+  "live": true,
+  "ready": false,
+  "uptime_s": 14,
+  "checks": {
+    "secrets_loaded": false,
+    "vector_search_capable": false,
+    "bm25_search_capable": true,
+    "detail": {
+      "secrets_loaded": "KAIRIX_LLM_API_KEY missing",
+      "vector_search_capable": "embed credentials unavailable"
+    }
+  }
+}
+```
+
+`ready` is the boolean to act on. The capability flags use the suffixes `_capable` (functional) and `_loaded` (configured). The `detail` map carries an actionable failure reason for any False capability. HTTP status is always 200 — load-balancer probes should treat the JSON body as the gate, not the status code.
+
+Resolves the #167 gap where `/healthz` reported `ready=true` while vector search was silently broken because `/run/secrets/kairix.env` had never been hydrated after a reboot.
 
 ## Error envelope
 

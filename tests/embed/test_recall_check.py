@@ -49,7 +49,9 @@ def test_check_uses_default_queries_when_db_has_no_documents() -> None:
     """An empty documents table falls through to DEFAULT_RECALL_QUERIES (R01..R05)."""
     db = _make_documents_db([])
     checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=FakeVectorSearcher())
-    result = checker.check(db=db)
+    # canary_cache_path=None disables the persistent canary cache so this
+    # test isolates the adaptive-sampling logic without writing to disk.
+    result = checker.check(db=db, canary_cache_path=None)
 
     assert len(result["detail"]) == len(DEFAULT_RECALL_QUERIES)
     ids = [d["id"] for d in result["detail"]]
@@ -67,7 +69,9 @@ def test_check_uses_three_adaptive_queries_for_three_indexed_documents() -> None
         ]
     )
     checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=FakeVectorSearcher())
-    result = checker.check(db=db)
+    # canary_cache_path=None disables the persistent canary cache so this
+    # test isolates the adaptive-sampling logic without writing to disk.
+    result = checker.check(db=db, canary_cache_path=None)
 
     assert len(result["detail"]) == 3
     assert {d["id"] for d in result["detail"]} == {"A01", "A02", "A03"}
@@ -89,7 +93,9 @@ def test_check_excludes_inactive_and_titleless_documents_from_adaptive_queries()
         ]
     )
     checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=FakeVectorSearcher())
-    result = checker.check(db=db)
+    # canary_cache_path=None disables the persistent canary cache so this
+    # test isolates the adaptive-sampling logic without writing to disk.
+    result = checker.check(db=db, canary_cache_path=None)
 
     # Only the one valid row makes it into adaptive queries.
     assert len(result["detail"]) == 1
@@ -101,7 +107,9 @@ def test_check_falls_back_to_defaults_when_documents_table_is_missing() -> None:
     """A DB with no ``documents`` table → adaptive returns [] → defaults are used."""
     db = sqlite3.connect(":memory:")
     checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=FakeVectorSearcher())
-    result = checker.check(db=db)
+    # canary_cache_path=None disables the persistent canary cache so this
+    # test isolates the adaptive-sampling logic without writing to disk.
+    result = checker.check(db=db, canary_cache_path=None)
 
     assert len(result["detail"]) == len(DEFAULT_RECALL_QUERIES)
     assert [d["id"] for d in result["detail"]] == [q[0] for q in DEFAULT_RECALL_QUERIES]
@@ -250,7 +258,7 @@ def test_recall_checker_uses_adaptive_queries_when_db_has_documents() -> None:
     db = _make_documents_db([("docs/architecture.md", "architecture", 1)])
     fake_searcher = FakeVectorSearcher(paths=["docs/architecture.md"])
     checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=fake_searcher)
-    result = checker.check(db=db)
+    result = checker.check(db=db, canary_cache_path=None)
 
     assert result["total"] == 1
     assert result["detail"][0]["id"] == "A01"
@@ -363,12 +371,7 @@ def test_run_recall_gate_passes_on_first_run_with_no_previous_log(tmp_path: Path
     fake_searcher = FakeVectorSearcher(paths=["docs/architecture.md"])
 
     class _StaticChecker(RecallChecker):
-        def check(
-            self,
-            *,
-            db: sqlite3.Connection | None = None,
-            recall_queries: list[tuple[str, str, str]] | None = None,
-        ) -> dict[str, object]:
+        def check(self, **kwargs: object) -> dict[str, object]:
             return {"score": 0.85, "passed": 4, "total": 5, "timestamp": 0, "detail": []}
 
     passed, result = run_recall_gate(
@@ -492,7 +495,7 @@ def test_recall_checker_falls_through_to_defaults_when_db_has_no_recall_queries_
 
     checker = RecallChecker(embed_provider=FakeEmbedProvider(), vector_searcher=FakeVectorSearcher())
     try:
-        result = checker.check(db=db)
+        result = checker.check(db=db, canary_cache_path=None)
     finally:
         db.close()
 

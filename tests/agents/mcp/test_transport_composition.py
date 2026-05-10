@@ -182,3 +182,155 @@ def test_streamable_route_reaches_underlying_handler() -> None:
     assert response.status_code == 200
     assert response.text == "streamable-ok"
     assert server.streamable_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Layered readiness probe (/healthz/ready) — v2026.5.10 #167 fix
+#
+# /healthz/ready surfaces granular capability checks so a deployment with
+# missing secrets / broken vector search can no longer report ready=true.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_healthz_ready_default_returns_ready_true_with_empty_checks() -> None:
+    """No capability_probe → endpoint exists and returns a benign 'ready'."""
+    server = _FakeFastMCP()
+    app = build_mcp_app(server)
+
+    with TestClient(app) as client:
+        response = client.get("/healthz/ready")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["live"] is True
+    assert body["ready"] is True
+    assert body["checks"] == {}
+    assert isinstance(body["uptime_s"], int)
+
+
+@pytest.mark.unit
+def test_healthz_ready_surfaces_capability_probe_detail() -> None:
+    """A probe reporting one failing capability flips ready=false and exposes detail."""
+    server = _FakeFastMCP()
+
+    def probe() -> dict[str, Any]:
+        return {
+            "secrets_loaded": False,
+            "vector_search_capable": False,
+            "bm25_search_capable": True,
+            "detail": {
+                "secrets_loaded": "KAIRIX_LLM_API_KEY missing",  # pragma: allowlist secret
+                "vector_search_capable": "embed credentials unavailable",
+            },
+        }
+
+    app = build_mcp_app(server, capability_probe=probe)
+
+    with TestClient(app) as client:
+        response = client.get("/healthz/ready")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["live"] is True
+    assert body["ready"] is False, "any *_capable / *_loaded False must derive ready=false"
+    checks = body["checks"]
+    assert checks["secrets_loaded"] is False
+    assert checks["vector_search_capable"] is False
+    assert checks["bm25_search_capable"] is True
+    assert "KAIRIX_LLM_API_KEY missing" in checks["detail"]["secrets_loaded"]  # pragma: allowlist secret
+
+
+@pytest.mark.unit
+def test_healthz_ready_returns_ready_true_when_all_capabilities_pass() -> None:
+    """All capabilities True → ready=True derived; explicit 'ready' field optional."""
+    server = _FakeFastMCP()
+
+    def probe() -> dict[str, Any]:
+        return {
+            "secrets_loaded": True,
+            "vector_search_capable": True,
+            "bm25_search_capable": True,
+            "detail": {},
+        }
+
+    app = build_mcp_app(server, capability_probe=probe)
+
+    with TestClient(app) as client:
+        response = client.get("/healthz/ready")
+
+    assert response.status_code == 200
+    assert response.json()["ready"] is True
+
+
+@pytest.mark.unit
+def test_healthz_ready_explicit_ready_field_overrides_derivation() -> None:
+    """A probe that sets ``ready`` explicitly takes precedence over derivation."""
+    server = _FakeFastMCP()
+
+    def probe() -> dict[str, Any]:
+        # All granular checks pass, but operator wants to gate readiness
+        # on a separate condition (e.g. a startup soak period).
+        return {
+            "ready": False,
+            "secrets_loaded": True,
+            "vector_search_capable": True,
+            "detail": {"reason": "still warming up"},
+        }
+
+    app = build_mcp_app(server, capability_probe=probe)
+
+    with TestClient(app) as client:
+        response = client.get("/healthz/ready")
+
+    assert response.json()["ready"] is False
+
+
+@pytest.mark.unit
+def test_healthz_ready_handles_probe_exception_without_crashing() -> None:
+    """A probe that raises should surface ready=false with a structured error,
+    not propagate a 500 to the load balancer."""
+    server = _FakeFastMCP()
+
+    def broken_probe() -> dict[str, Any]:
+        raise RuntimeError("readiness lookup failed")
+
+    app = build_mcp_app(server, capability_probe=broken_probe)
+
+    with TestClient(app) as client:
+        response = client.get("/healthz/ready")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready"] is False
+    assert "probe_error" in body["checks"]
+    assert "readiness lookup failed" in body["checks"]["probe_error"]
+
+
+@pytest.mark.unit
+def test_healthz_ready_does_not_affect_basic_healthz_route() -> None:
+    """Basic /healthz keeps its back-compat shape regardless of /healthz/ready wiring."""
+    server = _FakeFastMCP()
+
+    def probe() -> dict[str, Any]:
+        return {"secrets_loaded": False}
+
+    app = build_mcp_app(server, capability_probe=probe)
+
+    with TestClient(app) as client:
+        basic = client.get("/healthz")
+
+    body = basic.json()
+    # Old shape: just {ready, uptime_s} — no checks/live keys leaking in.
+    assert set(body.keys()) == {"ready", "uptime_s"}
+    assert body["ready"] is True
+
+
+@pytest.mark.unit
+def test_healthz_ready_route_is_present() -> None:
+    """The new probe endpoint is wired by default."""
+    server = _FakeFastMCP()
+    app = build_mcp_app(server)
+
+    paths = _route_paths(app)
+    assert "/healthz/ready" in paths

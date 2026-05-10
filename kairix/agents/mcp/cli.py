@@ -120,6 +120,7 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     port = _resolve_port(args)
     server = build_server(host=args.host, port=port)
 
+    from kairix.agents.mcp.capability_probe import build_capability_probe
     from kairix.agents.mcp.readiness import EventReadinessGate
     from kairix.agents.mcp.transport import build_mcp_app
 
@@ -128,7 +129,13 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     # is marked ready immediately after the app is built. When we add a real
     # warm-up phase, mark_ready() moves to the end of that phase.
     gate = EventReadinessGate()
-    app = build_mcp_app(server, with_sse=not args.no_sse, readiness_check=gate.is_ready)
+    capability_probe = build_capability_probe()
+    app = build_mcp_app(
+        server,
+        with_sse=not args.no_sse,
+        readiness_check=gate.is_ready,
+        capability_probe=capability_probe,
+    )
     gate.mark_ready()
 
     sse_status = "+ /sse legacy" if not args.no_sse else "(no /sse)"

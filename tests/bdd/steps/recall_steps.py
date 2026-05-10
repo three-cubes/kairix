@@ -91,7 +91,11 @@ def empty_search_index() -> None:
 
 @when("the recall check builds queries")
 def build_queries() -> None:
-    _state["queries"] = _get_recall_queries(_state["db"])
+    # cache_path=None bypasses the persistent canary cache so the BDD scenario
+    # exercises the build path each run (otherwise the first scenario
+    # populates ~/.cache/kairix/recall-canaries.json and subsequent
+    # scenarios load from that cache).
+    _state["queries"] = _get_recall_queries(_state["db"], cache_path=None)
 
 
 @then("the default recall queries are used")
@@ -122,12 +126,7 @@ def configured_checker(score: float) -> None:
     captured_score = score
 
     class _StaticChecker(RecallChecker):
-        def check(
-            self,
-            *,
-            db: sqlite3.Connection | None = None,
-            recall_queries: list[tuple[str, str, str]] | None = None,
-        ) -> dict[str, object]:
+        def check(self, **kwargs: object) -> dict[str, object]:
             return {
                 "score": captured_score,
                 "passed": round(captured_score * 5),
