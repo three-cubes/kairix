@@ -44,7 +44,16 @@ coverage:
         informational: false
     patch:
       default:
-        target: 85%
+        # `auto` = patch must be >= current project base coverage. This
+        # couples the patch gate to the F7 baseline trajectory: as files
+        # leave .architecture/baseline/per-file-coverage-floor-files.txt
+        # the project average rises, and the patch bar rises with it.
+        # Picking a fixed target (e.g. 85%) is the wrong shape — it
+        # either rejects in-trajectory PRs or becomes obsolete once
+        # project coverage clears it. The mechanical 85% floor is F7
+        # (per-file, on coverage.xml); patch is the no-regression guard.
+        target: auto
+        threshold: 1%
         informational: false
 
 comment:
