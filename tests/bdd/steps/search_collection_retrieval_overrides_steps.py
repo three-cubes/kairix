@@ -7,8 +7,8 @@ per-collection overrides in YAML, and the resolver merges them over the
 global config when the search is scoped to a single collection.
 
 These scenarios drive ``resolve_retrieval_config`` via its public injection
-seams (``config_fn``, ``overrides_fn``) — no monkeypatching, no inline
-stubs.
+seam (``deps=ResolveConfigDeps(config_fn, overrides_fn)``) — no
+monkeypatching, no inline stubs.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 
 from kairix.core.search.config import RetrievalConfig
-from kairix.core.search.config_loader import resolve_retrieval_config
+from kairix.core.search.config_loader import ResolveConfigDeps, resolve_retrieval_config
 
 
 @dataclass
@@ -74,8 +74,10 @@ def _resolve_with_ctx(ctx: _OverridesCtx, *, collection: str | None, collections
     ctx.resolved = resolve_retrieval_config(
         collection=collection,
         collections=collections,
-        config_fn=lambda: global_cfg,
-        overrides_fn=lambda: ctx.overrides,
+        deps=ResolveConfigDeps(
+            config_fn=lambda: global_cfg,
+            overrides_fn=lambda: ctx.overrides,
+        ),
     )
 
 
