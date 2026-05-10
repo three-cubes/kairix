@@ -1,0 +1,98 @@
+name: "5 · Release (tag + GitHub release from CHANGELOG)"
+
+# Manual-dispatch release workflow. Resolves #170: takes the previously
+# manual sequence (tag main, push tag, create GitHub Release with notes
+# copy-pasted from CHANGELOG) and bundles it into one step.
+#
+# Pre-requisite: develop -> main has already been merged through a
+# normal PR (which gates on CI + Sonar). This workflow only does the
+# tagging + release-creation + CHANGELOG-extraction part.
+#
+# All input values are passed through env: bindings before being used
+# in run: scripts (avoids workflow-injection via input string).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Tag to create (e.g. v2026.5.10.6)'
+        required: true
+        type: string
+      changelog_label:
+        description: 'CHANGELOG section to use for release notes (default: Unreleased)'
+        required: false
+        default: 'Unreleased'
+        type: string
+
+permissions:
+  contents: write  # required to create tags + releases
+
+jobs:
+  release:
+    name: Tag main + create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate version format
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! echo "$VERSION" | grep -Eq '^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(\.[0-9]+)?$'; then
+            echo "::error::version '$VERSION' does not match CalVer pattern vYYYY.M.D[.N]"
+            exit 1
+          fi
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "::error::tag '$VERSION' already exists"
+            exit 1
+          fi
+
+      - name: Extract release notes from CHANGELOG
+        env:
+          LABEL: ${{ inputs.changelog_label }}
+        run: |
+          python scripts/extract_changelog_section.py --version "$LABEL" > /tmp/release-notes.md
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "::error::no release notes extracted for [$LABEL]"
+            exit 1
+          fi
+          echo "::group::Release notes preview"
+          cat /tmp/release-notes.md
+          echo "::endgroup::"
+
+      - name: Tag main
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "kairix $VERSION"
+          git push origin "$VERSION"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "$VERSION" \
+              --title "kairix $VERSION" \
+              --notes-file /tmp/release-notes.md \
+              --verify-tag
+
+      - name: Summary
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          {
+            echo "## Release $VERSION created"
+            echo ""
+            echo "- Tag pushed: \`$VERSION\`"
+            echo "- GitHub Release created with notes from CHANGELOG.md"
+            echo ""
+            echo "Downstream workflows fire on the release event:"
+            echo "- 3 · Docker publish (release)"
+            echo "- 4 · PyPI publish (release)"
+          } >> "$GITHUB_STEP_SUMMARY"
