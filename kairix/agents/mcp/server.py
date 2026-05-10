@@ -24,16 +24,11 @@ Design principles:
 from __future__ import annotations
 
 import logging
-import re
-import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
-import requests
-
 from kairix.agents.mcp.errors import async_tool_handler
-from kairix.core.search.intent import QueryIntent
 from kairix.core.search.scope import Scope
 from kairix.text import estimate_tokens
 
@@ -44,56 +39,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_SCOPE: Scope = Scope.SHARED_AGENT
-
-# ---------------------------------------------------------------------------
-# Budget inference + entity name extraction (AFF-1, AFF-3)
-# ---------------------------------------------------------------------------
-
-_RESEARCH_WORDS = re.compile(r"\b(research|compare|analyse|analyze|comprehensive|detailed)\b", re.IGNORECASE)
-
-_ENTITY_PREFIX_RE = re.compile(
-    r"^(what\s+is|who\s+is|tell\s+me\s+about|what\s+do\s+we\s+know\s+about)\s+",
-    re.IGNORECASE,
-)
-
-
-def _infer_budget(
-    query: str,
-    explicit_budget: int,
-    classify_fn: Callable[[str], QueryIntent] | None = None,
-) -> int:
-    """Automatically adjust the token budget based on question type.
-
-    Quick lookups (person/company names, keywords) get a small budget.
-    Research-style questions get a larger one. If the caller explicitly
-    set a budget, that value is used unchanged.
-
-    Args:
-        classify_fn: Injectable intent classifier for testing.
-                     Defaults to ``kairix.core.search.intent.classify``.
-    """
-    if explicit_budget != 3000:
-        return explicit_budget
-    try:
-        from kairix.core.search.intent import QueryIntent as _QueryIntent
-        from kairix.core.search.intent import classify as _default_classify
-
-        _classify = classify_fn or _default_classify
-        intent = _classify(query)
-        if intent in (_QueryIntent.ENTITY, _QueryIntent.KEYWORD):
-            return 1500
-    except (ImportError, ValueError, TypeError, RuntimeError):
-        logger.debug("_infer_budget: classify failed, using heuristics", exc_info=True)
-    if _RESEARCH_WORDS.search(query):
-        return 5000
-    return 3000
-
-
-def _extract_entity_name(query: str) -> str:
-    """Best-effort extraction of the entity name from a query string."""
-    name = _ENTITY_PREFIX_RE.sub("", query).strip()
-    return name.rstrip("?!. ")
-
 
 # ---------------------------------------------------------------------------
 # Shared service helpers — MCP tools call these, not each other
@@ -176,108 +121,32 @@ def tool_search(
     agent: str | None = None,
     scope: Scope = Scope.SHARED_AGENT,
     budget: int = 3000,
+    limit: int = 10,
     *,
-    search_fn: Callable[..., Any] | None = None,
-    entity_card_fn: Callable[..., Any] | None = None,
+    deps: Any = None,
 ) -> dict[str, Any]:
-    """Search for anything in the knowledge base.
+    """Search the knowledge store.
 
-    Just ask your question — the system works out the best way to find
-    what you need, including handling date-based queries (temporal) and
-    setting the right amount of context automatically. You don't need
-    to configure anything.
+    Thin adapter around ``kairix.use_cases.search.run_search``. CLI and
+    MCP both delegate to the same use case so the surfaces stay aligned
+    (closes Phase-2 drift in #168).
 
-    Args:
-        search_fn:      Injectable search function for testing.
-                        Defaults to the production hybrid search.
-        entity_card_fn: Injectable entity card function for testing.
-                        Defaults to _fetch_entity_card.
+    The optional ``deps`` parameter forwards a ``SearchDeps`` directly
+    to the use case — production callers leave it None; tests pass a
+    ``SearchDeps`` to drive without touching live services.
     """
+    from kairix.use_cases.search import run_search, search_output_to_envelope
+
     logger.info("mcp.search: agent=%r scope=%r", agent, scope)
-    try:
-        # The ``search_fn is None`` branch only fires when ``kairix.core.factory``
-        # is uninstalled; in-process tests always inject ``search_fn`` directly,
-        # so the lazy-import path is unreachable under test.
-        if search_fn is None:  # pragma: no cover
-            from kairix.core.factory import build_search_pipeline
-
-            _pipeline = build_search_pipeline()
-            search_fn = _pipeline.search
-
-        budget = _infer_budget(query, budget)
-        result = search_fn(query=query, agent=agent, scope=scope, budget=budget)
-
-        intent_value = result.intent.value if hasattr(result.intent, "value") else str(result.intent)
-        results_list = [
-            {
-                "path": r.result.path,
-                "score": r.result.boosted_score,
-                "snippet": r.content[:500],
-                "tokens": r.token_estimate,
-            }
-            for r in result.results
-        ]
-
-        # AFF-3: When the question is about a known person/company, show
-        # their knowledge graph summary at the top of results.
-        # Uses _fetch_entity_card (direct Neo4j call) — MCP tools should
-        # not call other MCP tools; they share underlying services.
-        if intent_value == QueryIntent.ENTITY.value:
-            entity_name = _extract_entity_name(query)
-            if entity_name:
-                _entity_card = entity_card_fn or _fetch_entity_card
-                card = _entity_card(entity_name)
-                if card is not None:
-                    results_list.insert(
-                        0,
-                        {
-                            "path": card.get("vault_path", ""),
-                            "score": 1.0,
-                            "snippet": card.get("summary", ""),
-                            "tokens": estimate_tokens(card.get("summary", "")),
-                            "source": "entity_graph",
-                            "entity": {
-                                "id": card.get("id", ""),
-                                "name": card.get("name", ""),
-                                "type": card.get("type", ""),
-                            },
-                        },
-                    )
-
-        return {
-            "query": result.query,
-            "intent": intent_value,
-            "results": results_list,
-            "total_tokens": result.total_tokens,
-            "latency_ms": result.latency_ms,
-            "error": result.error,
-        }
-    except (
-        ImportError,
-        sqlite3.Error,
-        requests.RequestException,
-        KeyError,
-        ValueError,
-    ) as exc:
-        logger.warning("mcp.search failed: %s", exc, exc_info=True)
-        return {
-            "query": query,
-            "intent": "",
-            "results": [],
-            "total_tokens": 0,
-            "latency_ms": 0.0,
-            "error": "Search failed — check server logs for details.",
-        }
-    except Exception as exc:  # broad catch justified: tool_search must never raise to MCP callers
-        logger.warning("mcp.search failed (unexpected): %s", exc, exc_info=True)
-        return {
-            "query": query,
-            "intent": "",
-            "results": [],
-            "total_tokens": 0,
-            "latency_ms": 0.0,
-            "error": "Search failed — check server logs for details.",
-        }
+    out = run_search(
+        query,
+        agent=agent,
+        scope=scope,
+        budget=budget,
+        limit=limit,
+        deps=deps,
+    )
+    return search_output_to_envelope(out)
 
 
 def tool_entity(
@@ -593,69 +462,33 @@ def tool_contradict(
     agent: str | None = None,
     top_k: int = 5,
     threshold: float = 0.45,
+    top_claims: int = 3,
     scope: Scope = DEFAULT_SCOPE,
     *,
-    llm_backend: Any | None = None,
-    contradict_fn: Callable[..., Any] | None = None,
+    deps: Any = None,
 ) -> dict[str, Any]:
     """Check new content against existing knowledge for contradictions.
 
+    Thin adapter around ``kairix.use_cases.contradict.run_contradict``.
     Use before writing new facts — catches conflicts with what's already
     in the knowledge base. Returns a list of contradicting documents with
     scores and explanations.
 
-    Args:
-        llm_backend:   Injectable LLM backend for testing.
-                       Defaults to the production backend.
-        contradict_fn: Injectable contradiction checker for testing.
-                       Defaults to check_contradiction.
+    The optional ``deps`` parameter forwards a ``ContradictDeps`` directly
+    to the use case — production callers leave it None.
     """
-    try:
-        if contradict_fn is None:
-            from kairix.knowledge.contradict.detector import check_contradiction
+    from kairix.use_cases.contradict import contradict_output_to_envelope, run_contradict
 
-            contradict_fn = check_contradiction
-        if llm_backend is None:
-            from kairix.platform.llm import get_default_backend
-
-            llm_backend = get_default_backend()
-
-        # Agent forwarding stays conditional — the WS2-B design intentionally
-        # doesn't lock contradict to a single agent's collection so cross-agent
-        # contradictions surface. Scope is always forwarded so callers who want
-        # explicit broadening (scope=everything) or narrowing get it.
-        extra: dict[str, Any] = {"scope": scope}
-        if agent is not None:
-            extra["agent"] = agent
-        results = contradict_fn(
-            content=content,
-            llm=llm_backend,
-            top_k=top_k,
-            threshold=threshold,
-            **extra,
-        )
-        return {
-            "content": content,
-            "contradictions": [
-                {
-                    "path": r.doc_path,
-                    "score": r.score,
-                    "reason": r.reason,
-                    "snippet": r.snippet,
-                }
-                for r in results
-            ],
-            "has_contradictions": len(results) > 0,
-            "error": "",
-        }
-    except Exception as exc:
-        logger.warning("mcp.contradict failed: %s", exc, exc_info=True)
-        return {
-            "content": content,
-            "contradictions": [],
-            "has_contradictions": False,
-            "error": "Contradiction check failed — check server logs for details.",
-        }
+    out = run_contradict(
+        content,
+        agent=agent,
+        scope=scope,
+        top_k=top_k,
+        threshold=threshold,
+        top_claims=top_claims,
+        deps=deps,
+    )
+    return contradict_output_to_envelope(out)
 
 
 # ---------------------------------------------------------------------------
@@ -692,9 +525,10 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         agent: str | None = None,
         scope: Scope = DEFAULT_SCOPE,
         budget: int = 3000,
+        limit: int = 10,
     ) -> dict[str, Any]:
         """Search your knowledge store — finds the best answers to any question."""
-        return tool_search(query=query, agent=agent, scope=scope, budget=budget)
+        return tool_search(query=query, agent=agent, scope=scope, budget=budget, limit=limit)
 
     @server.tool()
     @async_tool_handler
@@ -742,6 +576,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         agent: str | None = None,
         top_k: int = 5,
         threshold: float = 0.45,
+        top_claims: int = 3,
         scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Check new content against existing knowledge for contradictions."""
@@ -750,6 +585,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
             agent=agent,
             top_k=top_k,
             threshold=threshold,
+            top_claims=top_claims,
             scope=scope,
         )
 

@@ -1,168 +1,185 @@
-"""Tests for kairix.core.search.cli — search CLI entry point.
+"""Unit tests for ``kairix.core.search.cli`` pure helpers.
 
-Drives the public ``main(argv, *, pipeline=...)`` only; argument parsing
-and result formatting are exercised via the operator-visible CLI surface
-(stdout, exit code, the args the pipeline receives).
+Phase 2 of #168 made the CLI a thin adapter — argv parsing + result
+formatting only. The use case logic lives in
+``kairix.use_cases.search.run_search`` (covered in
+``tests/use_cases/test_search.py``). These tests pin the formatters
+that turn a ``SearchOutput`` into stdout and the JSON envelope.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 
 import pytest
 
-from kairix.core.search.cli import main
-from kairix.core.search.intent import QueryIntent
-from kairix.core.search.pipeline import SearchResult
+from kairix.core.search.cli import build_parser, format_text, to_json_envelope
+from kairix.use_cases.search import SearchHit, SearchOutput
 
 pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------
-# Local fakes — minimal CLI-shape stand-ins for SearchPipeline + result rows.
-#
-# These don't belong in tests/fakes.py (yet): the production SearchPipeline
-# already has a canonical Fake there for the search module, but the CLI's
-# `result.result.title/snippet/...` rendering shape is its own surface and
-# the test needs row-level control. Keep them close to the test.
+# build_parser
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _Row:
-    path: str = "docs/test.md"
-    title: str = "Test Doc"
-    snippet: str = "A test snippet"
-    boosted_score: float = 0.95
-    collection: str = "shared"
+def test_build_parser_accepts_query_only() -> None:
+    args = build_parser().parse_args(["q"])
+    assert args.query == "q"
+    assert args.agent is None
+    assert args.scope == "shared+agent"
+    assert args.budget == 3000
+    assert args.limit == 10
+    assert args.as_json is False
+    assert args.include_entity_card is True
 
 
-@dataclass
-class _BudgetedRow:
-    result: _Row
-    tier: str = "T1"
-    content: str = "snippet content"
-
-
-class _RecordingPipeline:
-    """SearchPipeline-shaped fake that records the kwargs it was called with.
-
-    Tests assert on ``last_call`` to verify CLI flags reach the pipeline
-    boundary, and on ``self._result`` to control what the CLI renders.
-    """
-
-    def __init__(self, result: SearchResult | None = None) -> None:
-        self._result = result or SearchResult(
-            query="test",
-            intent=QueryIntent.SEMANTIC,
-            results=[_BudgetedRow(result=_Row())],
-            bm25_count=1,
-            vec_count=1,
-            fused_count=1,
-            total_tokens=100,
-            latency_ms=5.0,
-        )
-        self.last_call: dict | None = None
-
-    def search(self, *, query: str, budget: int, scope: str, agent: str | None) -> SearchResult:
-        self.last_call = {"query": query, "budget": budget, "scope": scope, "agent": agent}
-        self._result.query = query
-        return self._result
-
-
-# ---------------------------------------------------------------------------
-# Argument parsing — exercised through main() via the recording pipeline.
-# ---------------------------------------------------------------------------
-
-
-def test_main_query_is_positional_and_required() -> None:
-    """Running with no argv exits 2 (argparse usage error)."""
-    pipeline = _RecordingPipeline()
-    with pytest.raises(SystemExit) as exc:
-        main([], pipeline=pipeline)
-    assert exc.value.code == 2
-    # Pipeline must not have been invoked when argparse rejects argv.
-    assert pipeline.last_call is None
-
-
-def test_main_default_flag_values_reach_pipeline() -> None:
-    """A bare query uses scope='shared+agent', budget=3000, agent=None."""
-    pipeline = _RecordingPipeline()
-    main(["hello world"], pipeline=pipeline)
-    assert pipeline.last_call == {
-        "query": "hello world",
-        "scope": "shared+agent",
-        "budget": 3000,
-        "agent": None,
-    }
-
-
-def test_main_passes_all_flags_to_pipeline() -> None:
-    """--agent, --scope, --budget all flow through to the pipeline call."""
-    pipeline = _RecordingPipeline()
-    main(
-        ["q", "--agent", "builder", "--scope", "agent", "--budget", "500"],
-        pipeline=pipeline,
+def test_build_parser_accepts_all_flags() -> None:
+    args = build_parser().parse_args(
+        [
+            "q",
+            "--agent",
+            "builder",
+            "--scope",
+            "all-agents",
+            "--budget",
+            "5000",
+            "--limit",
+            "25",
+            "--json",
+            "--no-entity-card",
+        ]
     )
-    assert pipeline.last_call == {
-        "query": "q",
-        "agent": "builder",
-        "scope": "agent",
-        "budget": 500,
-    }
+    assert args.agent == "builder"
+    assert args.scope == "all-agents"
+    assert args.budget == 5000
+    assert args.limit == 25
+    assert args.as_json is True
+    assert args.include_entity_card is False
 
 
-def test_main_limit_truncates_rendered_results(capsys: pytest.CaptureFixture[str]) -> None:
-    """--limit N caps how many rows the CLI renders, regardless of pipeline output."""
-    many_rows = SearchResult(
+def test_build_parser_rejects_unknown_scope() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["q", "--scope", "bogus"])
+
+
+# ---------------------------------------------------------------------------
+# format_text
+# ---------------------------------------------------------------------------
+
+
+def _hit(**kwargs: object) -> SearchHit:
+    """Build a SearchHit with sensible test defaults."""
+    return SearchHit(
+        path=kwargs.get("path", "/p"),  # type: ignore[arg-type]  # narrow to str at use site
+        title=kwargs.get("title", ""),  # type: ignore[arg-type]  # narrow to str at use site
+        snippet=kwargs.get("snippet", ""),  # type: ignore[arg-type]  # narrow to str at use site
+        score=float(kwargs.get("score", 0.0)),  # type: ignore[arg-type]  # narrow to float at use site
+        tier=kwargs.get("tier", ""),  # type: ignore[arg-type]  # narrow to str at use site
+        collection=kwargs.get("collection", ""),  # type: ignore[arg-type]  # narrow to str at use site
+    )
+
+
+def test_format_text_renders_query_intent_and_diagnostics() -> None:
+    out = SearchOutput(
+        query="my query",
+        intent="semantic",
+        results=[],
+        bm25_count=4,
+        vec_count=6,
+        fused_count=8,
+        total_tokens=100,
+        latency_ms=42.0,
+    )
+    text = format_text(out)
+    assert "Query: my query" in text
+    assert "Intent: semantic" in text
+    assert "BM25=4" in text
+    assert "vec=6" in text
+    assert "100 tokens" in text
+    assert "42ms" in text
+
+
+def test_format_text_marks_vec_failed() -> None:
+    out = SearchOutput(query="q", intent="semantic", vec_failed=True)
+    assert "vec_failed=True" in format_text(out)
+
+
+def test_format_text_renders_each_hit_with_path_score_collection() -> None:
+    hit = _hit(path="docs/notes.md", title="Notes", snippet="hello world", score=0.812, tier="L1", collection="shared")
+    out = SearchOutput(query="q", intent="semantic", results=[hit])
+    text = format_text(out)
+    assert "1. [L1] Notes" in text
+    assert "docs/notes.md" in text
+    assert "hello world" in text
+    assert "score=0.8120" in text
+    assert "collection=shared" in text
+
+
+def test_format_text_truncates_long_snippet_with_ellipsis() -> None:
+    hit = _hit(path="/p", snippet="x" * 250)
+    out = SearchOutput(query="q", intent="semantic", results=[hit])
+    text = format_text(out)
+    assert "x" * 200 + "…" in text
+
+
+def test_format_text_falls_back_to_basename_when_title_empty() -> None:
+    hit = _hit(path="docs/foo.md", title="", tier="L0")
+    out = SearchOutput(query="q", intent="semantic", results=[hit])
+    text = format_text(out)
+    assert "1. [L0] foo.md" in text
+
+
+def test_format_text_says_no_results_when_empty() -> None:
+    out = SearchOutput(query="q", intent="semantic", results=[])
+    assert "No results found." in format_text(out)
+
+
+def test_format_text_short_circuits_on_error() -> None:
+    out = SearchOutput(query="q", intent="", error="ValueError: boom")
+    text = format_text(out)
+    assert "Error: ValueError: boom" in text
+    # Diagnostics line not emitted on the error path
+    assert "BM25=" not in text
+
+
+# ---------------------------------------------------------------------------
+# to_json_envelope
+# ---------------------------------------------------------------------------
+
+
+def test_to_json_envelope_serialises_all_fields() -> None:
+    hit = _hit(path="p", title="t", snippet="s", score=0.5, tier="L1", collection="c")
+    out = SearchOutput(
         query="q",
-        intent=QueryIntent.SEMANTIC,
-        results=[_BudgetedRow(result=_Row(path=f"docs/r{i}.md", title=f"Doc {i}")) for i in range(5)],
+        intent="semantic",
+        results=[hit],
+        bm25_count=1,
+        vec_count=2,
+        fused_count=3,
+        vec_failed=False,
+        total_tokens=10,
+        latency_ms=15.4567,
     )
-    pipeline = _RecordingPipeline(result=many_rows)
-    main(["q", "--limit", "2"], pipeline=pipeline)
-    out = capsys.readouterr().out
-    assert "Doc 0" in out
-    assert "Doc 1" in out
-    assert "Doc 2" not in out, f"--limit 2 should have truncated row 2; got:\n{out}"
+    env = to_json_envelope(out)
+    assert env["query"] == "q"
+    assert env["intent"] == "semantic"
+    assert env["bm25_count"] == 1
+    assert env["vec_count"] == 2
+    assert env["fused_count"] == 3
+    assert env["vec_failed"] is False
+    assert env["total_tokens"] == 10
+    assert env["latency_ms"] == pytest.approx(15.5)
+    assert "error" not in env  # only present on the error path
+    assert env["results"] == [
+        {"path": "p", "title": "t", "collection": "c", "score": 0.5, "tier": "L1", "snippet": "s"}
+    ]
+    # Round-trip via json to confirm it's serialisable.
+    assert json.loads(json.dumps(env)) == env
 
 
-# ---------------------------------------------------------------------------
-# Output formatting — exercised through main()'s stdout.
-# ---------------------------------------------------------------------------
-
-
-def test_main_no_results_message_shown(capsys: pytest.CaptureFixture[str]) -> None:
-    """When the pipeline returns zero rows the CLI tells the operator so."""
-    empty = SearchResult(query="test", intent=QueryIntent.SEMANTIC)
-    main(["test"], pipeline=_RecordingPipeline(result=empty))
-    out = capsys.readouterr().out
-    assert "No results found" in out
-    assert "test" in out
-
-
-def test_main_text_output_includes_query(capsys: pytest.CaptureFixture[str]) -> None:
-    """Text-mode output echoes the query so operators can confirm what ran."""
-    main(["my query"], pipeline=_RecordingPipeline())
-    out = capsys.readouterr().out
-    assert "my query" in out
-
-
-def test_main_json_output_is_valid_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """--json emits a single parseable JSON document with query + results keys."""
-    main(["my query", "--json"], pipeline=_RecordingPipeline())
-    data = json.loads(capsys.readouterr().out)
-    assert data["query"] == "my query"
-    assert "results" in data
-
-
-def test_main_exits_1_on_error_and_prints_error_message(capsys: pytest.CaptureFixture[str]) -> None:
-    """A SearchResult with .error set exits 1 and surfaces the message to stdout."""
-    error_result = SearchResult(query="test", intent=QueryIntent.SEMANTIC, error="something broke")
-    pipeline = _RecordingPipeline(result=error_result)
-    with pytest.raises(SystemExit) as exc:
-        main(["test"], pipeline=pipeline)
-    assert exc.value.code == 1
-    out = capsys.readouterr().out
-    assert "Error: something broke" in out
+def test_to_json_envelope_includes_error_field_when_set() -> None:
+    out = SearchOutput(query="q", intent="", error="ConnectionError: KAIRIX_NEO4J_URI not reachable")
+    env = to_json_envelope(out)
+    assert env["error"].startswith("ConnectionError")

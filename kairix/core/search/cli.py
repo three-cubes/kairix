@@ -2,26 +2,30 @@
 CLI entry point for `kairix search`.
 
 Usage:
-  kairix search "query" [--agent AGENT] [--scope SCOPE] [--budget N] [--json]
+  kairix search "query" [--agent AGENT] [--scope SCOPE] [--budget N] [--limit N] [--json]
 
 Options:
-  --agent AGENT   Agent name for collection scoping (shape, builder, etc.)
-  --scope SCOPE   Collection scope: shared | agent | shared+agent (default: shared+agent)
-  --budget N      Token budget cap (default: 3000)
-  --json          Output raw JSON instead of formatted text
-  --limit N       Max results to display (default: 10)
+  --agent AGENT       Agent name for collection scoping (shape, builder, etc.)
+  --scope SCOPE       Collection scope: shared | agent | shared+agent | all-agents | everything
+  --budget N          Token budget cap (default: 3000)
+  --limit N           Max results to display (default: 10)
+  --json              Output raw JSON instead of formatted text
+  --no-entity-card    Skip the entity-graph augmentation when the query is an entity lookup
 
-Exits 0 on success, 1 on error.
+Adapter only — business logic lives in ``kairix.use_cases.search.run_search``.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
+import sys
 
-from kairix.core.search.config_loader import load_config
-from kairix.core.search.pipeline import SearchResult
+from kairix.core.search.scope import Scope
+from kairix.use_cases.search import SearchOutput, run_search
 
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kairix search",
         description="Hybrid BM25 + vector search over your document store.",
@@ -37,94 +41,98 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--budget", type=int, default=3000, help="Token budget (default: 3000)")
     parser.add_argument("--limit", type=int, default=10, help="Max results to display")
     parser.add_argument("--json", dest="as_json", action="store_true", help="Output raw JSON")
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--no-entity-card",
+        dest="include_entity_card",
+        action="store_false",
+        default=True,
+        help="Skip the entity-graph augmentation",
+    )
+    return parser
 
 
-def _format_result(sr: SearchResult, limit: int) -> str:
-    """Format SearchResult as human-readable text."""
-    lines: list[str] = []
-    lines.append(f"Query: {sr.query}")
-    lines.append(f"Intent: {sr.intent.value}")
-
-    if sr.error:
-        lines.append(f"Error: {sr.error}")
+def format_text(out: SearchOutput) -> str:
+    """Render a ``SearchOutput`` as the human-readable text the CLI prints."""
+    lines: list[str] = [f"Query: {out.query}", f"Intent: {out.intent}"]
+    if out.error:
+        lines.append(f"Error: {out.error}")
         return "\n".join(lines)
 
-    lines.append(
-        f"Results: {len(sr.results)} returned "
-        f"(BM25={sr.bm25_count}, vec={sr.vec_count}"
-        + (", vec_failed=True" if sr.vec_failed else "")
-        + f") | {sr.total_tokens} tokens | {sr.latency_ms:.0f}ms"
+    diagnostics = (
+        f"Results: {len(out.results)} returned "
+        f"(BM25={out.bm25_count}, vec={out.vec_count}"
+        + (", vec_failed=True" if out.vec_failed else "")
+        + f") | {out.total_tokens} tokens | {out.latency_ms:.0f}ms"
     )
+    lines.append(diagnostics)
     lines.append("")
 
-    for i, budgeted in enumerate(sr.results[:limit], start=1):
-        r = budgeted.result
-        title = r.title or r.path.split("/")[-1]
-        lines.append(f"{i}. [{budgeted.tier}] {title}")
-        lines.append(f"   {r.path}")
-        if r.snippet:
-            snippet = r.snippet[:200].replace("\n", " ")
-            if len(r.snippet) > 200:
+    for i, hit in enumerate(out.results, start=1):
+        title = hit.title or hit.path.split("/")[-1]
+        tier = hit.tier or "search"
+        lines.append(f"{i}. [{tier}] {title}")
+        lines.append(f"   {hit.path}")
+        if hit.snippet:
+            snippet = hit.snippet[:200].replace("\n", " ")
+            if len(hit.snippet) > 200:
                 snippet += "…"
             lines.append(f"   {snippet}")
-        lines.append(f"   score={r.boosted_score:.4f} | collection={r.collection}")
+        lines.append(f"   score={hit.score:.4f} | collection={hit.collection}")
         lines.append("")
 
-    if not sr.results:
+    if not out.results:
         lines.append("No results found.")
 
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None, *, pipeline=None) -> None:
-    import sys
+def to_json_envelope(out: SearchOutput) -> dict:
+    """Serialise the ``SearchOutput`` to the JSON envelope the ``--json`` flag emits."""
+    envelope: dict = {
+        "query": out.query,
+        "intent": out.intent,
+        "bm25_count": out.bm25_count,
+        "vec_count": out.vec_count,
+        "fused_count": out.fused_count,
+        "vec_failed": out.vec_failed,
+        "total_tokens": out.total_tokens,
+        "latency_ms": round(out.latency_ms, 1),
+        "results": [
+            {
+                "path": h.path,
+                "title": h.title,
+                "collection": h.collection,
+                "score": h.score,
+                "tier": h.tier,
+                "snippet": h.snippet,
+            }
+            for h in out.results
+        ],
+    }
+    if out.error:
+        envelope["error"] = out.error
+    return envelope
 
-    args = _parse_args(argv)
 
-    if pipeline is None:
-        from kairix.core.factory import build_search_pipeline
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
 
-        pipeline = build_search_pipeline(config=load_config())
-
-    sr = pipeline.search(
-        query=args.query,
-        budget=args.budget,
-        scope=args.scope,
+    out = run_search(
+        args.query,
         agent=args.agent,
+        scope=Scope.parse(args.scope),
+        budget=args.budget,
+        limit=args.limit,
+        include_entity_card=args.include_entity_card,
     )
 
     if args.as_json:
-        output: dict = {
-            "query": sr.query,
-            "intent": sr.intent.value,
-            "bm25_count": sr.bm25_count,
-            "vec_count": sr.vec_count,
-            "fused_count": sr.fused_count,
-            "vec_failed": sr.vec_failed,
-            "total_tokens": sr.total_tokens,
-            "latency_ms": round(sr.latency_ms, 1),
-            "results": [
-                {
-                    "path": b.result.path,
-                    "title": b.result.title,
-                    "collection": b.result.collection,
-                    "score": b.result.boosted_score,
-                    "tier": b.tier,
-                    "snippet": b.content[:500],
-                }
-                for b in sr.results[: args.limit]
-            ],
-        }
-        if sr.error:
-            output["error"] = sr.error
-        print(json.dumps(output, indent=2))
-        if sr.error:
-            sys.exit(1)
+        print(json.dumps(to_json_envelope(out), indent=2))
     else:
-        print(_format_result(sr, limit=args.limit))
-        if sr.error:
-            sys.exit(1)
+        print(format_text(out))
+
+    if out.error:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
