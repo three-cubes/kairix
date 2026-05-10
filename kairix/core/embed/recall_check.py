@@ -322,8 +322,7 @@ def save_recall_result(result: dict[str, Any], log_path: Path = RECALL_LOG) -> N
     runs.append(result)
     runs = runs[-90:]
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    # NOSONAR — internal log path; not user-controlled (see docstring).
-    log_path.write_text(json.dumps(runs, indent=2))
+    log_path.write_text(json.dumps(runs, indent=2))  # NOSONAR — internal log path; not user-controlled (see docstring).
 
 
 def run_recall_gate(
