@@ -589,11 +589,25 @@ This is required for `kairix entity suggest` to work, including inside Docker co
 
 ## Running the Benchmark
 
+For local / non-production hosts:
+
 ```bash
 kairix benchmark run --suite suites/example.yaml
 ```
 
-See [EVALUATION.md](EVALUATION.md) for current scores, benchmark methodology, and the graded relevance scoring format.
+For shared production VMs, run inside the **sandboxed eval container** (closes #88) so eval workloads can't starve agent traffic:
+
+```bash
+docker compose -f docker-compose.yml \
+               -f docker-compose.override.yml \
+               -f docker-compose.eval.yml \
+               --profile eval \
+    run --rm kairix-eval benchmark run --suite suites/reflib-gold.yaml
+```
+
+The Dockerfile's entrypoint auto-prepends `kairix`, so the leading `kairix` is omitted from the run command. The eval profile pins `cpus=1.0` and `mem_limit=2g` (vs production's 4 CPU / 3 GB), so a benchmark run can't pin the host. The container exits when the command finishes; `--rm` cleans up. See [docker-compose.eval.yml](../../docker-compose.eval.yml) for the full overlay.
+
+See [EVALUATION.md](../evaluation/EVALUATION.md) for current scores, benchmark methodology, and the graded relevance scoring format.
 
 ---
 
