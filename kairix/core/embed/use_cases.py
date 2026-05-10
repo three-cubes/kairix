@@ -28,16 +28,15 @@ Design notes:
 from __future__ import annotations
 
 import logging
-import sqlite3
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kairix.core.embed import _pipeline_defaults as _defaults
 from kairix.core.embed.deps import EmbedDependencies
-from kairix.core.embed.embed import DEFAULT_BATCH_SIZE, run_embed
-from kairix.core.embed.recall_check import run_recall_gate
-from kairix.core.embed.schema import save_run_log
+from kairix.core.embed.embed import DEFAULT_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +92,32 @@ class EmbedPipelineResult:
         return self.failed == 0
 
 
+@dataclass(frozen=True)
+class PipelineDeps:
+    """Injectable dependencies for ``run_incremental_embed_pipeline``.
+
+    Production callers leave every field None and the use case fills in
+    real implementations on first access. Tests construct a
+    ``PipelineDeps(...)`` with light-weight stand-ins to drive the
+    orchestration end-to-end without touching real DB / Azure / disk.
+
+    All fields are intentionally callables (not concrete instances) so
+    the use case stays decoupled from import order and module-level
+    state in the production helpers.
+    """
+
+    db_path_fn: Callable[[], str] | None = None
+    open_db_fn: Callable[[Path], Any] | None = None
+    schema_fn: Callable[[Any], None] | None = None
+    validate_schema_fn: Callable[[Any], None] | None = None
+    acquire_lock_fn: Callable[[], Any] | None = None
+    release_lock_fn: Callable[[Any], None] | None = None
+    save_run_log_fn: Callable[[dict[str, Any]], None] | None = None
+    run_embed_fn: Callable[..., dict[str, Any]] | None = None
+    run_recall_gate_fn: Callable[..., tuple[bool, dict[str, Any]]] | None = None
+    scan_documents_fn: Callable[[Any, list[str]], tuple[int, int, int]] | None = None
+
+
 def run_incremental_embed_pipeline(
     *,
     force: bool = False,
@@ -101,6 +126,7 @@ def run_incremental_embed_pipeline(
     skip_recall_check: bool = False,
     rebuild_canaries: bool = False,
     deps: EmbedDependencies | None = None,
+    pipeline_deps: PipelineDeps | None = None,
 ) -> EmbedPipelineResult:
     """Run the full incremental embed pipeline and return a structured result.
 
@@ -117,10 +143,25 @@ def run_incremental_embed_pipeline(
     Raises only on truly unrecoverable conditions (DB unreachable,
     schema migration failure). All other failure modes — Azure errors,
     recall regression, scan errors — are reported in the result.
+
+    ``deps`` injects embed-stage dependencies (Azure config, batch I/O).
+    ``pipeline_deps`` injects orchestration dependencies (DB, lock,
+    scan, recall) — used by tests to drive the full flow without
+    touching production disk or Azure. Production callers leave both
+    None and lazy production defaults are wired on demand.
     """
-    from kairix.core.db import get_db_path, open_db
-    from kairix.core.db.schema import create_schema, validate_schema
-    from kairix.core.embed.cli import acquire_lock, release_lock
+    pdeps = pipeline_deps or PipelineDeps()
+
+    db_path_fn = pdeps.db_path_fn or _defaults.default_db_path
+    open_db_fn = pdeps.open_db_fn or _defaults.default_open_db
+    schema_fn = pdeps.schema_fn or _defaults.default_create_schema
+    validate_fn = pdeps.validate_schema_fn or _defaults.default_validate_schema
+    acquire_fn = pdeps.acquire_lock_fn or _defaults.default_acquire_lock
+    release_fn = pdeps.release_lock_fn or _defaults.default_release_lock
+    save_log_fn = pdeps.save_run_log_fn or _defaults.default_save_run_log
+    embed_fn = pdeps.run_embed_fn or _defaults.default_run_embed
+    recall_fn = pdeps.run_recall_gate_fn or _defaults.default_run_recall_gate
+    scan_fn = pdeps.scan_documents_fn or _defaults.default_scan_documents
 
     diagnostics: list[str] = []
 
@@ -131,20 +172,20 @@ def run_incremental_embed_pipeline(
         batch_size,
     )
 
-    lock_fh = acquire_lock()
-    db_path = get_db_path()
+    lock_fh = acquire_fn()
+    db_path = db_path_fn()
     start = time.time()
     embed_result: dict[str, Any]
 
     try:
-        db = open_db(Path(db_path))
+        db = open_db_fn(Path(db_path))
         try:
-            create_schema(db)
-            validate_schema(db)
+            schema_fn(db)
+            validate_fn(db)
 
-            scan_new, scan_updated, scan_errors = _scan_documents(db, diagnostics)
+            scan_new, scan_updated, scan_errors = scan_fn(db, diagnostics)
 
-            embed_result = run_embed(
+            embed_result = embed_fn(
                 db=db,
                 force=force,
                 batch_size=batch_size,
@@ -154,11 +195,11 @@ def run_incremental_embed_pipeline(
             embed_result["command"] = "embed"
             embed_result["db_path"] = str(db_path)
             embed_result["timestamp"] = int(start)
-            save_run_log(embed_result)
+            save_log_fn(embed_result)
         finally:
             db.close()
     finally:
-        release_lock(lock_fh)
+        release_fn(lock_fh)
 
     recall_score: float | None = None
     recall_passed: bool | None = None
@@ -171,7 +212,7 @@ def run_incremental_embed_pipeline(
             captured_alert.append(msg)
 
         try:
-            recall_passed, recall_result = run_recall_gate(
+            recall_passed, recall_result = recall_fn(
                 alert_callback=_capture,
                 rebuild_canaries=rebuild_canaries,
             )
@@ -201,63 +242,3 @@ def run_incremental_embed_pipeline(
         scan_errors=scan_errors,
         diagnostics=diagnostics,
     )
-
-
-def _scan_documents(db: sqlite3.Connection, diagnostics: list[str]) -> tuple[int, int, int]:
-    """Scan the document root for new/changed files and rebuild FTS.
-
-    Extracted to keep ``run_incremental_embed_pipeline`` readable.
-    Returns ``(new, updated, errors)``. On any unexpected failure the
-    diagnostic is appended and zeros are returned — the embed step
-    still runs against whatever was previously indexed.
-    """
-    from kairix.core.db.scanner import CollectionConfig, DocumentScanner
-    from kairix.core.search.config_loader import _resolve_config_path, load_collections
-    from kairix.core.search.registry import build_agent_owner_resolver, parse_agent_registry
-    from kairix.paths import document_root, reference_library_root
-
-    droot = document_root()
-
-    agent_resolver = None
-    try:
-        config_path = _resolve_config_path()
-        if config_path is not None:
-            import yaml as _yaml
-
-            with config_path.open(encoding="utf-8") as _f:
-                _raw_yaml = _yaml.safe_load(_f) or {}
-            _registry = parse_agent_registry(_raw_yaml)
-            if _registry.list_agents():
-                agent_resolver = build_agent_owner_resolver(_registry)
-    # Agent-resolver construction is best-effort; we'd rather scan with
-    # agent_owner=NULL than skip the scan entirely.
-    except Exception as exc:
-        diagnostics.append(f"agent_resolver_unavailable: {exc}")
-
-    scanner = DocumentScanner(db, document_root=droot, agent_owner_resolver=agent_resolver)
-
-    collections_cfg = load_collections()
-    if collections_cfg and collections_cfg.shared:
-        scan_collections = [CollectionConfig(name=c.name, path=c.path, glob=c.glob) for c in collections_cfg.shared]
-        logger.info("Using %d configured collections", len(scan_collections))
-    else:
-        scan_collections = [CollectionConfig(name="default", path=".")]
-
-    reflib_root = reference_library_root()
-    if reflib_root.is_dir():
-        scan_collections.append(CollectionConfig(name="reference-library", path=str(reflib_root), glob="**/*.md"))
-
-    scan_report = scanner.scan(scan_collections)
-    if scan_report.new > 0 or scan_report.updated > 0:
-        logger.info(
-            "Scanned documents: %d new, %d updated, %d unchanged",
-            scan_report.new,
-            scan_report.updated,
-            scan_report.unchanged,
-        )
-        from kairix.core.db.fts import rebuild_fts
-
-        fts_count = rebuild_fts(db)
-        logger.info("FTS index rebuilt: %d documents", fts_count)
-
-    return scan_report.new, scan_report.updated, scan_report.errors
