@@ -19,9 +19,13 @@ no indexed documents (no corpus to sample from).
 To force a re-sample after major corpus changes, delete the canary
 cache file or pass ``rebuild_canaries=True`` to ``check()``.
 
-The ``RecallChecker`` class is the only seam: tests inject a ``FakeEmbedProvider``
-and a ``FakeVectorSearcher`` via the constructor; production callers build
-``RecallChecker()`` which constructs production defaults lazily on first use.
+The ``RecallChecker`` class is the only seam: tests inject a
+``FakeEmbedProvider`` and a ``FakeVectorSearcher`` via the constructor;
+production callers build ``RecallChecker()`` which constructs production
+defaults lazily on first use. For unit-coverage of the credentials /
+provider-construction failure paths, tests inject a ``creds_resolver``
+and ``provider_factory`` via the constructor (``FakeCredentials`` from
+``tests/fakes.py`` is the canonical creds stand-in).
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ import numpy as np
 from kairix.core.embed.schema import EMBED_VECTOR_DIMS as EMBED_DIMS
 
 if TYPE_CHECKING:
+    from kairix.credentials import Credentials, GraphCredentials
     from kairix.platform.llm.embed_provider import EmbedProvider
 
 logger = logging.getLogger(__name__)
@@ -187,45 +192,84 @@ def save_canary_cache(
     logger.info("recall-canaries: cached %d queries to %s", len(queries), cache_path)
 
 
+def _default_creds_resolver() -> Credentials | GraphCredentials | None:
+    """Production credentials resolver — looks up the embed creds.
+
+    Returns whatever ``get_credentials("embed")`` returns; on failure
+    (raising) returns ``None`` so the recall check degrades to a skip
+    instead of crashing.
+    """
+    try:
+        from kairix.credentials import get_credentials
+
+        return get_credentials("embed")
+    except Exception:
+        return None
+
+
+def _default_provider_factory(creds: Credentials) -> EmbedProvider:
+    """Production EmbedProvider factory — wraps ``get_embed_provider``.
+
+    Accepts the resolved credentials (unused by ``get_embed_provider`` but
+    exposed for symmetry with test injection).
+    """
+    del creds  # production helper resolves its own credentials internally
+    from kairix.platform.llm.embed_provider import get_embed_provider
+
+    return get_embed_provider()
+
+
+def _resolve_provider_and_model(
+    creds_resolver: Callable[[], Credentials | GraphCredentials | None],
+    provider_factory: Callable[[Credentials], EmbedProvider],
+    model: str | None,
+) -> tuple[EmbedProvider | None, str | None]:
+    """Resolve an EmbedProvider + model from injected dependencies.
+
+    Returns ``(None, None)`` when credentials are missing / unusable, the
+    resolver itself raises, or the factory raises — callers treat this as
+    a skip-the-query signal. The recall gate is an alarm system; it must
+    degrade silently rather than take down the embed pipeline.
+    """
+    from kairix.credentials import Credentials
+
+    try:
+        creds = creds_resolver()
+    except Exception as e:
+        logger.warning("Recall embed: creds_resolver raised %s — skipping", e)
+        return None, None
+
+    if not isinstance(creds, Credentials) or not creds.api_key or not creds.endpoint:
+        logger.warning("Embed credentials not set — skipping recall check")
+        return None, None
+
+    chosen_model = model if model is not None else (creds.model or "text-embedding-3-large")
+
+    try:
+        provider = provider_factory(creds)
+    except Exception as e:
+        logger.warning("Recall embed failed: provider_factory raised %s", e)
+        return None, None
+    return provider, chosen_model
+
+
 def _embed_query(
     query: str,
     *,
-    provider: EmbedProvider | None = None,
-    model: str | None = None,
+    provider: EmbedProvider,
+    model: str = "text-embedding-3-large",
 ) -> np.ndarray | None:
-    """Embed a single query string via the configured EmbedProvider.
+    """Embed a single query string via the supplied EmbedProvider.
 
-    Returns a unit-normalised float32 numpy array, or None when credentials
-    are missing or the provider call fails. The provider's openai SDK client
-    handles retry, rate-limiting, and backoff internally.
+    Returns a unit-normalised float32 numpy array, or ``None`` when the
+    provider call fails or returns no vectors. The provider's openai SDK
+    client handles retry, rate-limiting, and backoff internally.
+
+    This helper is intentionally pure — credentials resolution and provider
+    construction live in ``_resolve_provider_and_model`` (called by
+    ``RecallChecker._embed``) so the embed-batch call path can be tested
+    with a ``FakeEmbedProvider`` without exercising the credentials seam.
     """
-    if provider is None:
-        try:
-            from kairix.credentials import Credentials, get_credentials
-            from kairix.platform.llm.embed_provider import get_embed_provider
-
-            creds = get_credentials("embed")
-        except Exception:
-            logger.warning("Embed credentials not set — skipping recall check")
-            return None
-
-        # Reachable only with valid Azure embed credentials; deferred to
-        # FakeCredentials in credentials-DI.
-        if not isinstance(creds, Credentials) or not creds.api_key or not creds.endpoint:  # pragma: no cover
-            logger.warning("Embed credentials not set — skipping recall check")
-            return None
-
-        if model is None:  # pragma: no cover — same path as above; needs FakeCredentials
-            model = creds.model or "text-embedding-3-large"
-
-        try:  # pragma: no cover — same path as above; needs FakeCredentials
-            provider = get_embed_provider()
-        except Exception as e:  # pragma: no cover
-            logger.warning("Recall embed failed: get_embed_provider raised %s", e)
-            return None
-    elif model is None:
-        model = "text-embedding-3-large"
-
     try:
         vectors = provider.embed_batch([query], model=model, dims=EMBED_DIMS)
         if not vectors:
@@ -240,19 +284,28 @@ def _embed_query(
         return None
 
 
-class _UsearchVectorSearcher:  # pragma: no cover
-    """Production VectorSearcher — pragma'd whole.
+def _default_index_resolver() -> Any:
+    """Production index resolver — wraps ``get_vector_index`` so tests can inject a fake."""
+    from kairix.core.search.vec_index import get_vector_index
 
-    Tests inject ``FakeVectorSearcher`` via ``RecallChecker(vector_searcher=...)``.
-    The real usearch index lookup is exercised by integration coverage with a
-    populated usearch index, not by the unit suite.
+    return get_vector_index()
+
+
+class UsearchVectorSearcher:
+    """Production VectorSearcher wrapping the usearch index.
+
+    Tests construct it with ``index_resolver=`` to drive every branch
+    (index missing, search returns hits, search raises). Production callers
+    leave ``index_resolver=None`` and the default
+    (``kairix.core.search.vec_index.get_vector_index``) is used.
     """
+
+    def __init__(self, index_resolver: Callable[[], Any] | None = None) -> None:
+        self._index_resolver = index_resolver if index_resolver is not None else _default_index_resolver
 
     def search_vectors(self, vector: np.ndarray, *, limit: int) -> list[str]:
         try:
-            from kairix.core.search.vec_index import get_vector_index
-
-            index = get_vector_index()
+            index = self._index_resolver()
             if index is None:
                 logger.warning("usearch index not available for recall check")
                 return []
@@ -266,17 +319,27 @@ class _UsearchVectorSearcher:  # pragma: no cover
 class RecallChecker:
     """Embed-and-vector-search recall quality gate.
 
-    Constructor takes the two protocol implementations exercised by the gate:
+    Constructor takes the two protocol implementations exercised by the gate
+    plus injection seams for the credentials / provider lookup:
 
       - ``embed_provider``: any ``EmbedProvider`` (production: Azure/OpenAI;
-        tests: ``FakeEmbedProvider``).
+        tests: ``FakeEmbedProvider``). When ``None``, ``creds_resolver`` and
+        ``provider_factory`` are used to construct one on first ``_embed`` call.
       - ``vector_searcher``: any ``VectorSearcher`` (production:
-        ``_UsearchVectorSearcher`` wrapping the usearch index; tests:
+        ``UsearchVectorSearcher`` wrapping the usearch index; tests:
         ``FakeVectorSearcher`` from ``tests/fakes.py``).
+      - ``creds_resolver``: returns a ``Credentials`` or ``None``. Default
+        delegates to ``kairix.credentials.get_credentials("embed")`` and
+        treats any exception as "no credentials" (returns ``None``).
+      - ``provider_factory``: builds an ``EmbedProvider`` from resolved
+        ``Credentials``. Default delegates to
+        ``kairix.platform.llm.embed_provider.get_embed_provider``.
 
-    Both are optional — when ``None`` the production defaults are
-    constructed lazily so a bare ``RecallChecker()`` runs against the real
-    Azure/usearch surface.
+    All four are optional — production callers leave them all None and the
+    real Azure / usearch surface is used. Tests inject ``FakeEmbedProvider``
+    + ``FakeVectorSearcher`` to drive the happy paths, and inject
+    ``FakeCredentials`` (via ``creds_resolver``) to exercise the
+    credentials-resolution failure paths without touching real secrets.
     """
 
     def __init__(
@@ -284,19 +347,39 @@ class RecallChecker:
         *,
         embed_provider: EmbedProvider | None = None,
         vector_searcher: VectorSearcher | None = None,
+        creds_resolver: Callable[[], Credentials | GraphCredentials | None] | None = None,
+        provider_factory: Callable[[Credentials], EmbedProvider] | None = None,
     ) -> None:
         self._embed_provider = embed_provider
         self._vector_searcher = vector_searcher
+        self._creds_resolver = creds_resolver if creds_resolver is not None else _default_creds_resolver
+        self._provider_factory = provider_factory if provider_factory is not None else _default_provider_factory
+        # Cached resolved model so we only resolve credentials once per checker.
+        self._resolved_model: str | None = None
 
     def _embed(self, query: str) -> np.ndarray | None:
-        return _embed_query(query, provider=self._embed_provider)
+        provider = self._embed_provider
+        model: str
+        if provider is None:
+            resolved_provider, resolved_model = _resolve_provider_and_model(
+                self._creds_resolver,
+                self._provider_factory,
+                self._resolved_model,
+            )
+            if resolved_provider is None or resolved_model is None:
+                return None
+            self._embed_provider = resolved_provider
+            self._resolved_model = resolved_model
+            provider = resolved_provider
+            model = resolved_model
+        else:
+            model = self._resolved_model or "text-embedding-3-large"
+        return _embed_query(query, provider=provider, model=model)
 
     def _search(self, vector: np.ndarray, limit: int) -> list[str]:
         searcher = self._vector_searcher
-        # Lazy default is production-only — tests inject FakeVectorSearcher via
-        # the constructor, so this construction never fires in the unit suite.
-        if searcher is None:  # pragma: no cover
-            searcher = _UsearchVectorSearcher()
+        if searcher is None:
+            searcher = UsearchVectorSearcher()
             self._vector_searcher = searcher
         return searcher.search_vectors(vector, limit=limit)
 
@@ -323,16 +406,16 @@ class RecallChecker:
         """
         close_db = False
         if db is None:
-            try:
-                from kairix.core.db import get_db_path, open_db
+            from kairix.core.db import get_db_path, open_db
 
-                db = open_db(Path(get_db_path()))
-                close_db = True
-            # ``get_db_path`` returns a path even when missing and ``open_db``
-            # auto-creates parent dirs; this guard is defensive for unwritable
-            # parents (e.g. read-only fs).
-            except FileNotFoundError:  # pragma: no cover
-                db = None
+            # ``get_db_path`` returns a path (existing or default-creation
+            # location) and ``open_db`` auto-creates parent dirs and the
+            # SQLite file via ``sqlite3.connect``, so neither raises
+            # ``FileNotFoundError``. Other exceptions (e.g. permission
+            # errors) are surfaced — they indicate broken environment
+            # config that the gate cannot work around.
+            db = open_db(Path(get_db_path()))
+            close_db = True
 
         if recall_queries is not None:
             queries = recall_queries
