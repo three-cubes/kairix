@@ -655,3 +655,53 @@ jobs:
             fi
           done
           echo "All required jobs passed or were skipped."
+
+      - name: SonarCloud quality gate verdict
+        # Fail the merge gate if SonarCloud's Quality Gate is ERROR.
+        # The sonar-scan step in Stage 4 has continue-on-error: true (so
+        # transient SonarCloud outages don't block merge), so the QG result
+        # is NOT carried by RESULT_SECURITY. We check it here authoritatively
+        # via SonarCloud's public API.
+        #
+        # Resolves the v2026.5.10 dogfood report: Sonar reported ERROR with
+        # 35 unreviewed hotspots and the merge still went through because
+        # nothing in the gate read the QG verdict.
+        env:
+          PROJECT_KEY: quanyeomans_kairix
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BRANCH_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR_NUMBER" ]; then
+              URL="https://sonarcloud.io/api/qualitygates/project_status?projectKey=${PROJECT_KEY}&pullRequest=${PR_NUMBER}"
+              CTX="PR #${PR_NUMBER}"
+          else
+              URL="https://sonarcloud.io/api/qualitygates/project_status?projectKey=${PROJECT_KEY}&branch=${BRANCH_REF}"
+              CTX="branch ${BRANCH_REF}"
+          fi
+          # Sonar may not have processed the new analysis yet; allow up to
+          # 90 s of polling before declaring the verdict missing. A missing
+          # verdict is treated as failure — operators must wait for Sonar
+          # to finish, or fix scan upload, rather than merge with no signal.
+          for i in 1 2 3 4 5 6; do
+              RESPONSE=$(curl -fsS --max-time 10 "$URL" || echo '{}')
+              STATUS=$(echo "$RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin) if sys.stdin.readable() else {}; print(d.get('projectStatus', {}).get('status', 'MISSING'))" 2>/dev/null || echo "MISSING")
+              if [ "$STATUS" = "OK" ]; then
+                  echo "SonarCloud Quality Gate OK for ${CTX}"
+                  exit 0
+              fi
+              if [ "$STATUS" = "ERROR" ]; then
+                  echo "SonarCloud Quality Gate ERROR for ${CTX}:"
+                  echo "$RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$RESPONSE"
+                  echo
+                  echo "Triage at https://sonarcloud.io/project/issues?id=${PROJECT_KEY}"
+                  exit 1
+              fi
+              # WARN, MISSING, or transient — wait and retry.
+              echo "SonarCloud verdict not ready (status=${STATUS}); attempt ${i}/6, sleeping 15 s..."
+              sleep 15
+          done
+          echo "FAILED: SonarCloud Quality Gate verdict still unavailable after 90 s."
+          echo "Either the Sonar scan never uploaded, or Sonar is degraded."
+          echo "Re-run the workflow once Sonar processes the analysis."
+          exit 1
