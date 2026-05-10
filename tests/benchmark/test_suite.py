@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from kairix.quality.benchmark.runner import BenchmarkResult, run_benchmark
+from kairix.quality.benchmark.runner import BenchmarkDeps, BenchmarkResult, run_benchmark
 from kairix.quality.benchmark.suite import (
     BenchmarkCase,
     BenchmarkSuite,
@@ -403,7 +403,7 @@ def _run_single_exact_case(gold_path: str, retrieved_paths: list[str]) -> float:
         suite,
         system="hybrid",
         agent="test",
-        retrieve_fn=_make_retrieve_fn([_mock_retrieve_result(retrieved_paths)]),
+        deps=BenchmarkDeps(retrieve=_make_retrieve_fn([_mock_retrieve_result(retrieved_paths)])),
     )
     return float(result.cases[0]["score"])
 
@@ -522,7 +522,7 @@ def test_run_benchmark_mocked_retrieval_correct_scores() -> None:
         suite,
         system="hybrid",
         agent="test",
-        retrieve_fn=_make_retrieve_fn(retrieve_results),
+        deps=BenchmarkDeps(retrieve=_make_retrieve_fn(retrieve_results)),
     )
 
     assert isinstance(result, BenchmarkResult)
@@ -612,7 +612,7 @@ def test_run_benchmark_weighted_total_calculation() -> None:
         suite,
         system="hybrid",
         agent="test",
-        retrieve_fn=_make_retrieve_fn(retrieve_results),
+        deps=BenchmarkDeps(retrieve=_make_retrieve_fn(retrieve_results)),
     )
 
     assert result.summary["category_scores"]["recall"] == pytest.approx(1.0)
@@ -687,7 +687,7 @@ def test_run_benchmark_all_scores_1_gives_weighted_total_1() -> None:
         suite_exact,
         system="hybrid",
         agent="test",
-        retrieve_fn=_make_retrieve_fn(retrieve_results),
+        deps=BenchmarkDeps(retrieve=_make_retrieve_fn(retrieve_results)),
     )
 
     assert result.summary["category_scores"]["recall"] == pytest.approx(1.0)
@@ -718,7 +718,7 @@ def test_run_benchmark_saves_json_to_output_dir(tmp_path: Path) -> None:
         system="bm25",
         agent="test",
         output_dir=output_dir,
-        retrieve_fn=_make_retrieve_fn([_mock_retrieve_result([])]),
+        deps=BenchmarkDeps(retrieve=_make_retrieve_fn([_mock_retrieve_result([])])),
     )
 
     json_files = list(Path(output_dir).glob("*.json"))
