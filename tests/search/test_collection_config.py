@@ -6,6 +6,7 @@ import pytest
 
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.config_loader import (
+    ResolveConfigDeps,
     _merge_retrieval_config,
     resolve_retrieval_config,
 )
@@ -124,8 +125,10 @@ class TestResolveRetrievalConfig:
         }
         result = resolve_retrieval_config(
             collections=["reference-library"],
-            config_fn=RetrievalConfig.defaults,
-            overrides_fn=lambda: baseline_overrides,
+            deps=ResolveConfigDeps(
+                config_fn=RetrievalConfig.defaults,
+                overrides_fn=lambda: baseline_overrides,
+            ),
         )
         assert result.fusion_strategy == "bm25_primary"
         assert result.vec_limit == 5
@@ -144,8 +147,10 @@ class TestResolveRetrievalConfig:
         global_cfg = RetrievalConfig.defaults()
         result = resolve_retrieval_config(
             collections=["reference-library"],
-            config_fn=lambda: global_cfg,
-            overrides_fn=lambda: {},
+            deps=ResolveConfigDeps(
+                config_fn=lambda: global_cfg,
+                overrides_fn=lambda: {},
+            ),
         )
         assert result is global_cfg
 
@@ -153,8 +158,10 @@ class TestResolveRetrievalConfig:
     def test_single_collection_with_yaml_config(self) -> None:
         result = resolve_retrieval_config(
             collections=["my-docs"],
-            config_fn=RetrievalConfig.defaults,
-            overrides_fn=lambda: {"my-docs": {"fusion_strategy": "rrf", "vec_limit": 30}},
+            deps=ResolveConfigDeps(
+                config_fn=RetrievalConfig.defaults,
+                overrides_fn=lambda: {"my-docs": {"fusion_strategy": "rrf", "vec_limit": 30}},
+            ),
         )
         assert result.fusion_strategy == "rrf"
         assert result.vec_limit == 30
@@ -162,13 +169,16 @@ class TestResolveRetrievalConfig:
     @pytest.mark.unit
     def test_multi_collection_uses_global(self) -> None:
         global_cfg = RetrievalConfig.defaults()
-        result = resolve_retrieval_config(collections=["a", "b"], config_fn=lambda: global_cfg)
+        result = resolve_retrieval_config(
+            collections=["a", "b"],
+            deps=ResolveConfigDeps(config_fn=lambda: global_cfg),
+        )
         assert result is global_cfg
 
     @pytest.mark.unit
     def test_no_collection_uses_global(self) -> None:
         global_cfg = RetrievalConfig.defaults()
-        result = resolve_retrieval_config(config_fn=lambda: global_cfg)
+        result = resolve_retrieval_config(deps=ResolveConfigDeps(config_fn=lambda: global_cfg))
         assert result is global_cfg
 
     @pytest.mark.unit
@@ -176,8 +186,10 @@ class TestResolveRetrievalConfig:
         global_cfg = RetrievalConfig.defaults()
         result = resolve_retrieval_config(
             collections=["unknown"],
-            config_fn=lambda: global_cfg,
-            overrides_fn=lambda: {},
+            deps=ResolveConfigDeps(
+                config_fn=lambda: global_cfg,
+                overrides_fn=lambda: {},
+            ),
         )
         assert result is global_cfg
 

@@ -1,7 +1,3 @@
-kairix/agents/briefing/pipeline.py
-kairix/agents/research/graph.py
-kairix/agents/research/nodes.py
-kairix/core/search/config_loader.py
 kairix/knowledge/contradict/detector.py
 kairix/knowledge/summaries/generate.py
 kairix/platform/llm/backends.py

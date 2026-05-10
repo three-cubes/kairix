@@ -26,6 +26,7 @@ from kairix.core.search import config_loader
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.config_loader import (
     ConfigValidationError,
+    ResolveConfigDeps,
     load_collections,
     load_config,
     parse_collections,
@@ -482,7 +483,7 @@ class TestResolveRetrievalConfigContract:
         argument the resolver returns the object produced by ``config_fn``.
         """
         sentinel = RetrievalConfig.defaults()
-        result = resolve_retrieval_config(config_fn=lambda: sentinel)
+        result = resolve_retrieval_config(deps=ResolveConfigDeps(config_fn=lambda: sentinel))
         assert result is sentinel
 
     def test_multi_collection_returns_global_config(self) -> None:
@@ -490,7 +491,10 @@ class TestResolveRetrievalConfigContract:
         in ``collections`` short-circuit per-collection lookup.
         """
         sentinel = RetrievalConfig.defaults()
-        result = resolve_retrieval_config(collections=["a", "b"], config_fn=lambda: sentinel)
+        result = resolve_retrieval_config(
+            collections=["a", "b"],
+            deps=ResolveConfigDeps(config_fn=lambda: sentinel),
+        )
         assert result is sentinel
 
     def test_unknown_single_collection_returns_global_config(
@@ -510,7 +514,10 @@ class TestResolveRetrievalConfigContract:
         )
         monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg_file))
         sentinel = RetrievalConfig.defaults()
-        result = resolve_retrieval_config(collection="not-present", config_fn=lambda: sentinel)
+        result = resolve_retrieval_config(
+            collection="not-present",
+            deps=ResolveConfigDeps(config_fn=lambda: sentinel),
+        )
         assert result is sentinel
 
     def test_single_collection_yaml_override_merged_over_global(
@@ -540,7 +547,10 @@ class TestResolveRetrievalConfigContract:
             vec_limit=7,
             bm25_limit=21,
         )
-        result = resolve_retrieval_config(collection="my-docs", config_fn=lambda: global_cfg)
+        result = resolve_retrieval_config(
+            collection="my-docs",
+            deps=ResolveConfigDeps(config_fn=lambda: global_cfg),
+        )
         assert result.fusion_strategy == "rrf"  # from override
         assert result.vec_limit == 30  # from override
         assert result.bm25_limit == 21  # preserved from global
@@ -572,15 +582,17 @@ class TestResolveRetrievalConfigContract:
         only ``decay_halflife_days`` on chunk_date_boost preserves the global
         ``enabled`` and ``guard_explicit_only`` flags.
 
-        Drives the public surface via the documented ``overrides_fn=``
-        injection seam; no env-var monkeypatching, no YAML file on disk.
+        Drives the public surface via the documented deps injection seam;
+        no env-var monkeypatching, no YAML file on disk.
         """
         result = resolve_retrieval_config(
             collection="dated-notes",
-            config_fn=RetrievalConfig.defaults,
-            overrides_fn=lambda: {
-                "dated-notes": {"boosts": {"temporal": {"chunk_date_boost": {"decay_halflife_days": 7}}}},
-            },
+            deps=ResolveConfigDeps(
+                config_fn=RetrievalConfig.defaults,
+                overrides_fn=lambda: {
+                    "dated-notes": {"boosts": {"temporal": {"chunk_date_boost": {"decay_halflife_days": 7}}}},
+                },
+            ),
         )
         defaults = RetrievalConfig.defaults()
         # Override applied: halflife from per-collection block.
@@ -596,10 +608,12 @@ class TestResolveRetrievalConfigContract:
         """
         result = resolve_retrieval_config(
             collection="dated-notes",
-            config_fn=RetrievalConfig.defaults,
-            overrides_fn=lambda: {
-                "dated-notes": {"boosts": {"temporal": {"date_path_boost": {"factor": 1.7}}}},
-            },
+            deps=ResolveConfigDeps(
+                config_fn=RetrievalConfig.defaults,
+                overrides_fn=lambda: {
+                    "dated-notes": {"boosts": {"temporal": {"date_path_boost": {"factor": 1.7}}}},
+                },
+            ),
         )
         defaults = RetrievalConfig.defaults()
         assert result.temporal.date_path_boost_factor == pytest.approx(1.7)
@@ -624,10 +638,12 @@ class TestResolveRetrievalConfigContract:
         )
         result = resolve_retrieval_config(
             collection="noisy-docs",
-            config_fn=lambda: global_cfg,
-            overrides_fn=lambda: {
-                "noisy-docs": {"rerank": {"model": "cross-encoder/ms-marco-TinyBERT-L-2-v2"}},
-            },
+            deps=ResolveConfigDeps(
+                config_fn=lambda: global_cfg,
+                overrides_fn=lambda: {
+                    "noisy-docs": {"rerank": {"model": "cross-encoder/ms-marco-TinyBERT-L-2-v2"}},
+                },
+            ),
         )
         # Override applied: model from per-collection block.
         assert result.rerank.model == "cross-encoder/ms-marco-TinyBERT-L-2-v2"

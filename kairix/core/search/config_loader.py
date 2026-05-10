@@ -448,12 +448,26 @@ def _get_collection_overrides() -> dict[str, dict]:
     return {c.name: c.retrieval_overrides for c in collections_cfg.shared if c.retrieval_overrides}
 
 
+@dataclass
+class ResolveConfigDeps:
+    """Injectable dependencies for ``resolve_retrieval_config``.
+
+    Both fields are typed as concrete callables (no ``Optional``) so mypy
+    sees a real type at every call site. Production callers leave
+    ``deps=None`` — the dataclass wires the real loader and override lookup
+    via ``default_factory``. Tests construct
+    ``ResolveConfigDeps(config_fn=..., overrides_fn=...)``.
+    """
+
+    config_fn: Callable[[], RetrievalConfig] = field(default_factory=lambda: load_config)
+    overrides_fn: Callable[[], dict[str, dict]] = field(default_factory=lambda: _get_collection_overrides)
+
+
 def resolve_retrieval_config(
     collection: str | None = None,
     collections: list[str] | None = None,
     explicit_config: RetrievalConfig | None = None,
-    config_fn: Callable[[], RetrievalConfig] | None = None,
-    overrides_fn: Callable[[], dict[str, dict]] | None = None,
+    deps: ResolveConfigDeps | None = None,
 ) -> RetrievalConfig:
     """Resolve the retrieval config for a search request.
 
@@ -476,17 +490,17 @@ def resolve_retrieval_config(
         collections:     List of collection names; per-collection override
                          applies only when this list is length 1.
         explicit_config: Direct override; bypasses all other lookup.
-        config_fn:       Injection seam for the global config loader. Tests
-                         pass a no-arg callable returning a known RetrievalConfig.
-        overrides_fn:    Injection seam for per-collection overrides lookup.
-                         Tests pass a no-arg callable returning the override
-                         dict directly. Defaults to ``_get_collection_overrides``.
+        deps:            Injectable dependencies (config_fn, overrides_fn).
+                         Production callers leave None; tests pass a
+                         ``ResolveConfigDeps`` with fakes. The default
+                         factories wire the real loader and per-collection
+                         override lookup.
     """
     if explicit_config is not None:
         return explicit_config
 
-    _load = config_fn or load_config
-    global_cfg = _load()
+    d = deps or ResolveConfigDeps()
+    global_cfg = d.config_fn()
 
     # Determine target collection (only for single-collection searches)
     target = collection
@@ -497,8 +511,7 @@ def resolve_retrieval_config(
         return global_cfg
 
     # Per-collection YAML overrides
-    _overrides = overrides_fn or _get_collection_overrides
-    overrides = _overrides().get(target)
+    overrides = d.overrides_fn().get(target)
     if overrides:
         return _merge_retrieval_config(global_cfg, overrides)
 
