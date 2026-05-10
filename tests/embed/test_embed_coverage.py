@@ -121,6 +121,23 @@ def test_chunk_text_empty_string() -> None:
     assert isinstance(result, list)
 
 
+@pytest.mark.unit
+def test_chunk_text_skips_whitespace_only_chunks() -> None:
+    """When a chunk window contains only whitespace, the chunker drops it
+    and continues — exercises the falsy-chunk branch in chunk_text.
+    """
+    # Text whose body has a long whitespace stretch in the middle so a
+    # mid-text chunk window strips down to "". Force chunk_size large enough
+    # that the iteration produces multiple windows.
+    text = "alpha " + " " * 800 + " beta"
+    chunks = chunk_text(text, chunk_size=300, overlap=0)
+    # Sanity: every kept chunk has non-empty stripped text.
+    assert all(c["text"].strip() for c in chunks)
+    # Seq numbers are still sequential (skipped chunks don't increment seq).
+    for i, c in enumerate(chunks):
+        assert c["seq"] == i
+
+
 # ---------------------------------------------------------------------------
 # preflight_check — driven through the ``client=`` injection seam.
 # ---------------------------------------------------------------------------
@@ -486,6 +503,59 @@ def test_run_embed_logs_chunk_date_populated_count_when_documents_have_dates(cap
     # Sabotage check: if extract_chunk_date were broken or the chunk_date assertion path
     # in run_embed were the warning branch, the populated message would not appear at all.
     assert "/" in populated_lines[0]  # "for N/M chunks" embeds a fraction
+
+
+@pytest.mark.unit
+def test_run_embed_marks_batch_failed_when_db_write_raises_sqlite_error(caplog) -> None:
+    """When the sqlite write inside ``_embed_and_store_batch`` raises
+    ``sqlite3.Error`` (e.g. closed connection, locked DB, schema drift),
+    every chunk in that batch surfaces as failed and the run continues.
+
+    Drives the ``except sqlite3.Error`` branch in _embed_and_store_batch
+    via a deps-injected ``embed_batch`` and a wrapper sqlite connection
+    whose commit raises. No monkeypatch — pure injection at the boundary.
+    """
+    import logging
+
+    db = sqlite3.connect(":memory:")
+    _seed_documents(db, [("h1", "doc body content " * 5, "docs/a.md")])
+
+    # Wrapper that raises sqlite3.Error on commit. ``with db:`` calls
+    # ``commit`` on success, so this fires the run_embed sqlite-error path.
+    class _CommitFailsConnection:
+        def __init__(self, inner: sqlite3.Connection) -> None:
+            self._inner = inner
+
+        def __enter__(self) -> Any:
+            return self._inner.__enter__()
+
+        def __exit__(self, exc_type, exc, tb) -> Any:
+            # Force commit to fail so _embed_and_store_batch hits its
+            # sqlite3.Error branch (covers the DB-write failure path).
+            raise sqlite3.OperationalError("simulated DB write failure")
+
+        def execute(self, *args: Any, **kwargs: Any) -> Any:
+            return self._inner.execute(*args, **kwargs)
+
+        def commit(self) -> None:
+            self._inner.commit()
+
+        def cursor(self) -> Any:
+            return self._inner.cursor()
+
+    deps = _build_run_embed_deps()
+
+    from kairix.core.embed.embed import run_embed
+
+    wrapped = _CommitFailsConnection(db)
+    with caplog.at_level(logging.ERROR):
+        result = run_embed(wrapped, batch_size=10, deps=deps)  # type: ignore[arg-type]  # wrapper proxies sqlite3.Connection surface that run_embed touches
+
+    # Every chunk in the failing batch should be marked failed.
+    assert result["embedded"] == 0
+    assert result["failed"] >= 1
+    error_lines = [r.message for r in caplog.records if "DB write for batch" in r.message]
+    assert error_lines, f"expected a 'DB write for batch' error log; got {[r.message for r in caplog.records]}"
 
 
 @pytest.mark.unit
