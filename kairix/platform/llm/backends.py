@@ -2,12 +2,45 @@
 Concrete LLMBackend implementations.
 
 AzureOpenAIBackend — thin wrapper over kairix._azure.
+
+Tests substitute the chat/embed callables through ``LLMBackendDeps`` rather
+than passing per-method ``*_fn=None`` substitution kwargs.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
+
+
+def _default_chat(messages: list[dict[str, Any]], max_tokens: int = 800) -> str:
+    """Production chat callable — delegates to ``kairix._azure.chat_completion``."""
+    from kairix._azure import chat_completion
+
+    result: str = chat_completion(messages, max_tokens=max_tokens)
+    return result
+
+
+def _default_embed(text: str) -> list[float]:
+    """Production embed callable — delegates to ``kairix._azure.embed_text``."""
+    from kairix._azure import embed_text
+
+    result: list[float] = embed_text(text)
+    return result
+
+
+@dataclass
+class LLMBackendDeps:
+    """Injectable dependencies for ``AzureOpenAIBackend``.
+
+    Each field defaults to the production Azure callable; tests construct
+    ``LLMBackendDeps(chat=fake_chat, embed=fake_embed)`` rather than passing
+    ``chat_fn=`` / ``embed_fn=`` kwargs to the backend's constructor.
+    """
+
+    chat: Callable[..., str] = field(default_factory=lambda: _default_chat)
+    embed: Callable[[str], list[float]] = field(default_factory=lambda: _default_embed)
 
 
 class AzureOpenAIBackend:
@@ -25,29 +58,18 @@ class AzureOpenAIBackend:
     # Adapter pattern: satisfies LLMBackend protocol by delegating to _azure module
     """
 
-    def __init__(
-        self,
-        chat_fn: Callable[..., str] | None = None,
-        embed_fn: Callable[..., list[float]] | None = None,
-    ) -> None:
-        """Construct with optional injectable callables for testing."""
-        self._chat_fn = chat_fn
-        self._embed_fn = embed_fn
+    def __init__(self, deps: LLMBackendDeps | None = None) -> None:
+        """Construct with optional injectable dependencies for testing.
+
+        Production callers leave ``deps`` ``None`` and the defaults wire
+        to ``kairix._azure``; tests pass ``LLMBackendDeps(chat=...)``.
+        """
+        self._deps = deps if deps is not None else LLMBackendDeps()
 
     def chat(self, messages: list[dict[str, Any]], max_tokens: int = 800) -> str:
         """Chat completion via Azure OpenAI (gpt-4o-mini by default)."""
-        if self._chat_fn is not None:
-            return self._chat_fn(messages, max_tokens=max_tokens)
-        from kairix._azure import chat_completion
-
-        result: str = chat_completion(messages, max_tokens=max_tokens)
-        return result
+        return self._deps.chat(messages, max_tokens=max_tokens)
 
     def embed(self, text: str) -> list[float]:
         """Text embedding via Azure OpenAI (text-embedding-3-large)."""
-        if self._embed_fn is not None:
-            return self._embed_fn(text)
-        from kairix._azure import embed_text
-
-        result: list[float] = embed_text(text)
-        return result
+        return self._deps.embed(text)

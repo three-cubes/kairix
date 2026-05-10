@@ -1,8 +1,8 @@
 """Step definitions for onboard_check.feature.
 
 Drives ``check_kairix_on_path`` and ``check_secrets_loaded`` through their
-public DI seams (``which_fn`` and ``env`` kwargs) — no monkeypatch on
-``os.environ`` or ``shutil.which``.
+public DI seams (``OnboardChecksDeps`` and ``env`` kwarg) — no monkeypatch
+on ``os.environ`` or ``shutil.which``.
 """
 
 import sqlite3
@@ -12,6 +12,7 @@ from pytest_bdd import given, then, when
 
 from kairix.platform.onboard.check import (
     CheckResult,
+    OnboardChecksDeps,
     check_kairix_on_path,
     check_secrets_loaded,
 )
@@ -28,13 +29,13 @@ def kairix_with_credentials():
         "KAIRIX_LLM_ENDPOINT": "https://test.openai.azure.com/",
     }
     # Pretend `kairix` is installed at /usr/local/bin/kairix for the on-path check.
-    _state["which_fn"] = lambda name: f"/usr/local/bin/{name}" if name == "kairix" else None
+    _state["which"] = lambda name: f"/usr/local/bin/{name}" if name == "kairix" else None
 
 
 @given("kairix is installed without API credentials")
 def kairix_without_credentials():
     _state["env"] = {}  # no KAIRIX_LLM_* keys, no KAIRIX_SECRETS_FILE
-    _state["which_fn"] = lambda name: f"/usr/local/bin/{name}" if name == "kairix" else None
+    _state["which"] = lambda name: f"/usr/local/bin/{name}" if name == "kairix" else None
 
 
 @given("documents are indexed")
@@ -65,7 +66,8 @@ def documents_indexed(tmp_path):
 @when("I run onboard check")
 def run_onboard_check(tmp_path):
     env = _state.get("env", {})
-    which_fn = _state.get("which_fn", lambda _name: None)
+    which = _state.get("which", lambda _name: None)
+    deps = OnboardChecksDeps(which=which)
 
     doc_root_setting = env.get("KAIRIX_DOCUMENT_ROOT", "")
     if doc_root_setting:
@@ -78,7 +80,7 @@ def run_onboard_check(tmp_path):
         doc_root_fix = "Set KAIRIX_DOCUMENT_ROOT or create ~/kairix-vault/"
 
     _state["check_results"] = {
-        "kairix_on_path": check_kairix_on_path(which_fn=which_fn),
+        "kairix_on_path": check_kairix_on_path(deps=deps),
         "secrets_loaded": check_secrets_loaded(env=env),
         "document_root_configured": CheckResult(
             name="document_root_configured",
