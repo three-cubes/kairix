@@ -37,26 +37,28 @@ def given_search_raises():
 
 @when(parsers.re(r'the agent calls tool_contradict with content "(?P<content>[^"]*)"'))
 def call_tool_contradict(content):
-    from kairix.agents.mcp.server import tool_contradict
+    """Drive the use case + envelope projection just like the MCP adapter does."""
+    from kairix.use_cases.contradict import (
+        ContradictDeps,
+        contradict_output_to_envelope,
+        run_contradict,
+    )
 
     _state["exception"] = None
     _state["result"] = None
 
     fake_llm = FakeLLMBackend()
 
-    try:
+    def _check_fn(**kwargs):
         if _state.get("mock_raises"):
+            raise RuntimeError("search unavailable")
+        return _state["mock_contradictions"]
 
-            def _failing_contradict(**kwargs):
-                raise RuntimeError("search unavailable")
+    deps = ContradictDeps(check_fn=_check_fn, llm_backend=fake_llm)
 
-            _state["result"] = tool_contradict(content=content, llm_backend=fake_llm, contradict_fn=_failing_contradict)
-        else:
-            _state["result"] = tool_contradict(
-                content=content,
-                llm_backend=fake_llm,
-                contradict_fn=lambda **kwargs: _state["mock_contradictions"],
-            )
+    try:
+        out = run_contradict(content, deps=deps)
+        _state["result"] = contradict_output_to_envelope(out)
     except Exception as exc:
         _state["exception"] = exc
 

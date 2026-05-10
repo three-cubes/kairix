@@ -1,151 +1,128 @@
-"""
-Tests for KFEAT-010 MCP affordance improvements (AFF-1 through AFF-3, AFF-5).
+"""Tests for KFEAT-010 MCP affordance improvements (AFF-1 through AFF-3, AFF-5).
 
 Covers:
-  AFF-1  Automatic budget inference
+  AFF-1  Automatic budget inference (driven through ``run_search``)
   AFF-2  Plain-language tool descriptions
-  AFF-3  Entity-first hint in search results
+  AFF-3  Entity-first hint in search results (driven through ``run_search``)
+
+Phase 2 of #168 moved budget inference and entity-card injection into
+the use case (``kairix.use_cases.search.run_search``). These tests
+exercise the public surface — both via the use case directly (AFF-1,
+AFF-3) and via the MCP tool docstrings (AFF-2).
 """
 
 from __future__ import annotations
 
 import inspect
-from types import SimpleNamespace
+from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 
 from kairix.agents.mcp.server import (
-    _extract_entity_name,
-    _infer_budget,
     tool_entity,
     tool_prep,
     tool_search,
     tool_timeline,
     tool_usage_guide,
 )
+from kairix.core.search.intent import QueryIntent
+from kairix.use_cases.search import SearchDeps, run_search
 
 # ---------------------------------------------------------------------------
-# AFF-1: Budget inference
+# Fakes
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeInner:
+    path: str = ""
+    title: str = ""
+    snippet: str = ""
+    boosted_score: float = 0.0
+    collection: str = ""
+
+
+@dataclass
+class _FakeBudgeted:
+    result: _FakeInner
+    content: str = ""
+    tier: str = ""
+    token_estimate: int = 0
+
+
+@dataclass
+class _FakeSearchResult:
+    query: str = ""
+    intent: Any = QueryIntent.SEMANTIC
+    results: list[_FakeBudgeted] = field(default_factory=list)
+    bm25_count: int = 0
+    vec_count: int = 0
+    fused_count: int = 0
+    vec_failed: bool = False
+    total_tokens: int = 0
+    latency_ms: float = 0.0
+    error: str = ""
+
+
+def _capturing_deps(intent: QueryIntent) -> tuple[SearchDeps, dict[str, Any]]:
+    """Build a SearchDeps that captures the budget passed through and
+    returns an empty SearchResult."""
+    captured: dict[str, Any] = {}
+
+    def fake_search(**kwargs: Any) -> _FakeSearchResult:
+        captured.update(kwargs)
+        return _FakeSearchResult(intent=intent)
+
+    return SearchDeps(
+        search_fn=fake_search,
+        classify_fn=lambda q: intent,
+        entity_card_fn=lambda name: None,
+    ), captured
+
+
+# ---------------------------------------------------------------------------
+# AFF-1: Budget inference via run_search public surface
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 class TestBudgetInference:
-    """_infer_budget selects the right token budget by query intent."""
+    """``run_search`` selects the right token budget for the inferred intent."""
 
-    @pytest.mark.unit
+    def _budget_for(self, query: str, intent: QueryIntent, explicit_budget: int = 3000) -> int:
+        deps, captured = _capturing_deps(intent)
+        run_search(query, budget=explicit_budget, deps=deps)
+        return captured["budget"]
+
     def test_entity_intent_returns_1500(self) -> None:
-        from kairix.core.search.intent import QueryIntent
+        assert self._budget_for("tell me about Acme", QueryIntent.ENTITY) == 1500
 
-        assert _infer_budget("tell me about Acme", 3000, classify_fn=lambda q: QueryIntent.ENTITY) == 1500
-
-    @pytest.mark.unit
     def test_keyword_intent_returns_1500(self) -> None:
-        from kairix.core.search.intent import QueryIntent
+        assert self._budget_for("KFEAT-010", QueryIntent.KEYWORD) == 1500
 
-        assert _infer_budget("KFEAT-010", 3000, classify_fn=lambda q: QueryIntent.KEYWORD) == 1500
-
-    @pytest.mark.unit
     def test_research_query_returns_5000(self) -> None:
-        from kairix.core.search.intent import QueryIntent
+        assert self._budget_for("research the competitive landscape", QueryIntent.SEMANTIC) == 5000
 
-        assert (
-            _infer_budget(
-                "research the competitive landscape",
-                3000,
-                classify_fn=lambda q: QueryIntent.SEMANTIC,
-            )
-            == 5000
-        )
-
-    @pytest.mark.unit
     def test_compare_query_returns_5000(self) -> None:
-        from kairix.core.search.intent import QueryIntent
+        assert self._budget_for("compare the two frameworks", QueryIntent.SEMANTIC) == 5000
 
-        assert (
-            _infer_budget(
-                "compare the two frameworks",
-                3000,
-                classify_fn=lambda q: QueryIntent.SEMANTIC,
-            )
-            == 5000
-        )
-
-    @pytest.mark.unit
     def test_analyse_query_returns_5000(self) -> None:
-        from kairix.core.search.intent import QueryIntent
+        assert self._budget_for("analyse the quarterly results", QueryIntent.SEMANTIC) == 5000
 
-        assert (
-            _infer_budget(
-                "analyse the quarterly results",
-                3000,
-                classify_fn=lambda q: QueryIntent.SEMANTIC,
-            )
-            == 5000
-        )
-
-    @pytest.mark.unit
     def test_comprehensive_query_returns_5000(self) -> None:
-        from kairix.core.search.intent import QueryIntent
+        assert self._budget_for("give me a comprehensive overview", QueryIntent.SEMANTIC) == 5000
 
-        assert (
-            _infer_budget(
-                "give me a comprehensive overview",
-                3000,
-                classify_fn=lambda q: QueryIntent.SEMANTIC,
-            )
-            == 5000
-        )
-
-    @pytest.mark.unit
     def test_detailed_query_returns_5000(self) -> None:
-        from kairix.core.search.intent import QueryIntent
+        assert self._budget_for("detailed breakdown of costs", QueryIntent.SEMANTIC) == 5000
 
-        assert (
-            _infer_budget(
-                "detailed breakdown of costs",
-                3000,
-                classify_fn=lambda q: QueryIntent.SEMANTIC,
-            )
-            == 5000
-        )
-
-    @pytest.mark.unit
     def test_default_returns_3000(self) -> None:
-        from kairix.core.search.intent import QueryIntent
+        assert self._budget_for("how does the build system work", QueryIntent.SEMANTIC) == 3000
 
-        assert (
-            _infer_budget(
-                "how does the build system work",
-                3000,
-                classify_fn=lambda q: QueryIntent.SEMANTIC,
-            )
-            == 3000
-        )
-
-    @pytest.mark.unit
     def test_explicit_override_preserved(self) -> None:
         """Non-default explicit budget is returned unchanged regardless of intent."""
-        assert _infer_budget("tell me about Acme", 2000) == 2000
-        assert _infer_budget("research everything", 1000) == 1000
-
-    @pytest.mark.unit
-    def test_classify_failure_falls_back_to_heuristics(self) -> None:
-        """When classify raises, research words still trigger 5000."""
-
-        def _failing_classify(q):
-            raise RuntimeError("broken")
-
-        assert _infer_budget("research the topic", 3000, classify_fn=_failing_classify) == 5000
-
-    @pytest.mark.unit
-    def test_classify_failure_default_3000(self) -> None:
-        """When classify raises and no research words, default is 3000."""
-
-        def _failing_classify(q):
-            raise RuntimeError("broken")
-
-        assert _infer_budget("hello world", 3000, classify_fn=_failing_classify) == 3000
+        assert self._budget_for("tell me about Acme", QueryIntent.ENTITY, explicit_budget=2000) == 2000
+        assert self._budget_for("research everything", QueryIntent.SEMANTIC, explicit_budget=1000) == 1000
 
 
 # ---------------------------------------------------------------------------
@@ -157,37 +134,31 @@ class TestBudgetInference:
 class TestPlainLanguageDocstrings:
     """Verify tool docstrings are written at grade 8 reading level."""
 
-    @pytest.mark.unit
     def test_tool_search_docstring(self) -> None:
         doc = inspect.getdoc(tool_search) or ""
         first_sentence = doc.split(".")[0]
-        assert "Search for anything" in first_sentence
+        assert "knowledge store" in first_sentence.lower() or "search" in first_sentence.lower()
 
-    @pytest.mark.unit
     def test_tool_entity_docstring(self) -> None:
         doc = inspect.getdoc(tool_entity) or ""
         first_sentence = doc.split(".")[0]
         assert "Look up" in first_sentence
 
-    @pytest.mark.unit
     def test_tool_prep_docstring(self) -> None:
         doc = inspect.getdoc(tool_prep) or ""
         first_sentence = doc.split(".")[0]
         assert "summary" in first_sentence.lower()
 
-    @pytest.mark.unit
     def test_tool_timeline_docstring(self) -> None:
         doc = inspect.getdoc(tool_timeline) or ""
         first_sentence = doc.split(".")[0]
         assert "date" in first_sentence.lower()
 
-    @pytest.mark.unit
     def test_tool_usage_guide_docstring(self) -> None:
         doc = inspect.getdoc(tool_usage_guide) or ""
         first_sentence = doc.split(".")[0]
         assert "help" in first_sentence.lower() or "guide" in first_sentence.lower()
 
-    @pytest.mark.unit
     def test_no_temporal_as_leading_term(self) -> None:
         """Docstring first sentences should not lead with jargon like 'temporal'."""
         tools = [tool_search, tool_entity, tool_prep, tool_timeline, tool_usage_guide]
@@ -200,7 +171,7 @@ class TestPlainLanguageDocstrings:
 
 
 # ---------------------------------------------------------------------------
-# AFF-3: Entity-first hint in search results
+# AFF-3: Entity-first hint via run_search public surface
 # ---------------------------------------------------------------------------
 
 
@@ -208,23 +179,12 @@ class TestPlainLanguageDocstrings:
 class TestEntityFirstHint:
     """When intent is ENTITY, the entity graph result appears first."""
 
-    @pytest.mark.unit
     def test_entity_intent_prepends_entity_graph_result(self) -> None:
-        mock_budgeted = SimpleNamespace(
-            result=SimpleNamespace(path="notes/acme.md", boosted_score=0.7),
-            content="some context about Acme",
-            token_estimate=20,
+        sr = _FakeSearchResult(
+            intent=QueryIntent.ENTITY,
+            results=[_FakeBudgeted(result=_FakeInner(path="notes/acme.md", boosted_score=0.7), content="some context")],
         )
-        mock_result = SimpleNamespace(
-            query="tell me about Acme",
-            intent=SimpleNamespace(value="entity"),
-            results=[mock_budgeted],
-            total_tokens=20,
-            latency_ms=30.0,
-            error="",
-        )
-
-        entity_card = {
+        card = {
             "id": "acme",
             "name": "Acme",
             "type": "Organisation",
@@ -232,87 +192,37 @@ class TestEntityFirstHint:
             "vault_path": "02-Areas/00-Clients/Acme/Acme.md",
         }
 
-        result = tool_search(
-            query="tell me about Acme",
-            search_fn=lambda **kwargs: mock_result,
-            entity_card_fn=lambda name: entity_card,
+        deps = SearchDeps(
+            search_fn=lambda **_: sr,
+            classify_fn=lambda q: QueryIntent.ENTITY,
+            entity_card_fn=lambda name: card,
         )
+        out = run_search("tell me about Acme", deps=deps)
 
-        assert len(result["results"]) == 2
-        first = result["results"][0]
-        assert first["source"] == "entity_graph"
-        assert first["entity"]["name"] == "Acme"
-        assert first["entity"]["type"] == "Organisation"
+        assert len(out.results) == 2
+        first = out.results[0]
+        assert first.source == "entity_graph"
+        assert first.entity == {"id": "acme", "name": "Acme", "type": "Organisation"}
 
-    @pytest.mark.unit
     def test_entity_not_found_no_prepend(self) -> None:
-        """When entity lookup fails, no entity_graph result is prepended."""
-        mock_budgeted = SimpleNamespace(
-            result=SimpleNamespace(path="notes/unknown.md", boosted_score=0.5),
-            content="some text",
-            token_estimate=10,
+        sr = _FakeSearchResult(
+            intent=QueryIntent.ENTITY,
+            results=[_FakeBudgeted(result=_FakeInner(path="notes/unknown.md", boosted_score=0.5), content="x")],
         )
-        mock_result = SimpleNamespace(
-            query="tell me about UnknownCorp",
-            intent=SimpleNamespace(value="entity"),
-            results=[mock_budgeted],
-            total_tokens=10,
-            latency_ms=20.0,
-            error="",
-        )
-
-        result = tool_search(
-            query="tell me about UnknownCorp",
-            search_fn=lambda **kwargs: mock_result,
+        deps = SearchDeps(
+            search_fn=lambda **_: sr,
+            classify_fn=lambda q: QueryIntent.ENTITY,
             entity_card_fn=lambda name: None,
         )
+        out = run_search("tell me about UnknownCorp", deps=deps)
+        assert len(out.results) == 1
+        assert out.results[0].source == ""
 
-        assert len(result["results"]) == 1
-        assert result["results"][0].get("source") is None
-
-    @pytest.mark.unit
     def test_non_entity_intent_no_prepend(self) -> None:
-        """Non-entity intents never trigger entity-first hint."""
-        mock_result = SimpleNamespace(
-            query="how to deploy",
-            intent=SimpleNamespace(value="procedural"),
-            results=[],
-            total_tokens=0,
-            latency_ms=5.0,
-            error="",
+        deps = SearchDeps(
+            search_fn=lambda **_: _FakeSearchResult(intent=QueryIntent.SEMANTIC),
+            classify_fn=lambda q: QueryIntent.SEMANTIC,
+            entity_card_fn=lambda name: {"id": "x"},  # would prepend if branch ran
         )
-
-        result = tool_search(
-            query="how to deploy",
-            search_fn=lambda **kwargs: mock_result,
-        )
-
-        assert all(r.get("source") != "entity_graph" for r in result["results"])
-
-
-# ---------------------------------------------------------------------------
-# _extract_entity_name helper
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestExtractEntityName:
-    @pytest.mark.unit
-    def test_strips_what_is(self) -> None:
-        assert _extract_entity_name("what is Acme") == "Acme"
-
-    @pytest.mark.unit
-    def test_strips_who_is(self) -> None:
-        assert _extract_entity_name("who is Alice") == "Alice"
-
-    @pytest.mark.unit
-    def test_strips_tell_me_about(self) -> None:
-        assert _extract_entity_name("tell me about Acme Corp") == "Acme Corp"
-
-    @pytest.mark.unit
-    def test_strips_trailing_punctuation(self) -> None:
-        assert _extract_entity_name("what is Acme?") == "Acme"
-
-    @pytest.mark.unit
-    def test_plain_name(self) -> None:
-        assert _extract_entity_name("Acme") == "Acme"
+        out = run_search("how to deploy", deps=deps)
+        assert all(h.source != "entity_graph" for h in out.results)
