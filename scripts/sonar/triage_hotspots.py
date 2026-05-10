@@ -107,8 +107,7 @@ HOTSPOT_RATIONALES: dict[tuple[str, str], str] = {
         "does not need cryptographic randomness. Reviewed and accepted."
     ),
     ("python:S2245", "kairix/quality/eval/judge.py"): (
-        "Non-security PRNG — used for retrieval-quality scoring sampling, not "
-        "security. Reviewed and accepted."
+        "Non-security PRNG — used for retrieval-quality scoring sampling, not security. Reviewed and accepted."
     ),
     ("python:S2245", "scripts/build-reflib-queries.py"): (
         "Non-security PRNG — operator-only script that samples reference-library "
@@ -177,7 +176,7 @@ def _api(method: str, path: str, token: str, **params: str) -> dict:
         body = urllib.parse.urlencode(params).encode("utf-8")
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 — fixed sonarcloud.io domain
+    with urllib.request.urlopen(req, timeout=30) as resp:
         raw = resp.read().decode("utf-8")
     return json.loads(raw) if raw else {}
 
