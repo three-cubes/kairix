@@ -33,6 +33,8 @@ _EXPECTED_TOOLS = {
     "contradict",
     "usage_guide",
     "brief",
+    "entity_suggest",
+    "entity_validate",
 }
 
 

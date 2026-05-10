@@ -491,6 +491,42 @@ def tool_contradict(
     return contradict_output_to_envelope(out)
 
 
+def tool_entity_suggest(
+    text: str,
+    *,
+    deps: Any = None,
+) -> dict[str, Any]:
+    """Suggest entities found in arbitrary text by running NER + Neo4j cross-ref.
+
+    Thin adapter around ``kairix.use_cases.entity.run_entity_suggest``.
+    Use to spot people, organisations, places mentioned in prose so an
+    operator (or another agent) can decide whether to add them to the
+    knowledge graph.
+    """
+    from kairix.use_cases.entity import entity_suggest_output_to_envelope, run_entity_suggest
+
+    out = run_entity_suggest(text, deps=deps)
+    return entity_suggest_output_to_envelope(out)
+
+
+def tool_entity_validate(
+    name: str,
+    update: bool = False,
+    *,
+    deps: Any = None,
+) -> dict[str, Any]:
+    """Validate an entity against Wikidata and optionally update Neo4j.
+
+    Thin adapter around ``kairix.use_cases.entity.run_entity_validate``.
+    Use to confirm a graph entity has a real-world match (qid) and
+    optionally write that qid back to the Neo4j node.
+    """
+    from kairix.use_cases.entity import entity_validate_output_to_envelope, run_entity_validate
+
+    out = run_entity_validate(name, update=update, deps=deps)
+    return entity_validate_output_to_envelope(out)
+
+
 def tool_brief(
     agent: str,
     *,
@@ -620,5 +656,17 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     def brief(agent: str) -> dict[str, Any]:
         """Generate a session briefing for an agent. Returns content + on-disk path."""
         return tool_brief(agent=agent)
+
+    @server.tool()
+    @async_tool_handler
+    def entity_suggest(text: str) -> dict[str, Any]:
+        """Suggest entities (people, organisations, places) found in text via NER + Neo4j cross-ref."""
+        return tool_entity_suggest(text=text)
+
+    @server.tool()
+    @async_tool_handler
+    def entity_validate(name: str, update: bool = False) -> dict[str, Any]:
+        """Validate a named entity against Wikidata and optionally write the qid to Neo4j."""
+        return tool_entity_validate(name=name, update=update)
 
     return server

@@ -7,10 +7,17 @@ import sys
 from typing import Any
 
 
-def cmd_suggest(args: argparse.Namespace) -> int:
-    """kairix entity suggest <text> — NER-based entity suggestions."""
-    from kairix.knowledge.entities.suggest import format_suggestions, suggest_entities
-    from kairix.knowledge.graph.client import get_client
+def cmd_suggest(
+    args: argparse.Namespace,
+    *,
+    deps: Any = None,
+) -> int:
+    """kairix entity suggest <text> — NER-based entity suggestions.
+
+    Thin adapter around ``kairix.use_cases.entity.run_entity_suggest``.
+    Reads --file when provided; otherwise uses positional text.
+    """
+    from kairix.use_cases.entity import run_entity_suggest
 
     text = args.text
     if args.file:
@@ -22,65 +29,114 @@ def cmd_suggest(args: argparse.Namespace) -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1
 
-    try:
-        neo4j = get_client()
-        suggestions = suggest_entities(text, neo4j)
-    except ImportError:
-        print(
-            "ERROR: Entity suggestion requires spaCy NLP. Run: pip install 'kairix[nlp]'",
-            file=sys.stderr,
-        )
+    out = run_entity_suggest(text, deps=deps)
+    if out.error:
+        print(f"ERROR: {out.error}", file=sys.stderr)
         return 1
 
-    print(format_suggestions(suggestions, fmt=args.format))
-
-    if args.format == "table":
-        new_count = sum(1 for s in suggestions if s.is_new)
-        existing_count = len(suggestions) - new_count
-        print(f"\nTotal: {len(suggestions)} entities found ({new_count} new, {existing_count} existing)")
-
+    print(format_suggest_output(out, fmt=args.format))
     return 0
 
 
-def cmd_validate(args: argparse.Namespace) -> int:
+def format_suggest_output(out: Any, *, fmt: str) -> str:
+    """Render an EntitySuggestOutput as table-style or jsonl text."""
+    import json as _json
+
+    if fmt == "jsonl":
+        return "\n".join(
+            _json.dumps(
+                {
+                    "text": h.text,
+                    "label": h.label,
+                    "is_new": h.is_new,
+                    "existing_id": h.existing_id,
+                    "existing_name": h.existing_name,
+                    "context": h.context,
+                }
+            )
+            for h in out.suggestions
+        )
+    # Table
+    lines: list[str] = []
+    if out.suggestions:
+        lines.append(f"{'TEXT':<30} {'LABEL':<10} {'STATUS':<10} EXISTING ID/NAME")
+        lines.append("-" * 80)
+        for h in out.suggestions:
+            status = "new" if h.is_new else "existing"
+            existing = f"{h.existing_id or ''} {h.existing_name or ''}".strip()
+            lines.append(f"{h.text:<30} {h.label:<10} {status:<10} {existing}")
+    lines.append("")
+    lines.append(f"Total: {len(out.suggestions)} entities found ({out.new_count} new, {out.existing_count} existing)")
+    return "\n".join(lines)
+
+
+def cmd_validate(
+    args: argparse.Namespace,
+    *,
+    deps: Any = None,
+) -> int:
     """kairix entity validate <name> — validate entity against Wikidata."""
     import json as _json
 
-    from kairix.knowledge.entities.validate import validate_entity
-    from kairix.knowledge.graph.client import get_client
+    from kairix.use_cases.entity import run_entity_validate
 
-    try:
-        neo4j = get_client()
-        result = validate_entity(args.name, neo4j, update=args.update)
-    except Exception as exc:
-        print(f"ERROR: Validation failed: {exc}", file=sys.stderr)
+    out = run_entity_validate(args.name, update=args.update, deps=deps)
+    if out.error:
+        print(f"ERROR: Validation failed: {out.error}", file=sys.stderr)
         return 1
 
     if args.format == "json":
-        print(_json.dumps(result, indent=2))
+        print(_json.dumps(_validate_envelope(out), indent=2))
         return 0
 
-    # Table output
-    print(f"\nEntity: {result['name']}")
-    print(f"Neo4j id: {result['neo4j_id'] or '(not found)'}")
-    if result["updated"]:
-        print("Updated: wikidata_qid written to Neo4j node")
-    print()
+    print(format_validate_table(out, with_update_hint=not args.update))
+    return 0 if out.matches else 1
 
-    if not result["matches"]:
-        print("No Wikidata matches found.")
-        return 1
 
-    print(f"{'QID':<12} {'CONFIDENCE':<12} {'LABEL':<30} DESCRIPTION")
-    print("-" * 90)
-    for m in result["matches"]:
-        print(f"{m['qid']:<12} {m['confidence']:<12} {m['label']:<30} {m['description'][:35]}")
+def _validate_envelope(out: Any) -> dict[str, Any]:
+    """Mirror the on-disk envelope shape so --json output stays compatible."""
+    return {
+        "name": out.name,
+        "neo4j_id": out.neo4j_id or None,
+        "matches": [
+            {
+                "qid": m.qid,
+                "label": m.label,
+                "description": m.description,
+                "url": m.url,
+                "confidence": m.confidence,
+            }
+            for m in out.matches
+        ],
+        "updated": out.updated,
+        "error": out.error,
+    }
 
-    print(f"\nBest match: {result['matches'][0]['url']}")
-    if not args.update and result["matches"] and result["matches"][0]["confidence"] in ("high", "medium"):
-        print("Run with --update to write wikidata_qid to Neo4j.")
 
-    return 0
+def format_validate_table(out: Any, *, with_update_hint: bool) -> str:
+    """Render an EntityValidateOutput as the operator-facing table view."""
+    lines: list[str] = []
+    lines.append("")
+    lines.append(f"Entity: {out.name}")
+    lines.append(f"Neo4j id: {out.neo4j_id or '(not found)'}")
+    if out.updated:
+        lines.append("Updated: wikidata_qid written to Neo4j node")
+    lines.append("")
+
+    if not out.matches:
+        lines.append("No Wikidata matches found.")
+        return "\n".join(lines)
+
+    lines.append(f"{'QID':<12} {'CONFIDENCE':<12} {'LABEL':<30} DESCRIPTION")
+    lines.append("-" * 90)
+    for m in out.matches:
+        lines.append(f"{m.qid:<12} {m.confidence:<12} {m.label:<30} {m.description[:35]}")
+
+    lines.append("")
+    lines.append(f"Best match: {out.matches[0].url}")
+    if with_update_hint and out.matches and out.matches[0].confidence in ("high", "medium"):
+        lines.append("Run with --update to write wikidata_qid to Neo4j.")
+    return "\n".join(lines)
 
 
 def cmd_seed(args: argparse.Namespace, *, db_path: Any = None, neo4j_client: Any = None) -> int:
