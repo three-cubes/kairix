@@ -12,7 +12,6 @@ kairix/core/embed/cli.py
 kairix/core/embed/deps.py
 kairix/core/factory.py
 kairix/core/search/config_validator.py
-kairix/core/search/rerank.py
 kairix/core/search/vector_repository.py
 kairix/core/temporal/cli.py
 kairix/core/temporal/index.py
