@@ -296,13 +296,19 @@ def test_tool_usage_guide_falls_back_to_truncated_text_when_no_match(tmp_path: P
 
 @pytest.mark.unit
 def test_tool_usage_guide_returns_error_dict_when_read_fails(tmp_path: Path) -> None:
-    """A guide path that exists but can't be read (e.g. it's a directory) → error dict."""
-    # A directory at the guide path: exists() returns True, read_text() raises IsADirectoryError.
+    """A guide path that exists but can't be read (e.g. it's a directory) → error dict.
+
+    Phase 3f of #168 changed the error envelope from a generic
+    'lookup failed' message to the structured ``<Class>: <msg>`` form
+    that matches the other use cases.
+    """
     bad = tmp_path / "guide-but-actually-a-dir"
     bad.mkdir()
     result = tool_usage_guide(topic="any", guide_path=bad)
     assert result["content"] == ""
-    assert "lookup failed" in result["error"]
+    # IsADirectoryError on POSIX, PermissionError on Windows — both are class-prefixed
+    assert ":" in result["error"]
+    assert result["error"] != ""
 
 
 # tool_contradict behaviour is now covered by tests/use_cases/test_contradict.py
