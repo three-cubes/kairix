@@ -139,7 +139,7 @@ class TestValidateConfig:
     @pytest.mark.unit
     def test_invalid_config_not_silently_swallowed(self, tmp_path, monkeypatch):
         """ConfigValidationError must propagate — never fall back to defaults on invalid config."""
-        pytest.importorskip("yaml")
+        pytest.importorskip("yaml", reason="config loader uses PyYAML; skip when not installed (optional via [dev])")
         config_file = tmp_path / "kairix.config.yaml"
         config_file.write_text(
             textwrap.dedent("""
@@ -172,7 +172,7 @@ class TestLoadConfig:
 
     @pytest.mark.unit
     def test_loads_from_env_var(self, tmp_path, monkeypatch):
-        pytest.importorskip("yaml")
+        pytest.importorskip("yaml", reason="config loader uses PyYAML; skip when not installed (optional via [dev])")
         config_file = tmp_path / "my-kairix.yaml"
         config_file.write_text(
             textwrap.dedent("""

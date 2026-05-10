@@ -86,3 +86,31 @@ repos:
         language: system
         pass_filenames: false
         files: ^tests/.*\.py$
+
+      - id: arch-workflow-silencers-have-rationale
+        name: "arch F10: CI workflow silencers require rationale"
+        entry: bash scripts/checks/check-workflow-silencers-have-rationale.sh
+        language: system
+        pass_filenames: false
+        files: ^\.github/workflows/.*\.yml$
+
+      - id: arch-test-skip-rationale
+        name: "arch F11: test skip mechanisms require rationale"
+        entry: python3 scripts/checks/check_test_skip_rationale.py
+        language: system
+        pass_filenames: false
+        files: ^tests/.*\.py$
+
+      - id: arch-bdd-happy-path
+        name: "arch F12: every feature has a happy-path scenario"
+        entry: python3 scripts/checks/check_bdd_happy_path.py
+        language: system
+        pass_filenames: false
+        files: ^tests/bdd/features/.*\.feature$
+
+      - id: arch-bdd-no-implementation-leaks
+        name: "arch F13: BDD scenarios reject implementation symbols"
+        entry: python3 scripts/checks/check_bdd_no_implementation_leaks.py
+        language: system
+        pass_filenames: false
+        files: ^tests/bdd/features/.*\.feature$

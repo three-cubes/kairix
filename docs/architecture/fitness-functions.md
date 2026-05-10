@@ -26,6 +26,11 @@ document needs an update.
    - [F7 — Per-file coverage floor at 85%](#f7--per-file-coverage-floor-at-85)
    - [F4 — No `os.environ.get("KAIRIX_*")` outside `paths.py` / `secrets.py`](#f4--no-osenvirongetkairix_-outside-pathspy--secretspy)
    - [F8 — Every `test_*` function has a category marker](#f8--every-test_-function-has-a-category-marker)
+   - [F9 — Per-file 85% floor on union coverage](#f9--per-file-85-floor-on-union-coverage)
+   - [F10 — CI workflow silencers require rationale](#f10--ci-workflow-silencers-require-rationale)
+   - [F11 — Test skip mechanisms require rationale](#f11--test-skip-mechanisms-require-rationale)
+   - [F12 — Every BDD feature has a happy-path scenario](#f12--every-bdd-feature-has-a-happy-path-scenario)
+   - [F13 — BDD scenarios reject implementation symbols](#f13--bdd-scenarios-reject-implementation-symbols)
 5. [SDLC integration map](#sdlc-integration-map)
 6. [Harness architecture](#harness-architecture)
 7. [GitHub Actions integration](#github-actions-integration)
@@ -152,8 +157,13 @@ fully enforced; new violations anywhere in the codebase block.
 | F4 | No `os.environ.get("KAIRIX_*")` outside `paths.py`/`secrets.py` | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | `env-reads-in-paths-files.txt` |
 | F5 | No internal-name imports in tests | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-internal-test-imports-files.txt` |
 | F6 | No `*_fn=None` test-only kwargs in production | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-test-only-kwargs-files.txt` |
-| F7 | Per-file coverage floor at 85% | coverage report | Python + Cobertura XML | CI unit-and-type | `per-file-coverage-floor-files.txt` |
+| F7 | Per-file coverage floor at 85% (unit) | coverage report | Python + Cobertura XML | CI unit-and-type | `per-file-coverage-floor-files.txt` |
 | F8 | Every `test_*` function carries a category marker | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
+| F9 | Per-file 85% floor on union (unit ∪ integration) coverage | coverage report | Python + `coverage combine` + Cobertura XML | CI Stage 5 (after unit + integration) | `per-file-coverage-floor-union-files.txt` |
+| F10 | CI workflow silencers require rationale | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
+| F11 | Test skip mechanisms require rationale | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
+| F12 | Every BDD feature has at least one happy-path scenario | structural | Python (Gherkin parser) | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
+| F13 | BDD scenarios reject implementation symbols | line pattern | Python (regex) | pre-commit, safe-commit, CI Stage 0 | `bdd-no-implementation-leaks-files.txt` |
 
 ---
 
@@ -821,26 +831,394 @@ rationale. Expect pushback at review.
 
 ---
 
+### F9 — Per-file 85% floor on union coverage
+
+#### Statement
+
+Every kairix/* source file in the **union** of unit and integration
+coverage must be ≥ 85% line-covered. F9 is the **holistic** version
+of F7's atomic per-file floor, in the sense of Ford / Sadalage / Kua's
+*Building Evolutionary Architectures* — it tests "did the system
+collectively cover this code" rather than "did one specific scope
+cover this code."
+
+#### Why
+
+F7 alone gates the unit run. Files exercised only at integration
+scope — `factory.py`, `mcp/server.py`, `db/repository.py`, certain
+adapter modules — measure as 0% in the unit run and end up
+grandfathered in the F7 baseline forever, even though they're well
+exercised by integration tests. F9 closes that loop: an integration
+test that drives a previously-uncovered production-wiring file gets
+credit, and the file leaves the F9 baseline.
+
+This matches the canonical guidance from ThoughtWorks' *Building
+Evolutionary Architectures*: where atomic functions test one
+dimension, holistic functions test cross-cutting properties of the
+whole system. Coverage union is exactly that shape.
+
+#### Detection
+
+Stage 5 of the CI pipeline:
+
+  1. Stage 2 (unit-and-type) writes `.coverage.unit` via
+     `COVERAGE_FILE` and uploads it as the `coverage-data` artifact.
+  2. Stage 3 (integration) writes `.coverage.integration` via
+     `COVERAGE_FILE` and uploads it as the `coverage-data-integration`
+     artifact.
+  3. Stage 5 downloads both, runs ``coverage combine --keep
+     .coverage.unit .coverage.integration`` to produce a unified
+     `.coverage` database, exports it to `coverage-union.xml`, and
+     runs ``check_per_file_coverage.py coverage-union.xml
+     per-file-coverage-floor-union``.
+
+The per-file 85% floor is identical to F7's; only the source data
+differs. The baseline lives in
+`.architecture/baseline/per-file-coverage-floor-union-files.txt` and
+is independent of F7's baseline so they ratchet independently.
+
+#### Where it runs
+
+Only in CI (Stage 5). Pre-commit and `safe-commit.sh` skip F9 for
+the same reason they skip F7 — running both unit + integration
+suites on every commit is too slow.
+
+#### Fix pattern
+
+The same as F7, with the additional shortcut: a file that's
+production-wiring (e.g. `factory.py`) and exercised only via
+integration tests can leave the F9 baseline as soon as those
+integration tests are written, **without requiring unit-level
+coverage**. This is the legitimate use-case Ford et al. describe —
+some code's natural test scope is integration; F9 lets it earn
+its keep there.
+
+**Do not** use F9 as a way to avoid writing unit tests for code
+that has unit-testable logic. F7 is still in effect for every file
+F7 already grandfathers — F9 is a *complement* to F7, not a relaxation.
+
+#### References
+
+  - Ford, Parsons, Kua, *Building Evolutionary Architectures* (2017,
+    O'Reilly) — atomic vs holistic fitness functions.
+  - `coverage combine` reference:
+    https://coverage.readthedocs.io/en/latest/cmd.html#combining-data-files-coverage-combine
+
+---
+
+### F10 — CI workflow silencers require rationale
+
+#### Statement
+
+Every `continue-on-error: true` and `fail_ci_if_error: false` in
+`.github/workflows/*.yml` MUST have a same-line trailing comment
+explaining why the silencer is intentional. Bare uses are rejected.
+
+#### Why
+
+CI workflow silencers are the most invisible quality bypass available
+to agents — failure stops being a signal but the build still goes
+green. Each silencer can be legitimate (Codecov outage shouldn't
+block the merge; a fork PR with no token can't render a coverage
+comment) but each must have a written reason or it's just noise.
+
+The user-reported smell that drove this rule: "are there workarounds
+agents have access to that bypass quality bars?" The answer was yes,
+and a sweep of `ci.yml` showed nine bare silencers with no rationale.
+
+#### Detection
+
+`scripts/checks/check-workflow-silencers-have-rationale.sh`. Greps
+for the bare patterns `continue-on-error: true$` and
+`fail_ci_if_error: false$` (no trailing comment). A file is a
+violation if any silencer line in it lacks a same-line `#`-comment.
+
+#### Examples
+
+Rejected:
+```yaml
+      - name: Upload coverage
+        uses: codecov/codecov-action@v5
+        with:
+          fail_ci_if_error: false   # bare — no rationale
+```
+
+Allowed:
+```yaml
+      - name: Upload coverage
+        uses: codecov/codecov-action@v5
+        with:
+          fail_ci_if_error: false  # codecov outage / rate-limit must not block merge — F7 is the mechanical floor, not Codecov
+```
+
+#### Fix pattern
+
+For every flagged silencer, either DELETE it (preferred — make CI
+fail loudly) or document why with a same-line comment. The rationale
+is read at every code review; "we copied this from another workflow"
+is not a rationale.
+
+#### Limits
+
+`--cov-fail-under=0` and similar pytest-CLI silencers are not covered
+by F10 because they're line-continuation arguments inside `run:`
+blocks where same-line comments don't render. Their rationale lives
+in the surrounding YAML `#`-comment block. There's only one such
+silencer (in the integration job) and it's documented.
+
+---
+
+### F11 — Test skip mechanisms require rationale
+
+#### Statement
+
+Every `pytest.mark.skip`, `pytest.mark.skipif`, `pytest.mark.xfail`,
+and `pytest.importorskip(...)` MUST declare a rationale, either as a
+`reason=` kwarg or as a same-line / immediately-preceding `#`-comment.
+
+#### Why
+
+A silently-skipping test is a worse signal than a missing test — it
+looks present but never runs. The starlette/transport regression in
+this branch is the canonical example: the unit test for
+`kairix/agents/mcp/transport.py` silently skipped on missing
+starlette, F7 saw 0% coverage on the file, and the gate failed.
+With a rationale, that skip would be visible from the diff.
+
+#### Detection
+
+`scripts/checks/check_test_skip_rationale.py`. AST walk over
+`tests/**.py`. Inspects:
+
+  - Function/class decorators: `@pytest.mark.skip` / `skipif` / `xfail`
+    must be a Call (not bare Attribute) and must have a non-empty
+    `reason=` kwarg.
+  - Module-level `pytestmark = pytest.mark.skip(...)` assignments.
+  - `pytest.importorskip("X")` calls — accept `reason=` kwarg, a
+    same-line trailing comment, or an immediately-preceding `#`-comment
+    block (within 3 lines, no blank-line gap).
+
+#### Examples
+
+Rejected:
+```python
+@pytest.mark.skip                           # bare — no reason
+def test_x(): ...
+
+@pytest.mark.skipif(sys.platform == "win32") # no reason kwarg
+def test_y(): ...
+
+pytest.importorskip("foo")                  # no reason, no preceding comment
+```
+
+Allowed:
+```python
+@pytest.mark.skip(reason="see #999 — fixture rewrite in progress")
+def test_x(): ...
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only path")
+def test_y(): ...
+
+# Skip when the optional [agents] extras aren't installed — the
+# transport module imports starlette at module level.
+pytest.importorskip("starlette")
+
+pytest.importorskip("yaml", reason="config loader uses PyYAML; skip when not installed")
+```
+
+#### Fix pattern
+
+Add a rationale. If the test is broken, fix it; if the dependency is
+mandatory, install it (this PR did exactly that for starlette + the
+unit-and-type job); if the test is duplicated by integration coverage,
+delete it.
+
+---
+
+### F12 — Every BDD feature has a happy-path scenario
+
+#### Statement
+
+Every `tests/bdd/features/*.feature` file MUST contain at least one
+scenario whose preceding tag block does NOT include any of `@error`,
+`@negative`, `@failure`, `@unhappy`, `@error-path`. A feature with
+zero scenarios also fails.
+
+#### Why
+
+The user-reported smell: "many of our BDD tests only document error
+states." Per Adzic *Specification by Example* and Wynne *The Cucumber
+Book*, a feature exists to document a *capability* — the capability
+needs a positive scenario showing what success looks like before we
+enumerate failure modes. A feature whose scenarios are all
+`@error`/`@negative` is an error catalogue, not a specification of
+stakeholder value.
+
+Liz Keogh calls this "test infection of BDD" — scenarios written from
+the test author's perspective rather than the stakeholder's.
+
+#### Detection
+
+`scripts/checks/check_bdd_happy_path.py`. Parses each `.feature` file
+line-by-line:
+
+  1. Find every `Scenario:` / `Scenario Outline:` line.
+  2. Walk backward to collect tag lines (`^\s*@`) until a blank or
+     non-tag line.
+  3. A scenario is happy-path if its tag set is disjoint from
+     `{@error, @negative, @failure, @unhappy, @error-path}`.
+  4. The feature passes if it has ≥1 happy-path scenario.
+
+Untagged scenarios count as happy-path (untagged is the positive-flow
+default).
+
+#### Examples
+
+Rejected (errors-only catalogue):
+```gherkin
+Feature: Benchmark error handling
+
+  @error
+  Scenario: Invalid YAML rejected
+    Given a malformed suite
+    When the operator runs the benchmark
+    Then an error is shown
+
+  @negative
+  Scenario: Missing gold path rejected
+    Given a suite with a missing gold reference
+    When the operator runs the benchmark
+    Then an error is shown
+```
+
+Allowed:
+```gherkin
+Feature: Benchmark suite execution
+
+  Scenario: Operator runs a suite and sees scores
+    Given a valid benchmark suite
+    When the operator runs the benchmark
+    Then the result shows category scores
+
+  @error
+  Scenario: Invalid YAML rejected
+    Given a malformed suite
+    When the operator runs the benchmark
+    Then an error is shown
+```
+
+#### Fix pattern
+
+Add at least one positive-flow scenario. If the feature is genuinely
+about an error mode (uncommon), the right home is probably a
+narrower "errors" feature explicitly named so — at which point the
+positive-flow scenario lives in the parent feature.
+
+#### References
+
+  - Adzic, *Specification by Example* (2011) — features describe
+    capabilities, not exception cases.
+  - Wynne, Hellesøy, *The Cucumber Book* — every feature has a
+    must-work golden path.
+  - Liz Keogh, "Step Away From The Tools" — BDD test-infection.
+
+---
+
+### F13 — BDD scenarios reject implementation symbols
+
+#### Statement
+
+`.feature` files MUST NOT contain references to test-framework
+internals (`Mock`, `MagicMock`, `monkeypatch`, `pytest.`, `unittest.`)
+or kairix internal module paths (`kairix.<package>.<symbol>`). The
+config-file name `kairix.config.yaml` and similar `.yaml`/`.yml`/
+`.json` filenames are explicitly allowed.
+
+#### Why
+
+Per Dan North (BDD), scenarios describe stakeholder *outcomes*, not
+the code that implements them. A scenario that mentions `Mock` or
+`kairix.core.search.bm25.bm25_search` is not a specification — it's
+a unit test masquerading as one. Liz Keogh calls this "scenario
+describes internals."
+
+The rule complements F12: F12 catches "the feature only documents
+errors"; F13 catches "the feature describes how the code works
+instead of what the user sees."
+
+#### Detection
+
+`scripts/checks/check_bdd_no_implementation_leaks.py`. Per `.feature`
+file, scans every non-comment line for forbidden tokens:
+
+  - Exact matches: `Mock`, `MagicMock`, `monkeypatch`
+  - Prefix matches: `pytest.`, `unittest.`
+  - Module-path pattern: `kairix\.[a-z_]+\.[a-z_]+` *unless* the
+    third segment is one of the allow-listed file extensions
+    (`yaml`, `yml`, `json`, `toml`, `py`, `md`, `txt`, `xml`, `lock`,
+    `feature`).
+
+#### Examples
+
+Rejected:
+```gherkin
+  Scenario: Mock benchmark produces category scores
+    Given the operator runs the test
+    When kairix.core.search.bm25.bm25_search executes
+    Then a Mock is returned
+```
+
+Allowed:
+```gherkin
+  Scenario: Operator runs a benchmark
+    Given the operator has a kairix.config.yaml with reflib enabled
+    When they run the benchmark suite
+    Then they see the score summary
+```
+
+#### Fix pattern
+
+Rewrite in stakeholder language. If the scenario is genuinely about
+internals, it does not belong in `tests/bdd/features/` — move it to a
+unit test where it belongs.
+
+#### Limits
+
+F13 catches only the hard symbol leaks. Soft leaks ("the code", "the
+function does X") and abstraction-level concerns (whether the
+scenario describes a business outcome at all) are Three Amigos /
+human-review concerns; see the aspirational practices issue.
+
+#### References
+
+  - Dan North, "Introducing BDD" (2006) — outcomes vs implementation.
+  - Liz Keogh on BDD test-infection.
+
+---
+
 ## SDLC integration map
 
 Each fitness function fires at multiple lifecycle stages. The same
 script is invoked everywhere — there's no drift between local and CI
 enforcement.
 
-| Stage | When | F1 | F2 | F3 | F4 | F5 | F6 | F7 | F8 |
-|---|---|---|---|---|---|---|---|---|---|
-| **IDE** | edit | — | — | — | — | — | — | — | — |
-| **`git commit`** | every commit (via `.pre-commit-config.yaml`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
-| **`bash scripts/safe-commit.sh`** | pre-push / pre-PR | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
-| **CI Stage 0 — Architecture fitness** | every PR push | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
-| **CI unit-and-type** | every PR push | — | — | — | — | — | — | ✓ | — |
-| **CI gate (fan-in)** | every PR push | requires Stage 0 ✓ |  |  |  |  |  |  |  |
-| **Branch protection** | merge attempt | enforced via CI gate |  |  |  |  |  |  |  |
+| Stage | When | F1 | F2 | F3 | F4 | F5 | F6 | F7 | F8 | F9 | F10 | F11 | F12 | F13 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **IDE** | edit | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| **`git commit`** (pre-commit) | every commit | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | ✓ |
+| **`bash scripts/safe-commit.sh`** | pre-push / pre-PR | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | ✓ |
+| **CI Stage 0 — Architecture fitness** | every PR push | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | ✓ |
+| **CI Stage 2 unit-and-type** | every PR push | — | — | — | — | — | — | ✓ | — | — | — | — | — | — |
+| **CI Stage 5 union-coverage** | every PR push (after Stage 3) | — | — | — | — | — | — | — | — | ✓ | — | — | — | — |
+| **CI gate (fan-in)** | every PR push | requires Stage 0 + Stage 2 + Stage 5 ✓ |  |  |  |  |  |  |  |  |  |  |  |  |
+| **Branch protection** | merge attempt | enforced via CI gate |  |  |  |  |  |  |  |  |  |  |  |  |
 
-**Reading this table:** F1–F6 and F8 fire at three layers (commit,
-manual gate, CI). F7 fires only in CI because it needs the test
-runtime. The CI gate fans-in on the Stage 0 result — a failing fitness
-function blocks merge regardless of whether other jobs pass.
+**Reading this table:** F1–F6, F8, F10–F13 fire at three layers (commit,
+manual gate, CI Stage 0). F7 fires in Stage 2 because it needs unit
+coverage. F9 fires in Stage 5 because it needs both unit and integration
+coverage to be combined. The CI gate fans-in on every required job — a
+failing fitness function blocks merge regardless of whether other jobs
+pass.
 
 ---
 
@@ -852,26 +1230,32 @@ function blocks merge regardless of whether other jobs pass.
 scripts/checks/
 ├── _arch_lib.py                          # Python helper: gate(), python_files(), repo_relative()
 ├── _lib.sh                               # Shell helper: arch_gate() function
-├── check-no-internal-patches.sh          # F1
-├── check-no-env-monkeypatch.sh           # F2
-├── check-suppressions-have-rationale.sh  # F3
-├── check-env-reads-stay-in-paths.sh      # F4
-├── check_no_internal_imports.py          # F5 (AST)
-├── check_no_test_only_kwargs.py          # F6 (AST)
-├── check_per_file_coverage.py            # F7 (XML)
-├── check_test_markers.py                 # F8 (AST)
-└── run-all.sh                            # Orchestrator (used by safe-commit + CI Stage 0)
+├── check-no-internal-patches.sh                       # F1
+├── check-no-env-monkeypatch.sh                        # F2
+├── check-suppressions-have-rationale.sh               # F3 (extended: covers # type: ignore + # nosec)
+├── check-env-reads-stay-in-paths.sh                   # F4
+├── check_no_internal_imports.py                       # F5 (AST)
+├── check_no_test_only_kwargs.py                       # F6 (AST)
+├── check_per_file_coverage.py                         # F7 (Cobertura XML) + F9 (with arg)
+├── check_test_markers.py                              # F8 (AST)
+├── check-workflow-silencers-have-rationale.sh         # F10
+├── check_test_skip_rationale.py                       # F11 (AST)
+├── check_bdd_happy_path.py                            # F12 (Gherkin parser)
+├── check_bdd_no_implementation_leaks.py               # F13 (regex)
+└── run-all.sh                                         # Orchestrator (safe-commit + CI Stage 0)
 
 .architecture/baseline/
 ├── no-internal-patches-files.txt
 ├── no-env-monkeypatch-files.txt
-├── suppressions-have-rationale-files.txt
-├── env-reads-in-paths-files.txt          # F4
+├── suppressions-have-rationale-files.txt              # F3 (now includes # type: ignore + # nosec sites)
+├── env-reads-in-paths-files.txt                       # F4
 ├── no-internal-test-imports-files.txt
 ├── no-test-only-kwargs-files.txt
-├── per-file-coverage-floor-files.txt
-└── test-only-kwargs-allow.txt            # F6 allow-list (separate from baseline)
-# F8 ships with no baseline — clean
+├── per-file-coverage-floor-files.txt                  # F7 (unit only)
+├── per-file-coverage-floor-union-files.txt            # F9 (unit ∪ integration)
+├── bdd-no-implementation-leaks-files.txt              # F13
+└── test-only-kwargs-allow.txt                         # F6 allow-list (separate from baseline)
+# F8, F10, F11, F12 ship with no baseline — clean
 
 docs/architecture/
 └── fitness-functions.md                  # this document
@@ -968,6 +1352,20 @@ expected check output):
 | F8 | `tests/_sabotage_f8_fixture.py` with `@pytest.fixture` named `test_*` | passed (no false positive) | Fixtures named `test_*` correctly excluded |
 | F8 | `tests/_sabotage_f8_modulemark.py` with module-level `pytestmark = pytest.mark.unit` and unmarked function | passed (no false positive) | Module-level mark inheritance works |
 | F8 | `tests/_sabotage_f8_listmark.py` with class-level `pytestmark = [pytest.mark.contract]` | passed (no false positive) | List-form pytestmark accepted |
+| F3 ext | `tests/_sabotage_f3_typeignore.py` with `x = 1  # type: ignore` | ✓ | Bare `# type: ignore` caught |
+| F3 ext | `tests/_sabotage_f3_nosec.py` with bare `# nosec` on a bandit-flagged line | ✓ | Bare `# nosec` caught |
+| F3 ext | `tests/_sabotage_f3_typeignore_ok.py` with `x = 1  # type: ignore[attr-defined]  # third-party stub gap` | passed (no false positive) | Rationale form accepted |
+| F10 | `.github/workflows/_sabotage_f10.yml` with bare `continue-on-error: true` | ✓ |  |
+| F10 | `.github/workflows/_sabotage_f10_ok.yml` with `continue-on-error: true  # rationale` | passed (no false positive) | Same-line comment accepted |
+| F11 | `tests/_sabotage_f11_skip.py` with `@pytest.mark.skip` (bare) | ✓ |  |
+| F11 | `tests/_sabotage_f11_importorskip.py` with `pytest.importorskip("nonexistent_module")` (no rationale) | ✓ |  |
+| F11 | `tests/_sabotage_f11_xfail_bare.py` with `@pytest.mark.xfail` (bare) | ✓ |  |
+| F11 | `tests/_sabotage_f11_ok.py` with preceding comment + `@pytest.mark.skip(reason="…")` | passed (no false positive) | Comment-block-above pattern accepted |
+| F12 | `tests/bdd/features/_sabotage_f12_errors_only.feature` with two `@error`/`@negative` scenarios only | ✓ | Feature with no happy-path rejected |
+| F12 | `tests/bdd/features/_sabotage_f12_empty.feature` with zero scenarios | ✓ | Empty feature rejected |
+| F12 | `tests/bdd/features/_sabotage_f12_ok.feature` with one untagged + one `@error` scenario | passed (no false positive) | Mixed feature accepted |
+| F13 | `tests/bdd/features/_sabotage_f13.feature` with `Mock` + `kairix.core.search.bm25` references | ✓ | Implementation symbols caught |
+| F13 | `tests/bdd/features/_sabotage_f13_ok.feature` with `kairix.config.yaml` (filename) reference | passed (no false positive) | File-extension allowlist works |
 
 After each plant, the file was removed and the check re-run to confirm
 the baseline state was preserved. The runner script lives at
@@ -1312,5 +1710,41 @@ fitness_functions:
     script: scripts/checks/check_test_markers.py
     baseline: null  # ships clean — no grandfathered files
     precommit_hook: arch-test-markers
+    layer: [pre-commit, safe-commit, ci-stage0]
+
+  - id: F9
+    name: per-file-coverage-floor-union
+    script: scripts/checks/check_per_file_coverage.py
+    invoke: python3 scripts/checks/check_per_file_coverage.py coverage-union.xml per-file-coverage-floor-union
+    baseline: .architecture/baseline/per-file-coverage-floor-union-files.txt
+    precommit_hook: null  # CI-only (needs unit + integration coverage combined)
+    layer: [ci-stage5]
+
+  - id: F10
+    name: workflow-silencers-have-rationale
+    script: scripts/checks/check-workflow-silencers-have-rationale.sh
+    baseline: null  # ships clean — no grandfathered files
+    precommit_hook: arch-workflow-silencers-have-rationale
+    layer: [pre-commit, safe-commit, ci-stage0]
+
+  - id: F11
+    name: test-skip-rationale
+    script: scripts/checks/check_test_skip_rationale.py
+    baseline: null  # ships clean — no grandfathered files
+    precommit_hook: arch-test-skip-rationale
+    layer: [pre-commit, safe-commit, ci-stage0]
+
+  - id: F12
+    name: bdd-happy-path
+    script: scripts/checks/check_bdd_happy_path.py
+    baseline: null  # ships clean — no grandfathered files
+    precommit_hook: arch-bdd-happy-path
+    layer: [pre-commit, safe-commit, ci-stage0]
+
+  - id: F13
+    name: bdd-no-implementation-leaks
+    script: scripts/checks/check_bdd_no_implementation_leaks.py
+    baseline: .architecture/baseline/bdd-no-implementation-leaks-files.txt
+    precommit_hook: arch-bdd-no-implementation-leaks
     layer: [pre-commit, safe-commit, ci-stage0]
 ```

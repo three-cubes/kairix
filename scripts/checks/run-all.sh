@@ -46,6 +46,18 @@ python3 "${SCRIPT_DIR}/check_no_test_only_kwargs.py" || overall=1
 # F8 — AST-based
 python3 "${SCRIPT_DIR}/check_test_markers.py" || overall=1
 
+# F10 — workflow YAML silencer rationale (shell + grep)
+bash "${SCRIPT_DIR}/check-workflow-silencers-have-rationale.sh" || overall=1
+
+# F11 — test skip rationale (AST)
+python3 "${SCRIPT_DIR}/check_test_skip_rationale.py" || overall=1
+
+# F12 — BDD happy-path coverage
+python3 "${SCRIPT_DIR}/check_bdd_happy_path.py" || overall=1
+
+# F13 — BDD no implementation symbols
+python3 "${SCRIPT_DIR}/check_bdd_no_implementation_leaks.py" || overall=1
+
 # F7 — needs coverage.xml. Skip if not present or skip flag set.
 if [ "$skip_coverage" -eq 0 ]; then
     if [ -f "${REPO_ROOT}/coverage.xml" ]; then

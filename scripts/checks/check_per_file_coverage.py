@@ -1,25 +1,36 @@
-"""F7: Per-file coverage floor at 85%.
+"""F7 / F9: Per-file coverage floor at 85%.
 
-Repository-wide coverage averages can hide files with 0% coverage. This
-check enforces a per-file floor: every kairix/* source file in the
-``coverage.xml`` report must be ≥85% covered.
+Repository-wide coverage averages can hide files with 0% coverage.
+This check enforces a per-file floor: every kairix/* source file in
+the ``coverage.xml`` report must be ≥85% covered.
 
-Files currently below the floor are listed in
-``.architecture/baseline/per-file-coverage-floor.txt`` (format:
-``path/to/file.py``, one per line). The check fails if:
+Modes:
 
-  - A file NOT in the baseline drops below the floor (regression on a
-    previously-clean file).
-  - A NEW file appears in ``coverage.xml`` below the floor.
+  - **F7 (unit only)**: invoked with one argument or no argument —
+    defaults gate name to ``per-file-coverage-floor`` and reads
+    baseline from ``per-file-coverage-floor-files.txt``. Reflects
+    unit + bdd + contract coverage from Stage 2.
+
+  - **F9 (union)**: invoked with a second positional argument naming
+    a different gate (e.g. ``per-file-coverage-floor-union``). Used
+    against a coverage XML produced by ``coverage combine`` over
+    unit + integration ``.coverage`` files. Reflects the union of
+    all test scopes; production-wiring files exercised only at
+    integration scope no longer measure as uncovered.
+
+Files currently below the floor for a given gate are listed in
+``.architecture/baseline/<gate-name>-files.txt``. The check fails if a
+file NOT in that baseline is below the floor.
 
 Existing baseline files are grandfathered. The expectation is the
 baseline shrinks over time as testing improves.
 
 Usage:
-    python3 scripts/checks/check_per_file_coverage.py [coverage.xml]
+    python3 scripts/checks/check_per_file_coverage.py [coverage.xml] [gate-name]
 
 If no path is given, defaults to ``coverage.xml`` in the CWD (the file
-emitted by pytest --cov-report=xml).
+emitted by pytest --cov-report=xml). If no gate name is given, defaults
+to ``per-file-coverage-floor`` (F7).
 """
 
 from __future__ import annotations
@@ -98,6 +109,7 @@ def parse_coverage(coverage_xml: Path) -> dict[Path, float]:
 
 def main(argv: list[str]) -> int:
     coverage_xml = Path(argv[1]) if len(argv) > 1 else Path("coverage.xml")
+    gate_name = argv[2] if len(argv) > 2 else "per-file-coverage-floor"
     coverage = parse_coverage(coverage_xml)
 
     if not coverage:
@@ -118,16 +130,11 @@ def main(argv: list[str]) -> int:
         for path in sorted(below_floor):
             pct = coverage[path] * 100
             lines.append(f"  {path}  {pct:5.1f}%  (floor: {FLOOR:.0f}%)")
-        # Persist a temp file so gate() can read the violations cleanly,
-        # but route through the gate helper directly for consistency.
-        # gate() expects Path objects, not formatted lines, so feed the
-        # raw set and let the failure message above carry the percentages
-        # as supplemental detail.
         formatted = "\n".join(lines)
-        result = gate("per-file-coverage-floor", below_floor, REMEDIATION + "\n\nMeasured:\n" + formatted)
+        result = gate(gate_name, below_floor, REMEDIATION + "\n\nMeasured:\n" + formatted)
         return result
 
-    return gate("per-file-coverage-floor", set(), REMEDIATION)
+    return gate(gate_name, set(), REMEDIATION)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-name: "5 · Dependency Review"
+name: "2a · Dependency review (PR → main)"
 
 on:
   pull_request:

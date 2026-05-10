@@ -1,4 +1,4 @@
-name: "4 · Integration (PR to main)"
+name: "2 · Pre-merge integration suite (PR → main)"
 
 # Runs full integration suite on PRs targeting main.
 # Separated from ci.yml so it can use larger runners when needed.

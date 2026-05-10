@@ -6,7 +6,7 @@
 #
 # Version is derived from the git tag via setuptools-scm — no manual version editing.
 
-name: "7 · PyPI Publish"
+name: "4 · PyPI publish (release)"
 
 on:
   release:
