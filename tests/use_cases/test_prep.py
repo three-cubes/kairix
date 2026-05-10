@@ -150,6 +150,51 @@ def test_agent_and_scope_pass_through() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Determinism — closes #116
+# ---------------------------------------------------------------------------
+
+
+def test_l0_sources_are_prefix_of_l1_when_same_query_and_deps() -> None:
+    """Pin the determinism contract called out by the 2026-05-02 dogfood (#116):
+    when L0 and L1 see the same ranked search results, the L0 source list
+    must be a prefix of L1's — different counts are expected (different
+    budget caps) but the *ordering* of overlapping sources must match.
+
+    Rebuts the dogfood concern that L0 vs L1 produces differently-ranked
+    sources for the same query. The use-case implementation takes
+    ``results[:5]`` from a deterministic search ranking; budget only
+    affects which results survive ``apply_budget``, never the order
+    among the survivors.
+    """
+    # Same SearchResult shape returned for both tiers — what differs is
+    # how many BudgetedResults survive the budget cap, not their order.
+    full_results = [_FakeBudgeted(result=_FakeInner(title=f"doc-{i}"), content=f"snippet-{i}") for i in range(7)]
+
+    captured: dict[str, Any] = {"l0": None, "l1": None}
+
+    def _make_deps(tier: str) -> PrepDeps:
+        # L0 (budget=1500) survives 3 results; L1 (budget=3000) survives 5.
+        kept = 3 if tier == "l0" else 5
+
+        def _search(**kwargs: Any) -> _FakeSearchResult:
+            captured[tier] = kwargs
+            return _FakeSearchResult(results=full_results[:kept])
+
+        return PrepDeps(search_fn=_search, chat_fn=lambda **_: f"summary for {tier}")
+
+    out_l0 = run_prep("topic", tier="l0", deps=_make_deps("l0"))
+    out_l1 = run_prep("topic", tier="l1", deps=_make_deps("l1"))
+
+    # L0's source list must be a prefix of L1's — overlap is identically ranked.
+    assert out_l0.sources == out_l1.sources[: len(out_l0.sources)], (
+        f"L0 sources must prefix L1 sources; got L0={out_l0.sources!r} L1={out_l1.sources!r}"
+    )
+    # And the budgets we passed are the documented L0/L1 caps.
+    assert captured["l0"]["budget"] == 1500
+    assert captured["l1"]["budget"] == 3000
+
+
+# ---------------------------------------------------------------------------
 # Envelope projection
 # ---------------------------------------------------------------------------
 
