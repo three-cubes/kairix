@@ -1,0 +1,84 @@
+# Coverage, flag, and PR-comment policy for Codecov.
+#
+# Reference: https://docs.codecov.com/docs/codecovyml-reference
+#
+# Source-of-truth notes:
+#   - The pytest-cov omit list lives in pyproject.toml ([tool.coverage.run]).
+#     Coverage XML uploaded here is already filtered, so no `ignore:` block
+#     is needed at the Codecov layer (and adding one would create a second
+#     omit list that drifts).
+#   - The merge bar matches F7 (architecture fitness function): every new
+#     line must belong to a file at >=85% coverage. `patch.target = 85%`
+#     applies the same bar to the PR diff itself.
+#   - Bundles: not applicable. Kairix is a Python-only project; there is
+#     no JS/TS frontend bundle to analyse. `codecov-bundle-analyzer-action`
+#     is intentionally NOT wired up.
+
+codecov:
+  require_ci_to_pass: true
+
+# Two flags are uploaded by .github/workflows/ci.yml:
+#   - `unit`        from Stage 2 (pytest -m "unit or bdd or contract" with --cov)
+#   - `integration` from Stage 3 (pytest -m integration with --cov)
+# Carryforward keeps the most recent successful flag report when only the
+# other flag is uploaded — avoids dashboard flapping when one stage skips.
+flag_management:
+  default_rules:
+    carryforward: true
+  individual_flags:
+    - name: unit
+      paths:
+        - kairix/
+      carryforward: true
+    - name: integration
+      paths:
+        - kairix/
+      carryforward: true
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: false
+    patch:
+      default:
+        target: 85%
+        informational: false
+
+comment:
+  layout: "header, diff, flags, components, files, footer"
+  behavior: default
+  require_changes: false
+
+# Component breakdown for per-area dashboards. Each component reports a
+# project-status check so Codecov tracks regressions inside a directory
+# even when overall coverage moves the other way.
+component_management:
+  default_rules:
+    statuses:
+      - type: project
+        target: auto
+        threshold: 1%
+  individual_components:
+    - component_id: search
+      name: Search
+      paths: ["kairix/core/search/**"]
+    - component_id: agents
+      name: Agents (CLI + MCP)
+      paths: ["kairix/agents/**"]
+    - component_id: knowledge
+      name: Knowledge store
+      paths: ["kairix/knowledge/**"]
+    - component_id: quality
+      name: Quality (eval + benchmark)
+      paths: ["kairix/quality/**"]
+    - component_id: core
+      name: Core (db, embed, classify, factory)
+      paths:
+        - "kairix/core/db/**"
+        - "kairix/core/embed/**"
+        - "kairix/core/classify/**"
+        - "kairix/core/factory.py"
+        - "kairix/core/protocols.py"

@@ -109,7 +109,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # The [agents] extras provide starlette (transitively via mcp>=1.20)
+        # so the MCP transport contract test runs here instead of being
+        # silently skipped by `pytest.importorskip("starlette")`.
+        run: pip install -e ".[dev,agents]"
 
       - name: Contract tests (schema validation, interface agreements)
         run: |
@@ -141,6 +144,16 @@ jobs:
           path: results-contracts.xml
           retention-days: 14
 
+      - name: Upload contract test results to Codecov (test analytics)
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1
+        with:
+          files: results-contracts.xml
+          flags: contract
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
   # ── Stage 2: Unit tests + type checking (2 min) ───────────────────────────
   # Engineering hub: "Type checking: zero errors. Coverage: >=80%."
   unit-and-type:
@@ -165,8 +178,14 @@ jobs:
           cache: pip
 
       - name: Install dependencies (with type stubs)
+        # The [agents] extras pull in mcp>=1.20 (and starlette transitively) so
+        # tests/agents/mcp/test_transport_composition.py — which guards its
+        # imports with `pytest.importorskip("starlette")` — actually runs in
+        # the unit job rather than silently skipping. Without this, the
+        # transport composer's coverage measures as 0% even though the unit
+        # tests exist, and F7 fails the per-file floor.
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,agents]"
 
       - name: Type checking -- mypy strict
         # Engineering hub: "mypy -- zero errors". Strict mode from Phase 1.
@@ -223,6 +242,21 @@ jobs:
         uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           files: coverage.xml
+          flags: unit
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload unit test results to Codecov (test analytics)
+        # Codecov Test Analytics: tracks flaky tests, slow tests, and
+        # failure trends across runs. Free for OSS. Same CODECOV_TOKEN as
+        # the coverage upload. Only the 3.12 matrix uploads (consistent
+        # with the coverage upload).
+        if: ${{ !cancelled() && matrix.python-version == '3.12' }}
+        uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1
+        with:
+          files: results-unit.xml
+          flags: unit
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
@@ -300,6 +334,16 @@ jobs:
         uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           files: coverage-integration.xml
+          flags: integration
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload integration test results to Codecov (test analytics)
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1
+        with:
+          files: results-integration.xml
           flags: integration
           fail_ci_if_error: false
         env:
