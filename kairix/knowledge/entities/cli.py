@@ -236,7 +236,54 @@ def build_parser() -> argparse.ArgumentParser:
     p_seed.add_argument("--dry-run", action="store_true", help="Show candidates without seeding")
     p_seed.set_defaults(func=cmd_seed)
 
+    # get subcommand — direct entity lookup by name (Phase 3e of #168)
+    p_get = sub.add_parser("get", help="Look up an entity by name")
+    p_get.add_argument("name", help="Entity name (case-insensitive)")
+    p_get.add_argument("--format", choices=["table", "json"], default="table")
+    p_get.set_defaults(func=cmd_get)
+
     return parser
+
+
+def cmd_get(
+    args: argparse.Namespace,
+    *,
+    deps: Any = None,
+) -> int:
+    """kairix entity get <name> — direct Neo4j entity-card lookup.
+
+    Thin adapter around ``kairix.use_cases.entity_get.run_entity_get``.
+    """
+    import json as _json
+
+    from kairix.use_cases.entity_get import run_entity_get
+
+    out = run_entity_get(args.name, deps=deps)
+
+    if args.format == "json":
+        from kairix.use_cases.entity_get import entity_get_output_to_envelope
+
+        print(_json.dumps(entity_get_output_to_envelope(out), indent=2))
+    else:
+        print(format_get_output(out))
+
+    return 1 if out.error else 0
+
+
+def format_get_output(out: Any) -> str:
+    """Render an EntityGetOutput as the operator-facing table view."""
+    if out.error:
+        return f"error: {out.error}"
+    lines: list[str] = [
+        f"Entity:     {out.name}",
+        f"Type:       {out.type or '(unknown)'}",
+        f"Neo4j id:   {out.id or '(none)'}",
+        f"Vault path: {out.vault_path or '(none)'}",
+    ]
+    if out.summary:
+        lines.append("")
+        lines.append(out.summary)
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None, *, db_path: Any = None, neo4j_client: Any = None) -> int:
@@ -254,4 +301,6 @@ def main(argv: list[str] | None = None, *, db_path: Any = None, neo4j_client: An
         return cmd_suggest(args)
     if args.command == "validate":
         return cmd_validate(args)
+    if args.command == "get":
+        return cmd_get(args)
     return 1  # pragma: no cover — unreachable; subparsers required=True
