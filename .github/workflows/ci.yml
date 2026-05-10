@@ -208,12 +208,6 @@ jobs:
           ruff format --check kairix/ tests/
 
       - name: Unit + BDD + Contract tests with coverage
-        # COVERAGE_FILE keeps the .coverage data file at a deterministic
-        # name so we can upload it (alongside coverage.xml) for F9 to
-        # combine with integration coverage. Default would be `.coverage`
-        # which collides with pytest-cov's parallel-mode auto-detection.
-        env:
-          COVERAGE_FILE: .coverage.unit
         run: |
           pytest tests/ \
             -m "unit or bdd or contract" \
@@ -223,6 +217,18 @@ jobs:
             --cov-fail-under=80 \
             --junitxml=results-unit.xml \
             -v --tb=short
+
+      - name: Preserve .coverage as .coverage.unit (for F9 union)
+        # pytest-cov writes the data file to .coverage by default. We
+        # rename it to .coverage.unit so it can be uploaded alongside
+        # the integration job's .coverage.integration and combined in
+        # Stage 5. Cannot use COVERAGE_FILE env var for this — pytest-cov
+        # behaviour with non-default data_file paths is inconsistent
+        # between coverage report shapes (in particular, integration
+        # job's --cov-fail-under=0 path drops the data file).
+        if: matrix.python-version == '3.12'
+        run: |
+          if [ -f .coverage ]; then cp .coverage .coverage.unit; fi
 
       - name: F7 — per-file coverage floor (85%)
         # Repo-wide coverage averages can hide files at 0%. F7 requires every
@@ -340,14 +346,19 @@ jobs:
         # F7 enforces per-file coverage from the unit run; F9 (Stage 5)
         # combines this with the unit .coverage to enforce the same floor
         # over the union, which catches integration-only files.
-        env:
-          COVERAGE_FILE: .coverage.integration
         run: |
           pytest tests/ -m integration -v --tb=short --maxfail=3 \
             --cov=kairix \
             --cov-report=xml:coverage-integration.xml \
             --cov-fail-under=0 \
             --junitxml=results-integration.xml
+
+      - name: Preserve .coverage as .coverage.integration (for F9 union)
+        # See unit-and-type job's matching step for why we copy after the
+        # run rather than using COVERAGE_FILE env var.
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f .coverage ]; then cp .coverage .coverage.integration; fi
 
       - name: Upload integration coverage data (for F9 union)
         if: ${{ !cancelled() }}

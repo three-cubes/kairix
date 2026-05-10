@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _arch_lib import REPO_ROOT, gate, repo_relative  # noqa: E402
+from _arch_lib import REPO_ROOT, gate, repo_relative
 
 REMEDIATION = """A BDD scenario should describe what a stakeholder sees, not
 how the code is implemented. Forbidden tokens detected (Mock / MagicMock /
@@ -108,11 +108,7 @@ def main() -> int:
     features_dir = REPO_ROOT / "tests" / "bdd" / "features"
     if not features_dir.exists():
         return gate("bdd-no-implementation-leaks", set(), REMEDIATION)
-    violations = {
-        repo_relative(p)
-        for p in features_dir.rglob("*.feature")
-        if file_has_violation(p)
-    }
+    violations = {repo_relative(p) for p in features_dir.rglob("*.feature") if file_has_violation(p)}
     return gate("bdd-no-implementation-leaks", violations, REMEDIATION)
 
 

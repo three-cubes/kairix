@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _arch_lib import gate, python_files, repo_relative  # noqa: E402
+from _arch_lib import gate, python_files, repo_relative
 
 REMEDIATION = """Add a rationale to every test-skip mechanism:
 

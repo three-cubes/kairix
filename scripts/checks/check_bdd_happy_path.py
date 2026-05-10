@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _arch_lib import REPO_ROOT, gate, repo_relative  # noqa: E402
+from _arch_lib import REPO_ROOT, gate, repo_relative
 
 REMEDIATION = """Every feature file must declare at least one happy-path
 scenario — a scenario that demonstrates what success looks like for
@@ -109,11 +109,7 @@ def main() -> int:
     features_dir = REPO_ROOT / "tests" / "bdd" / "features"
     if not features_dir.exists():
         return gate("bdd-happy-path", set(), REMEDIATION)
-    violations = {
-        repo_relative(p)
-        for p in features_dir.rglob("*.feature")
-        if file_has_violation(p)
-    }
+    violations = {repo_relative(p) for p in features_dir.rglob("*.feature") if file_has_violation(p)}
     return gate("bdd-happy-path", violations, REMEDIATION)
 
 
