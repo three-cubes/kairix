@@ -1,5 +1,4 @@
 kairix/agents/briefing/pipeline.py
-kairix/agents/mcp/server.py
 kairix/agents/research/graph.py
 kairix/agents/research/nodes.py
 kairix/core/embed/embed.py
