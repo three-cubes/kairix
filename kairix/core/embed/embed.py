@@ -90,7 +90,7 @@ def chunk_text(
 # ── Azure API ─────────────────────────────────────────────────────────────────
 
 
-def _get_azure_config() -> tuple[str, str, str]:  # pragma: no cover
+def _get_azure_config() -> tuple[str, str, str]:  # pragma: no cover  # prod lazy default; deps injection
     """
     Read embed API config via ``get_credentials("embed")``. Supports Azure,
     OpenRouter, or any OpenAI-compatible endpoint.
@@ -144,7 +144,7 @@ def preflight_check(
     ``.data[0].embedding`` list. Production callers leave it as ``None`` so
     the real client is built lazily via ``make_openai_client``.
     """
-    if client is None:  # pragma: no cover
+    if client is None:  # pragma: no cover  # prod lazy default; tests inject client=fake
         from kairix.credentials import make_openai_client
 
         client = make_openai_client(api_key, endpoint, max_retries=2, timeout=30.0)
@@ -165,7 +165,7 @@ _embed_client = None
 _embed_client_key: tuple[str, str] = ("", "")
 
 
-def _get_embed_client(api_key: str, endpoint: str) -> Any:  # pragma: no cover
+def _get_embed_client(api_key: str, endpoint: str) -> Any:  # pragma: no cover  # prod-only module cache
     """Return a cached OpenAI client. Creates a new one if credentials change.
 
     Production-only — every test that exercises ``embed_batch`` injects a
@@ -214,7 +214,7 @@ def embed_batch(
     if not texts:
         return []
 
-    if client is None:  # pragma: no cover
+    if client is None:  # pragma: no cover  # prod lazy default; tests inject client=fake
         client = _get_embed_client(api_key, endpoint)
 
     try:
@@ -286,7 +286,7 @@ def batched(items: list[Any], size: int) -> Generator[list[Any], None, None]:
 # ── usearch index update ─────────────────────────────────────────────────────
 
 
-def _open_usearch_index() -> Any:  # pragma: no cover
+def _open_usearch_index() -> Any:  # pragma: no cover  # prod lazy default; deps injection
     """Open (or create) the usearch ANN index for the embed run.
 
     Production-only — every test that exercises ``run_embed`` injects an
@@ -483,7 +483,7 @@ def run_embed(
 
     Returns dict with: embedded, skipped, failed, duration_s, estimated_cost_usd
     """
-    if deps is None:  # pragma: no cover
+    if deps is None:  # pragma: no cover  # prod lazy default; tests pass deps=
         deps = EmbedDependencies()
 
     assert deps.get_document_root is not None
