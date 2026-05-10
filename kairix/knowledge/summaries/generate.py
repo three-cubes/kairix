@@ -6,12 +6,17 @@ L1: structured overview (~500 tokens) — main topic, key points, status
 
 Both functions raise on API failure. The batch helper (generate_summaries)
 catches and logs failures per-file so callers always get partial results.
+
+Tests inject a fake chat callable through ``SummariesDeps`` rather than
+threading per-helper ``chat_fn=None`` substitution kwargs.
 """
+
+from __future__ import annotations
 
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,13 +71,36 @@ def _first_n_words(text: str, n: int) -> str:
     return " ".join(words[:n])
 
 
+def _default_chat(messages: list[dict], max_tokens: int) -> str:
+    """Production chat callable — delegates to ``kairix._azure.chat_completion``.
+
+    Wrapper exists so ``SummariesDeps.chat`` has a stable, typed default
+    that doesn't import ``kairix._azure`` at module-import time.
+    """
+    from kairix._azure import chat_completion
+
+    return chat_completion(messages, max_tokens=max_tokens)
+
+
+@dataclass
+class SummariesDeps:
+    """Injectable dependencies for the summaries module.
+
+    Each field defaults to a production implementation; tests construct
+    ``SummariesDeps(chat=fake_chat)`` with a fake callable rather than
+    threading per-helper ``chat_fn=None`` substitution kwargs.
+    """
+
+    chat: Callable[..., str] = field(default_factory=lambda: _default_chat)
+
+
 def _call_chat(
     messages: list[dict],
     api_key: str,
     endpoint: str,
     deployment: str,
     max_tokens: int,
-    chat_fn: Callable[..., str] | None = None,
+    deps: SummariesDeps | None = None,
 ) -> tuple[str, int]:
     """
     Call Azure OpenAI chat completions via the shared SDK client.
@@ -82,12 +110,8 @@ def _call_chat(
     The api_key, endpoint, and deployment parameters are accepted for backwards
     compatibility but ignored — credentials are resolved by ``kairix._azure``.
     """
-    if chat_fn is None:
-        from kairix._azure import chat_completion
-
-        chat_fn = chat_completion
-
-    content = chat_fn(messages, max_tokens=max_tokens)
+    d = deps if deps is not None else SummariesDeps()
+    content = d.chat(messages, max_tokens=max_tokens)
     # Token usage is not available from the shared client; estimate from output length.
     tokens_est = estimate_tokens(content)
     return content, tokens_est
@@ -104,7 +128,8 @@ def generate_l0(
     api_key: str,
     endpoint: str,
     deployment: str = "gpt-4o-mini",
-    chat_fn: Callable[..., str] | None = None,
+    *,
+    deps: SummariesDeps | None = None,
 ) -> str:
     """
     Generate L0 abstract for a document.
@@ -117,7 +142,7 @@ def generate_l0(
         {"role": "system", "content": _L0_SYSTEM},
         {"role": "user", "content": f"Document path: {path}\n\n{truncated}"},
     ]
-    abstract, _ = _call_chat(messages, api_key, endpoint, deployment, max_tokens=150, chat_fn=chat_fn)
+    abstract, _ = _call_chat(messages, api_key, endpoint, deployment, max_tokens=150, deps=deps)
     return abstract
 
 
@@ -127,7 +152,8 @@ def generate_l1(
     api_key: str,
     endpoint: str,
     deployment: str = "gpt-4o-mini",
-    chat_fn: Callable[..., str] | None = None,
+    *,
+    deps: SummariesDeps | None = None,
 ) -> str:
     """
     Generate L1 structured overview for a document.
@@ -140,7 +166,7 @@ def generate_l1(
         {"role": "system", "content": _L1_SYSTEM},
         {"role": "user", "content": f"Document path: {path}\n\n{truncated}"},
     ]
-    overview, _ = _call_chat(messages, api_key, endpoint, deployment, max_tokens=600, chat_fn=chat_fn)
+    overview, _ = _call_chat(messages, api_key, endpoint, deployment, max_tokens=600, deps=deps)
     return overview
 
 
@@ -152,7 +178,8 @@ def generate_summaries(
     include_l1: bool = False,
     batch_size: int = 10,
     sleep_ms: int = 100,
-    chat_fn: Callable[..., str] | None = None,
+    *,
+    deps: SummariesDeps | None = None,
 ) -> list[SummaryResult]:
     """
     Batch generate summaries for a list of file paths.
@@ -162,6 +189,7 @@ def generate_summaries(
     Sleeps sleep_ms milliseconds between each file call for rate limiting.
     batch_size controls how many files are processed before each sleep.
     """
+    d = deps if deps is not None else SummariesDeps()
     results: list[SummaryResult] = []
 
     for i, path in enumerate(paths):
@@ -179,13 +207,13 @@ def generate_summaries(
             now = datetime.now(timezone.utc).isoformat()
             tokens_total = 0
 
-            l0 = generate_l0(path, content, api_key, endpoint, deployment, chat_fn=chat_fn)
+            l0 = generate_l0(path, content, api_key, endpoint, deployment, deps=d)
             # Rough token estimate for L0 if usage not tracked here
             tokens_total += estimate_tokens(l0)
 
             l1: str | None = None
             if include_l1:
-                l1 = generate_l1(path, content, api_key, endpoint, deployment, chat_fn=chat_fn)
+                l1 = generate_l1(path, content, api_key, endpoint, deployment, deps=d)
                 tokens_total += estimate_tokens(l1)
 
             results.append(

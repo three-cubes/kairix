@@ -11,15 +11,16 @@ the document store via a Strategy-pattern pipeline:
      mismatch — and returns the winning category for each candidate.
   4. Results above ``threshold`` are returned, sorted by score.
 
-Never raises — failures return empty lists. Pass injectable scorer/
-extractor/search/LLM for testing without monkey-patching.
+Never raises — failures return empty lists. Pass a ``ContradictDetectorDeps``
+dataclass to substitute scorer / extractor / search at the boundary
+without monkey-patching.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from kairix.knowledge.contradict.extract import EntityDensityClaimExtractor
@@ -43,6 +44,32 @@ class ContradictionResult:
     claim: str = ""  # the extracted claim that drove the search/scoring
 
 
+def _default_search() -> Callable[..., Any]:
+    """Production search callable — bound to the canonical ``SearchPipeline``."""
+    from kairix.core.factory import build_search_pipeline
+
+    return build_search_pipeline().search
+
+
+@dataclass
+class ContradictDetectorDeps:
+    """Injectable dependencies for ``check_contradiction``.
+
+    Each field defaults to a production implementation; tests construct
+    ``ContradictDetectorDeps(search=fake_search, ...)`` with fakes
+    rather than threading per-helper ``*_fn=None`` substitution kwargs.
+
+    The scorer field is built lazily from the LLM passed to
+    ``check_contradiction`` because the production scorer needs the
+    LLM at construction time. Tests bypass that by setting ``scorer``
+    directly.
+    """
+
+    search: Callable[..., Any] = field(default_factory=_default_search)
+    scorer: CompositeContradictionScorer | None = None
+    extractor: Any = field(default_factory=EntityDensityClaimExtractor)
+
+
 def check_contradiction(
     content: str,
     llm: Any,
@@ -52,9 +79,7 @@ def check_contradiction(
     scope: Any = None,
     *,
     top_claims: int = 3,
-    search_fn: Callable[..., Any] | None = None,
-    scorer: CompositeContradictionScorer | None = None,
-    extractor: Any | None = None,
+    deps: ContradictDetectorDeps | None = None,
 ) -> list[ContradictionResult]:
     """
     Check whether *content* contradicts existing knowledge in the document store.
@@ -62,33 +87,26 @@ def check_contradiction(
     Args:
         content:    The new content to check (claim, note, decision, etc.).
         llm:        An LLM backend implementing ``chat(messages)`` — only used
-                    if scorer is None (the default scorer wraps the LLM).
+                    to build the default scorer when ``deps.scorer`` is None.
         top_k:      How many similar documents to compare against per claim.
         threshold:  Minimum contradiction score (0.0-1.0) to include. Default
                     0.45 — calibrated for the three-category composite which
                     individually scores more conservatively than the historic
                     single-prompt scorer.
         top_claims: How many high-signal claims to extract from content.
-        search_fn:  Injectable search function. Defaults to SearchPipeline.search.
-        scorer:     Injectable composite scorer. Defaults to all three categories
-                    (direct + overstatement + status_mismatch).
-        extractor:  Injectable claim extractor. Defaults to entity-density rank.
+        deps:       Injectable dependency bundle (search callable, scorer,
+                    extractor). Production callers leave ``None`` and the
+                    defaults wire to the real ``SearchPipeline``,
+                    composite scorer, and entity-density extractor.
 
     Returns:
         List of ContradictionResult, sorted by score descending. Empty list
         when no contradictions found or on any failure.
     """
-    if search_fn is None:
-        from kairix.core.factory import build_search_pipeline
-
-        _pipeline = build_search_pipeline()
-        search_fn = _pipeline.search
-
-    if scorer is None:
-        scorer = default_contradiction_scorer(llm)
-
-    if extractor is None:
-        extractor = EntityDensityClaimExtractor()
+    d = deps if deps is not None else ContradictDetectorDeps()
+    search = d.search
+    scorer = d.scorer if d.scorer is not None else default_contradiction_scorer(llm)
+    extractor = d.extractor
 
     claims = extractor.extract(content, top_n=top_claims) or [content[:500]]
 
@@ -105,7 +123,7 @@ def check_contradiction(
     seen_paths: dict[str, tuple[str, Any]] = {}
     for claim in claims:
         try:
-            sr = search_fn(query=claim[:500], **search_kwargs)
+            sr = search(query=claim[:500], **search_kwargs)
             for bundle in sr.results[:top_k]:
                 path = bundle.result.path
                 if path not in seen_paths:

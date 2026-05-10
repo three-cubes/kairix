@@ -1,12 +1,13 @@
 """
 Tests for kairix.knowledge.summaries.generate
 
-Uses chat_fn parameter for dependency injection — no monkey-patching needed.
+Uses ``SummariesDeps(chat=...)`` for dependency injection — no monkey-patching needed.
 """
 
 import pytest
 
 from kairix.knowledge.summaries.generate import (
+    SummariesDeps,
     _first_n_words,
     generate_l0,
     generate_summaries,
@@ -27,7 +28,7 @@ def test_generate_l0_returns_string():
         content="Some content about Azure Key Vault.",
         api_key="test-key",
         endpoint="https://test.openai.azure.com",
-        chat_fn=lambda msgs, max_tokens=150: expected,
+        deps=SummariesDeps(chat=lambda msgs, max_tokens=150: expected),
     )
 
     assert result == expected
@@ -50,10 +51,10 @@ def test_generate_l0_uses_first_800_words():
         content=long_content,
         api_key="k",
         endpoint="https://ep",
-        chat_fn=capture_chat,
+        deps=SummariesDeps(chat=capture_chat),
     )
 
-    assert captured_messages, "chat_fn was not called"
+    assert captured_messages, "chat callable was not invoked"
     user_msg = captured_messages[0][1]["content"]
     # Should contain word_799 but NOT word_800
     assert "word_799" in user_msg
@@ -83,7 +84,7 @@ def test_first_n_words_empty():
 
 
 # ---------------------------------------------------------------------------
-# generate_summaries (integration-level mock)
+# generate_summaries (integration-level via injected fake chat)
 # ---------------------------------------------------------------------------
 
 
@@ -98,8 +99,14 @@ def test_generate_summaries_returns_list(tmp_path):
         [str(tmp_path / "a.md"), str(tmp_path / "b.md")],
         api_key="k",
         endpoint="https://ep",
-        chat_fn=lambda msgs, max_tokens=150: "Summary text.",
+        sleep_ms=0,  # keep the test fast — sleep path is exercised elsewhere
+        deps=SummariesDeps(chat=lambda msgs, max_tokens=150: "Summary text."),
     )
 
     assert isinstance(result, list)
     assert len(result) == 2
+    # Sabotage-prove: assert the chat-injected content actually flowed through.
+    # If deps wasn't honoured, the production _default_chat would have been
+    # invoked and raised on missing Azure credentials — so this also locks
+    # in that we never reach the production callable in the test path.
+    assert all(r.l0 == "Summary text." for r in result)
