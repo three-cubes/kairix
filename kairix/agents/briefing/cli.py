@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from kairix.use_cases.brief import BriefOutput, run_brief
+from kairix.use_cases.brief import BriefDeps, BriefOutput, run_brief
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,8 +57,12 @@ def format_output(out: BriefOutput, *, print_full: bool) -> str:
     return preview
 
 
-def main(args: list[str] | None = None) -> None:
-    """Entry point for ``kairix brief``."""
+def main(args: list[str] | None = None, *, deps: BriefDeps | None = None) -> None:
+    """Entry point for ``kairix brief``.
+
+    The optional ``deps`` parameter forwards a ``BriefDeps`` directly
+    to the use case — production callers leave it None.
+    """
     if args is None:
         args = sys.argv[2:]  # strip 'kairix brief'
     parsed = build_parser().parse_args(args)
@@ -69,7 +73,7 @@ def main(args: list[str] | None = None) -> None:
         os.environ["KAIRIX_AGENT_MEMORY_ROOT"] = parsed.memory_root
 
     print(f"Generating briefing for agent: {parsed.agent} ...", file=sys.stderr)
-    out = run_brief(parsed.agent)
+    out = run_brief(parsed.agent, deps=deps)
 
     if out.error:
         print(f"Error generating briefing: {out.error}", file=sys.stderr)
