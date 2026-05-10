@@ -8,6 +8,8 @@ The fitness functions are mechanical, blocking checks that encode rejected patte
 
 F7 (per-file unit coverage floor) and F9 (union coverage floor) run in CI only because they need the test runtime — F7 in Stage 2 and F9 in Stage 5 (after both unit and integration suites finish so their coverage data can be combined). See [docs/architecture/fitness-functions.md](docs/architecture/fitness-functions.md) for the full rule set, why each rule exists, and how to fix violations.
 
+**SonarCloud Quality Gate is blocking** as of v2026.5.10.1. The CI gate polls SonarCloud's `/api/qualitygates/project_status` and fails on `ERROR`; GitHub branch protection on `main` additionally requires the `SonarCloud Code Analysis` check posted by the Sonar app. Either layer alone catches a regression; both together survive workflow drift. Triage failing hotspots at https://sonarcloud.io/project/issues?id=quanyeomans_kairix.
+
 ---
 
 ## Architecture patterns

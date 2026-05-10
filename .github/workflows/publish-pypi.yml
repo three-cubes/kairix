@@ -53,10 +53,14 @@ jobs:
         run: sleep 60
 
       - name: Install and smoke test
+        # The PyPI distribution name (kairix-agentic-knowledge-mgt) is
+        # different from the Python import name (kairix). pip resolves
+        # the long form; ``import kairix`` and the ``kairix`` console
+        # script are unchanged for end users.
         env:
           TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
           VERSION="${TAG_NAME#v}"
-          pip install "kairix==${VERSION}"
+          pip install "kairix-agentic-knowledge-mgt==${VERSION}"
           python -c "import kairix; print(f'kairix {kairix.__version__} installed successfully')"
           kairix --version

@@ -53,6 +53,8 @@ Pre-existing violations are grandfathered in `.architecture/baseline/`; net-new 
 
 Stages: arch-fitness (Stage 0, F1-F6+F8) → pre-commit → contracts → unit+bdd+contract+mypy (Stage 2, includes F7 per-file 85% floor) → integration → security (incl. SonarCloud) → Docker. All must pass before merge.
 
+**SonarCloud Quality Gate is blocking** as of v2026.5.10.1. Two layers of enforcement: (i) the `check` (CI gate) job polls SonarCloud's `/api/qualitygates/project_status` and fails on `ERROR`; (ii) GitHub branch protection on `main` requires the separate `SonarCloud Code Analysis` check posted by the Sonar app. Either layer alone would catch a regression; both together survive workflow drift. Triage failing hotspots at https://sonarcloud.io/project/issues?id=quanyeomans_kairix.
+
 Codecov surfaces:
 - **Coverage**: `unit` flag (Stage 2) and `integration` flag (Stage 3) upload via `codecov/codecov-action@v5`. `codecov.yml` carryforwards both flags so the dashboard merges correctly when only one stage runs. Patch target = 85% (matches F7).
 - **Test analytics**: JUnit XMLs from contracts / unit / integration upload via `codecov/test-results-action@v1` for flaky-test and slow-test tracking.

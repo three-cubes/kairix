@@ -94,7 +94,7 @@ Copy `.github/workflows/ci.yml`'s job structure. The pipeline runs five stages:
 | **4** | `security` | bandit, pip-audit, SonarCloud |
 | **5** | `union-coverage` | downloads .coverage from Stages 2 and 3, runs F9 on the union |
 
-Plus a `check` fan-in job that gates branch protection on every required job's result.
+Plus a `check` fan-in job that gates branch protection on every required job's result. The `check` job ALSO polls SonarCloud's `/api/qualitygates/project_status` and fails on `ERROR` — a Sonar QG regression is an immediate merge block, not advisory. See §G17 for the rationale.
 
 ### 6. Wire Codecov
 
@@ -345,6 +345,54 @@ Workflow names (the `name:` line at the top of `.yml`) drive only the GitHub Act
 ### G16. Pin every `uses:` in every workflow
 
 If you fix G7 only on `ci.yml`, SonarCloud will start flagging the next workflow file you write. **Sweep every workflow file** at setup time. The SHA-resolution shell snippet is already in G7.
+
+### G17. SonarCloud Quality Gate must be a hard gate, not advisory
+
+**Symptom:** A release ships with SonarCloud reporting `ERROR` on the dashboard (e.g. 35 unreviewed security hotspots, `new_security_hotspots_reviewed = 0%`) and the merge went through silently.
+
+**Cause:** The default wiring is advisory by accident, in three layers:
+
+1. The Sonar scan step in `ci.yml` typically has `continue-on-error: true` so transient SonarCloud outages don't block merge. That's defensible — but it means the *job* always reports success regardless of the QG verdict.
+2. The CI gate fan-in job depends on the Sonar *job*'s success, not the SonarCloud QG verdict. So a failing QG with a successful job (i.e. the common case) doesn't trip the gate.
+3. The SonarCloud app posts a separate GitHub status check called `SonarCloud Code Analysis` that DOES carry the QG verdict — but unless branch protection requires that specific check, GitHub's merge UI ignores it.
+
+**Fix — both of the following, intentionally redundant:**
+
+1. **In the `check` (CI gate) job, poll the SonarCloud QG API and fail on ERROR.** The kairix workflow does this with up to 90 s of polling to absorb the upload-vs-verdict lag:
+
+   ```yaml
+   - name: SonarCloud quality gate verdict
+     env:
+       PROJECT_KEY: <owner>_<repo>
+       PR_NUMBER: ${{ github.event.pull_request.number }}
+       BRANCH_REF: ${{ github.ref_name }}
+     run: |
+       set -euo pipefail
+       if [ -n "$PR_NUMBER" ]; then
+           URL="https://sonarcloud.io/api/qualitygates/project_status?projectKey=${PROJECT_KEY}&pullRequest=${PR_NUMBER}"
+       else
+           URL="https://sonarcloud.io/api/qualitygates/project_status?projectKey=${PROJECT_KEY}&branch=${BRANCH_REF}"
+       fi
+       for i in 1 2 3 4 5 6; do
+           RESPONSE=$(curl -fsS --max-time 10 "$URL" || echo '{}')
+           STATUS=$(echo "$RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('projectStatus',{}).get('status','MISSING'))" 2>/dev/null || echo "MISSING")
+           [ "$STATUS" = "OK" ] && exit 0
+           [ "$STATUS" = "ERROR" ] && { echo "$RESPONSE"; exit 1; }
+           sleep 15
+       done
+       exit 1   # missing verdict after 90s = fail; do not merge with no Sonar signal
+   ```
+
+2. **Add `SonarCloud Code Analysis` to the branch protection's required status checks**, alongside `check`:
+
+   ```bash
+   gh api -X POST "repos/<owner>/<repo>/branches/main/protection/required_status_checks/contexts" \
+       --input - <<<'["SonarCloud Code Analysis"]'
+   ```
+
+Both layers protect against the other failing. The CI gate poll catches QG regressions even if branch protection drifts; the branch-protection check catches them even if the workflow's poll is removed or skipped. Fixing only one is fragile.
+
+**Triage:** failing hotspots are at `https://sonarcloud.io/project/issues?id=<projectKey>`. The `new_security_hotspots_reviewed` condition checks the new-code window only; clearing the backlog of pre-existing hotspots is a one-time hygiene task that doesn't repeat.
 
 ---
 
