@@ -267,7 +267,16 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-data
-          path: coverage.xml
+          # `include-hidden-files: true` is required because upload-artifact@v4
+          # excludes dotfiles by default — `.coverage` is a dotfile that
+          # py-cov-action needs to render the PR coverage comment. F9 itself
+          # reads coverage.xml (not .coverage), so this upload is purely
+          # for the Coverage report job below; if .coverage isn't present
+          # at upload time the job degrades but doesn't block.
+          include-hidden-files: true
+          path: |
+            .coverage
+            coverage.xml
           retention-days: 7
 
   # ── Coverage delta PR comment ─────────────────────────────────────────────
@@ -286,10 +295,6 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: coverage-data
-
-      - name: Rename .coverage.unit -> .coverage for py-cov-action
-        run: |
-          if [ -f .coverage.unit ]; then mv .coverage.unit .coverage; fi
 
       - uses: py-cov-action/python-coverage-comment-action@53ff7553078bad69030786e486677315346c2dd2 # v3
         with:
