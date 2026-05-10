@@ -273,93 +273,27 @@ def tool_research(
     return research_output_to_envelope(out)
 
 
-def _resolve_guide_path(guide_path: Path | None) -> Path:
-    """Resolve the usage-guide markdown file path. Production fallback chain:
-    relative to this module → relative to the installed kairix package.
-    """
-    if guide_path is not None:
-        return guide_path
-    candidate = Path(__file__).parent.parent.parent / "docs" / "agent-usage-guide.md"
-    if candidate.exists():
-        return candidate
-    import kairix as _kairix
-
-    return Path(_kairix.__file__).parent.parent / "docs" / "agent-usage-guide.md"
-
-
-def _extract_topic_sections(full_text: str, topic_lower: str) -> str:
-    """Return the concatenated markdown sections whose heading mentions the topic.
-
-    Sections are demarcated by ``##`` / ``###`` headings. Falls back to a
-    keyword search across all lines when no heading matches.
-    """
-    lines = full_text.splitlines()
-    sections: list[str] = []
-    current: list[str] = []
-    in_section = False
-
-    for line in lines:
-        is_heading = line.startswith("## ") or line.startswith("### ")
-        if is_heading:
-            if in_section and current:
-                sections.append("\n".join(current))
-                current = []
-            in_section = topic_lower in line.lower()
-            if in_section:
-                current = [line]
-        elif in_section:
-            current.append(line)
-
-    if in_section and current:
-        sections.append("\n".join(current))
-
-    if sections:
-        return "\n\n".join(sections)
-    matching_lines = [ln for ln in lines if topic_lower in ln.lower()]
-    return "\n".join(matching_lines[:30]) if matching_lines else full_text[:2000]
-
-
-def tool_usage_guide(topic: str = "", *, guide_path: Path | None = None) -> dict[str, Any]:
+def tool_usage_guide(
+    topic: str = "",
+    *,
+    guide_path: Path | None = None,
+    deps: Any = None,
+) -> dict[str, Any]:
     """
     Return the kairix agent usage guide, or a section of it filtered by topic.
 
-    Use this tool when you are unsure how to use kairix, when a search returns
-    unexpected results, or when you want to understand a specific feature.
+    Thin adapter around ``kairix.use_cases.usage_guide.run_usage_guide``.
+    Use this tool when you are unsure how to use kairix, when a search
+    returns unexpected results, or when you want to understand a feature.
 
-    Args:
-        topic: Optional topic filter (e.g. "temporal", "entity", "troubleshoot",
-               "intent", "budget"). Empty string returns the full guide.
-        guide_path: Explicit path to the guide markdown file. When omitted,
-                    resolves relative to the package layout (production default).
-                    Tests inject an explicit path rather than monkeypatching
-                    ``__file__``.
-
-    Returns:
-        dict with keys: topic, content (markdown string), error.
+    The optional ``deps`` parameter forwards a ``UsageGuideDeps`` directly
+    to the use case — production callers leave it None. The legacy
+    ``guide_path`` parameter is preserved as the operator-facing override.
     """
-    try:
-        resolved_path = _resolve_guide_path(guide_path)
-        if not resolved_path.exists():
-            return {
-                "topic": topic,
-                "content": "",
-                "error": "Usage guide not found. Run: kairix onboard guide --document-root <path>",
-            }
+    from kairix.use_cases.usage_guide import run_usage_guide, usage_guide_output_to_envelope
 
-        full_text = resolved_path.read_text(encoding="utf-8")
-        if not topic:
-            return {"topic": "", "content": full_text, "error": ""}
-
-        content = _extract_topic_sections(full_text, topic.lower())
-        return {"topic": topic, "content": content, "error": ""}
-
-    except Exception as exc:
-        logger.warning("mcp.usage_guide failed: %s", exc)
-        return {
-            "topic": topic,
-            "content": "",
-            "error": "Usage guide lookup failed — check server logs for details.",
-        }
+    out = run_usage_guide(topic, guide_path=guide_path, deps=deps)
+    return usage_guide_output_to_envelope(out)
 
 
 def tool_contradict(
