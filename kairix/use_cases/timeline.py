@@ -94,15 +94,6 @@ class TimelineDeps:
     search_fn: Callable[..., Any] | None = None
 
 
-def _parse_iso(value: str | None) -> date | None:
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return None
-
-
 def _format_window(start: date | None, end: date | None) -> dict[str, str]:
     if start is None and end is None:
         return {}
