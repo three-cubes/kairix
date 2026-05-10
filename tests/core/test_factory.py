@@ -319,7 +319,14 @@ def test_build_search_pipeline_uses_docker_log_path_when_dockerenv_marker_presen
     real_path_cls = Path
 
     class _FakeDockerPath(Path):
-        """Path subclass whose ``exists()`` returns True for ``/.dockerenv``."""
+        """Path subclass whose ``exists()`` returns True for ``/.dockerenv``.
+
+        Python 3.10/3.11 require subclasses of pathlib.Path to inherit ``_flavour``;
+        3.12 reworked pathlib so the attribute is gone. Conditionally re-attach.
+        """
+
+        if hasattr(Path, "_flavour"):
+            _flavour = Path._flavour  # type: ignore[attr-defined]  # 3.10/3.11 only
 
         def exists(self, *args: Any, **kwargs: Any) -> bool:
             if str(self) == "/.dockerenv":
