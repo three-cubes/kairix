@@ -47,7 +47,7 @@ The benchmark uses strict NDCG@10 scoring with graded relevance (0/1/2), generat
 | YAML retrieval config | ✅ Shipped | `kairix.config.yaml` with validation; `RerankConfig`, `TemporalBoostConfig` |
 | Automated benchmark regression gate | ✅ Shipped | CI gate on PRs via mock backend; blocks NDCG regression > 0.02 |
 | Temporal chunk-date boost fixes | ✅ Shipped | Explicit-only guard, midpoint date, LIKE suffix path match (TMP-7B) |
-| Cross-encoder re-ranking | ✅ Shipped | `ms-marco-MiniLM-L-6-v2`; opt-in via `rerank.enabled: true`; `pip install kairix[rerank]` |
+| Cross-encoder re-ranking | ✅ Shipped | `ms-marco-MiniLM-L-6-v2`; opt-in via `rerank.enabled: true`; `pip install kairix-agentic-knowledge-mgt[rerank]` |
 | OpenAI SDK embed client | ✅ Shipped | `OpenAIEmbedProvider` via `openai` SDK (#43) |
 | Multi-collection support | ✅ Shipped | `hybrid_search()` accepts multiple collection names |
 | Port auto-detection | ✅ Shipped | `kairix mcp serve` and `kairix setup` auto-select available port |
