@@ -82,6 +82,26 @@ def _try_import_neo4j() -> Any:
         return None
 
 
+def _redact_uri(uri: str) -> str:
+    """Strip any embedded ``user:pass@`` credentials from a URI before logging.
+
+    Defensive against misuse of ``KAIRIX_NEO4J_URI`` — the documented
+    convention separates credentials from the URI (auth tuple), but
+    operators occasionally embed them inline. This redaction guarantees
+    we never log plaintext credentials even if someone does.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    try:
+        parts = urlparse(uri)
+    except ValueError:
+        return uri  # malformed URI — return as-is rather than mangle further
+    if not parts.hostname:
+        return uri
+    netloc = parts.hostname + (f":{parts.port}" if parts.port else "")
+    return urlunparse(parts._replace(netloc=netloc))
+
+
 class Neo4jClient:
     """
     Thin wrapper over the neo4j Python driver.
@@ -120,7 +140,7 @@ class Neo4jClient:
             self._driver = driver_cls.driver(self._uri, auth=(self._user, self._password))
             self._driver.verify_connectivity()
             self.available = True
-            logger.info("Neo4jClient: connected to %s", self._uri)
+            logger.info("Neo4jClient: connected to %s", _redact_uri(self._uri))
             self._init_constraints()
         except Exception as e:  # broad: neo4j raises diverse types on connect fail
             logger.warning("Neo4jClient: connection failed — %s", e)
