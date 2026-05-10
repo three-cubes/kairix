@@ -36,15 +36,29 @@ Every agent runs `safe-commit.sh` in its loop and only commits (and pushes, in n
 - User-facing: grade 8 reading level, "knowledge store" not "vault"
 - Test agents: generic names (agent-alpha, agent-beta)
 
+## Architecture fitness functions
+
+Mechanical, blocking checks encode rejected patterns into automation:
+F1 no `@patch` on kairix internals, F2 no `monkeypatch.setenv("KAIRIX_*")`,
+F3 suppressions require rationale, F5 no internal-name imports in tests,
+F6 no `*_fn=None` test-only kwargs in production, F7 per-file coverage
+≥ 85%. Pre-existing violations are grandfathered in
+`.architecture/baseline/`; net-new violations block at pre-commit, in
+`safe-commit.sh`, and in CI's Stage 0. **Canonical reference:**
+[docs/architecture/fitness-functions.md](docs/architecture/fitness-functions.md).
+Read this before adding `@patch`, `monkeypatch.setenv`, `*_fn=None`,
+or any new suppression — the gate will reject them.
+
 ## CI
 
-Stages: pre-commit → contracts → unit+bdd+contract+mypy → integration → security → Docker → SonarCloud + Codecov. All must pass before merge.
+Stages: arch-fitness (Stage 0) → pre-commit → contracts → unit+bdd+contract+mypy → integration → security → Docker → SonarCloud + Codecov. All must pass before merge.
 
 ## Docs
 
 | Topic | Location |
 |-------|----------|
 | Architecture & patterns | [docs/architecture/ENGINEERING.md](docs/architecture/ENGINEERING.md) |
+| **Architecture fitness functions** | [docs/architecture/fitness-functions.md](docs/architecture/fitness-functions.md) |
 | Operations & deployment | [docs/operations/OPERATIONS.md](docs/operations/OPERATIONS.md) |
 | Evaluation methodology | [docs/evaluation/EVALUATION.md](docs/evaluation/EVALUATION.md) |
 | Agent constraints | [CONSTRAINTS.md](CONSTRAINTS.md) |
