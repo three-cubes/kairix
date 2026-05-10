@@ -163,23 +163,19 @@ def test_generate_l1_uses_first_2000_words():
 
 
 @pytest.mark.unit
-def test_generate_summaries_with_l1():
+def test_generate_summaries_with_l1(tmp_path):
     """generate_summaries with include_l1=True produces both L0 and L1 per file."""
-    import tempfile
-    from pathlib import Path as _P
+    p = tmp_path / "doc.md"
+    p.write_text("Hello world content about testing.")
 
-    with tempfile.TemporaryDirectory() as td:
-        p = _P(td) / "doc.md"
-        p.write_text("Hello world content about testing.")
-
-        result = generate_summaries(
-            [str(p)],
-            api_key="k",
-            endpoint="https://ep",
-            include_l1=True,
-            sleep_ms=0,
-            deps=SummariesDeps(chat=lambda msgs, max_tokens=150: "L0/L1 stub."),
-        )
+    result = generate_summaries(
+        [str(p)],
+        api_key="k",
+        endpoint="https://ep",
+        include_l1=True,
+        sleep_ms=0,
+        deps=SummariesDeps(chat=lambda msgs, max_tokens=150: "L0/L1 stub."),
+    )
 
     assert len(result) == 1
     assert result[0].l0 == "L0/L1 stub."
