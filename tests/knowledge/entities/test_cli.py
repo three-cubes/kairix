@@ -18,8 +18,10 @@ from typing import Any
 import pytest
 
 from kairix.knowledge.entities.cli import (
+    cmd_get,
     cmd_suggest,
     cmd_validate,
+    format_get_output,
     format_suggest_output,
     format_validate_table,
 )
@@ -31,6 +33,7 @@ from kairix.use_cases.entity import (
     EntityValidateOutput,
     SuggestedEntityHit,
 )
+from kairix.use_cases.entity_get import EntityGetDeps, EntityGetOutput
 
 pytestmark = pytest.mark.unit
 
@@ -305,3 +308,76 @@ def test_cmd_validate_use_case_error_exits_one() -> None:
     rc, _stdout, stderr = _capture(lambda: cmd_validate(args, deps=deps))
     assert rc == 1
     assert "Validation failed" in stderr
+
+
+# ---------------------------------------------------------------------------
+# cmd_get — Phase 3e
+# ---------------------------------------------------------------------------
+
+
+def test_format_get_output_renders_entity_with_summary() -> None:
+    out = EntityGetOutput(
+        id="acme", name="Acme", type="Organisation", summary="supplier — Tier A", vault_path="/Acme.md"
+    )
+    text = format_get_output(out)
+    assert "Entity:     Acme" in text
+    assert "Type:       Organisation" in text
+    assert "Neo4j id:   acme" in text
+    assert "Vault path: /Acme.md" in text
+    assert "supplier — Tier A" in text
+
+
+def test_format_get_output_renders_unknown_for_empty_fields() -> None:
+    out = EntityGetOutput(name="X")
+    text = format_get_output(out)
+    assert "Type:       (unknown)" in text
+    assert "Neo4j id:   (none)" in text
+    assert "Vault path: (none)" in text
+
+
+def test_format_get_output_short_circuits_on_error() -> None:
+    out = EntityGetOutput(name="X", error="Entity not found: X")
+    assert format_get_output(out).startswith("error:")
+
+
+def test_cmd_get_table_format_returns_zero_on_match() -> None:
+    args = argparse.Namespace(name="Acme", format="table")
+    deps = EntityGetDeps(
+        fetch_fn=lambda name: {
+            "id": "acme",
+            "name": name,
+            "type": "Organisation",
+            "summary": "supplier",
+            "vault_path": "/Acme.md",
+        }
+    )
+    rc, stdout, _ = _capture(lambda: cmd_get(args, deps=deps))
+    assert rc == 0
+    assert "Acme" in stdout
+    assert "Organisation" in stdout
+
+
+def test_cmd_get_returns_one_on_not_found() -> None:
+    args = argparse.Namespace(name="Bogus", format="table")
+    deps = EntityGetDeps(fetch_fn=lambda name: None)
+    rc, stdout, _ = _capture(lambda: cmd_get(args, deps=deps))
+    assert rc == 1
+    assert "Entity not found" in stdout
+
+
+def test_cmd_get_json_format_emits_envelope() -> None:
+    args = argparse.Namespace(name="Acme", format="json")
+    deps = EntityGetDeps(
+        fetch_fn=lambda name: {
+            "id": "acme",
+            "name": name,
+            "type": "Organisation",
+            "summary": "s",
+            "vault_path": "/p",
+        }
+    )
+    rc, stdout, _ = _capture(lambda: cmd_get(args, deps=deps))
+    assert rc == 0
+    payload = json.loads(stdout)
+    assert payload["id"] == "acme"
+    assert payload["name"] == "Acme"

@@ -150,29 +150,29 @@ def tool_search(
 def tool_entity(
     name: str,
     *,
+    deps: Any = None,
     neo4j_client: Any | None = None,
 ) -> dict[str, Any]:
     """Look up a specific person, company, or topic by name.
 
+    Thin adapter around ``kairix.use_cases.entity_get.run_entity_get``.
     This is a quick, direct lookup from the knowledge graph (Neo4j) —
     use it when you already know the name of what you're looking for.
 
-    Args:
-        neo4j_client: Injectable Neo4j client for testing.
-                      Defaults to the production client.
-    """
-    card = _fetch_entity_card(name, neo4j_client=neo4j_client)
-    if card is not None:
-        return {**card, "error": ""}
+    The optional ``deps`` parameter forwards an ``EntityGetDeps`` directly
+    to the use case — production callers leave it None.
 
-    return {
-        "id": "",
-        "name": name,
-        "type": "",
-        "summary": "",
-        "vault_path": "",
-        "error": f"Entity not found: {name}",
-    }
+    The legacy ``neo4j_client`` parameter is retained for back-compat;
+    when set, it overrides the default ``_fetch_entity_card`` helper's
+    Neo4j client. Prefer ``deps`` for new code.
+    """
+    from kairix.use_cases.entity_get import EntityGetDeps, entity_get_output_to_envelope, run_entity_get
+
+    if deps is None and neo4j_client is not None:
+        deps = EntityGetDeps(fetch_fn=lambda n: _fetch_entity_card(n, neo4j_client=neo4j_client))
+
+    out = run_entity_get(name, deps=deps)
+    return entity_get_output_to_envelope(out)
 
 
 def tool_prep(
