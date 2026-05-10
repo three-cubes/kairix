@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -74,12 +75,30 @@ def load_template(name: str) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+@dataclass
+class WizardDeps:
+    """Injectable dependencies for ``run_setup``.
+
+    Replaces the F6-violating ``connection_test_fn=None`` test-only kwarg
+    with a typed dataclass. Production code calls ``run_setup`` without
+    ``deps`` — the default factory wires the real LLM connection probe.
+    Tests construct ``WizardDeps(connection_test=lambda *_a, **_k: True)``
+    and pass it through.
+
+    The field is non-Optional with a ``default_factory`` (per CLAUDE.md
+    F6 guidance) so mypy sees the production callable directly — no
+    ``assert deps.x is not None`` ladder is needed inside the wizard.
+    """
+
+    connection_test: Callable[[str, str, str, str], bool] = field(default_factory=lambda: _test_llm_connection)
+
+
 def run_setup(
     output_path: str = "kairix.config.yaml",
     ctx: SetupContext | None = None,
     preset: str | None = None,
     document_path: str | None = None,
-    connection_test_fn: Callable[[str, str, str, str], bool] | None = None,
+    deps: WizardDeps | None = None,
 ) -> bool:
     """Run the setup wizard.
 
@@ -87,13 +106,13 @@ def run_setup(
     and JSON output modes via SetupContext.
 
     Args:
-        connection_test_fn: Callable(provider, endpoint, api_key, embed_model) -> bool.
-                            Defaults to _test_llm_connection.
+        deps: Injectable dependencies. Tests construct
+              ``WizardDeps(connection_test=fake)``; production omits the kwarg
+              and the default factory wires ``_test_llm_connection``.
 
     Returns True if setup completed successfully.
     """
-    if connection_test_fn is None:
-        connection_test_fn = _test_llm_connection
+    deps = deps if deps is not None else WizardDeps()
     if ctx is None:
         ctx = SetupContext.auto_detect()
 
@@ -156,7 +175,7 @@ def run_setup(
         prompt(ctx, "Chat model name")  # consumed by future config expansion
 
     print("\n  Testing connection...")
-    if connection_test_fn(provider_key, endpoint, api_key, embed_model):
+    if deps.connection_test(provider_key, endpoint, api_key, embed_model):
         print("  \u2713 Connected successfully\n")
     else:
         print("  \u2717 Connection failed — check your credentials and try again\n")
