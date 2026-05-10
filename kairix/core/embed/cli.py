@@ -55,8 +55,14 @@ def setup_logging(verbose: bool = False) -> None:
 def acquire_lock() -> IO[str]:
     """
     Acquire exclusive lock using the same lockfile as kairix-maintenance.sh.
-    Waits up to LOCK_WAIT_SECS. If the lock holder is dead, takes over.
-    Exits with code 3 if timeout and holder is still alive.
+
+    Waits up to ``LOCK_WAIT_SECS`` retrying ``LOCK_EX | LOCK_NB``. The kernel
+    releases ``flock`` automatically when the holding process exits (clean or
+    crash), so a "stale lockfile" is self-healing — the next worker simply
+    succeeds at LOCK_NB once the holder is gone. No PID inspection needed.
+
+    Exits with code 3 if the wait window expires while the holder is still
+    actively running.
     """
     lock_fh = open(LOCKFILE, "w")
     deadline = time.time() + LOCK_WAIT_SECS
@@ -70,34 +76,14 @@ def acquire_lock() -> IO[str]:
             logging.info("Waiting for embed lock...")
             time.sleep(5)
 
-    # Timeout — check if the lock holder is still alive
+    # Wait window exhausted and we still couldn't acquire — the holder is
+    # genuinely alive and working. Exit cleanly.
     lock_fh.close()
-    try:
-        holder_pid = int(LOCKFILE.read_text().strip())
-        # signal 0 is documented as a process-existence probe — does not
-        # deliver a real signal. Used here to detect a stale lockfile from a
-        # dead PID before taking it over.
-        os.kill(holder_pid, 0)  # NOSONAR — signal 0 is a process-existence probe, not a delivered signal
-        # Process is alive — genuine contention
-        logging.error(
-            "Could not acquire lock after %ds — PID %d is still running",
-            LOCK_WAIT_SECS,
-            holder_pid,
-        )
-        sys.exit(3)
-    except (ProcessLookupError, ValueError, OSError):
-        # Holder is dead or PID unreadable — stale lock
-        logging.warning("Stale embed lock (holder no longer running) — taking over")
-        LOCKFILE.unlink(missing_ok=True)
-        lock_fh = open(LOCKFILE, "w")
-        try:
-            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            lock_fh.write(str(os.getpid()))
-            lock_fh.flush()
-            return lock_fh
-        except BlockingIOError:
-            logging.error("Failed to acquire lock even after stale lock cleanup")
-            sys.exit(3)
+    logging.error(
+        "Could not acquire lock after %ds — another embed is still running",
+        LOCK_WAIT_SECS,
+    )
+    sys.exit(3)
 
 
 def release_lock(lock_fh: IO[str]) -> None:
