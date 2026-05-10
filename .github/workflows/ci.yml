@@ -324,10 +324,16 @@ jobs:
         # Coverage collected and uploaded so production-wiring code
         # exercised only at integration scope (factory.build_search_pipeline,
         # mcp.server.build_server, db.repository SQL surface) is measured.
+        # `--cov-fail-under=0` overrides pyproject's `fail_under = 80` —
+        # integration tests target wiring, not the full surface, and the
+        # 80% floor is enforced by Stage 2 (where the unit suite runs).
+        # F7 enforces per-file coverage in Stage 2; this step is for
+        # measurement only.
         run: |
           pytest tests/ -m integration -v --tb=short --maxfail=3 \
             --cov=kairix \
             --cov-report=xml:coverage-integration.xml \
+            --cov-fail-under=0 \
             --junitxml=results-integration.xml
 
       - name: Upload integration coverage to Codecov

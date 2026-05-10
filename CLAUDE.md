@@ -54,7 +54,12 @@ a new suppression, or an unmarked test — the gate will reject them.
 
 ## CI
 
-Stages: arch-fitness (Stage 0) → pre-commit → contracts → unit+bdd+contract+mypy → integration → security → Docker → SonarCloud + Codecov. All must pass before merge.
+Stages: arch-fitness (Stage 0, F1-F6+F8) → pre-commit → contracts → unit+bdd+contract+mypy (Stage 2, includes F7 per-file 85% floor) → integration → security (incl. SonarCloud) → Docker. All must pass before merge.
+
+Codecov surfaces:
+- **Coverage**: `unit` flag (Stage 2) and `integration` flag (Stage 3) upload via `codecov/codecov-action@v5`. `codecov.yml` carryforwards both flags so the dashboard merges correctly when only one stage runs. Patch target = 85% (matches F7).
+- **Test analytics**: JUnit XMLs from contracts / unit / integration upload via `codecov/test-results-action@v1` for flaky-test and slow-test tracking.
+- **Bundles**: not applicable (Python-only project).
 
 ## Docs
 

@@ -574,6 +574,29 @@ full test run on every commit (too slow). `safe-commit.sh` doesn't
 run F7 for the same reason — the orchestrator skips it via the
 `--skip-coverage` flag.
 
+#### Relationship to Codecov
+
+F7 is the **mechanical** floor — it blocks the merge regardless of
+Codecov's status. Codecov complements F7 with:
+
+- **Two coverage flags**: `unit` (Stage 2 — `pytest -m "unit or bdd or
+  contract"`) and `integration` (Stage 3 — `pytest -m integration`),
+  both with carryforward enabled in `codecov.yml`. The two flags merge
+  in the dashboard so production-wiring files only exercised at
+  integration scope (`factory.py`, `mcp/server.py`) show their real
+  coverage rather than a false 0% from the unit run.
+- **Patch target = 85%** in `codecov.yml` — applies the F7 bar to the
+  PR diff itself, so a PR that adds new code at <85% is rejected.
+- **Components** (Search / Agents / Knowledge / Quality / Core) for
+  per-area regression tracking on top of the file-level floor.
+- **Test analytics** via `codecov/test-results-action@v1` (uploaded
+  from contracts, unit, and integration jobs) — flaky-test detection
+  and slow-test trends, separate from coverage signal.
+
+`pyproject.toml`'s `[tool.coverage.run].omit` list is the only place
+files are excluded from measurement; `codecov.yml` deliberately has no
+`ignore:` block to prevent omit-list drift.
+
 #### Fix pattern
 
 Add tests that drive the public surface exercising the uncovered
@@ -587,7 +610,11 @@ lines. Specifically:
   are exercised by integration tests that don't currently feed the
   unit-coverage measurement. The CI workflow uploads integration
   coverage to Codecov with `flags: integration` so the patch-coverage
-  measurement counts them.
+  measurement counts them. F7 itself only inspects `coverage.xml` from
+  the unit run, so a file exercised purely at integration scope still
+  fails F7 unless it has unit tests too — the architectural signal is
+  to make sure the testable logic in those files isn't trapped behind
+  integration-only seams.
 - **Real testable logic** — write tests that drive the public surface.
 
 **Do not** add `# pragma: no cover` to silence the gate. That's the
@@ -828,19 +855,23 @@ scripts/checks/
 ├── check-no-internal-patches.sh          # F1
 ├── check-no-env-monkeypatch.sh           # F2
 ├── check-suppressions-have-rationale.sh  # F3
+├── check-env-reads-stay-in-paths.sh      # F4
 ├── check_no_internal_imports.py          # F5 (AST)
 ├── check_no_test_only_kwargs.py          # F6 (AST)
 ├── check_per_file_coverage.py            # F7 (XML)
+├── check_test_markers.py                 # F8 (AST)
 └── run-all.sh                            # Orchestrator (used by safe-commit + CI Stage 0)
 
 .architecture/baseline/
 ├── no-internal-patches-files.txt
 ├── no-env-monkeypatch-files.txt
 ├── suppressions-have-rationale-files.txt
+├── env-reads-in-paths-files.txt          # F4
 ├── no-internal-test-imports-files.txt
 ├── no-test-only-kwargs-files.txt
 ├── per-file-coverage-floor-files.txt
 └── test-only-kwargs-allow.txt            # F6 allow-list (separate from baseline)
+# F8 ships with no baseline — clean
 
 docs/architecture/
 └── fitness-functions.md                  # this document
@@ -867,14 +898,17 @@ For each rule, I chose the simplest tool that gives correct detection:
 - **Shell + grep** for line-pattern rules (F1, F2, F3) where the
   trigger is an unambiguous string at the line level. AST adds no
   precision; the grep regex is short, readable, and fast.
-- **Python AST** for structural rules (F5, F6) where the trigger
+- **Python AST** for structural rules (F5, F6, F8) where the trigger
   depends on import structure (rejected `from kairix.x import _y`
-  vs. allowed `from kairix.x import y as _alias`) or function
+  vs. allowed `from kairix.x import y as _alias`), function
   signatures (`*_fn=None` requires inspecting `args.args` /
-  `args.kwonlyargs` defaults).
+  `args.kwonlyargs` defaults), or decorator/marker inheritance
+  (F8 needs to walk class decorators + `pytestmark` assignments).
 - **Cobertura XML** for F7 because the data is already in that
   format from `pytest --cov-report=xml`. Standard library
-  `xml.etree.ElementTree` is sufficient.
+  `xml.etree.ElementTree` is sufficient. The same `coverage.xml` is
+  uploaded to Codecov from the same CI step, so the mechanical floor
+  (F7) and the dashboard signal (Codecov) read from one source.
 
 I considered and rejected:
 
@@ -959,7 +993,7 @@ arch-fitness:
   steps:
     - uses: actions/checkout@...
     - uses: actions/setup-python@...
-    - name: Run F1-F6 (no test runtime needed)
+    - name: Run F1-F6 + F8 (no test runtime needed)
       run: bash scripts/checks/run-all.sh --skip-coverage
 ```
 
@@ -977,6 +1011,18 @@ F7 runs inside `unit-and-type`:
 
 It runs **after** pytest emits `coverage.xml`, gated to one Python
 version (3.12) to avoid duplicate enforcement across the matrix.
+
+The same `coverage.xml` is then uploaded to Codecov in the next step
+(`codecov/codecov-action@v5` with `flags: unit`). Codecov's patch
+target (`codecov.yml: coverage.status.patch.default.target = 85%`)
+mirrors F7's floor, so the dashboard signal and the mechanical gate
+stay aligned. The integration job runs the equivalent flow with
+`flags: integration` from `coverage-integration.xml`.
+
+Test analytics — flaky-test detection, slow-test trends — runs in
+parallel via `codecov/test-results-action@v1`, consuming the JUnit
+XMLs already produced by every test stage (contracts / unit /
+integration). It does not block the merge; it's diagnostic signal.
 
 ### CI gate
 
