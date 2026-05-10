@@ -123,7 +123,7 @@ No GPU. No per-seat licensing. One VM serves your entire team of agents and huma
 ### Option A: pip install
 
 ```bash
-pip install "kairix-agentic-knowledge-mgt[agents,neo4j]"
+pip install "kairix[agents,neo4j]"
 kairix setup                   # interactive wizard — picks your paths, ports, collections
 kairix embed                   # index your documents
 kairix search "your question"  # find answers

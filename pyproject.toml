@@ -3,13 +3,7 @@ requires = ["setuptools>=61", "wheel", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# PyPI distribution name. The Python import path is still ``kairix``
-# (source layout under kairix/, console script entry remains ``kairix``).
-# The dist name here matches the trusted-publisher record on PyPI;
-# the short ``kairix`` slot was already reserved by another account
-# with no releases, so we publish under the long-form name and users
-# can still ``import kairix`` after install.
-name = "Kairix-agentic-knowledge-mgt"
+name = "kairix"
 dynamic = ["version"]
 description = "Self-contained knowledge retrieval engine — hybrid search, entity graph, temporal reasoning, session briefing"
 readme = "README.md"

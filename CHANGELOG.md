@@ -7,43 +7,6 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
-## [2026.5.10.2] - 2026-05-10 — SonarCloud Quality Gate is hard, not advisory
-
-> **Upgrading?** No code changes for end users. CI/release behaviour changes: the SonarCloud Quality Gate is now a true blocking gate at every layer. Releases will not proceed unless SonarCloud reports `OK` on the released SHA — there is no longer any path through which a release can ship while the QG is `ERROR`.
-
-### Changed
-
-- **`continue-on-error: true` removed from the SonarCloud Scan step** in `ci.yml`. The previous wiring tolerated SonarCloud being unreachable so transient outages didn't block merge — that was the wrong tradeoff. If SonarCloud is unavailable or the scan fails to upload, the security stage now fails, the CI gate fails, and the merge is blocked. Wait for Sonar to recover; do not merge with no Sonar verdict.
-- **Release-event SonarCloud QG enforcement added.** Both `docker-publish.yml` and `publish-pypi.yml` now begin with a `sonar-gate` job that polls SonarCloud's `/api/qualitygates/project_status` for the `main` branch and fails on `ERROR`. Even a manually-created release event won't trigger image push or PyPI upload until Sonar reports `OK`. This is the third independent enforcement layer (alongside the CI gate poll and branch protection's `SonarCloud Code Analysis` requirement).
-- **Five `githubactions:S7637` hotspots fixed.** Sonar flagged that several actions in `docker-publish.yml`, `publish-pypi.yml`, `benchmark-gate.yml`, `reflib-benchmark-gate.yml`, `integration.yml`, and `dependency-review.yml` were pinned by tag rather than commit SHA. All swept to commit-SHA pins with the tag preserved in a sidecar comment.
-
-### Documentation
-
-- The "absorbs Sonar outages" framing in `CHANGELOG [2026.5.10.1]` and `quality-harness-setup-guide.md §G17` corrected. Hard answer: if Sonar isn't OK, the release doesn't ship.
-
-### Known follow-up
-
-- **#174** tracks the 30 remaining SonarCloud hotspots (regex-DoS reviews, pseudorandom usage, tempfile, asyncio sync primitives, two Docker-runtime). Until they're triaged, the project-level QG remains `ERROR` and merges to main will be blocked. This is the intended behaviour — the QG is blocking now, and it is correctly catching the backlog.
-
----
-
-## [2026.5.10.1] - 2026-05-10 — PyPI distribution rename + SonarCloud now blocks merge
-
-> **Upgrading?** End users `import kairix` exactly as before; the **install command changes** to use the long-form distribution name: `pip install "kairix-agentic-knowledge-mgt[<extras>]"`. The Python package name (`kairix`), the console script (`kairix`), and every CLI / MCP surface are unchanged.
-
-### Changed
-
-- **PyPI distribution name is now `Kairix-agentic-knowledge-mgt`.** The short `kairix` slot on PyPI was reserved by an unrelated publisher with no releases, so we publish under the long-form name. The Python import path (`import kairix`), the source layout (`kairix/...`), and the console script entry (`kairix`) are unchanged. Existing imports and CLI invocations require no change. Operator install commands updated in `OPERATIONS.md` and the upgrade runbook.
-- **SonarCloud Quality Gate now blocks merge.** Pre-fix the Sonar QG verdict was advisory (the scan step had `continue-on-error: true` and the CI gate didn't read the QG status), so a release with 35 unreviewed security hotspots and `new_security_hotspots_reviewed = 0%` could be merged silently. Two enforcement layers added:
-  - The `check` (CI gate) job now polls SonarCloud's `/api/qualitygates/project_status` and fails when status is `ERROR`. Up to 90 s of polling absorbs the lag between scan upload and QG verdict; a missing verdict after 90 s also fails (rather than letting the merge through with no Sonar signal).
-  - GitHub branch protection on `main` now requires both `check` and `SonarCloud Code Analysis` checks. Belt-and-braces: even if a future workflow change skips the CI gate's Sonar poll, branch protection still won't allow merge without Sonar's own verdict.
-
-### Operational note
-
-If the SonarCloud QG fires due to a backlog of pre-existing hotspots (not net-new findings), triage them at https://sonarcloud.io/project/issues?id=quanyeomans_kairix. The `new_security_hotspots_reviewed` condition checks the new-code window only — clearing the backlog is a one-time hygiene task that subsequent merges will not need to repeat.
-
----
-
 ## [2026.5.10] - 2026-05-10 — Worker stability, layered health probes, deploy self-heal
 
 > **Upgrading?** Drop-in. The worker now survives recall-gate alerts (which were silently killing the process before this release). The `/healthz/ready` endpoint is new but additive — `/healthz` is unchanged for back-compat with existing load-balancer probes. systemd-managed deployments should adopt the example unit files in `scripts/install/` to fix the post-reboot self-heal gap (#167).

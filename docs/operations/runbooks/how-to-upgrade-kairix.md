@@ -41,7 +41,7 @@ Kairix is installed into a virtualenv at `/opt/kairix/.venv`.
 
 ```bash
 # Install new version
-sudo /opt/kairix/.venv/bin/pip install kairix-agentic-knowledge-mgt==<NEW_VERSION>
+sudo /opt/kairix/.venv/bin/pip install kairix==<NEW_VERSION>
 
 kairix --version
 # Should show new version

@@ -269,13 +269,13 @@ This creates `/opt/kairix/.venv/` (legacy pip path), installs kairix into it, in
 ```bash
 # Create venv and install (core)
 python3 -m venv /opt/kairix/.venv
-/opt/kairix/.venv/bin/pip install kairix-agentic-knowledge-mgt
+/opt/kairix/.venv/bin/pip install kairix
 
 # With Neo4j entity graph support (recommended for full feature set)
-/opt/kairix/.venv/bin/pip install "kairix-agentic-knowledge-mgt[neo4j]"
+/opt/kairix/.venv/bin/pip install "kairix[neo4j]"
 
 # With MCP server for agent integration
-/opt/kairix/.venv/bin/pip install "kairix-agentic-knowledge-mgt[agents]"
+/opt/kairix/.venv/bin/pip install "kairix[agents]"
 
 # Verify
 /opt/kairix/.venv/bin/kairix --help
@@ -570,7 +570,7 @@ After embedding, kairix automatically generates L0 (abstract-level) summaries fo
 For MULTI_HOP and SEMANTIC intent queries, kairix can apply a cross-encoder re-ranker after initial retrieval to improve result ordering. This requires the `rerank` extra:
 
 ```bash
-pip install "kairix-agentic-knowledge-mgt[rerank]"
+pip install "kairix[rerank]"
 ```
 
 Re-ranking is applied automatically when the extra is installed. Without it, kairix falls back to the standard fusion ranking (no degradation, just no cross-encoder pass).
@@ -580,7 +580,7 @@ Re-ranking is applied automatically when the extra is installed. Without it, kai
 Entity suggestion uses spaCy NLP models to detect named entities in your documents. This requires the `nlp` extra:
 
 ```bash
-pip install "kairix-agentic-knowledge-mgt[nlp]"
+pip install "kairix[nlp]"
 ```
 
 This is required for `kairix entity suggest` to work, including inside Docker containers. The Docker image includes the `nlp` extra by default.
@@ -811,10 +811,10 @@ For deeper diagnostic procedures and less common failure modes, see [`docs/opera
 
 ```bash
 # Upgrade to latest
-/opt/kairix/.venv/bin/pip install --upgrade kairix-agentic-knowledge-mgt
+/opt/kairix/.venv/bin/pip install --upgrade kairix
 
 # Or pin to a specific version
-/opt/kairix/.venv/bin/pip install "kairix-agentic-knowledge-mgt==2026.4.27"
+/opt/kairix/.venv/bin/pip install "kairix==2026.4.27"
 
 # Verify
 kairix onboard check
@@ -829,7 +829,7 @@ bash scripts/install.sh --skip-smoke   # re-downloads and re-installs wrapper
 
 ```bash
 # Install new version
-pip install --force-reinstall --no-deps "kairix-agentic-knowledge-mgt==<new-version>"
+pip install --force-reinstall --no-deps "kairix==<new-version>"
 
 # Run schema tests to verify compatibility
 pytest tests/ -k "schema" -v

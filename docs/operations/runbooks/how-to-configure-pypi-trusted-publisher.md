@@ -87,8 +87,8 @@ Check the run's logs for the `publish` job. The most common reasons:
 - Required-reviewer approval pending — the job is waiting on you.
 - The release event is a `prereleased` rather than `created` — the workflow currently triggers on `types: [created]`. Adjust the trigger if you want pre-releases to publish.
 
-**Verify job fails with `pip install kairix-agentic-knowledge-mgt==X.Y.Z` not found**
-PyPI's CDN can lag a few seconds after publish. The workflow already has `sleep 60` before the install attempt. If it still fails, manually `pip install kairix-agentic-knowledge-mgt==X.Y.Z` from your machine — if that works too, the verify job's network may be slow; bump the sleep.
+**Verify job fails with `pip install kairix==X.Y.Z` not found**
+PyPI's CDN can lag a few seconds after publish. The workflow already has `sleep 60` before the install attempt. If it still fails, manually `pip install kairix==X.Y.Z` from your machine — if that works too, the verify job's network may be slow; bump the sleep.
 
 ## See also
 

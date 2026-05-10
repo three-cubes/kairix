@@ -94,7 +94,7 @@ Copy `.github/workflows/ci.yml`'s job structure. The pipeline runs five stages:
 | **4** | `security` | bandit, pip-audit, SonarCloud |
 | **5** | `union-coverage` | downloads .coverage from Stages 2 and 3, runs F9 on the union |
 
-Plus a `check` fan-in job that gates branch protection on every required job's result. The `check` job ALSO polls SonarCloud's `/api/qualitygates/project_status` and fails on `ERROR` — a Sonar QG regression is an immediate merge block, not advisory. See §G17 for the rationale.
+Plus a `check` fan-in job that gates branch protection on every required job's result.
 
 ### 6. Wire Codecov
 
@@ -345,77 +345,6 @@ Workflow names (the `name:` line at the top of `.yml`) drive only the GitHub Act
 ### G16. Pin every `uses:` in every workflow
 
 If you fix G7 only on `ci.yml`, SonarCloud will start flagging the next workflow file you write. **Sweep every workflow file** at setup time. The SHA-resolution shell snippet is already in G7.
-
-### G17. SonarCloud Quality Gate must be a hard gate, not advisory
-
-**Symptom:** A release ships with SonarCloud reporting `ERROR` on the dashboard (e.g. 35 unreviewed security hotspots, `new_security_hotspots_reviewed = 0%`) and the merge went through silently.
-
-**Cause:** The default wiring is advisory in three accidental layers:
-
-1. The Sonar scan step in `ci.yml` may have been added with `continue-on-error: true` to tolerate Sonar outages. **This is the wrong tradeoff** — it means the *job* always reports success regardless of the QG verdict, and a release ships with no Sonar signal at all. If Sonar is down, the right answer is to wait, not to merge blind.
-2. The CI gate fan-in job depends on the Sonar *job*'s success, not the SonarCloud QG verdict. So a failing QG with a successful job (i.e. the common case if continue-on-error is set) doesn't trip the gate.
-3. The SonarCloud app posts a separate GitHub status check called `SonarCloud Code Analysis` that DOES carry the QG verdict — but unless branch protection requires that specific check, GitHub's merge UI ignores it.
-
-**Fix — three intentionally redundant enforcement layers:**
-
-1. **In the `check` (CI gate) job, poll the SonarCloud QG API and fail on ERROR.** The kairix workflow does this with up to 90 s of polling to absorb the upload-vs-verdict lag:
-
-   ```yaml
-   - name: SonarCloud quality gate verdict
-     env:
-       PROJECT_KEY: <owner>_<repo>
-       PR_NUMBER: ${{ github.event.pull_request.number }}
-       BRANCH_REF: ${{ github.ref_name }}
-     run: |
-       set -euo pipefail
-       if [ -n "$PR_NUMBER" ]; then
-           URL="https://sonarcloud.io/api/qualitygates/project_status?projectKey=${PROJECT_KEY}&pullRequest=${PR_NUMBER}"
-       else
-           URL="https://sonarcloud.io/api/qualitygates/project_status?projectKey=${PROJECT_KEY}&branch=${BRANCH_REF}"
-       fi
-       for i in 1 2 3 4 5 6; do
-           RESPONSE=$(curl -fsS --max-time 10 "$URL" || echo '{}')
-           STATUS=$(echo "$RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('projectStatus',{}).get('status','MISSING'))" 2>/dev/null || echo "MISSING")
-           [ "$STATUS" = "OK" ] && exit 0
-           [ "$STATUS" = "ERROR" ] && { echo "$RESPONSE"; exit 1; }
-           sleep 15
-       done
-       exit 1   # missing verdict after 90s = fail; do not merge with no Sonar signal
-   ```
-
-2. **Add `SonarCloud Code Analysis` to the branch protection's required status checks**, alongside `check`:
-
-   ```bash
-   gh api -X POST "repos/<owner>/<repo>/branches/main/protection/required_status_checks/contexts" \
-       --input - <<<'["SonarCloud Code Analysis"]'
-   ```
-
-3. **Add a `sonar-gate` job to release-event workflows** (Docker publish, PyPI publish). Even a manually-created release event will not trigger image push or PyPI upload until SonarCloud reports `OK` for `main`:
-
-   ```yaml
-   jobs:
-     sonar-gate:
-       name: SonarCloud Quality Gate (release)
-       runs-on: ubuntu-latest
-       steps:
-         - name: SonarCloud quality gate verdict for release
-           env:
-             PROJECT_KEY: <owner>_<repo>
-             BRANCH_REF: main
-           run: |
-             # Same poll-and-fail logic as the CI gate above
-             ...
-
-     build-and-push:
-       needs: sonar-gate   # release-event publish gated on Sonar OK
-       ...
-   ```
-
-4. **Do NOT use `continue-on-error: true` on the Sonar scan step.** If Sonar is unavailable, the security stage MUST fail. The "tolerate outages" tradeoff sounds reasonable but produces silent releases without verdict — exactly what the gate is supposed to prevent.
-
-All three layers — CI gate poll, branch-protection check, release-event poll — protect against each other failing. Fixing only one is fragile.
-
-**Triage:** failing hotspots are at `https://sonarcloud.io/project/issues?id=<projectKey>`. The `new_security_hotspots_reviewed` condition checks the new-code window only; clearing the backlog of pre-existing hotspots is a one-time hygiene task that doesn't repeat. See kairix #174 for the canonical triage runbook.
 
 ---
 

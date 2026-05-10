@@ -1,0 +1,35 @@
+name: "5 · SonarCloud hotspot triage (manual)"
+
+# Workflow_dispatch-only. Run after pushing rationale entries to
+# scripts/sonar/triage_hotspots.py to mark the listed hotspots as
+# Acknowledged with their rationale recorded in SonarCloud's audit
+# trail. Idempotent: subsequent runs only triage hotspots that don't
+# already match an Acknowledged record.
+#
+# Why this exists: SonarCloud's hotspot review is a UI-only flow by
+# default — there's no in-code suppression that affects hotspot status.
+# Triaging 30 hotspots through the web UI is tedious and the audit
+# trail is hand-typed. This workflow runs the triage programmatically
+# with rationale text reviewed in code, so the decisions are visible
+# in git history.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  triage:
+    name: Mark hotspots Acknowledged with rationale
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Run triage script
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: python3 scripts/sonar/triage_hotspots.py

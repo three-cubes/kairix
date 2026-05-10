@@ -1640,25 +1640,11 @@ enforcement mechanism (review, runtime check, or human judgement):
   guidance (commit hygiene, naming, agent collaboration).
 - **`docs/architecture/ENGINEERING.md`** — broader architecture rules
   (Protocol-driven boundaries, factory composition, repository pattern).
-- **`docs/architecture/quality-harness-setup-guide.md`** — companion
-  setup guide (G1–G17 gotchas, including the SonarCloud blocking-gate
-  configuration in G17).
 - **`docs/architecture/cli-mcp-feature-parity.md`** — issue #168, the
   CLI/MCP convergence initiative; its Phase 2 work will reduce CLI
   body coverage gaps that F7 currently flags.
 - **`scripts/checks/`** — implementation source-of-truth.
 - **`.architecture/baseline/`** — current grandfathered violations.
-
-### External quality gates
-
-The SonarCloud Quality Gate is **not a fitness function** — it's an
-external service whose verdict the merge gate consumes. Like the
-fitness functions it is blocking (since v2026.5.10.1): the CI gate
-polls SonarCloud's `/api/qualitygates/project_status` and fails on
-`ERROR`, and GitHub branch protection requires the separate
-`SonarCloud Code Analysis` check the Sonar app posts. See
-quality-harness-setup-guide.md §G17 for the rationale and the exact
-wiring.
 
 ---
 
