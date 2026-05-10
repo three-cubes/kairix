@@ -30,7 +30,6 @@ from typing import Any, Literal
 
 from kairix.agents.mcp.errors import async_tool_handler
 from kairix.core.search.scope import Scope
-from kairix.text import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -183,84 +182,22 @@ def tool_prep(
     tier: Literal["l0", "l1"] = "l0",
     scope: Scope = DEFAULT_SCOPE,
     *,
-    search_fn: Callable[..., Any] | None = None,
-    chat_fn: Callable[..., Any] | None = None,
+    deps: Any = None,
 ) -> dict[str, Any]:
     """Get a short summary of a topic before committing to a full search.
 
-    Choose 'l0' for 2-3 sentences or 'l1' for a structured overview.
-    Uses less resources than a full search — good for quick context checks.
+    Thin adapter around ``kairix.use_cases.prep.run_prep``. Choose 'l0'
+    for 2-3 sentences or 'l1' for a structured overview. Uses less
+    resources than a full search — good for quick context checks.
     Retrieves relevant documents first, then summarises from them.
 
-    Args:
-        scope:     Search scope — shared, agent, shared+agent, all-agents,
-                   or everything. Default shared+agent.
-        search_fn: Injectable search function for testing.
-                   Defaults to the production hybrid search.
-        chat_fn:   Injectable chat completion function for testing.
-                   Defaults to the production Azure chat completion.
+    The optional ``deps`` parameter forwards a ``PrepDeps`` directly
+    to the use case — production callers leave it None.
     """
-    try:
-        if search_fn is None:
-            from kairix.core.factory import build_search_pipeline
+    from kairix.use_cases.prep import prep_output_to_envelope, run_prep
 
-            _pipeline = build_search_pipeline()
-            search_fn = _pipeline.search
-        if chat_fn is None:
-            from kairix._azure import chat_completion
-
-            chat_fn = chat_completion
-
-        # Retrieve context first — prep is grounded, not hallucinated
-        budget = 1500 if tier == "l0" else 3000
-        sr = search_fn(query, agent=agent, scope=scope, budget=budget)
-        context_parts = []
-        for r in sr.results[:5]:
-            context_parts.append(f"[{r.result.title or r.result.path}]\n{r.content[:500]}")
-        context = "\n\n---\n\n".join(context_parts) if context_parts else ""
-
-        if not context:
-            return {
-                "query": query,
-                "tier": tier,
-                "summary": "No relevant documents found for this topic.",
-                "tokens": 0,
-                "error": "",
-            }
-
-        max_tokens = 150 if tier == "l0" else 600
-        system = (
-            "You are a concise knowledge assistant. Based ONLY on the provided documents, "
-            "summarise what is known about the topic in 2-3 sentences. "
-            "Do not add information that is not in the documents."
-            if tier == "l0"
-            else "You are a knowledge assistant. Based ONLY on the provided documents, "
-            "provide a structured overview of the topic. "
-            "Do not add information that is not in the documents."
-        )
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": f"Topic: {query}\n\nDocuments:\n{context}"},
-        ]
-        summary = chat_fn(messages, max_tokens=max_tokens)
-        return {
-            "query": query,
-            "tier": tier,
-            "summary": summary,
-            "tokens": estimate_tokens(summary),
-            "sources": [r.result.title or r.result.path for r in sr.results[:5]],
-            "error": "",
-        }
-    except (ImportError, OSError, RuntimeError, KeyError, ValueError) as exc:
-        logger.warning("mcp.prep failed: %s", exc, exc_info=True)
-        return {
-            "query": query,
-            "tier": tier,
-            "summary": "",
-            "tokens": 0,
-            "sources": [],
-            "error": "Prep failed — check server logs for details.",
-        }
+    out = run_prep(query, agent=agent, scope=scope, tier=tier, deps=deps)
+    return prep_output_to_envelope(out)
 
 
 def tool_timeline(

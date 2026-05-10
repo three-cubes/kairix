@@ -8,13 +8,11 @@ Tests use dependency injection (DI) — no monkey-patching required.
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from kairix.agents.mcp.server import (
     tool_entity,
-    tool_prep,
     tool_usage_guide,
 )
 
@@ -32,64 +30,6 @@ class FakeNeo4jClient:
 
     def cypher(self, query: str, params: dict | None = None) -> list[dict]:
         return self._rows
-
-
-def _make_search_result(
-    query: str = "test query",
-    intent: str = "semantic",
-    results: list | None = None,
-    total_tokens: int = 10,
-    latency_ms: float = 42.5,
-    error: str = "",
-) -> SimpleNamespace:
-    """Build a fake SearchResult namespace."""
-    if results is None:
-        results = [
-            SimpleNamespace(
-                result=SimpleNamespace(path="notes/foo.md", boosted_score=0.9),
-                content="some text here",
-                token_estimate=10,
-            )
-        ]
-    return SimpleNamespace(
-        query=query,
-        intent=SimpleNamespace(value=intent),
-        results=results,
-        total_tokens=total_tokens,
-        latency_ms=latency_ms,
-        error=error,
-    )
-
-
-def _make_prep_search_result() -> SimpleNamespace:
-    """Create a fake search result for prep tests."""
-    mock_result = SimpleNamespace(
-        result=SimpleNamespace(title="test-doc", path="projects/test-doc.md"),
-        content="This is test document content about the topic.",
-    )
-    return SimpleNamespace(results=[mock_result])
-
-
-def _fake_search_default(**kw: object) -> SimpleNamespace:
-    return _make_search_result(query=str(kw.get("query", "test query")))
-
-
-def _fake_search_empty(**kw: object) -> SimpleNamespace:
-    return _make_search_result(
-        query=str(kw.get("query", "q")),
-        intent="entity",
-        results=[],
-        total_tokens=0,
-        latency_ms=1.0,
-    )
-
-
-def _fake_prep_search(*args: object, **kw: object) -> SimpleNamespace:
-    return _make_prep_search_result()
-
-
-def _fake_prep_search_empty(*args: object, **kw: object) -> SimpleNamespace:
-    return SimpleNamespace(results=[])
 
 
 # tool_search behaviour is now covered in tests/use_cases/test_search.py
@@ -189,79 +129,8 @@ def test_tool_entity_summary_includes_category_when_present() -> None:
     assert "knowledge-platform" in result["summary"]
 
 
-# ---------------------------------------------------------------------------
-# tool_prep
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_tool_prep_l0() -> None:
-    summary_text = "Brief context summary."
-
-    def fake_chat(messages: list, max_tokens: int = 150) -> str:
-        return summary_text
-
-    result = tool_prep(
-        query="What did we discuss last quarter?",
-        tier="l0",
-        search_fn=_fake_prep_search,
-        chat_fn=fake_chat,
-    )
-
-    assert result["tier"] == "l0"
-    assert result["summary"] == summary_text
-    assert result["error"] == ""
-    assert "sources" in result
-
-
-@pytest.mark.unit
-def test_tool_prep_l1() -> None:
-    summary_text = "Detailed context summary about the engagement."
-
-    def fake_chat(messages: list, max_tokens: int = 600) -> str:
-        return summary_text
-
-    result = tool_prep(
-        query="Explain our test engagement",
-        tier="l1",
-        search_fn=_fake_prep_search,
-        chat_fn=fake_chat,
-    )
-
-    assert result["tier"] == "l1"
-    assert result["error"] == ""
-
-
-@pytest.mark.unit
-def test_tool_prep_no_results_returns_no_content() -> None:
-    result = tool_prep(query="something obscure", tier="l0", search_fn=_fake_prep_search_empty)
-
-    assert "no relevant documents" in result["summary"].lower()
-    assert result["error"] == ""
-
-
-@pytest.mark.unit
-def test_tool_prep_error_handled() -> None:
-    def failing_search(*args: object, **kw: object) -> None:
-        raise RuntimeError("search unavailable")
-
-    result = tool_prep(query="anything", tier="l0", search_fn=failing_search)
-
-    assert result["summary"] == ""
-    assert "failed" in result["error"].lower()
-
-
-@pytest.mark.unit
-def test_tool_prep_default_tier_is_l0() -> None:
-    captured_kwargs: dict = {}
-
-    def capturing_chat(messages: list, max_tokens: int = 150) -> str:
-        captured_kwargs["max_tokens"] = max_tokens
-        return "ok"
-
-    tool_prep(query="q", search_fn=_fake_prep_search, chat_fn=capturing_chat)
-
-    assert captured_kwargs["max_tokens"] == 150
+# tool_prep behaviour is now covered in tests/use_cases/test_prep.py
+# (Phase 3c of #168 — tool_prep is a thin adapter around run_prep).
 
 
 # tool_timeline behaviour is now covered in tests/use_cases/test_timeline.py
