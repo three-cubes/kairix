@@ -24,7 +24,6 @@ Design principles:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -256,53 +255,22 @@ def tool_research(
     agent: str | None = None,
     max_turns: int = 4,
     *,
-    research_fn: Callable[..., Any] | None = None,
+    deps: Any = None,
 ) -> dict[str, Any]:
     """Ask a research question. The system searches multiple times, refining
     its approach until it finds a good answer or reports what's missing.
 
+    Thin adapter around ``kairix.use_cases.research.run_research_use_case``.
     Use this for complex questions that need more than a quick search.
     For simple lookups, use search instead — it's faster.
 
-    Args:
-        query:       The question to research.
-        agent:       Agent name for collection scoping.
-        max_turns:   Maximum search rounds (default 4).
-        research_fn: Injectable research function for testing.
-                     Defaults to run_research.
-
-    Returns:
-        dict with: query, synthesis, retrieved_chunks, gaps, confidence, turns, error.
+    The optional ``deps`` parameter forwards a ``ResearchDeps`` directly
+    to the use case — production callers leave it None.
     """
-    # Clamp max_turns to prevent unbounded LLM call amplification
-    max_turns = min(max(1, max_turns), 10)
-    try:
-        if research_fn is None:
-            from kairix.agents.research.graph import run_research
+    from kairix.use_cases.research import research_output_to_envelope, run_research_use_case
 
-            research_fn = run_research
-
-        result = research_fn(query=query, max_turns=max_turns)
-        return {
-            "query": result.get("query", query),
-            "synthesis": result.get("synthesis", ""),
-            "retrieved_chunks": result.get("retrieved_chunks", [])[:10],
-            "gaps": result.get("gaps", []),
-            "confidence": result.get("confidence", 0.0),
-            "turns": result.get("turns", 0),
-            "error": result.get("error", ""),
-        }
-    except Exception as exc:
-        logger.warning("mcp.research failed: %s", exc, exc_info=True)
-        return {
-            "query": query,
-            "synthesis": "",
-            "retrieved_chunks": [],
-            "gaps": [],
-            "confidence": 0.0,
-            "turns": 0,
-            "error": "Research failed — check server logs for details.",
-        }
+    out = run_research_use_case(query, max_turns=max_turns, deps=deps)
+    return research_output_to_envelope(out)
 
 
 def _resolve_guide_path(guide_path: Path | None) -> Path:
