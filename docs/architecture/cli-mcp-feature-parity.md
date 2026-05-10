@@ -34,22 +34,24 @@ For every feature operation:
 
 ## Audit (current state)
 
-| Feature | Operations | CLI | MCP | Gap |
-|---|---|---|---|---|
-| **search** | search | `kairix search` | `mcp__search` | UX parity to verify |
-| **contradict** | check | `kairix contradict check` | `mcp__contradict` | UX parity to verify |
-| **timeline** | timeline | `kairix timeline` (uses temporal-chunks index) | `mcp__timeline` (uses BM25+vec hybrid) | Same op, different code paths — closes #163 on convergence |
-| **entity** | suggest (NER from text) | `kairix entity suggest` | — | MCP missing |
-| **entity** | validate (against Wikidata) | `kairix entity validate` | — | MCP missing |
-| **entity** | get (lookup by name) | — | `mcp__entity` | CLI missing |
-| **entity** | seed (discover from index) | `kairix entity seed` | — | Operator-only? Decide whether agent-facing |
-| **prep** | prep | — | `mcp__prep` | CLI missing |
-| **research** | research | — | `mcp__research` | CLI missing |
-| **brief** | brief | `kairix brief` | — | MCP missing |
-| **usage_guide** | get | — | `mcp__usage_guide` | CLI missing (also dogfood CONN-2 deployment-step gap) |
+| Feature | Operations | CLI | MCP | Gap | Status |
+|---|---|---|---|---|---|
+| **timeline** | timeline | `kairix timeline` | `mcp__timeline` | code-path divergence (closes #163) | ✅ Phase 1 (#179) |
+| **search** | search | `kairix search` | `mcp__search` | UX parity (limit, diagnostics, entity card) | ✅ Phase 2 (#182) |
+| **contradict** | check | `kairix contradict check` | `mcp__contradict` | UX parity (top_claims, category, claim) | ✅ Phase 2 (#182) |
+| **brief** | brief | `kairix brief` | — → `mcp__brief` | MCP missing | ✅ Phase 3a (#183) |
+| **entity** | suggest (NER from text) | `kairix entity suggest` | — → `mcp__entity_suggest` | MCP missing | ✅ Phase 3b (#184) |
+| **entity** | validate (against Wikidata) | `kairix entity validate` | — → `mcp__entity_validate` | MCP missing | ✅ Phase 3b (#184) |
+| **prep** | prep | — → `kairix prep` | `mcp__prep` | CLI missing | ✅ Phase 3c (#185) |
+| **research** | research | — → `kairix research` | `mcp__research` | CLI missing | ✅ Phase 3d (#186) |
+| **entity** | get (lookup by name) | — → `kairix entity get` | `mcp__entity` | CLI missing | ✅ Phase 3e (#187) |
+| **usage_guide** | get | — → `kairix usage-guide` | `mcp__usage_guide` | CLI missing (also dogfood CONN-2) | ✅ Phase 3f (#188) |
+| **entity** | seed (discover from index) | `kairix entity seed` | — | Operator-only — no agent-facing surface | Out of scope |
 
-**Summary:** 8 surface-parity gaps + 1 code-path divergence + UX-parity
-audit work for the two already-converged features.
+**Status:** Phases 1–4 complete. MCP exposes 11 tools (was 7). Every
+agent-facing operation has both a CLI and an MCP surface, both calling
+the same use case in `kairix/use_cases/`. Cross-cutting invariants
+pinned in `tests/contracts/test_cli_mcp_parity_invariants.py`.
 
 ## Phasing
 
