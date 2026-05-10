@@ -382,17 +382,22 @@ def _embed_and_store_batch(
     dims: int,
     now: int,
     save_interval: int,
-    embed_batch_fn: Callable[..., list[list[float]]] | None = None,
+    embed_batch_fn: Callable[..., list[list[float]]],
 ) -> tuple[int, list[dict[str, Any]]]:
     """Embed a single batch and write results to DB + usearch index.
 
     Returns (embedded_count, failed_chunks) for this batch.
+
+    ``embed_batch_fn`` is the embedding callable — production passes the
+    Azure-backed ``embed_batch``; tests pass a fake. No default — caller
+    constructs the right callable at the boundary (the ``run_embed``
+    function below threads ``deps.embed_batch`` through). Removing the
+    legacy ``= None`` default closes the F6 test-seam violation.
     """
-    _embed = embed_batch_fn or embed_batch
     texts = [c["text"] for c in batch]
 
     try:
-        vectors = _embed(texts, api_key, endpoint, deployment, dims)
+        vectors = embed_batch_fn(texts, api_key, endpoint, deployment, dims)
     except (RuntimeError, KeyError, ValueError, OSError) as e:
         logger.error(
             "Batch %d failed: %s — logging %d chunks as failed",
