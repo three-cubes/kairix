@@ -278,6 +278,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-data
+          # `include-hidden-files: true` is required because upload-artifact@v4
+          # excludes dotfiles by default — `.coverage.unit` is a dotfile and
+          # would silently be dropped from the artifact, breaking F9.
+          include-hidden-files: true
           path: |
             .coverage.unit
             coverage.xml
@@ -358,22 +362,16 @@ jobs:
         # run rather than using COVERAGE_FILE env var.
         if: ${{ !cancelled() }}
         run: |
-          echo "=== DEBUG: workspace files after integration tests ==="
-          ls -la
-          echo "=== .coverage* files ==="
-          ls -la .coverage* 2>/dev/null || echo "no .coverage files"
-          if [ -f .coverage ]; then
-            cp .coverage .coverage.integration
-            echo "=== copied .coverage to .coverage.integration ==="
-          else
-            echo "=== ERROR: .coverage not found after pytest --cov ==="
-          fi
+          if [ -f .coverage ]; then cp .coverage .coverage.integration; fi
 
       - name: Upload integration coverage data (for F9 union)
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-data-integration
+          # See unit-and-type job: dotfiles are excluded by default in
+          # upload-artifact@v4 — required for `.coverage.integration`.
+          include-hidden-files: true
           path: .coverage.integration
           retention-days: 7
 
