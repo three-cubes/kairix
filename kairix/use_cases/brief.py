@@ -73,7 +73,7 @@ def run_brief(
     if normalised not in _VALID_AGENTS:
         return BriefOutput(
             agent=agent,
-            error=f"invalid agent: {agent!r}. Must be one of: {sorted(_VALID_AGENTS)}",
+            error=f"InvalidAgent: {agent!r}. Must be one of: {sorted(_VALID_AGENTS)}",
         )
 
     d = deps or BriefDeps()

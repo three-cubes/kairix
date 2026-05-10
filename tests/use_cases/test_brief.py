@@ -81,7 +81,7 @@ def test_agent_name_lowercased_and_stripped() -> None:
 def test_unknown_agent_returns_error_envelope() -> None:
     deps, captured = _build_deps()
     out = run_brief("rogue", deps=deps)
-    assert out.error.startswith("invalid agent")
+    assert out.error.startswith("InvalidAgent")
     assert captured["generate"] == []  # never reached the generator
 
 
@@ -89,7 +89,7 @@ def test_unknown_agent_returns_error_envelope() -> None:
 def test_empty_agent_string_is_invalid() -> None:
     deps, _ = _build_deps()
     out = run_brief("", deps=deps)
-    assert "invalid agent" in out.error
+    assert "InvalidAgent" in out.error
 
 
 @pytest.mark.parametrize("agent", ["builder", "shape", "growth", "consultant"])
@@ -139,7 +139,7 @@ def test_envelope_carries_all_fields() -> None:
 
 @pytest.mark.unit
 def test_envelope_carries_error_field() -> None:
-    out = BriefOutput(agent="x", error="invalid agent: 'x'. Must be ...")
+    out = BriefOutput(agent="x", error="InvalidAgent: 'x'. Must be ...")
     env = brief_output_to_envelope(out)
-    assert env["error"].startswith("invalid agent")
+    assert env["error"].startswith("InvalidAgent")
     assert env["content"] == ""

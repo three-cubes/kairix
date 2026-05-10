@@ -104,7 +104,7 @@ def test_topic_filter_returns_section(tmp_path: Path) -> None:
 def test_missing_guide_file_returns_operator_actionable_error(tmp_path: Path) -> None:
     deps = UsageGuideDeps(resolve_guide_fn=lambda p: tmp_path / "no-such.md")
     out = run_usage_guide(deps=deps)
-    assert "Usage guide not found" in out.error
+    assert out.error.startswith("UsageGuideNotFound:")
     assert "kairix onboard guide" in out.error
     assert out.content == ""
 
