@@ -9,12 +9,12 @@ Usage:
   kairix summarise --status            Show coverage stats
 """
 
+from __future__ import annotations
+
 import argparse
 import sqlite3
 import sys
 from pathlib import Path
-
-from kairix.paths import document_root as _get_document_root
 
 # ---------------------------------------------------------------------------
 # Credential helper
@@ -33,12 +33,10 @@ def _get_cred(secret_name: str) -> str:
 # Vault doc discovery
 # ---------------------------------------------------------------------------
 
-_DOCUMENT_ROOT = _get_document_root()
 
-
-def _discover_vault_docs() -> list[str]:
-    """Return absolute paths for all .md files in the vault."""
-    return [str(p) for p in _DOCUMENT_ROOT.rglob("*.md") if p.is_file()]
+def _discover_vault_docs(document_root: Path) -> list[str]:
+    """Return absolute paths for all .md files under ``document_root``."""
+    return [str(p) for p in document_root.rglob("*.md") if p.is_file()]
 
 
 # ---------------------------------------------------------------------------
@@ -46,10 +44,7 @@ def _discover_vault_docs() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _open_db() -> sqlite3.Connection:
-    from kairix.paths import summaries_db_path
-
-    db_path = summaries_db_path()
+def _open_db(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     from kairix.knowledge.summaries.staleness import init_summaries_db
@@ -63,7 +58,7 @@ def _open_db() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 
-def _cmd_status(db: sqlite3.Connection) -> None:
+def _cmd_status(db: sqlite3.Connection, document_root: Path) -> None:
     """Print coverage stats."""
     total_row = db.execute("SELECT COUNT(*) FROM summaries").fetchone()
     l0_row = db.execute("SELECT COUNT(*) FROM summaries WHERE l0 IS NOT NULL AND l0 != ''").fetchone()
@@ -73,7 +68,7 @@ def _cmd_status(db: sqlite3.Connection) -> None:
     l0 = l0_row[0] if l0_row else 0
     l1 = l1_row[0] if l1_row else 0
 
-    vault_count = len(_discover_vault_docs())
+    vault_count = len(_discover_vault_docs(document_root))
 
     print(f"Vault docs:     {vault_count}")
     print(f"With L0:        {l0} / {total} stored")
@@ -116,7 +111,18 @@ def _run_generate(
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(
+    argv: list[str] | None = None,
+    *,
+    document_root: Path | None = None,
+    db_path: Path | None = None,
+) -> None:
+    """Entry point for `kairix summarise`.
+
+    ``document_root`` and ``db_path`` are DI seams for tests; production
+    callers leave them ``None`` and the CLI resolves them from the
+    environment via ``kairix.paths``.
+    """
     parser = argparse.ArgumentParser(
         prog="kairix summarise",
         description="Generate L0/L1 tiered summaries for vault documents.",
@@ -141,10 +147,19 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv if argv is not None else sys.argv[2:])
 
-    db = _open_db()
+    if document_root is None:
+        from kairix.paths import document_root as _resolve_document_root
+
+        document_root = _resolve_document_root()
+    if db_path is None:
+        from kairix.paths import summaries_db_path
+
+        db_path = summaries_db_path()
+
+    db = _open_db(db_path)
 
     if args.status:
-        _cmd_status(db)
+        _cmd_status(db, document_root)
         db.close()
         return
 
@@ -160,14 +175,14 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
     if args.all:
-        paths = _discover_vault_docs()
+        paths = _discover_vault_docs(document_root)
         if not paths:
             print("No vault docs found.", file=sys.stderr)
             sys.exit(1)
         _run_generate(paths, args.include_l1, api_key, endpoint, args.deployment, db)
 
     elif args.stale:
-        all_paths = _discover_vault_docs()
+        all_paths = _discover_vault_docs(document_root)
         from kairix.knowledge.summaries.staleness import get_stale_paths
 
         paths = get_stale_paths(all_paths, db)

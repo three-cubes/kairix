@@ -31,6 +31,13 @@ class CorpusProfile:
     date_filename_count: int
     entity_doc_count: int
     titles: list[str] = field(default_factory=list)
+    # Titles whose underlying *path* matches the procedural-content shape
+    # (how-to / runbook / playbook / sop). Pre-computed at analyse time
+    # because path information is dropped before `generate_template_queries`
+    # runs — applying _PROCEDURAL_PATTERNS to titles directly was the bug
+    # fixed in #143 (procedural filter was permanently empty since titles
+    # never contain path separators).
+    procedural_titles: list[str] = field(default_factory=list)
 
 
 def analyse_corpus(db: sqlite3.Connection) -> CorpusProfile:
@@ -41,7 +48,8 @@ def analyse_corpus(db: sqlite3.Connection) -> CorpusProfile:
         collections[row[0]] = row[1]
 
     paths = db.execute("SELECT path, title FROM documents WHERE active=1").fetchall()
-    procedural = sum(1 for p, _ in paths if _PROCEDURAL_PATTERNS.search(p))
+    procedural_paths = [(p, t) for p, t in paths if _PROCEDURAL_PATTERNS.search(p)]
+    procedural = len(procedural_paths)
     date_files = sum(1 for p, _ in paths if _DATE_PATTERNS.search(p))
 
     # Entity docs: files in entity-like folders
@@ -49,6 +57,7 @@ def analyse_corpus(db: sqlite3.Connection) -> CorpusProfile:
     entity_count = sum(1 for p, _ in paths if entity_pattern.search(p))
 
     titles = [t for _, t in paths if t]
+    procedural_titles = [t for _, t in procedural_paths if t]
 
     return CorpusProfile(
         total_docs=total,
@@ -57,6 +66,7 @@ def analyse_corpus(db: sqlite3.Connection) -> CorpusProfile:
         date_filename_count=date_files,
         entity_doc_count=entity_count,
         titles=titles[:500],  # cap for memory
+        procedural_titles=procedural_titles[:500],
     )
 
 
@@ -112,8 +122,12 @@ def generate_template_queries(profile: CorpusProfile, n: int = 50) -> list[dict[
             }
         )
 
-    # Procedural queries
-    proc_titles = [t for t in titles if _PROCEDURAL_PATTERNS.search(t)][:n_procedural]
+    # Procedural queries — use titles pre-classified by path in analyse_corpus.
+    # Applying _PROCEDURAL_PATTERNS directly to titles here used to silently
+    # produce an empty list (titles never contain '/') so the fallback at
+    # `proc_titles = titles[:n_procedural]` always ran, mislabelling recall
+    # queries as procedural.
+    proc_titles = profile.procedural_titles[:n_procedural]
     if not proc_titles:
         proc_titles = titles[:n_procedural]
     for title in proc_titles:
@@ -209,6 +223,6 @@ def build_suite(queries: list[dict[str, Any]], output_path: str) -> None:
         },
         "cases": queries,
     }
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         yaml.dump(suite, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     logger.info("auto_gold: wrote %d queries to %s", len(queries), output_path)

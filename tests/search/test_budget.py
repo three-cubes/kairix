@@ -1,29 +1,14 @@
 """
 Tests for kairix.core.search.budget — token budget enforcer.
 
-Tests cover:
-  - apply_budget() returns [] on empty results
-  - apply_budget() returns [] on zero budget
-  - apply_budget() Phase 1 (no summaries_db): all results get L2 tier
-  - apply_budget() truncates content when a single result exceeds budget
-  - apply_budget() stops adding results when budget exhausted
-  - _open_summaries_db() returns None when path does not exist
-  - _open_summaries_db() returns connection when path exists
-  - _open_summaries_db() returns None when sqlite3.connect raises
-  - _select_tier() Phase 1 (summaries_db=None) always returns L2
-  - _select_tier() Phase 2 score/budget thresholds: L0, L1, L2 paths
-  - _get_content_for_tier() Phase 1 returns snippet
-  - _get_content_for_tier() Phase 2 L0 returns abstract when available
-  - _get_content_for_tier() Phase 2 L1 falls back to L0 when L1 unavailable
-  - apply_budget() unexpected error returns []
+Every test drives behaviour through the public ``apply_budget`` callable.
+Phase 1 paths run with the default ``summary_loader=None``; Phase 2 paths
+inject ``FakeSummaryLoader`` from ``tests/fakes.py``. No private helpers
+(``_select_tier``, ``_get_content_for_tier``, ``_open_summaries_db``) are
+imported or called directly.
 """
 
 from __future__ import annotations
-
-import sqlite3
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -33,13 +18,10 @@ from kairix.core.search.budget import (
     L2_BUDGET_MIN,
     L2_SCORE_THRESHOLD,
     BudgetedResult,
-    _get_content_for_tier,
-    _open_summaries_db,
-    _select_tier,
     apply_budget,
 )
 from kairix.core.search.rrf import FusedResult
-from kairix.text import strip_frontmatter
+from tests.fakes import FakeSummaryLoader
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -58,323 +40,226 @@ def _fused(path: str = "doc.md", snippet: str = "snippet text", score: float = 0
 
 
 # ---------------------------------------------------------------------------
-# apply_budget() tests
+# Phase 1 — no summary_loader: tier always L2, snippet content
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestApplyBudget:
-    @pytest.mark.unit
+class TestApplyBudgetPhase1:
     def test_empty_results_returns_empty(self) -> None:
         assert apply_budget([], budget=3000) == []
 
-    @pytest.mark.unit
     def test_zero_budget_returns_empty(self) -> None:
-        results = [_fused()]
-        assert apply_budget(results, budget=0) == []
+        assert apply_budget([_fused()], budget=0) == []
 
-    @pytest.mark.unit
     def test_negative_budget_returns_empty(self) -> None:
-        results = [_fused()]
-        assert apply_budget(results, budget=-1) == []
+        assert apply_budget([_fused()], budget=-1) == []
 
-    @pytest.mark.unit
-    def test_phase1_all_results_l2(self) -> None:
-        """With no summaries DB, all results should be L2 tier."""
-        results = [_fused(f"doc{i}.md", snippet="abc " * 10) for i in range(3)]
-        budgeted = apply_budget(results, budget=10_000)
-        assert all(r.tier == "L2" for r in budgeted)
-
-    @pytest.mark.unit
     def test_returns_budgeted_result_type(self) -> None:
-        results = [_fused()]
-        budgeted = apply_budget(results, budget=10_000)
+        budgeted = apply_budget([_fused()], budget=10_000)
         assert len(budgeted) == 1
         assert isinstance(budgeted[0], BudgetedResult)
 
-    @pytest.mark.unit
-    def test_truncates_content_when_exceeds_budget(self) -> None:
-        """A single large result should be truncated to fit the budget."""
-        # 200 words * 1.3 = 260 tokens. Budget = 50 → truncate.
-        large_snippet = " ".join(["word"] * 200)
-        results = [_fused(snippet=large_snippet)]
-        budgeted = apply_budget(results, budget=50)
+    def test_all_results_get_l2_tier_regardless_of_score_or_budget(self) -> None:
+        """Phase 1 short-circuit: tier is L2 for every result, even low scores / tight budgets."""
+        results = [
+            _fused("low.md", snippet="abc", score=0.0),
+            _fused("mid.md", snippet="def", score=L1_SCORE_THRESHOLD + 0.01),
+            _fused("high.md", snippet="ghi", score=0.9),
+        ]
+        # Use a tight budget so a Phase 2 selector would have demoted to L0.
+        budgeted = apply_budget(results, budget=L1_BUDGET_MIN - 100)
+        assert [b.tier for b in budgeted] == ["L2", "L2", "L2"]
+
+    def test_content_is_the_snippet_when_no_loader(self) -> None:
+        """No loader → content is the original snippet (frontmatter-stripped)."""
+        budgeted = apply_budget([_fused(snippet="the snippet content")], budget=10_000)
+        assert budgeted[0].content == "the snippet content"
+
+    def test_empty_snippet_returns_empty_content(self) -> None:
+        budgeted = apply_budget([_fused(snippet="")], budget=10_000)
+        assert budgeted[0].content == ""
+        assert budgeted[0].token_estimate == 0
+
+    def test_yaml_frontmatter_is_stripped_from_content(self) -> None:
+        snippet = "---\ntitle: Test Doc\ntype: note\n---\n\nActual content here."
+        budgeted = apply_budget([_fused(snippet=snippet)], budget=10_000)
+        content = budgeted[0].content
+        assert "---" not in content
+        assert "title:" not in content
+        assert "Actual content here." in content
+
+    def test_snippet_without_frontmatter_is_returned_unchanged(self) -> None:
+        snippet = "Just normal content here."
+        budgeted = apply_budget([_fused(snippet=snippet)], budget=10_000)
+        assert budgeted[0].content == snippet
+
+    def test_truncates_content_when_single_result_exceeds_budget(self) -> None:
+        """A single oversize result is truncated by char-multiplied budget, then re-tokenised."""
+        large_snippet = " ".join(["word"] * 200)  # ~1000 chars → ~260 tokens
+        budgeted = apply_budget([_fused(snippet=large_snippet)], budget=50)
         assert len(budgeted) == 1
-        # Content should be shorter than original
         assert len(budgeted[0].content) < len(large_snippet)
-        # Allow small rounding tolerance between char-based truncation and word-based estimation
+        # Allow a small rounding tolerance between char-based truncation and word-based estimation.
         assert budgeted[0].token_estimate <= 60
 
-    @pytest.mark.unit
-    def test_stops_when_budget_exhausted(self) -> None:
-        """Should stop adding results once budget is used up."""
-        # Each snippet is ~500 chars → ~125 tokens
-        snippet = "word " * 100  # 500 chars
+    def test_stops_appending_results_once_budget_exhausted(self) -> None:
+        """remaining <= 0 breaks the loop, so the trailing results are dropped."""
+        snippet = "word " * 100  # ~500 chars → ~125 tokens
         results = [_fused(f"doc{i}.md", snippet=snippet) for i in range(10)]
         budgeted = apply_budget(results, budget=200)
-        # Should get fewer than 10 results
         assert len(budgeted) < 10
-        # Total tokens should not exceed budget (allowing 1 partial result)
-        total = sum(r.token_estimate for r in budgeted)
-        assert total <= 200 + 50  # allow for rounding
+        total = sum(b.token_estimate for b in budgeted)
+        assert total <= 200 + 50  # rounding tolerance
 
-    @pytest.mark.unit
-    def test_unexpected_exception_returns_empty(self) -> None:
-        """apply_budget should never raise — returns [] on internal error."""
-        results = [_fused()]
-        with patch(
-            "kairix.core.search.budget._apply_budget_impl",
-            side_effect=RuntimeError("boom"),
-        ):
-            result = apply_budget(results, budget=3000)
+    def test_unexpected_exception_returns_empty_list(self) -> None:
+        """Any internal exception (here: ``.snippet`` access raises) is swallowed → []."""
+
+        class _ExplodingResult:
+            path = "x.md"
+            collection = "c"
+            title = "T"
+            rrf_score = 0.5
+            boosted_score = 0.5
+
+            @property
+            def snippet(self) -> str:
+                raise RuntimeError("boom on snippet access")
+
+        result = apply_budget([_ExplodingResult()], budget=3000)  # type: ignore[list-item]
         assert result == []
 
 
 # ---------------------------------------------------------------------------
-# _open_summaries_db() tests
+# Phase 2 — summary_loader injected: tier varies by score/budget; loader
+# delivers L0 abstract / L1 overview, with snippet fallback.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestOpenSummariesDb:
-    @pytest.mark.unit
-    def test_returns_none_when_path_missing(self) -> None:
-        with patch("kairix.core.search.budget.Path") as mock_path:
-            mock_path.return_value.exists.return_value = False
-            result = _open_summaries_db()
-        assert result is None
+class TestApplyBudgetPhase2Tiering:
+    """Tier selection driven through ``apply_budget(summary_loader=...)``."""
 
-    @pytest.mark.unit
-    def test_returns_connection_when_path_exists(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        # Create a valid sqlite3 db
-        sqlite3.connect(str(tmp_path)).close()
-        try:
-            with patch("kairix.core.search.budget.Path", return_value=tmp_path):
-                conn = _open_summaries_db()
-            # Should return a connection (not None) since path exists
-            if conn is not None:
-                conn.close()
-                assert True, "smoke: connection returned for existing DB"
-            else:
-                assert True, "smoke: mock redirected; no exception raised"
-        finally:
-            tmp_path.unlink(missing_ok=True)
-
-    @pytest.mark.unit
-    def test_returns_none_when_connect_raises(self) -> None:
-        with patch("kairix.core.search.budget.Path") as mock_path:
-            mock_path.return_value.exists.return_value = True
-            with patch("kairix.core.search.budget.sqlite3") as mock_sqlite:
-                mock_sqlite.connect.side_effect = Exception("cannot open")
-                result = _open_summaries_db()
-        assert result is None
-
-
-# ---------------------------------------------------------------------------
-# _select_tier() tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestSelectTier:
-    @pytest.mark.unit
-    def test_phase1_always_l2(self) -> None:
-        """No summaries_db → always L2, regardless of score or budget."""
-        result = _fused(score=0.0)
-        assert _select_tier(result, 100, L1_SCORE_THRESHOLD, L2_SCORE_THRESHOLD, None) == "L2"
-        assert _select_tier(result, 10_000, L1_SCORE_THRESHOLD, L2_SCORE_THRESHOLD, None) == "L2"
-
-    @pytest.mark.unit
-    def test_phase2_l2_when_high_score_high_budget(self) -> None:
-        """High score + budget ≥ L2_BUDGET_MIN → L2."""
-        result = _fused(score=L2_SCORE_THRESHOLD + 0.1)
-        db = MagicMock()
-        tier = _select_tier(result, L2_BUDGET_MIN, L1_SCORE_THRESHOLD, L2_SCORE_THRESHOLD, db)
-        assert tier == "L2"
-
-    @pytest.mark.unit
-    def test_phase2_l1_when_medium_score_medium_budget(self) -> None:
-        """Medium score + budget ≥ L1_BUDGET_MIN but < L2_BUDGET_MIN → L1."""
-        result = _fused(score=L1_SCORE_THRESHOLD + 0.01)
-        db = MagicMock()
-        # Budget between L1_BUDGET_MIN and L2_BUDGET_MIN, score below L2 threshold
-        budget = L1_BUDGET_MIN
-        tier = _select_tier(
-            result,
-            budget,
-            L1_SCORE_THRESHOLD,
-            L2_SCORE_THRESHOLD + 1.0,
-            db,  # raise L2 threshold
+    def test_high_score_high_budget_selects_l2_and_does_not_query_loader(self) -> None:
+        """L2 path: score ≥ l2_threshold and remaining ≥ L2_BUDGET_MIN."""
+        loader = FakeSummaryLoader()
+        budgeted = apply_budget(
+            [_fused(score=L2_SCORE_THRESHOLD + 0.1)],
+            budget=L2_BUDGET_MIN,
+            summary_loader=loader,
         )
-        assert tier == "L1"
+        assert budgeted[0].tier == "L2"
+        # L2 returns the snippet directly — proves the loader was NOT consulted.
+        assert loader.l0_calls == []
+        assert loader.l1_calls == []
+        assert budgeted[0].content == "snippet text"
 
-    @pytest.mark.unit
-    def test_phase2_l0_when_low_score(self) -> None:
-        """Low score → L0 regardless of budget."""
-        result = _fused(score=0.0)
-        db = MagicMock()
-        tier = _select_tier(result, L2_BUDGET_MIN, L1_SCORE_THRESHOLD, L2_SCORE_THRESHOLD, db)
-        assert tier == "L0"
-
-    @pytest.mark.unit
-    def test_phase2_l0_when_low_budget(self) -> None:
-        """Very low budget → L0 even if score is high."""
-        result = _fused(score=1.0)
-        db = MagicMock()
-        tier = _select_tier(result, 10, L1_SCORE_THRESHOLD, L2_SCORE_THRESHOLD, db)
-        assert tier == "L0"
-
-
-# ---------------------------------------------------------------------------
-# _get_content_for_tier() tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestGetContentForTier:
-    @pytest.mark.unit
-    def test_phase1_returns_snippet(self) -> None:
-        """No summaries_db → return result.snippet."""
-        result = _fused(snippet="the snippet content")
-        content = _get_content_for_tier(result, "L2", summaries_db=None)
-        assert content == "the snippet content"
-
-    @pytest.mark.unit
-    def test_phase1_empty_snippet_returns_empty(self) -> None:
-        result = FusedResult(
-            path="x.md",
-            collection="c",
-            title="T",
-            snippet="",
-            rrf_score=0.5,
-            boosted_score=0.5,
+    def test_medium_score_medium_budget_selects_l1_and_queries_l1_only(self) -> None:
+        """L1 path: l1_threshold ≤ score < l2_threshold AND L1_BUDGET_MIN ≤ budget < L2_BUDGET_MIN."""
+        loader = FakeSummaryLoader(l1_by_path={"doc.md": "l1 overview"})
+        budgeted = apply_budget(
+            [_fused(score=L1_SCORE_THRESHOLD + 0.01)],
+            budget=L1_BUDGET_MIN,  # ≥ L1_BUDGET_MIN, < L2_BUDGET_MIN
+            l2_threshold=L2_SCORE_THRESHOLD + 1.0,  # raise the L2 bar so we land in L1
+            summary_loader=loader,
         )
-        content = _get_content_for_tier(result, "L2", summaries_db=None)
-        assert content == ""
+        assert budgeted[0].tier == "L1"
+        assert budgeted[0].content == "l1 overview"
+        # L1 hit short-circuits before querying L0.
+        assert loader.l1_calls == ["doc.md"]
+        assert loader.l0_calls == []
 
-    @pytest.mark.unit
-    def test_phase2_l0_returns_abstract_when_available(self) -> None:
-        """With summaries_db, L0 tier returns abstract from get_l0."""
-        result = _fused(snippet="fallback snippet")
-        mock_db = MagicMock()
+    def test_low_score_with_high_budget_selects_l0(self) -> None:
+        """L0 path: score below l1_threshold even with plenty of budget."""
+        loader = FakeSummaryLoader(l0_by_path={"doc.md": "l0 abstract"})
+        budgeted = apply_budget(
+            [_fused(score=0.0)],
+            budget=L2_BUDGET_MIN,
+            summary_loader=loader,
+        )
+        assert budgeted[0].tier == "L0"
+        assert budgeted[0].content == "l0 abstract"
+        assert loader.l0_calls == ["doc.md"]
+        assert loader.l1_calls == []
 
-        mock_loader = MagicMock()
-        mock_loader.get_l0.return_value = "abstract text"
-        mock_loader.get_l1.return_value = None
-
-        with patch.dict("sys.modules", {"kairix.knowledge.summaries.loader": mock_loader}):
-            content = _get_content_for_tier(result, "L0", summaries_db=mock_db)
-
-        assert content == "abstract text"
-
-    @pytest.mark.unit
-    def test_phase2_l0_falls_back_to_snippet_when_no_abstract(self) -> None:
-        """With summaries_db, L0 falls back to snippet if get_l0 returns None."""
-        result = _fused(snippet="fallback snippet")
-        mock_db = MagicMock()
-
-        mock_loader = MagicMock()
-        mock_loader.get_l0.return_value = None
-        mock_loader.get_l1.return_value = None
-
-        with patch.dict("sys.modules", {"kairix.knowledge.summaries.loader": mock_loader}):
-            content = _get_content_for_tier(result, "L0", summaries_db=mock_db)
-
-        assert content == "fallback snippet"
-
-    @pytest.mark.unit
-    def test_phase2_l1_falls_back_to_l0_when_unavailable(self) -> None:
-        """With summaries_db, L1 tier falls back to L0 abstract if L1 missing."""
-        result = _fused(snippet="fallback snippet")
-        mock_db = MagicMock()
-
-        mock_loader = MagicMock()
-        mock_loader.get_l1.return_value = None
-        mock_loader.get_l0.return_value = "l0 abstract"
-
-        with patch.dict("sys.modules", {"kairix.knowledge.summaries.loader": mock_loader}):
-            content = _get_content_for_tier(result, "L1", summaries_db=mock_db)
-
-        assert content == "l0 abstract"
-
-    @pytest.mark.unit
-    def test_phase2_l1_returns_l1_when_available(self) -> None:
-        """With summaries_db, L1 returns L1 overview when available."""
-        result = _fused(snippet="fallback snippet")
-        mock_db = MagicMock()
-
-        mock_loader = MagicMock()
-        mock_loader.get_l1.return_value = "l1 overview"
-        mock_loader.get_l0.return_value = "l0 abstract"
-
-        with patch.dict("sys.modules", {"kairix.knowledge.summaries.loader": mock_loader}):
-            content = _get_content_for_tier(result, "L1", summaries_db=mock_db)
-
-        assert content == "l1 overview"
-
-    @pytest.mark.unit
-    def test_phase2_exception_falls_back_to_snippet(self) -> None:
-        """If summary lookup raises, fall back to snippet."""
-        result = _fused(snippet="safe fallback")
-        mock_db = MagicMock()
-
-        mock_loader = MagicMock()
-        mock_loader.get_l0.side_effect = Exception("DB error")
-        mock_loader.get_l1.side_effect = Exception("DB error")
-
-        with patch.dict("sys.modules", {"kairix.knowledge.summaries.loader": mock_loader}):
-            content = _get_content_for_tier(result, "L0", summaries_db=mock_db)
-
-        assert content == "safe fallback"
-
-    @pytest.mark.unit
-    def test_phase1_strips_yaml_frontmatter_from_snippet(self) -> None:
-        """S18-16: snippets with YAML frontmatter should have it stripped."""
-        snippet = "---\ntitle: Test Doc\ntype: note\n---\n\nActual content here."
-        result = _fused(snippet=snippet)
-        content = _get_content_for_tier(result, "L2", summaries_db=None)
-        assert "---" not in content
-        assert "title:" not in content
-        assert "Actual content" in content
-
-    @pytest.mark.unit
-    def test_phase1_preserves_snippet_without_frontmatter(self) -> None:
-        """S18-16: snippets without frontmatter are returned unchanged."""
-        snippet = "Just normal content here."
-        result = _fused(snippet=snippet)
-        content = _get_content_for_tier(result, "L2", summaries_db=None)
-        assert content == snippet
-
-
-# ---------------------------------------------------------------------------
-# strip_frontmatter() tests (kairix.text utility)
-# ---------------------------------------------------------------------------
+    def test_low_budget_with_high_score_selects_l0(self) -> None:
+        """L0 path: tight budget demotes even a perfect-score result."""
+        loader = FakeSummaryLoader(l0_by_path={"doc.md": "l0 abstract"})
+        budgeted = apply_budget(
+            [_fused(score=1.0, snippet="x" * 200)],
+            budget=L1_BUDGET_MIN - 1,  # below L1_BUDGET_MIN
+            summary_loader=loader,
+        )
+        assert budgeted[0].tier == "L0"
+        assert budgeted[0].content == "l0 abstract"
 
 
 @pytest.mark.unit
-class TestStripFrontmatter:
-    @pytest.mark.unit
-    def test_snippet_excludes_yaml_frontmatter(self) -> None:
-        """S18-16: YAML frontmatter block is stripped from text."""
-        text = "---\ntitle: Test Doc\ntype: note\n---\n\nActual content here."
-        stripped = strip_frontmatter(text)
-        assert "---" not in stripped
-        assert "title:" not in stripped
-        assert "Actual content" in stripped
+class TestApplyBudgetPhase2Content:
+    """Content selection driven through ``apply_budget(summary_loader=...)``."""
 
-    @pytest.mark.unit
-    def test_no_frontmatter_unchanged(self) -> None:
-        text = "No frontmatter here, just content."
-        assert strip_frontmatter(text) == text
+    def test_l0_falls_back_to_snippet_when_loader_has_no_abstract(self) -> None:
+        """L0 with no abstract → snippet (frontmatter-stripped)."""
+        loader = FakeSummaryLoader()  # no l0/l1 configured
+        budgeted = apply_budget(
+            [_fused(score=0.0, snippet="fallback snippet")],
+            budget=L2_BUDGET_MIN,
+            summary_loader=loader,
+        )
+        assert budgeted[0].tier == "L0"
+        assert budgeted[0].content == "fallback snippet"
+        # L0 attempted; L1 not consulted (the L0 branch doesn't fall back to L1).
+        assert loader.l0_calls == ["doc.md"]
+        assert loader.l1_calls == []
 
-    @pytest.mark.unit
-    def test_empty_string(self) -> None:
-        assert strip_frontmatter("") == ""
+    def test_l1_falls_back_to_l0_when_l1_overview_unavailable(self) -> None:
+        """L1 miss → loader is queried for L0 next; that abstract is returned."""
+        loader = FakeSummaryLoader(l0_by_path={"doc.md": "l0 abstract"})
+        budgeted = apply_budget(
+            [_fused(score=L1_SCORE_THRESHOLD + 0.01)],
+            budget=L1_BUDGET_MIN,
+            l2_threshold=L2_SCORE_THRESHOLD + 1.0,
+            summary_loader=loader,
+        )
+        assert budgeted[0].tier == "L1"
+        assert budgeted[0].content == "l0 abstract"
+        # Both calls happen in order: L1 (miss), then L0 (hit).
+        assert loader.l1_calls == ["doc.md"]
+        assert loader.l0_calls == ["doc.md"]
 
-    @pytest.mark.unit
-    def test_mid_text_dashes_not_stripped(self) -> None:
-        """Dashes in the middle of text are not treated as frontmatter."""
-        text = "Some text\n---\nnot frontmatter\n---\nmore text"
-        assert strip_frontmatter(text) == text
+    def test_l1_miss_and_l0_miss_falls_back_to_snippet(self) -> None:
+        """L1 miss → L0 miss → snippet."""
+        loader = FakeSummaryLoader()
+        budgeted = apply_budget(
+            [_fused(score=L1_SCORE_THRESHOLD + 0.01, snippet="from snippet")],
+            budget=L1_BUDGET_MIN,
+            l2_threshold=L2_SCORE_THRESHOLD + 1.0,
+            summary_loader=loader,
+        )
+        assert budgeted[0].tier == "L1"
+        assert budgeted[0].content == "from snippet"
+        assert loader.l1_calls == ["doc.md"]
+        assert loader.l0_calls == ["doc.md"]
+
+    def test_loader_exception_in_l0_falls_back_to_snippet(self) -> None:
+        """A raising loader → caught by the inner try/except → snippet fallback."""
+        loader = FakeSummaryLoader(raises=RuntimeError("loader DB error"))
+        budgeted = apply_budget(
+            [_fused(score=0.0, snippet="safe fallback")],
+            budget=L2_BUDGET_MIN,
+            summary_loader=loader,
+        )
+        assert budgeted[0].tier == "L0"
+        assert budgeted[0].content == "safe fallback"
+
+    def test_loader_exception_in_l1_falls_back_to_snippet(self) -> None:
+        """A raising loader on the L1 path also falls back to the snippet."""
+        loader = FakeSummaryLoader(raises=RuntimeError("loader DB error"))
+        budgeted = apply_budget(
+            [_fused(score=L1_SCORE_THRESHOLD + 0.01, snippet="safe fallback")],
+            budget=L1_BUDGET_MIN,
+            l2_threshold=L2_SCORE_THRESHOLD + 1.0,
+            summary_loader=loader,
+        )
+        assert budgeted[0].tier == "L1"
+        assert budgeted[0].content == "safe fallback"

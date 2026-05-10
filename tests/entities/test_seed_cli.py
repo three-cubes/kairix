@@ -1,8 +1,8 @@
-"""Tests for `kairix entity seed` CLI subcommand (Sprint 17 Track D1)."""
+"""Tests for `kairix entity seed` CLI subcommand."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import sqlite3
 
 import pytest
 
@@ -33,44 +33,29 @@ class TestSeedCLIParsing:
 
 class TestSeedCLIExecution:
     @pytest.mark.unit
-    @patch("kairix.core.db.get_db_path")
-    def test_exits_1_when_no_index(self, mock_db: MagicMock) -> None:
-        mock_db.side_effect = FileNotFoundError("no index")
-        result = main(["seed"])
-        assert result == 1
+    def test_exits_1_when_no_index(self, tmp_path) -> None:
+        assert main(["seed"], db_path=tmp_path / "absent.sqlite") == 1
+
+    @pytest.mark.unit
+    def test_exits_1_when_index_unpopulated(self, tmp_path) -> None:
+        # File exists but has no documents table — operator gets the same hint.
+        db_path = tmp_path / "empty.sqlite"
+        sqlite3.connect(str(db_path)).close()
+        assert main(["seed"], db_path=db_path) == 1
 
     @pytest.mark.integration
-    @patch("kairix.knowledge.entities.seed.scan_for_entities")
-    @patch("kairix.core.db.get_db_path")
-    def test_dry_run_does_not_seed(self, mock_db: MagicMock, mock_scan: MagicMock, tmp_path) -> None:
-        from kairix.knowledge.entities.seed import EntityCandidate
-
-        mock_db.return_value = tmp_path / "index.sqlite"
-        # Create a minimal sqlite DB
-        import sqlite3
-
-        db = sqlite3.connect(str(mock_db.return_value))
+    def test_dry_run_does_not_seed(self, tmp_path) -> None:
+        db_path = tmp_path / "index.sqlite"
+        db = sqlite3.connect(str(db_path))
         db.execute("CREATE TABLE documents (id INTEGER, path TEXT, title TEXT, active INTEGER)")
         db.close()
-
-        mock_scan.return_value = [
-            EntityCandidate(name="Test Corp", entity_type="Organisation", confidence=0.9),
-        ]
-
-        result = main(["seed", "--dry-run"])
-        assert result == 0
+        # No rows → 0 candidates → return 0 with "no candidates" message
+        assert main(["seed", "--dry-run"], db_path=db_path) == 0
 
     @pytest.mark.integration
-    @patch("kairix.knowledge.entities.seed.scan_for_entities")
-    @patch("kairix.core.db.get_db_path")
-    def test_returns_0_when_no_candidates(self, mock_db: MagicMock, mock_scan: MagicMock, tmp_path) -> None:
-        mock_db.return_value = tmp_path / "index.sqlite"
-        import sqlite3
-
-        db = sqlite3.connect(str(mock_db.return_value))
+    def test_returns_0_when_no_candidates(self, tmp_path) -> None:
+        db_path = tmp_path / "index.sqlite"
+        db = sqlite3.connect(str(db_path))
         db.execute("CREATE TABLE documents (id INTEGER, path TEXT, title TEXT, active INTEGER)")
         db.close()
-
-        mock_scan.return_value = []
-        result = main(["seed"])
-        assert result == 0
+        assert main(["seed"], db_path=db_path) == 0

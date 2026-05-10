@@ -2,29 +2,28 @@
 Tests for kairix.core.search.planner — QueryPlanner decompose + retrieve_and_merge.
 
 Tests cover:
-  - decompose() fallback when chat_completion import fails
-  - decompose() fallback when JSON parse fails
-  - decompose() fallback when response is empty
-  - decompose() fallback when result list is invalid
-  - decompose() success: single sub-query passthrough
-  - decompose() success: multi-hop decomposition (3 sub-queries)
-  - decompose() with Neo4j unavailable (falls back to plain prompt)
-  - decompose() with Neo4j context injected into prompt
-  - retrieve_and_merge() single sub-query, RRF merge
-  - retrieve_and_merge() multiple sub-queries, RRF merge and deduplication
-  - retrieve_and_merge() search_fn raises exception → returns what succeeded
-  - retrieve_and_merge() empty sub-queries → empty results
+  - decompose() fallback paths (empty / invalid / over-long / non-list responses)
+  - decompose() success paths (single + multi-hop + filtered list items)
+  - decompose() Neo4j context injection (available + unavailable + raising client)
+  - retrieve_and_merge() single + multiple sub-queries with RRF, dedup, and fallback
+
+All tests inject ``llm_backend=FakeLLMBackend(...)`` and (where relevant) a
+``neo4j_client=`` mock — the production class accepts both as constructor /
+method arguments, so tests don't need to ``patch.dict("sys.modules", ...)``
+or substitute imports. The defensive-default ``llm_backend = get_default_backend()``
+branch is ``# pragma: no cover``-annotated in production with rationale.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from kairix.core.search.planner import QueryPlanner
+from tests.fakes import FakeLLMBackend
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,134 +55,164 @@ def _search_fn_factory(results_by_query: dict[str, list[_FakeResult]]):
 @pytest.mark.unit
 class TestDecompose:
     @pytest.mark.unit
-    def test_fallback_when_import_fails(self) -> None:
-        """Should return [query] when kairix._azure is not importable."""
+    def test_fallback_to_original_query_when_backend_chat_raises(self) -> None:
+        """When the backend's chat() raises, decompose returns [query] unchanged."""
         planner = QueryPlanner()
-        with patch("builtins.__import__", side_effect=ImportError("no module")):
-            result = planner.decompose("what is the meaning of life?")
-        assert result == ["what is the meaning of life?"]
-
-    @pytest.mark.unit
-    def test_fallback_when_chat_completion_raises(self) -> None:
-        """Should return [query] when chat_completion raises."""
-        planner = QueryPlanner()
-        mock_azure = MagicMock()
-        mock_azure.chat_completion.side_effect = RuntimeError("API down")
-        with patch.dict("sys.modules", {"kairix._azure": mock_azure}):
-            result = planner.decompose("query that fails")
+        backend = FakeLLMBackend(chat_raises=RuntimeError("API down"))
+        result = planner.decompose("query that fails", llm_backend=backend)
         assert result == ["query that fails"]
+        # The backend WAS called once (the exception was caught inside decompose).
+        assert len(backend.chat_calls) == 1
 
     @pytest.mark.unit
-    def test_fallback_when_response_is_empty(self) -> None:
-        """Should return [query] when chat_completion returns empty string."""
+    def test_fallback_to_original_query_when_backend_returns_empty_string(self) -> None:
+        """An empty backend response → fall back to [query] (with a warning log)."""
         planner = QueryPlanner()
-        mock_azure = MagicMock()
-        mock_azure.chat_completion.return_value = ""
-        with patch.dict("sys.modules", {"kairix._azure": mock_azure}):
-            result = planner.decompose("what happened in march")
+        backend = FakeLLMBackend(chat_response="")
+        result = planner.decompose("what happened in march", llm_backend=backend)
         assert result == ["what happened in march"]
 
     @pytest.mark.unit
-    def test_fallback_when_json_invalid(self) -> None:
-        """Should return [query] when response is not valid JSON."""
+    def test_fallback_to_original_query_when_response_is_invalid_json(self) -> None:
+        """Non-JSON response with no extractable quoted strings → [query]."""
         planner = QueryPlanner()
-        mock_azure = MagicMock()
-        mock_azure.chat_completion.return_value = "not json at all"
-        with patch.dict("sys.modules", {"kairix._azure": mock_azure}):
-            result = planner.decompose("some query")
+        # No quoted substrings of length 5+ → regex fallback can't extract anything → [query].
+        backend = FakeLLMBackend(chat_response="not json at all")
+        result = planner.decompose("some query", llm_backend=backend)
         assert result == ["some query"]
 
     @pytest.mark.unit
-    def test_fallback_when_json_not_list(self) -> None:
-        """Should return [query] when response JSON is not a list."""
+    def test_regex_fallback_extracts_quoted_strings_from_invalid_json(self) -> None:
+        """When JSON parse fails but the response has quoted ≥5-char strings, those are returned.
+
+        Closes coverage of the regex-fallback branch in decompose.
+        """
         planner = QueryPlanner()
-        mock_azure = MagicMock()
-        mock_azure.chat_completion.return_value = '{"key": "value"}'
-        with patch.dict("sys.modules", {"kairix._azure": mock_azure}):
-            result = planner.decompose("what")
+        backend = FakeLLMBackend(chat_response='garbage "first sub-query" some "second one" tail')
+        result = planner.decompose("some query", llm_backend=backend)
+        assert result == ["first sub-query", "second one"]
+
+    @pytest.mark.unit
+    def test_fallback_to_original_query_when_response_json_is_not_a_list(self) -> None:
+        """A JSON dict response → fall through to [query]."""
+        planner = QueryPlanner()
+        backend = FakeLLMBackend(chat_response='{"key": "value"}')
+        result = planner.decompose("what", llm_backend=backend)
         assert result == ["what"]
 
     @pytest.mark.unit
-    def test_fallback_when_list_too_long(self) -> None:
-        """Should return [query] when response list has more than 3 items."""
+    def test_fallback_to_original_query_when_response_list_has_more_than_three_items(self) -> None:
+        """A list with >3 items violates the contract → fall back to [query]."""
         planner = QueryPlanner()
-        mock_azure = MagicMock()
-        mock_azure.chat_completion.return_value = '["a", "b", "c", "d"]'
-        with patch.dict("sys.modules", {"kairix._azure": mock_azure}):
-            result = planner.decompose("something")
+        backend = FakeLLMBackend(chat_response='["a", "b", "c", "d"]')
+        result = planner.decompose("something", llm_backend=backend)
         assert result == ["something"]
 
     @pytest.mark.unit
-    def test_fallback_when_list_is_empty(self) -> None:
-        """Should return [query] when response list is empty."""
+    def test_fallback_to_original_query_when_response_list_is_empty(self) -> None:
+        """An empty list response → length below the 1-3 contract → [query]."""
         planner = QueryPlanner()
-        mock_azure = MagicMock()
-        mock_azure.chat_completion.return_value = "[]"
-        with patch.dict("sys.modules", {"kairix._azure": mock_azure}):
-            result = planner.decompose("empty response")
+        backend = FakeLLMBackend(chat_response="[]")
+        result = planner.decompose("empty response", llm_backend=backend)
         assert result == ["empty response"]
 
     @pytest.mark.unit
-    def test_success_single_sub_query(self) -> None:
-        """Should return the single sub-query from a simple query."""
+    def test_returns_single_sub_query_from_passthrough_response(self) -> None:
+        """A single-element response is returned verbatim."""
         planner = QueryPlanner()
-        mock_azure = MagicMock()
-        mock_azure.chat_completion.return_value = '["simple query passthrough"]'
-        with patch.dict("sys.modules", {"kairix._azure": mock_azure}):
-            result = planner.decompose("simple query passthrough")
+        backend = FakeLLMBackend(chat_response='["simple query passthrough"]')
+        result = planner.decompose("simple query passthrough", llm_backend=backend)
         assert result == ["simple query passthrough"]
 
     @pytest.mark.unit
-    def test_success_multi_hop_three_subs(self) -> None:
-        """Should return 3 sub-queries for a complex multi-hop query."""
+    def test_returns_three_sub_queries_for_multi_hop_decomposition(self) -> None:
+        """A 3-element response is returned as the decomposed sub-query list."""
         planner = QueryPlanner()
-        mock_azure = MagicMock()
-        mock_azure.chat_completion.return_value = '["sub1", "sub2", "sub3"]'
-        with patch.dict("sys.modules", {"kairix._azure": mock_azure}):
-            result = planner.decompose("complex query needing decomposition")
+        backend = FakeLLMBackend(chat_response='["sub1", "sub2", "sub3"]')
+        result = planner.decompose("complex query needing decomposition", llm_backend=backend)
         assert result == ["sub1", "sub2", "sub3"]
 
     @pytest.mark.unit
-    def test_filters_empty_strings_from_list(self) -> None:
-        """Should filter out empty strings from the sub-query list."""
+    def test_filters_empty_string_items_from_decomposed_list(self) -> None:
+        """Empty-string list items are filtered before returning."""
         planner = QueryPlanner()
-        mock_azure = MagicMock()
-        mock_azure.chat_completion.return_value = '["sub1", "", "sub2"]'
-        with patch.dict("sys.modules", {"kairix._azure": mock_azure}):
-            result = planner.decompose("query with blanks")
+        backend = FakeLLMBackend(chat_response='["sub1", "", "sub2"]')
+        result = planner.decompose("query with blanks", llm_backend=backend)
         assert result == ["sub1", "sub2"]
 
     @pytest.mark.unit
-    def test_with_neo4j_unavailable(self) -> None:
-        """Should use plain prompt when Neo4j client is unavailable."""
+    def test_uses_plain_prompt_when_neo4j_client_is_unavailable(self) -> None:
+        """A neo4j_client with available=False routes through the plain prompt path.
+
+        Asserts the prompt fed to the backend does NOT contain the entity-context
+        marker — proving the available=False guard short-circuits before the
+        graph lookup.
+        """
         planner = QueryPlanner()
         neo4j_mock = MagicMock(available=False)
+        backend = FakeLLMBackend(chat_response='["sub-query-from-plain-prompt"]')
 
-        with patch("kairix.core.search.planner.neo4j_graph_context", return_value=None):
-            result = planner.decompose("active projects techcorp", neo4j_client=neo4j_mock)
+        result = planner.decompose("active projects techcorp", neo4j_client=neo4j_mock, llm_backend=backend)
 
-        # Should still return a list
-        assert isinstance(result, list)
-        assert len(result) >= 1
+        assert result == ["sub-query-from-plain-prompt"]
+        # Plain prompt path: the entity-context marker is absent.
+        prompt = backend.chat_calls[0]["messages"][0]["content"]
+        assert "Known entities related to this query" not in prompt
 
     @pytest.mark.unit
-    def test_with_neo4j_context_injected(self) -> None:
-        """Should inject entity context when Neo4j graph context returns a string."""
+    def test_injects_entity_context_when_neo4j_returns_relationships(self) -> None:
+        """An available neo4j_client with relationships injects the entity context into the prompt.
+
+        Asserts the entity-context marker DOES appear in the prompt and the
+        related entity names are present — the with-context prompt path is
+        actually exercised, not just declared by the test.
+        """
         planner = QueryPlanner()
         neo4j_mock = MagicMock(available=True)
-        context_str = "Known entities related to this query:\n- TechCorp → GlobalTech, BuilderCo"
+        neo4j_mock.find_by_name.return_value = [{"id": "techcorp", "name": "TechCorp"}]
+        neo4j_mock.related_entities.return_value = [
+            {"name": "GlobalTech"},
+            {"name": "BuilderCo"},
+        ]
+        backend = FakeLLMBackend(chat_response='["entity-aware sub-query"]')
 
-        mock_backend = MagicMock()
-        mock_backend.chat.return_value = '["entity-aware sub-query"]'
+        result = planner.decompose("what techcorp builds today", neo4j_client=neo4j_mock, llm_backend=backend)
 
-        with patch("kairix.core.search.planner.neo4j_graph_context", return_value=context_str):
-            result = planner.decompose(
-                "what is techcorp doing",
-                neo4j_client=neo4j_mock,
-                llm_backend=mock_backend,
-            )
+        assert result == ["entity-aware sub-query"]
+        # The with-context prompt was used and named the related entities.
+        prompt = backend.chat_calls[0]["messages"][0]["content"]
+        assert "Known entities related to this query" in prompt
+        assert "TechCorp" in prompt
+        assert "GlobalTech" in prompt and "BuilderCo" in prompt
 
-        assert isinstance(result, list)
+    @pytest.mark.unit
+    def test_uses_plain_prompt_when_neo4j_returns_no_entities(self) -> None:
+        """An available client that finds no entities → context is None → plain prompt."""
+        planner = QueryPlanner()
+        neo4j_mock = MagicMock(available=True)
+        neo4j_mock.find_by_name.return_value = []  # no matches → no context built
+        backend = FakeLLMBackend(chat_response='["plain"]')
+
+        result = planner.decompose("query that finds nothing", neo4j_client=neo4j_mock, llm_backend=backend)
+
+        assert result == ["plain"]
+        prompt = backend.chat_calls[0]["messages"][0]["content"]
+        assert "Known entities related to this query" not in prompt
+
+    @pytest.mark.unit
+    def test_falls_back_to_plain_prompt_when_neo4j_context_lookup_raises(self) -> None:
+        """If the Neo4j lookup raises mid-context-build, fall through to the plain prompt path.
+
+        Closes coverage of the inner ``except Exception`` around ``neo4j_graph_context``.
+        """
+        planner = QueryPlanner()
+        neo4j_mock = MagicMock(available=True)
+        neo4j_mock.find_by_name.side_effect = RuntimeError("neo4j crash")
+        backend = FakeLLMBackend(chat_response='["fallback"]')
+
+        result = planner.decompose("query with broken neo4j", neo4j_client=neo4j_mock, llm_backend=backend)
+
+        assert result == ["fallback"]
 
 
 # ---------------------------------------------------------------------------
@@ -463,23 +492,26 @@ class TestDecomposeEdgeCases:
 
     @pytest.mark.unit
     def test_neo4j_context_exception_falls_back(self) -> None:
-        """If _neo4j_graph_context raises, should fall back to plain prompt."""
+        """If neo4j find_by_name raises, fall back to plain-prompt decomposition.
+
+        Drives the exception through ``find_by_name`` directly rather than patching
+        ``neo4j_graph_context`` — the real production behaviour propagates from
+        the Neo4j call, not from the helper itself.
+        """
         planner = QueryPlanner()
         neo4j_mock = MagicMock(available=True)
-        mock_backend = MagicMock()
-        mock_backend.chat.return_value = '["fallback query"]'
+        neo4j_mock.find_by_name.side_effect = RuntimeError("neo4j crash")
+        mock_backend = FakeLLMBackend(chat_response='["fallback query"]')
 
-        with patch(
-            "kairix.core.search.planner.neo4j_graph_context",
-            side_effect=RuntimeError("neo4j crash"),
-        ):
-            result = planner.decompose(
-                "query with broken neo4j",
-                neo4j_client=neo4j_mock,
-                llm_backend=mock_backend,
-            )
-        assert isinstance(result, list)
-        assert len(result) >= 1
+        result = planner.decompose(
+            "query with broken neo4j",
+            neo4j_client=neo4j_mock,
+            llm_backend=mock_backend,
+        )
+        # The plain prompt path was taken (no entity-context marker in the prompt).
+        prompt = mock_backend.chat_calls[0]["messages"][0]["content"]
+        assert "Known entities related to this query" not in prompt
+        assert result == ["fallback query"]
 
 
 # ---------------------------------------------------------------------------

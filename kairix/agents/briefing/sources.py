@@ -3,23 +3,22 @@ Individual source fetchers for the briefing pipeline.
 
 Each fetcher is independent and safe to run concurrently.
 All functions return strings (may be empty on failure) and never raise.
+
+Each fetcher accepts an optional ``memory_dir`` / ``document_root`` Path
+override so tests can pass a tmp_path-rooted layout without monkeypatching
+the kairix.paths helpers. Production callers leave them ``None`` and the
+helpers resolve via ``kairix.paths``.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
+from pathlib import Path
 
-from kairix.paths import agent_memory_path, document_root
 from kairix.text import truncate_to_tokens
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-_DOCUMENT_ROOT = document_root()
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +26,7 @@ _DOCUMENT_ROOT = document_root()
 # ---------------------------------------------------------------------------
 
 
-def fetch_memory_logs(agent: str, max_tokens: int = 500) -> str:
+def fetch_memory_logs(agent: str, max_tokens: int = 500, memory_dir: Path | None = None) -> str:
     """
     Fetch last 7 days of memory log files for agent.
 
@@ -35,7 +34,10 @@ def fetch_memory_logs(agent: str, max_tokens: int = 500) -> str:
     Returns empty string on failure.
     """
     try:
-        memory_dir = agent_memory_path(agent)
+        if memory_dir is None:
+            from kairix.paths import agent_memory_path
+
+            memory_dir = agent_memory_path(agent)
         if not memory_dir.exists():
             logger.warning(
                 "sources: memory dir not found for agent %r at %s — create it with: mkdir -p %s",
@@ -79,13 +81,16 @@ def fetch_memory_logs(agent: str, max_tokens: int = 500) -> str:
 # ---------------------------------------------------------------------------
 
 
-def fetch_recent_memory(agent: str, max_tokens: int = 300) -> str:
+def fetch_recent_memory(agent: str, max_tokens: int = 300, memory_dir: Path | None = None) -> str:
     """
     Fetch today's and yesterday's memory files for agent (full content).
     Returns empty string on failure.
     """
     try:
-        memory_dir = agent_memory_path(agent)
+        if memory_dir is None:
+            from kairix.paths import agent_memory_path
+
+            memory_dir = agent_memory_path(agent)
         if not memory_dir.exists():
             return ""
 
@@ -118,17 +123,26 @@ def fetch_recent_memory(agent: str, max_tokens: int = 300) -> str:
 # ---------------------------------------------------------------------------
 
 
-def fetch_entity_stub(agent: str, max_tokens: int = 400) -> str:
+def _resolve_document_root(document_root: Path | None) -> Path:
+    if document_root is not None:
+        return document_root
+    from kairix.paths import document_root as _document_root
+
+    return _document_root()
+
+
+def fetch_entity_stub(agent: str, max_tokens: int = 400, document_root: Path | None = None) -> str:
     """
     Fetch the agent's own entity stub from vault-entities.
     Returns empty string on failure.
     """
     try:
+        root = _resolve_document_root(document_root)
         # Try agent-specific entity stub (concept type)
         candidate_paths = [
-            _DOCUMENT_ROOT / "04-Agent-Knowledge" / "entities" / "concept" / f"{agent}.md",
-            _DOCUMENT_ROOT / "04-Agent-Knowledge" / "entities" / "agent" / f"{agent}.md",
-            _DOCUMENT_ROOT / "04-Agent-Knowledge" / "entities" / "person" / f"{agent}.md",
+            root / "04-Agent-Knowledge" / "entities" / "concept" / f"{agent}.md",
+            root / "04-Agent-Knowledge" / "entities" / "agent" / f"{agent}.md",
+            root / "04-Agent-Knowledge" / "entities" / "person" / f"{agent}.md",
         ]
 
         for path in candidate_paths:
@@ -152,15 +166,16 @@ def fetch_entity_stub(agent: str, max_tokens: int = 400) -> str:
 # ---------------------------------------------------------------------------
 
 
-def fetch_knowledge_rules(agent: str, max_tokens: int = 300) -> str:
+def fetch_knowledge_rules(agent: str, max_tokens: int = 300, document_root: Path | None = None) -> str:
     """
     Fetch rules/constraints from agent's knowledge collection.
     Returns empty string on failure.
     """
     try:
+        root = _resolve_document_root(document_root)
         rules_paths = [
-            _DOCUMENT_ROOT / "04-Agent-Knowledge" / agent / "rules.md",
-            _DOCUMENT_ROOT / "04-Agent-Knowledge" / "shared" / "rules.md",
+            root / "04-Agent-Knowledge" / agent / "rules.md",
+            root / "04-Agent-Knowledge" / "shared" / "rules.md",
         ]
 
         parts: list[str] = []
@@ -188,16 +203,17 @@ def fetch_knowledge_rules(agent: str, max_tokens: int = 300) -> str:
 # ---------------------------------------------------------------------------
 
 
-def fetch_recent_decisions(agent: str, max_tokens: int = 400) -> str:
+def fetch_recent_decisions(agent: str, max_tokens: int = 400, document_root: Path | None = None) -> str:
     """
     Fetch decisions from last 30 days from decisions.md.
     Returns empty string on failure.
     """
     try:
+        root = _resolve_document_root(document_root)
         parts: list[str] = []
 
         # decisions.md
-        decisions_path = _DOCUMENT_ROOT / "04-Agent-Knowledge" / agent / "decisions.md"
+        decisions_path = root / "04-Agent-Knowledge" / agent / "decisions.md"
         if decisions_path.exists():
             try:
                 content = decisions_path.read_text(encoding="utf-8", errors="replace")

@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from kairix.quality.benchmark.suite import BenchmarkSuite
 from kairix.quality.eval.constants import (
@@ -33,6 +33,41 @@ from kairix.quality.eval.metrics import (
     ndcg_graded,
     reciprocal_rank_graded,
 )
+
+if TYPE_CHECKING:
+    from kairix.core.protocols import ChatBackend
+
+
+@runtime_checkable
+class ContentClassifier(Protocol):
+    """Two-step classifier surface used by the benchmark runner.
+
+    Production: ``ContentClassifier`` wraps ``kairix.core.classify.rules.classify_content``
+    and ``kairix.core.classify.judge.classify_with_llm``. Tests pass a
+    ``FakeContentClassifier`` from ``tests/fakes.py`` instead of substituting
+    individual ``classify_fn`` / ``classify_llm_fn`` callables.
+    """
+
+    def classify_rules(self, query: str, agent: str) -> Any: ...
+
+    def classify_with_llm(self, query: str, agent: str) -> Any: ...
+
+
+class _DefaultContentClassifier:
+    """Production ``ContentClassifier`` — delegates to the real classify modules."""
+
+    def classify_rules(
+        self, query: str, agent: str
+    ) -> Any:  # pragma: no cover — needs the real classify_content; deferred to integration coverage
+        from kairix.core.classify.rules import classify_content
+
+        return classify_content(query, agent=agent)
+
+    def classify_with_llm(self, query: str, agent: str) -> Any:  # pragma: no cover — same as above
+        from kairix.core.classify.judge import classify_with_llm
+
+        return classify_with_llm(query, agent=agent)
+
 
 # Re-export so existing `from kairix.quality.benchmark.runner import CATEGORY_WEIGHTS` keeps working
 
@@ -60,7 +95,7 @@ FUZZY_MATCH_TOPK = 10
 __all__ = ["CATEGORY_ALIASES", "CATEGORY_WEIGHTS", "PHASE_GATES", "match_gold_to_path"]
 
 
-def _title_in_retrieved(gold_title: str, retrieved_paths: list[str], top_k: int) -> bool:
+def title_in_retrieved(gold_title: str, retrieved_paths: list[str], top_k: int) -> bool:
     """True if any of the top-k retrieved paths resolves to the gold title."""
     return any(match_gold_to_path(gold_title, p) for p in retrieved_paths[:top_k])
 
@@ -83,7 +118,7 @@ class BenchmarkResult:
 # ---------------------------------------------------------------------------
 
 
-def _exact_match(paths: list[str], gold: str) -> float:
+def exact_match(paths: list[str], gold: str) -> float:
     """1.0 if gold path is a case-insensitive substring of any top-K result paths."""
     if not gold:
         return 0.0
@@ -102,41 +137,33 @@ def _exact_match(paths: list[str], gold: str) -> float:
     return 0.0
 
 
-def _classification_score(
+def classification_score(
     query: str,
     expected_type: str,
-    classify_fn: Callable[..., Any] | None = None,
-    classify_llm_fn: Callable[..., Any] | None = None,
+    classifier: ContentClassifier | None = None,
 ) -> float:
-    """
-    Score a classification case by running kairix classify and comparing type.
-    Returns 1.0 if result type matches expected_type, 0.0 otherwise.
+    """Score a classification case by running kairix classify and comparing type.
 
-    Args:
-        classify_fn:     Injectable rules classifier. Defaults to ``classify_content``.
-        classify_llm_fn: Injectable LLM classifier fallback. Defaults to ``classify_with_llm``.
+    Returns 1.0 if the classifier's result.type matches ``expected_type``, 0.0 otherwise.
+    Two-step: rules first; if the rules return ``unknown``, fall back to the LLM
+    classifier. Returns 0.0 on any exception.
+
+    Tests pass a ``FakeContentClassifier`` from tests/fakes.py to control both
+    steps; production uses ``_DefaultContentClassifier`` which delegates to the
+    real classify modules.
     """
     try:
-        if classify_fn is None:
-            from kairix.core.classify.rules import classify_content
-
-            classify_fn = classify_content
-        if classify_llm_fn is None:
-            from kairix.core.classify.judge import classify_with_llm
-
-            classify_llm_fn = classify_with_llm
-
-        result = classify_fn(query, agent="shared")
+        if classifier is None:
+            classifier = _DefaultContentClassifier()
+        result = classifier.classify_rules(query, agent="shared")
         if result.type == "unknown":
-            # Try LLM fallback
-            result = classify_llm_fn(query, agent="shared")
-
+            result = classifier.classify_with_llm(query, agent="shared")
         return 1.0 if result.type == expected_type else 0.0
     except Exception:
         return 0.0
 
 
-def _fuzzy_match(paths: list[str], gold: str) -> float:
+def fuzzy_match(paths: list[str], gold: str) -> float:
     """1.0 if gold path is in any top-10 result paths."""
     if not gold:
         return 0.0
@@ -153,34 +180,34 @@ def _fuzzy_match(paths: list[str], gold: str) -> float:
     return 0.0
 
 
-def _llm_judge(
+def llm_judge(
     query: str,
     paths: list[str],
     snippets: list[str],
-    chat_fn: Callable[..., str] | None = None,
+    chat_backend: ChatBackend | None = None,
 ) -> float:
-    """
-    Score 0.0-1.0 using gpt-4o-mini as relevance judge.
+    """Score 0.0-1.0 using gpt-4o-mini as a relevance judge.
 
     Args:
-        query:    The search query to judge.
-        paths:    Retrieved document paths.
-        snippets: Retrieved document snippets.
-        chat_fn:  Optional chat completion callable for dependency injection.
-                  Defaults to ``kairix._azure.chat_completion``.
+        query:        The search query to judge.
+        paths:        Retrieved document paths.
+        snippets:     Retrieved document snippets.
+        chat_backend: ``ChatBackend`` protocol implementation. Defaults to
+                      ``AzureChatBackend`` constructed lazily.
 
     Returns 0.0 on any failure (API error, parse error, timeout).
     """
     try:
-        if chat_fn is None:
-            from kairix._azure import chat_completion
-
-            chat_fn = chat_completion
-
         if not paths:
             return 0.0
+        if (
+            chat_backend is None
+        ):  # pragma: no cover — production-only lazy AzureChatBackend construction; tests inject FakeChatBackend
+            from kairix._azure import AzureChatBackend
 
-        # Match the original run-benchmark-hybrid.py scorer — paths only, 6-point scale
+            chat_backend = AzureChatBackend()
+
+        # Match the original run-benchmark-hybrid.py scorer — paths only, 6-point scale.
         # This ensures scores are comparable across runs.
         snippets_text = "\n".join(f"- {p}" for p in paths[:5])
         prompt = (
@@ -197,8 +224,12 @@ def _llm_judge(
             "Reply with ONLY a number between 0.0 and 1.0."
         )
 
-        messages = [{"role": "user", "content": prompt}]
-        content = chat_fn(messages, max_tokens=10)
+        content = chat_backend.complete(
+            prompt,
+            api_key="",
+            endpoint="",
+            deployment="gpt-4o-mini",
+        )
         score = float(content)
         return max(0.0, min(1.0, score))
 
@@ -256,7 +287,12 @@ def score_tier(score: float) -> str:
 
 
 def _category_diagnosis(category: str, score: float) -> str:
-    """Return a brief diagnosis for a low-scoring category."""
+    """Return a brief diagnosis for a low-scoring category.
+
+    ``category`` must be one of CATEGORY_WEIGHTS keys — the only call site,
+    ``format_interpretation``, iterates exactly those keys. Unknown category
+    raises KeyError (caller invariant violation).
+    """
     if score >= CATEGORY_FLOOR:
         return "✅ above floor"
     diagnoses = {
@@ -268,7 +304,7 @@ def _category_diagnosis(category: str, score: float) -> str:
         "procedural": "❌ procedural docs not surfacing — check collection scope",
         "classification": "❌ classification rules not matching — check rules.py patterns",
     }
-    return diagnoses.get(category, f"❌ score {score:.3f} below floor {CATEGORY_FLOOR}")
+    return diagnoses[category]
 
 
 def format_interpretation(result: BenchmarkResult) -> str:
@@ -331,20 +367,20 @@ def score_case(
     Returns (score, ndcg_detail) where ndcg_detail is non-empty only for NDCG cases.
     """
     if case.score_method == "classification":
-        return _classification_score(case.query, case.expected_type or ""), {}
+        return classification_score(case.query, case.expected_type or ""), {}
 
     if case.score_method == "exact":
         if case.gold_title:
-            score = 1.0 if _title_in_retrieved(case.gold_title, paths, EXACT_MATCH_TOPK) else 0.0
+            score = 1.0 if title_in_retrieved(case.gold_title, paths, EXACT_MATCH_TOPK) else 0.0
         else:
-            score = _exact_match(paths, case.gold_path or "")
+            score = exact_match(paths, case.gold_path or "")
         return score, {}
 
     if case.score_method == "fuzzy":
         if case.gold_title:
-            score = 1.0 if _title_in_retrieved(case.gold_title, paths, FUZZY_MATCH_TOPK) else 0.0
+            score = 1.0 if title_in_retrieved(case.gold_title, paths, FUZZY_MATCH_TOPK) else 0.0
         else:
-            score = _fuzzy_match(paths, case.gold_path or "")
+            score = fuzzy_match(paths, case.gold_path or "")
         return score, {}
 
     if case.score_method == "ndcg":
@@ -361,7 +397,7 @@ def score_case(
         return score, ndcg_detail
 
     # llm fallback
-    return _llm_judge(query=case.query, paths=paths, snippets=snippets), {}
+    return llm_judge(query=case.query, paths=paths, snippets=snippets), {}
 
 
 def retrieve_case(
@@ -401,10 +437,18 @@ def compute_weighted_total(
     per_category_avg: dict[str, float],
     suite_version: str,
 ) -> float:
-    """Apply category weights (with Phase 3 classification adjustment) and return weighted total."""
+    """Apply category weights (with Phase 3 classification adjustment) and return weighted total.
+
+    The result is in the closed interval [0, 1] — both ``score_tier`` and
+    ``PHASE_GATES`` assume this. The Phase 3 adjustment moves 0.10 from
+    ``temporal`` to ``classification`` so the weights conserve. (A previous
+    revision used 0.15 for classification, which broke the [0, 1] range and
+    let perfect-scoring v1.1 suites report 1.05; surfaced by contract test.)
+    """
     effective_weights = dict(CATEGORY_WEIGHTS)
     if suite_version >= "1.1" and per_category_avg.get("classification", 0.0) > 0:
-        effective_weights["classification"] = 0.15
+        # Conservation: temporal donates 0.10 to classification.
+        effective_weights["classification"] = 0.10
         effective_weights["temporal"] = 0.10
     return round(
         sum(per_category_avg.get(cat, 0.0) * w for cat, w in effective_weights.items()),
@@ -514,6 +558,25 @@ def run_benchmark(
         if cat in category_scores:
             category_scores[cat].append(score)
 
+        # Build the canonical case-result dict first, then layer ndcg_detail
+        # and retrieval_meta on top WITHOUT letting them stomp the canonical
+        # fields. A custom retrieve_fn returning meta with keys like ``id``
+        # or ``score`` would otherwise silently rewrite the case identity —
+        # surfaced by contract test.
+        canonical_keys = {
+            "id",
+            "category",
+            "original_category",
+            "query",
+            "gold_path",
+            "score_method",
+            "score",
+            "retrieved_paths",
+            "elapsed_ms",
+        }
+        safe_extras: dict[str, Any] = {
+            k: v for k, v in {**ndcg_detail, **retrieval_meta}.items() if k not in canonical_keys
+        }
         case_results.append(
             {
                 "id": case.id,
@@ -525,8 +588,7 @@ def run_benchmark(
                 "score": round(score, 4),
                 "retrieved_paths": paths[:10],
                 "elapsed_ms": round(elapsed_ms, 1),
-                **ndcg_detail,
-                **retrieval_meta,
+                **safe_extras,
             }
         )
 

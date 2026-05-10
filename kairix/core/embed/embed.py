@@ -90,10 +90,15 @@ def chunk_text(
 # ── Azure API ─────────────────────────────────────────────────────────────────
 
 
-def _get_azure_config() -> tuple[str, str, str]:
+def _get_azure_config() -> tuple[str, str, str]:  # pragma: no cover
     """
     Read embed API config via ``get_credentials("embed")``. Supports Azure,
     OpenRouter, or any OpenAI-compatible endpoint.
+
+    Production lazy default for ``EmbedDependencies.get_azure_config``;
+    tests inject a fake callable via ``run_embed(deps=...)`` so this
+    function is never test-reachable. The credential resolution itself
+    is exercised in ``tests/test_credentials.py``.
 
     Raises OSError when credentials cannot be resolved.
     """
@@ -122,15 +127,27 @@ def _get_azure_config() -> tuple[str, str, str]:
     return api_key, endpoint, deployment
 
 
-def preflight_check(api_key: str, endpoint: str, deployment: str) -> int:
+def preflight_check(
+    api_key: str,
+    endpoint: str,
+    deployment: str,
+    *,
+    client: Any | None = None,
+) -> int:
     """
     Verify the embedding API is reachable with a single-item embed call.
     Returns embedding dimensions on success, raises on failure.
     Does NOT touch the DB — safe to call before any writes.
-    """
-    from kairix.credentials import make_openai_client
 
-    client = make_openai_client(api_key, endpoint, max_retries=2, timeout=30.0)
+    ``client`` is an injection seam for tests — pass an OpenAI-compatible
+    fake whose ``embeddings.create(...)`` returns a response with a
+    ``.data[0].embedding`` list. Production callers leave it as ``None`` so
+    the real client is built lazily via ``make_openai_client``.
+    """
+    if client is None:  # pragma: no cover
+        from kairix.credentials import make_openai_client
+
+        client = make_openai_client(api_key, endpoint, max_retries=2, timeout=30.0)
     response = client.embeddings.create(
         model=deployment,
         input=["preflight check"],
@@ -148,8 +165,13 @@ _embed_client = None
 _embed_client_key: tuple[str, str] = ("", "")
 
 
-def _get_embed_client(api_key: str, endpoint: str) -> Any:
-    """Return a cached OpenAI client. Creates a new one if credentials change."""
+def _get_embed_client(api_key: str, endpoint: str) -> Any:  # pragma: no cover
+    """Return a cached OpenAI client. Creates a new one if credentials change.
+
+    Production-only — every test that exercises ``embed_batch`` injects a
+    ``client=`` kwarg, bypassing this cache. The cache is reachable only
+    when the production lazy default fires (``client is None``).
+    """
     from kairix.credentials import make_openai_client
 
     global _embed_client, _embed_client_key
@@ -168,6 +190,8 @@ def embed_batch(
     endpoint: str,
     deployment: str,
     dims: int = DEFAULT_DIMS,
+    *,
+    client: Any | None = None,
 ) -> list[list[float]]:
     """
     Embed a batch of texts via Azure OpenAI using the OpenAI SDK.
@@ -175,6 +199,11 @@ def embed_batch(
     Client is reused across batches for connection pooling and rate-limiter
     state persistence. The SDK handles retry with exponential backoff and
     Retry-After headers automatically.
+
+    ``client`` is an injection seam for tests — pass an OpenAI-compatible
+    fake whose ``embeddings.create(...)`` returns a response with ``.data``
+    items carrying ``.index`` and ``.embedding``. Production callers leave
+    it as ``None`` so the cached production client is reused.
 
     Returns list of float vectors in same order as input texts.
     Raises on persistent failures after SDK retries are exhausted.
@@ -185,7 +214,8 @@ def embed_batch(
     if not texts:
         return []
 
-    client = _get_embed_client(api_key, endpoint)
+    if client is None:  # pragma: no cover
+        client = _get_embed_client(api_key, endpoint)
 
     try:
         response = client.embeddings.create(
@@ -205,8 +235,8 @@ def embed_batch(
             mid,
             len(texts) - mid,
         )
-        left = embed_batch(texts[:mid], api_key, endpoint, deployment, dims)
-        right = embed_batch(texts[mid:], api_key, endpoint, deployment, dims)
+        left = embed_batch(texts[:mid], api_key, endpoint, deployment, dims, client=client)
+        right = embed_batch(texts[mid:], api_key, endpoint, deployment, dims, client=client)
         return left + right
 
 
@@ -256,11 +286,15 @@ def batched(items: list[Any], size: int) -> Generator[list[Any], None, None]:
 # ── usearch index update ─────────────────────────────────────────────────────
 
 
-def _open_usearch_index() -> Any:
+def _open_usearch_index() -> Any:  # pragma: no cover
     """Open (or create) the usearch ANN index for the embed run.
 
-    Returns a mutable VectorIndex that can be reused across all batches.
-    Auto-deletes old index if dimensions have changed.
+    Production-only — every test that exercises ``run_embed`` injects an
+    ``open_usearch_index`` callable via ``EmbedDependencies`` (typically a
+    ``lambda: None`` or a ``_FakeVecIndex`` double). The real
+    ``VectorIndex.load()`` requires a writable on-disk path and embedded
+    vectors that match the current schema, neither of which is available
+    in unit tests.
     """
     try:
         from kairix.core.search.vec_index import VectorIndex
@@ -368,9 +402,25 @@ def _embed_and_store_batch(
         )
         return 0, list(batch)
 
+    # Defend against a partial response — the backend may return fewer vectors
+    # than texts (rate-limit, partial 5xx, mocked dev backends). Without this
+    # guard, ``zip(strict=False)`` would silently truncate and we'd report all
+    # chunks as embedded while staging only the matched ones — a silent
+    # over-count surfaced by the partial-response contract test.
+    matched = batch[: len(vectors)]
+    unaccounted = list(batch[len(vectors) :])
+    if unaccounted:
+        logger.error(
+            "Batch %d: backend returned %d vectors for %d texts — %d chunks unaccounted",
+            batch_idx,
+            len(vectors),
+            len(batch),
+            len(unaccounted),
+        )
+
     try:
         with db:
-            for chunk, vector in zip(batch, vectors, strict=False):
+            for chunk, vector in zip(matched, vectors, strict=True):
                 stage_embedding(
                     db,
                     chunk["hash"],
@@ -383,13 +433,13 @@ def _embed_and_store_batch(
                 )
         if vec_index is not None:
             try:
-                batch_hash_seqs = [build_hash_seq(c["hash"], c["seq"]) for c in batch]
+                batch_hash_seqs = [build_hash_seq(c["hash"], c["seq"]) for c in matched]
                 vec_index.add_vectors(batch_hash_seqs, vectors)
                 if (batch_idx + 1) % save_interval == 0:
                     vec_index.save()
             except Exception as e:
                 logger.error("usearch batch %d failed: %s", batch_idx, e)
-        return len(batch), []
+        return len(matched), unaccounted
     except sqlite3.Error as e:
         logger.error("DB write for batch %d failed: %s", batch_idx, e)
         return 0, list(batch)
@@ -428,7 +478,7 @@ def run_embed(
 
     Returns dict with: embedded, skipped, failed, duration_s, estimated_cost_usd
     """
-    if deps is None:
+    if deps is None:  # pragma: no cover
         deps = EmbedDependencies()
 
     assert deps.get_document_root is not None

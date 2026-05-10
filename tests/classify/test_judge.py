@@ -1,28 +1,25 @@
 """
 Tests for the LLM judge (kairix/classify/judge.py).
 
-Uses injected LLM backend — no monkey-patching needed.
+Uses canonical FakeLLMBackend from tests/fakes.py — no MagicMock.
 """
 
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
 
 import pytest
 
 from kairix.core.classify.judge import classify_with_llm
 from kairix.core.classify.rules import ClassificationResult
+from tests.fakes import FakeLLMBackend
 
 
-def _make_backend(return_value: str | None = None, side_effect=None):
-    """Build a fake LLM backend with a .chat method."""
-    backend = MagicMock()
+def _make_backend(return_value: str | None = None, side_effect: BaseException | None = None) -> FakeLLMBackend:
+    """Build a FakeLLMBackend with the given chat behaviour."""
     if side_effect is not None:
-        backend.chat.side_effect = side_effect
-    else:
-        backend.chat.return_value = return_value
-    return backend
+        return FakeLLMBackend(chat_raises=side_effect)
+    return FakeLLMBackend(chat_response=return_value or "")
 
 
 @pytest.mark.unit

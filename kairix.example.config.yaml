@@ -24,6 +24,20 @@
 # Each collection maps a name to a folder inside your document store.
 # If not configured, all documents in your vault are searched as one collection.
 #
+# Each collection accepts an optional ``in_default: bool`` flag (default
+# ``true``) controlling whether the collection participates in the *default*
+# search scopes (shared / shared+agent / all-agents / everything). A
+# collection with ``in_default: false`` is still scanned, indexed, and
+# reachable via an explicit ``--collection <name>`` lookup — it just doesn't
+# auto-join the default mix.
+#
+# When to set ``in_default: false``:
+#   - large reference corpora (the reference library below) — they would
+#     otherwise dominate result mix on common terms
+#   - archives that agents should consult deliberately, not as part of every
+#     default search ("did this come up in the archive?" is a different
+#     question from "did this come up in our current knowledge?")
+#
 # collections:
 #   # Shared collections — searched by all agents
 #   shared:
@@ -36,16 +50,81 @@
 #     - name: knowledge
 #       path: "05-Knowledge"
 #       glob: "**/*.md"
-#     # Add more as needed:
-#     # - name: archive
-#     #   path: "06-Archive"
-#     #   glob: "**/*.md"
+#     # Opt-in collections — indexed but excluded from default scopes:
+#     - name: archive
+#       path: "06-Archive"
+#       glob: "**/*.md"
+#       in_default: false
+#     - name: reference-library
+#       path: "reference-library"
+#       glob: "**/*.md"
+#       in_default: false
+#       # The reference library has its own retrieval baseline — derived
+#       # from a hybrid sweep against the shipped corpus. Operators who
+#       # don't override this block get the global retrieval config when
+#       # they search reflib explicitly. The values below match the
+#       # known-good baseline (REFLIB_RETRIEVAL_CONFIG).
+#       retrieval:
+#         fusion_strategy: bm25_primary
+#         bm25_limit: 20
+#         vec_limit: 5
+#         boosts:
+#           entity:
+#             enabled: true
+#             factor: 0.20
+#             cap: 2.0
+#           procedural:
+#             enabled: true
+#             factor: 1.4
 #
-#   # Per-agent collections — each agent gets its own memory scope
+#   # Per-agent collections — each agent gets its own memory scope.
+#   # Default agent_pattern still applies for legacy single-collection deployments.
 #   agent_pattern: "{agent}-memory"
-#   agent_paths:
-#     builder: "workspaces/builder/memory"
-#     shape: "workspaces/shape/memory"
+#
+# # ── Agents (multi-path schema) ────────────────────────────────────────────
+# # Declare each agent that exists. Each agent has a list of read paths
+# # (the agent's search scope) and a single write_path (the agent's write
+# # zone). Out of the box kairix uses /data/workspaces/{name} when paths
+# # are omitted, so a minimal config just names the agents.
+# #
+# # Three deployment shapes are supported:
+# #
+# #   1. Default (out of the box):
+# #      agents:
+# #        - name: alice
+# #          write_path: /data/workspaces/alice
+# #
+# #   2. Single explicit path:
+# #      agents:
+# #        - name: bob
+# #          paths:
+# #            - /data/workspaces/bob
+# #          write_path: /data/workspaces/bob
+# #
+# #   3. Multi-path (e.g. workspace + curated knowledge + cross-agent shared):
+# #      agents:
+# #        - name: shape
+# #          paths:
+# #            - /data/workspaces/shape          # absolute, primary workspace
+# #            - 04-Agent-Knowledge/shape        # relative to document_root
+# #            - 04-Agent-Knowledge/shared       # cross-agent shared area
+# #          write_path: /data/workspaces/shape
+# #
+# # Legacy schema still parses: a top-level ``collection: <name>`` field is
+# # honoured as the first synthetic collection name so saved benchmarks /
+# # search calls keep resolving without re-pinning.
+# agents:
+#   - name: alpha
+#     paths:
+#       - /data/workspaces/alpha
+#     write_path: /data/workspaces/alpha
+#   - name: beta
+#     paths:
+#       - /data/workspaces/beta
+#       - 04-Agent-Knowledge/beta
+#       - 04-Agent-Knowledge/shared
+#     write_path: /data/workspaces/beta
+#     read_only: false
 
 retrieval:
   # Fusion strategy: how keyword (BM25) and meaning-based (vector) search results are combined.

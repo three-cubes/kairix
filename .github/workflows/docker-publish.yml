@@ -1,4 +1,4 @@
-name: "6 · Docker Publish"
+name: "3 · Docker publish (release)"
 
 # Publishes Docker image to GitHub Container Registry (ghcr.io).
 # - Release: pushes :latest and :vX.Y.Z tags

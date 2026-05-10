@@ -6,16 +6,15 @@ Tests CLI output format and argument parsing.
 
 from __future__ import annotations
 
+import io
 import json
-from unittest.mock import patch
+from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
 
 
 def run_classify_cli(args: list[str]) -> tuple[str, str, int]:
     """Run classify CLI and return (stdout, stderr, exit_code)."""
-    import io
-
     from kairix.core.classify.cli import main
 
     stdout_capture = io.StringIO()
@@ -23,7 +22,7 @@ def run_classify_cli(args: list[str]) -> tuple[str, str, int]:
     exit_code = 0
 
     try:
-        with patch("sys.stdout", stdout_capture), patch("sys.stderr", stderr_capture):
+        with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
             main(args)
     except SystemExit as e:
         exit_code = e.code or 0

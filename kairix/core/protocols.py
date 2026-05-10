@@ -153,3 +153,121 @@ class AgentRegistry(Protocol):
     def collection_for(self, name: str) -> str: ...
 
     def validate_write(self, agent_name: str, path: str) -> bool: ...
+
+
+# ---------------------------------------------------------------------------
+# Eval-module protocols (#143 Phase 1 — paired with FakeXxx in tests/fakes.py)
+#
+# These four protocols define the boundary between the eval module and the
+# external systems it depends on (LLM chat, vector retrieval, the corpus
+# itself). Phase 2a/2b refactor judge.py / hybrid_sweep.py / generate.py /
+# gold_builder.py to consume these protocols via constructor injection,
+# eliminating the *_fn=None test-substitution kwargs scattered across the
+# eval surface today.
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class ChatBackend(Protocol):
+    """LLM chat-completion surface — substitutable across Azure / OpenRouter / fakes.
+
+    Wraps the call shape ``kairix._azure.chat_completion`` / OpenAI-API
+    chat completions use. The eval module's LLM judge and query generator
+    consume this protocol so test code can inject a `FakeChatBackend`
+    rather than reaching past `_call_llm` into module-level state.
+
+    Implementations are expected to:
+      - Block until the response is complete (no streaming surface here).
+      - Apply their own retry / rate-limit policy internally.
+      - Raise on credential failure rather than returning empty content.
+    """
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        api_key: str,
+        endpoint: str,
+        deployment: str,
+        system: str | None = None,
+        temperature: float = 0.0,
+        timeout_s: float = 30.0,
+    ) -> str: ...
+
+
+@runtime_checkable
+class LLMJudge(Protocol):
+    """Pairwise / pointwise relevance judge over (query, document) pairs.
+
+    The judge labels each candidate document for a query with a 0/1/2
+    relevance grade. Production implementations call out to an LLM via
+    `ChatBackend`; tests use `FakeLLMJudge` returning pre-configured grades.
+
+    Implementations are expected to:
+      - Never raise — return all-zero grades on any error.
+      - Shuffle candidate order before judging to prevent positional bias.
+      - Return a `JudgeResult`-shaped value (query, grades, shuffle_order,
+        judge_model, calibration_passed).
+    """
+
+    def grade(
+        self,
+        query: str,
+        candidates: list[tuple[str, str]],
+        *,
+        runs: int = 1,
+    ) -> Any: ...
+
+    def calibrate(self) -> bool: ...
+
+
+@runtime_checkable
+class QueryGenerator(Protocol):
+    """Synthesises retrieval evaluation queries from a corpus document.
+
+    Production implementations call out to an LLM to generate diverse,
+    intent-tagged queries that the source document would be the primary
+    answer for. Tests use `FakeQueryGenerator` returning pre-configured
+    queries.
+
+    Implementations are expected to:
+      - Return between 0 and `n` queries (LLM may produce fewer).
+      - Tag each query with one of the configured intent categories.
+      - Sanitise the source document content against prompt injection.
+    """
+
+    def generate(
+        self,
+        title: str,
+        body: str,
+        *,
+        n: int,
+        categories: list[str],
+    ) -> list[Any]: ...
+
+
+@runtime_checkable
+class Retriever(Protocol):
+    """Hybrid-search facade for sweep / benchmark / gold-builder callers.
+
+    The eval pipeline retrieves candidate documents via this protocol so
+    sweep configurations can be tested against `FakeRetriever` returning
+    pre-configured rankings. Production implementations delegate to the
+    `SearchPipeline.search` surface but accept the eval-shaped argument
+    signature directly.
+
+    Implementations are expected to:
+      - Return results in fused-rank order (best first).
+      - Honour the `collections` filter when supplied.
+      - Surface vec-failed state (e.g. via a `vec_failed: bool` attribute
+        on the result) so callers can distinguish "no results" from
+        "vector index unavailable".
+    """
+
+    def retrieve(
+        self,
+        query: str,
+        *,
+        collections: list[str] | None = None,
+        cfg: Any = None,
+    ) -> Any: ...

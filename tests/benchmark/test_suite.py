@@ -5,7 +5,8 @@ Covers:
   - load_suite(): valid YAML loads correctly
   - validate_suite(): missing gold path returns error string
   - validate_suite(): duplicate gold paths returns error string
-  - _exact_match(): case-insensitive substring match
+  - exact-method scoring driven through ``run_benchmark`` (case-insensitive,
+    suffix shortening, top-5 cutoff, empty gold/paths)
   - run_benchmark(): DI retrieve_fn, correct weighted total calculation
 """
 
@@ -19,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from kairix.quality.benchmark.runner import BenchmarkResult, _exact_match, run_benchmark
+from kairix.quality.benchmark.runner import BenchmarkResult, run_benchmark
 from kairix.quality.benchmark.suite import (
     BenchmarkCase,
     BenchmarkSuite,
@@ -373,66 +374,106 @@ def test_validate_suite_non_recall_cases_not_validated(
 
 
 # ---------------------------------------------------------------------------
-# _exact_match() tests
+# Exact-method scoring driven through run_benchmark
+#
+# Each test builds a single-case suite with score_method="exact" and a fixed
+# retrieve_fn output, then asserts on result.cases[0]["score"]. This drives
+# the same code path that production runs hit, instead of importing the
+# scoring helper directly.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_exact_match_returns_1_when_gold_in_top5() -> None:
-    """Returns 1.0 when gold path appears in top-5 results (case-insensitive)."""
-    paths = [
-        "vault/01-projects/arize/research-report.md",
-        "vault/02-areas/foo/bar.md",
-        "vault/04-knowledge/rules.md",
-    ]
-    gold = "01-Projects/Arize/Research-Report.md"
-    assert _exact_match(paths, gold) == pytest.approx(1.0)
+def _exact_case(case_id: str, gold_path: str) -> BenchmarkCase:
+    return BenchmarkCase(
+        id=case_id,
+        category="recall",
+        query="q",
+        gold_path=gold_path,
+        score_method="exact",
+    )
+
+
+def _run_single_exact_case(gold_path: str, retrieved_paths: list[str]) -> float:
+    """Run a one-case exact-method benchmark and return the raw score."""
+    suite = BenchmarkSuite(
+        meta={"agent": "test", "collections": ["vault"]},
+        cases=[_exact_case("R01", gold_path)],
+    )
+    result = run_benchmark(
+        suite,
+        system="hybrid",
+        agent="test",
+        retrieve_fn=_make_retrieve_fn([_mock_retrieve_result(retrieved_paths)]),
+    )
+    return float(result.cases[0]["score"])
 
 
 @pytest.mark.unit
-def test_exact_match_case_insensitive() -> None:
-    """Match is case-insensitive."""
-    paths = ["vault/PATH/TO/DOC.MD"]
-    gold = "path/to/doc.md"
-    assert _exact_match(paths, gold) == pytest.approx(1.0)
+def test_exact_score_is_1_when_gold_path_substring_appears_in_top5_results() -> None:
+    """Gold appears as case-insensitive substring of a top-5 result → score 1.0."""
+    score = _run_single_exact_case(
+        gold_path="01-Projects/Arize/Research-Report.md",
+        retrieved_paths=[
+            "vault/01-projects/arize/research-report.md",
+            "vault/02-areas/foo/bar.md",
+            "vault/04-knowledge/rules.md",
+        ],
+    )
+    assert score == pytest.approx(1.0)
 
 
 @pytest.mark.unit
-def test_exact_match_returns_0_when_gold_not_in_paths() -> None:
-    """Returns 0.0 when gold path is not in the retrieved paths."""
-    paths = [
-        "vault/01-projects/something-else/doc.md",
-        "vault/02-areas/foo/bar.md",
-    ]
-    gold = "01-projects/totally-different/report.md"
-    assert _exact_match(paths, gold) == pytest.approx(0.0)
+def test_exact_score_match_is_case_insensitive() -> None:
+    """An all-uppercase result still matches a lower-case gold."""
+    score = _run_single_exact_case(
+        gold_path="path/to/doc.md",
+        retrieved_paths=["vault/PATH/TO/DOC.MD"],
+    )
+    assert score == pytest.approx(1.0)
 
 
 @pytest.mark.unit
-def test_exact_match_only_checks_top5() -> None:
-    """Only checks the top 5 results, not beyond."""
-    paths = [
-        "vault/doc1.md",
-        "vault/doc2.md",
-        "vault/doc3.md",
-        "vault/doc4.md",
-        "vault/doc5.md",
-        "vault/unique-report-xyz-9999.md",  # position 6 — should NOT match
-    ]
-    gold = "unique-report-xyz-9999.md"
-    assert _exact_match(paths, gold) == pytest.approx(0.0)
+def test_exact_score_is_0_when_gold_path_does_not_appear() -> None:
+    """No retrieved path contains the gold path → score 0.0."""
+    score = _run_single_exact_case(
+        gold_path="01-projects/totally-different/report.md",
+        retrieved_paths=[
+            "vault/01-projects/something-else/doc.md",
+            "vault/02-areas/foo/bar.md",
+        ],
+    )
+    assert score == pytest.approx(0.0)
 
 
 @pytest.mark.unit
-def test_exact_match_empty_paths_returns_0() -> None:
-    """Empty paths list returns 0.0."""
-    assert _exact_match([], "some/path.md") == pytest.approx(0.0)
+def test_exact_score_only_considers_top5_results() -> None:
+    """A match at position 6 does NOT contribute — exact method has a top-5 cutoff."""
+    score = _run_single_exact_case(
+        gold_path="unique-report-xyz-9999.md",
+        retrieved_paths=[
+            "vault/doc1.md",
+            "vault/doc2.md",
+            "vault/doc3.md",
+            "vault/doc4.md",
+            "vault/doc5.md",
+            "vault/unique-report-xyz-9999.md",  # position 6 — outside the top-5 window
+        ],
+    )
+    assert score == pytest.approx(0.0)
 
 
 @pytest.mark.unit
-def test_exact_match_empty_gold_returns_0() -> None:
-    """Empty gold path returns 0.0."""
-    assert _exact_match(["some/path.md"], "") == pytest.approx(0.0)
+def test_exact_score_is_0_when_retriever_returns_empty_paths() -> None:
+    """Empty retrieved paths → score 0.0."""
+    score = _run_single_exact_case(gold_path="some/path.md", retrieved_paths=[])
+    assert score == pytest.approx(0.0)
+
+
+@pytest.mark.unit
+def test_exact_score_is_0_when_case_gold_path_is_empty_string() -> None:
+    """A misconfigured case with gold_path="" still scores 0 (never raises)."""
+    score = _run_single_exact_case(gold_path="", retrieved_paths=["vault/some/path.md"])
+    assert score == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -821,3 +862,301 @@ def test_gold_titles_highest_relevance_derives_gold_path(tmp_path: Path) -> None
     suite = load_suite(str(p))
     # gold_path derived from the relevance-2 entry
     assert suite.cases[0].gold_path == "projects"
+
+
+@pytest.mark.unit
+def test_gold_titles_with_unquoted_iso_date_coerces_to_str(tmp_path: Path) -> None:
+    """Regression for #103. PyYAML parses unquoted ISO date titles as datetime.date,
+    which crashes downstream scoring (str.endswith on a date object).
+
+    The suite loader must coerce title/path refs to str at the boundary."""
+    import textwrap
+
+    from kairix.quality.benchmark.suite import load_suite
+
+    content = textwrap.dedent("""\
+        meta:
+          name: dated
+          version: "1.0"
+        cases:
+          - id: D01
+            category: recall
+            query: "what happened on this day"
+            score_method: ndcg
+            gold_titles:
+              - title: 2026-04-07
+                relevance: 2
+              - title: 2026-04-08
+                relevance: 1
+    """)
+    p = tmp_path / "dated-suite.yaml"
+    p.write_text(content)
+
+    suite = load_suite(str(p))
+    case = suite.cases[0]
+    assert case.gold_titles is not None
+    assert all(isinstance(g["title"], str) for g in case.gold_titles)
+    assert case.gold_titles[0]["title"] == "2026-04-07"
+
+
+@pytest.mark.unit
+def test_gold_paths_with_unquoted_iso_date_coerces_to_str(tmp_path: Path) -> None:
+    """Regression for #103. Same coercion guarantee for gold_paths."""
+    import textwrap
+
+    from kairix.quality.benchmark.suite import load_suite
+
+    content = textwrap.dedent("""\
+        meta:
+          name: dated
+          version: "1.0"
+        cases:
+          - id: D02
+            category: recall
+            query: "what happened on this day"
+            score_method: ndcg
+            gold_paths:
+              - path: 2026-04-07
+                relevance: 2
+    """)
+    p = tmp_path / "dated-suite.yaml"
+    p.write_text(content)
+
+    suite = load_suite(str(p))
+    case = suite.cases[0]
+    assert case.gold_paths is not None
+    assert all(isinstance(g["path"], str) for g in case.gold_paths)
+
+
+@pytest.mark.unit
+def test_all_bundled_suites_load_without_errors() -> None:
+    """Every YAML in suites/ must load via load_suite — guards against the
+    #104 footgun where a bundled suite fails schema validation only at runtime.
+
+    Adds a CI gate that catches missing gold fields, type errors, and other
+    structural issues at load-time so first-run quick-start can never break
+    on a shipped suite.
+    """
+    from pathlib import Path
+
+    from kairix.quality.benchmark.suite import load_suite
+
+    repo_root = Path(__file__).resolve().parents[2]
+    suites_dir = repo_root / "suites"
+    assert suites_dir.is_dir(), f"expected bundled suites dir at {suites_dir}"
+
+    yaml_files = sorted(suites_dir.glob("*.yaml")) + sorted(suites_dir.glob("*.yml"))
+    assert yaml_files, "no bundled suites found — has the suites/ dir moved?"
+
+    failures: list[str] = []
+    for suite_path in yaml_files:
+        try:
+            suite = load_suite(str(suite_path))
+            assert suite.cases, f"{suite_path.name} loaded with zero cases"
+        except Exception as exc:
+            failures.append(f"{suite_path.name}: {type(exc).__name__}: {exc}")
+
+    assert not failures, "Bundled suites failed to load:\n  " + "\n  ".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# Branch-coverage tests for previously-uncovered validation paths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_suite_raises_when_yaml_root_is_not_a_mapping(tmp_path: Path) -> None:
+    """A YAML file whose root is a list is rejected with a clear error (line 63)."""
+    bad = tmp_path / "list-root.yaml"
+    bad.write_text("- one\n- two\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a YAML mapping"):
+        load_suite(str(bad))
+
+
+@pytest.mark.unit
+def test_load_suite_raises_when_meta_is_not_a_mapping(tmp_path: Path) -> None:
+    """A non-mapping ``meta`` value is rejected with a clear error (line 72)."""
+    bad = tmp_path / "bad-meta.yaml"
+    bad.write_text("meta: not-a-mapping\ncases: []\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="'meta' must be a mapping"):
+        load_suite(str(bad))
+
+
+@pytest.mark.unit
+def test_load_suite_raises_when_cases_is_not_a_list(tmp_path: Path) -> None:
+    """A non-list ``cases`` value is rejected with a clear error (line 76)."""
+    bad = tmp_path / "bad-cases.yaml"
+    bad.write_text("meta: {}\ncases: not-a-list\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="'cases' must be a list"):
+        load_suite(str(bad))
+
+
+@pytest.mark.unit
+def test_load_suite_collects_every_per_case_required_field_error(tmp_path: Path) -> None:
+    """A case missing id/category/score_method aggregates each error (lines 84, 88, 99, 101)."""
+    bad = tmp_path / "missing-fields.yaml"
+    bad.write_text(
+        "meta: {}\n"
+        "cases:\n"
+        "  - query: q1\n"  # missing id, category, score_method
+        "  - id: c2\n"
+        "    category: not-a-real-category\n"  # invalid category
+        "    query: q2\n"
+        "    score_method: also-bogus\n"  # invalid score_method
+        "    gold_path: x.md\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as exc_info:
+        load_suite(str(bad))
+    msg = str(exc_info.value)
+    assert "missing required field 'id'" in msg
+    assert "missing required field 'category'" in msg
+    assert "missing required field 'score_method'" in msg
+    assert "invalid score_method" in msg
+
+
+@pytest.mark.unit
+def test_load_suite_aggregates_gold_titles_validation_errors(tmp_path: Path) -> None:
+    """Gold-titles entries with various defects produce specific errors (lines 116, 120, 122)."""
+    bad = tmp_path / "bad-gold.yaml"
+    bad.write_text(
+        "meta: {}\n"
+        "cases:\n"
+        "  - id: c1\n"
+        "    category: recall\n"
+        "    query: q\n"
+        "    score_method: ndcg\n"
+        "    gold_titles:\n"
+        "      - not-a-mapping\n"  # gold_titles[0] must be a mapping
+        "      - title: ok-title\n"  # gold_titles[1] missing relevance
+        "      - title: another\n"
+        "        relevance: 5\n",  # gold_titles[2] relevance must be 0/1/2
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as exc_info:
+        load_suite(str(bad))
+    msg = str(exc_info.value)
+    assert "gold_titles[0] must be a mapping" in msg
+    assert "gold_titles[1] missing required field 'relevance'" in msg
+    assert "gold_titles[2] relevance must be 0, 1, or 2" in msg
+
+
+@pytest.mark.unit
+def test_load_suite_recall_case_without_any_gold_reference_is_rejected(tmp_path: Path) -> None:
+    """Recall case missing every gold-reference variant produces a single targeted error (lines 137-138)."""
+    bad = tmp_path / "no-gold.yaml"
+    bad.write_text(
+        "meta: {}\ncases:\n  - id: c1\n    category: recall\n    query: q\n    score_method: ndcg\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="recall cases must have gold_path, gold_title"):
+        load_suite(str(bad))
+
+
+@pytest.mark.unit
+def test_load_suite_non_dict_case_entry_is_rejected(tmp_path: Path) -> None:
+    """A case that's a string (not a mapping) emits a specific error (lines 247-248)."""
+    bad = tmp_path / "string-case.yaml"
+    bad.write_text(
+        "meta: {}\n"
+        "cases:\n"
+        "  - just-a-string\n"
+        "  - id: c2\n"
+        "    category: recall\n"
+        "    query: q\n"
+        "    score_method: ndcg\n"
+        "    gold_path: x.md\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_suite(str(bad))
+
+
+@pytest.mark.unit
+def test_derive_gold_path_uses_highest_relevance_gold_paths_entry(tmp_path: Path) -> None:
+    """When ``gold_paths`` has mixed relevance, the derived gold_path picks the highest entry (lines 156-158)."""
+    suite_path = tmp_path / "suite.yaml"
+    suite_path.write_text(
+        "meta: {}\n"
+        "cases:\n"
+        "  - id: c1\n"
+        "    category: recall\n"
+        "    query: q\n"
+        "    score_method: ndcg\n"
+        "    gold_paths:\n"
+        "      - path: low.md\n"
+        "        relevance: 1\n"
+        "      - path: highest.md\n"
+        "        relevance: 2\n"
+        "      - path: zero.md\n"
+        "        relevance: 0\n",
+        encoding="utf-8",
+    )
+    suite = load_suite(str(suite_path))
+    assert len(suite.cases) == 1
+    # gold_path was derived from gold_paths' highest-relevance entry.
+    assert suite.cases[0].gold_path == "highest.md"
+
+
+@pytest.mark.unit
+def test_load_suite_coerces_date_object_in_gold_paths_to_string(tmp_path: Path) -> None:
+    """A non-dict scalar inside gold_paths passes through verbatim (lines 182-183)."""
+    suite_path = tmp_path / "suite.yaml"
+    suite_path.write_text(
+        "meta: {}\n"
+        "cases:\n"
+        "  - id: c1\n"
+        "    category: recall\n"
+        "    query: q\n"
+        "    score_method: ndcg\n"
+        "    gold_paths:\n"
+        "      - path: 2026-04-07\n"  # unquoted ISO date — PyYAML parses as datetime.date
+        "        relevance: 2\n"
+        "      - just-a-string\n",  # non-dict — passes through unchanged
+        encoding="utf-8",
+    )
+    suite = load_suite(str(suite_path))
+    case = suite.cases[0]
+    # Dict item's path field coerced to str.
+    assert case.gold_paths is not None
+    assert isinstance(case.gold_paths[0]["path"], str)
+    assert case.gold_paths[0]["path"] == "2026-04-07"
+    # Non-dict item passed through verbatim.
+    assert case.gold_paths[1] == "just-a-string"
+
+
+@pytest.mark.unit
+def test_validate_suite_matches_gold_paths_via_progressive_suffix_shortening() -> None:
+    """validate_suite reports an error iff the gold path's filename has no
+    matching suffix in the documents table.
+
+    Drives the suffix-shortening loop in suite._gold_path_in_index through
+    validate_suite. Four single-case suites — three with shortenable matches
+    against ``engineering/patterns/ralph-loop.md`` (full / leading-prefix /
+    filename-only) all validate clean; the fourth, with no suffix match,
+    surfaces as one error.
+    """
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE documents (path TEXT)")
+    db.execute("INSERT INTO documents VALUES ('engineering/patterns/ralph-loop.md')")
+    db.commit()
+
+    def _suite_with(gold: str) -> BenchmarkSuite:
+        return BenchmarkSuite(
+            meta={"agent": "test", "collections": ["vault"]},
+            cases=[_exact_case("R01", gold)],
+        )
+
+    # Full match: gold == indexed path → no error.
+    assert validate_suite(_suite_with("engineering/patterns/ralph-loop.md"), db) == []
+    # Leading prefix on the gold path → suffix shortening matches → no error.
+    assert validate_suite(_suite_with("alt-prefix/engineering/patterns/ralph-loop.md"), db) == []
+    # Different middle directory but same filename → final loop step matches → no error.
+    assert validate_suite(_suite_with("different/dir/ralph-loop.md"), db) == []
+
+    # Completely unrelated filename → no suffix matches → exactly one error string,
+    # naming the case and the gold path.
+    errors = validate_suite(_suite_with("completely/unrelated.md"), db)
+    assert len(errors) == 1
+    assert "R01" in errors[0]
+    assert "completely/unrelated.md" in errors[0]

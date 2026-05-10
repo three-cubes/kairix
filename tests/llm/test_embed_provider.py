@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from types import ModuleType
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -86,30 +86,27 @@ class TestOpenAIEmbedProvider:
 @pytest.mark.unit
 class TestGetEmbedProvider:
     @pytest.mark.unit
-    def test_returns_azure_when_env_vars_set(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_LLM_ENDPOINT", "https://test.openai.azure.com")
-        monkeypatch.setenv("KAIRIX_LLM_API_KEY", "test-key")
-        provider = get_embed_provider()
+    def test_returns_azure_when_azure_creds_supplied(self) -> None:
+        from kairix.credentials import Credentials
+
+        creds = Credentials(
+            api_key="test-key",  # pragma: allowlist secret
+            endpoint="https://test.openai.azure.com",
+            model="text-embedding-3-large",
+        )
+        provider = get_embed_provider(creds_resolver=lambda: creds)
         assert isinstance(provider, AzureEmbedProvider)
 
     @pytest.mark.unit
-    def test_falls_back_to_openai(self, monkeypatch) -> None:
-        monkeypatch.delenv("KAIRIX_LLM_ENDPOINT", raising=False)
-        monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
-        monkeypatch.delenv("KAIRIX_EMBED_API_KEY", raising=False)
-        monkeypatch.delenv("KAIRIX_EMBED_ENDPOINT", raising=False)
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        with patch("kairix.credentials.get_credentials", return_value=None):
-            provider = get_embed_provider()
+    def test_falls_back_to_openai_via_env(self) -> None:
+        """When the creds_resolver returns None, the OPENAI_API_KEY env entry wins."""
+        provider = get_embed_provider(
+            creds_resolver=lambda: None,
+            env={"OPENAI_API_KEY": "sk-test"},  # pragma: allowlist secret
+        )
         assert isinstance(provider, OpenAIEmbedProvider)
 
     @pytest.mark.unit
-    def test_raises_when_no_credentials(self, monkeypatch) -> None:
-        monkeypatch.delenv("KAIRIX_LLM_ENDPOINT", raising=False)
-        monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
-        monkeypatch.delenv("KAIRIX_EMBED_API_KEY", raising=False)
-        monkeypatch.delenv("KAIRIX_EMBED_ENDPOINT", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        with patch("kairix.credentials.get_credentials", return_value=None):
-            with pytest.raises(OSError, match="No embedding provider"):
-                get_embed_provider()
+    def test_raises_when_no_credentials(self) -> None:
+        with pytest.raises(OSError, match="No embedding provider"):
+            get_embed_provider(creds_resolver=lambda: None, env={})

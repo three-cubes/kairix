@@ -2,7 +2,11 @@
 
 ## Commit gate
 
-Every commit passes through `bash scripts/safe-commit.sh "message"` which runs: ruff lint → ruff format → mypy → pytest (unit + bdd + contract) → detect-secrets → confidential check. Loop on failures until green.
+Every commit passes through `bash scripts/safe-commit.sh "message"` which runs: ruff lint → ruff format → mypy → pytest (unit + bdd + contract) → architecture fitness functions (F1–F6, F8, F10–F13) → detect-secrets → confidential check. Loop on failures until green.
+
+The fitness functions are mechanical, blocking checks that encode rejected patterns and lazy-workaround bypasses: forbidden monkeypatching (F1, F2), un-rationaled suppressions (F3 — covers `# noqa` / `# NOSONAR` / `# pragma: no cover` / `# type: ignore` / `# nosec`), env-var smuggling (F4), internal-name imports (F5), test-only kwargs (F6), unmarked tests (F8), un-rationaled CI silencers (F10), un-rationaled test skips (F11), BDD scenarios with no happy path (F12), and BDD scenarios that leak implementation symbols (F13). Pre-existing violations are grandfathered in `.architecture/baseline/`, so passing locally requires that the *changeset* introduces no new violations.
+
+F7 (per-file unit coverage floor) and F9 (union coverage floor) run in CI only because they need the test runtime — F7 in Stage 2 and F9 in Stage 5 (after both unit and integration suites finish so their coverage data can be combined). See [docs/architecture/fitness-functions.md](docs/architecture/fitness-functions.md) for the full rule set, why each rule exists, and how to fix violations.
 
 ---
 

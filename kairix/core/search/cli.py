@@ -82,12 +82,10 @@ def main(argv: list[str] | None = None, *, pipeline=None) -> None:
 
     args = _parse_args(argv)
 
-    cfg = load_config()
-
     if pipeline is None:
         from kairix.core.factory import build_search_pipeline
 
-        pipeline = build_search_pipeline(config=cfg)
+        pipeline = build_search_pipeline(config=load_config())
 
     sr = pipeline.search(
         query=args.query,

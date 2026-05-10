@@ -25,18 +25,21 @@ from kairix.knowledge.wikilinks.injector import (
     should_inject,
 )
 from kairix.knowledge.wikilinks.resolver import get_entities
-from kairix.paths import document_root as _doc_root_fn
-from kairix.paths import workspace_root as _workspace_root_fn
-
-_DOCUMENT_ROOT = str(_doc_root_fn())
-_WORKSPACES_ROOT = str(_workspace_root_fn())
+from kairix.paths import KairixPaths
 
 # Timestamp file to track last run
 _LAST_RUN_PATH = os.environ.get("KAIRIX_DATA_DIR", str(Path.home() / ".cache" / "kairix")) + "/wikilinks-last-run"
 
 
-def main(argv: list[str] | None = None) -> None:
-    """Entry point for `kairix wikilinks` subcommand."""
+def main(argv: list[str] | None = None, *, paths: KairixPaths | None = None) -> None:
+    """Entry point for `kairix wikilinks` subcommand.
+
+    Constructs the runtime ``KairixPaths`` once at the boundary and passes
+    it down to every command handler — the only place this CLI module
+    calls ``KairixPaths.resolve()``. Subcommands receive ``paths`` as a
+    parameter, so tests inject a ``FakePaths`` via the ``paths`` keyword
+    instead of monkeypatching ``KAIRIX_*`` environment variables.
+    """
     if argv is None:
         argv = sys.argv[2:]  # strip "kairix wikilinks"
 
@@ -44,15 +47,18 @@ def main(argv: list[str] | None = None) -> None:
         print(__doc__)
         sys.exit(0)
 
+    if paths is None:
+        paths = KairixPaths.resolve()
+
     subcmd = argv[0]
 
     if subcmd in ("--help", "-h", "help"):
         print(__doc__)
         sys.exit(0)
     elif subcmd == "inject":
-        _inject_cmd(argv[1:])
+        _inject_cmd(argv[1:], paths=paths)
     elif subcmd == "audit":
-        _audit_cmd(argv[1:])
+        _audit_cmd(argv[1:], paths=paths)
     elif subcmd == "status":
         _status_cmd(argv[1:])
     else:
@@ -65,7 +71,7 @@ def main(argv: list[str] | None = None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _inject_cmd(argv: list[str]) -> None:
+def _inject_cmd(argv: list[str], *, paths: KairixPaths) -> None:
     """Handle `kairix wikilinks inject` with flags."""
     dry_run = "--dry-run" in argv
     changed_only = "--changed" in argv
@@ -91,22 +97,22 @@ def _inject_cmd(argv: list[str]) -> None:
         print("Dry-run mode: no files will be modified.\n")
 
     if single_path:
-        _inject_single(single_path, entities, dry_run)
+        _inject_single(single_path, entities, dry_run, paths=paths)
     elif changed_only:
-        _inject_changed(entities, dry_run)
+        _inject_changed(entities, dry_run, paths=paths)
     else:
-        _inject_all(entities, dry_run)
+        _inject_all(entities, dry_run, paths=paths)
 
     if not dry_run:
         _write_last_run()
 
 
-def _inject_single(path: str, entities: list[Any], dry_run: bool) -> None:
+def _inject_single(path: str, entities: list[Any], dry_run: bool, *, paths: KairixPaths) -> None:
     """Inject wikilinks into a single file."""
-    if not should_inject(path):
+    if not should_inject(path, paths=paths):
         print(f"⚠️  {path} is not eligible for injection.")
         return
-    injected = inject_file(path, entities, dry_run=dry_run)
+    injected = inject_file(path, entities, dry_run=dry_run, paths=paths)
     if injected:
         mode = "(dry-run)" if dry_run else ""
         print(f"  ✅ {path} {mode}")
@@ -116,14 +122,14 @@ def _inject_single(path: str, entities: list[Any], dry_run: bool) -> None:
         print(f"  — {path}: no new links")
 
 
-def _inject_all(entities: list[Any], dry_run: bool) -> None:
+def _inject_all(entities: list[Any], dry_run: bool, *, paths: KairixPaths) -> None:
     """Inject wikilinks into all eligible vault and workspace files."""
-    files = _gather_eligible_files()
+    files = _gather_eligible_files(paths)
     total_files = 0
     total_links = 0
 
     for path in files:
-        injected = inject_file(path, entities, dry_run=dry_run)
+        injected = inject_file(path, entities, dry_run=dry_run, paths=paths)
         if injected:
             total_files += 1
             total_links += len(injected)
@@ -135,16 +141,16 @@ def _inject_all(entities: list[Any], dry_run: bool) -> None:
     print(f"\nDone. {total_files} files updated, {total_links} wikilinks injected.")
 
 
-def _inject_changed(entities: list[Any], dry_run: bool) -> None:
+def _inject_changed(entities: list[Any], dry_run: bool, *, paths: KairixPaths) -> None:
     """Inject only files modified since last run."""
     last_run = _read_last_run()
     if last_run is None:
         print("No previous run found — processing all eligible files.")
-        _inject_all(entities, dry_run)
+        _inject_all(entities, dry_run, paths=paths)
         return
 
     cutoff = last_run
-    files = _gather_eligible_files()
+    files = _gather_eligible_files(paths)
     changed = []
     for path in files:
         try:
@@ -162,7 +168,7 @@ def _inject_changed(entities: list[Any], dry_run: bool) -> None:
     total_files = 0
     total_links = 0
     for path in changed:
-        injected = inject_file(path, entities, dry_run=dry_run)
+        injected = inject_file(path, entities, dry_run=dry_run, paths=paths)
         if injected:
             total_files += 1
             total_links += len(injected)
@@ -174,16 +180,16 @@ def _inject_changed(entities: list[Any], dry_run: bool) -> None:
     print(f"\nDone. {total_files} files updated, {total_links} wikilinks injected.")
 
 
-def _gather_eligible_files() -> list[str]:
+def _gather_eligible_files(paths: KairixPaths) -> list[str]:
     """Collect all eligible .md files from vault and workspaces."""
     result: list[str] = []
-    for root in [_DOCUMENT_ROOT, _WORKSPACES_ROOT]:
+    for root in [str(paths.document_root), str(paths.workspace_root)]:
         p = Path(root)
         if not p.exists():
             continue
         for md_file in p.rglob("*.md"):
             path_str = str(md_file)
-            if should_inject(path_str):
+            if should_inject(path_str, paths=paths):
                 try:
                     if md_file.stat().st_size <= MAX_FILE_SIZE:
                         result.append(path_str)
@@ -197,16 +203,20 @@ def _gather_eligible_files() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _audit_cmd(argv: list[str]) -> None:
+def _audit_cmd(argv: list[str], *, paths: KairixPaths) -> None:
     """Handle `kairix wikilinks audit`."""
+    # The audit subcommand has no per-invocation options beyond the shared
+    # `paths` context; argv is accepted for sub-handler signature uniformity
+    # with the inject/dry-run handlers.
+    del argv
     from kairix.knowledge.wikilinks.audit import weekly_report
 
     entities = get_entities()
-    report = weekly_report(_DOCUMENT_ROOT, entities)
+    report = weekly_report(str(paths.document_root), entities, paths=paths)
     print(report)
 
     # Optionally save report to vault
-    report_path = Path(_DOCUMENT_ROOT) / "04-Agent-Knowledge" / "shared" / "wikilink-audit-report.md"
+    report_path = paths.document_root / "04-Agent-Knowledge" / "shared" / "wikilink-audit-report.md"
     try:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(report, encoding="utf-8")

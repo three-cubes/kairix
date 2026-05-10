@@ -23,22 +23,10 @@ import time
 from pathlib import Path
 
 from kairix.knowledge.wikilinks.resolver import WikiEntity
-from kairix.paths import document_root, workspace_root
+from kairix.paths import KairixPaths
 
 # Injection log path
 _LOG_PATH = str(Path.home() / ".cache" / "kairix" / "wikilinks-log.jsonl")
-
-_DOCUMENT_ROOT = str(document_root())
-_WORKSPACE_ROOT = str(workspace_root())
-
-# Eligible base paths for injection
-_ELIGIBLE_PREFIXES = (
-    f"{_WORKSPACE_ROOT}/",
-    f"{_DOCUMENT_ROOT}/04-Agent-Knowledge/",
-    f"{_DOCUMENT_ROOT}/01-Projects/",
-    f"{_DOCUMENT_ROOT}/02-Areas/",
-    f"{_DOCUMENT_ROOT}/05-Knowledge/",
-)
 
 _INELIGIBLE_SUBSTRINGS = (
     "/archive/",
@@ -49,12 +37,30 @@ _INELIGIBLE_SUBSTRINGS = (
 MAX_FILE_SIZE = 500 * 1024  # 500 KB
 
 
+def _eligible_prefixes(paths: KairixPaths) -> tuple[str, ...]:
+    """Compute the eligible-path prefixes from an injected ``KairixPaths``.
+
+    Each caller passes the paths it was constructed with — there is no
+    longer module-level state, so tests construct a ``KairixPaths`` (via
+    ``tests.fakes.FakePaths``) and inject it through the public API.
+    """
+    doc_root = str(paths.document_root)
+    ws_root = str(paths.workspace_root)
+    return (
+        f"{ws_root}/",
+        f"{doc_root}/04-Agent-Knowledge/",
+        f"{doc_root}/01-Projects/",
+        f"{doc_root}/02-Areas/",
+        f"{doc_root}/05-Knowledge/",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Eligibility check
 # ---------------------------------------------------------------------------
 
 
-def should_inject(path: str) -> bool:
+def should_inject(path: str, *, paths: KairixPaths | None = None) -> bool:
     """
     Return True if this file is agent-written content eligible for injection.
 
@@ -69,7 +75,15 @@ def should_inject(path: str) -> bool:
     - /home/<service-user>/.cache/shape/  (PDFs, raw imports)
     - Any path containing /archive/ or /archived/
     - Files > 500KB
+
+    Args:
+        path:  Filesystem path to check (string).
+        paths: Injected ``KairixPaths``. When ``None``, falls back to
+               ``KairixPaths.resolve()`` for backwards compatibility — new
+               code should pass it explicitly.
     """
+    paths = paths or KairixPaths.resolve()
+
     if not path.endswith(".md"):
         return False
 
@@ -85,16 +99,19 @@ def should_inject(path: str) -> bool:
     except OSError:
         pass  # file may not exist yet; defer to caller
 
+    prefixes = _eligible_prefixes(paths)
+    workspace_prefix = prefixes[0]
+
     # workspace memory files: <workspace-root>/*/memory/*.md
-    if path.startswith(f"{_WORKSPACE_ROOT}/"):
-        parts = path[len(f"{_WORKSPACE_ROOT}/") :].split("/")
+    if path.startswith(workspace_prefix):
+        parts = path[len(workspace_prefix) :].split("/")
         # parts[0] = workspace name, parts[1] = 'memory', parts[-1] = filename
         if len(parts) >= 3 and parts[1] == "memory":
             return True
         return False
 
     # Obsidian vault paths
-    for prefix in _ELIGIBLE_PREFIXES[1:]:  # skip /data/workspaces/ already handled
+    for prefix in prefixes[1:]:  # skip <workspace-root>/ already handled
         if path.startswith(prefix):
             return True
 
@@ -110,13 +127,25 @@ def inject_wikilinks(
     content: str,
     entities: list[WikiEntity],
     source_path: str = "",
+    *,
+    paths: KairixPaths | None = None,
 ) -> tuple[str, list[str]]:
     """
     Inject [[wikilinks]] on first meaningful mention of each entity.
 
+    Args:
+        content:     Markdown text.
+        entities:    Entities eligible for injection.
+        source_path: Path to the file being processed (used to skip an
+                     entity's own page). Empty string disables that check.
+        paths:       Injected ``KairixPaths``. When ``None``, falls back to
+                     ``KairixPaths.resolve()`` for backwards compatibility.
+
     Returns:
         (modified_content, list_of_injected_entity_names)
     """
+    paths = paths or KairixPaths.resolve()
+
     injected_names: list[str] = []
 
     # Parse content into segments: frontmatter, code blocks, text
@@ -130,7 +159,7 @@ def inject_wikilinks(
     linked_entities.update(already_linked)
 
     # Determine entities to skip (entity on its own page)
-    skip_entities = _entities_for_own_page(source_path, entities)
+    skip_entities = _entities_for_own_page(source_path, entities, paths)
 
     # Build sorted entity list: longer names first (avoids partial replacements)
     sorted_entities = sorted(entities, key=lambda e: -max(len(t) for t in e.all_triggers()))
@@ -151,7 +180,7 @@ def inject_wikilinks(
     return "".join(result_segments), injected_names
 
 
-def _entities_for_own_page(source_path: str, entities: list[WikiEntity]) -> set[str]:
+def _entities_for_own_page(source_path: str, entities: list[WikiEntity], paths: KairixPaths) -> set[str]:
     """
     Return names of entities whose vault file is source_path.
     These should not be linked on their own page.
@@ -160,7 +189,7 @@ def _entities_for_own_page(source_path: str, entities: list[WikiEntity]) -> set[
         return set()
 
     # Normalise source_path to a relative document path for comparison
-    doc_root = f"{_DOCUMENT_ROOT}/"
+    doc_root = f"{paths.document_root}/"
     if source_path.startswith(doc_root):
         rel = source_path[len(doc_root) :]
     else:
@@ -344,7 +373,14 @@ def _is_in_code_or_link(text: str, pos: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def inject_file(path: str, entities: list[WikiEntity], dry_run: bool = False) -> list[str]:
+def inject_file(
+    path: str,
+    entities: list[WikiEntity],
+    dry_run: bool = False,
+    *,
+    paths: KairixPaths | None = None,
+    log_path: Path | None = None,
+) -> list[str]:
     """
     Read file, inject wikilinks, write back (unless dry_run).
     Returns list of injected entity names.
@@ -353,7 +389,20 @@ def inject_file(path: str, entities: list[WikiEntity], dry_run: bool = False) ->
     - Non-.md files
     - Files > 500KB
     - Binary files
+
+    Args:
+        path:     Filesystem path to the markdown file.
+        entities: Entities eligible for injection.
+        dry_run:  When True, log the would-be injections but don't write.
+        paths:    Injected ``KairixPaths``. When ``None``, falls back to
+                  ``KairixPaths.resolve()`` for backwards compatibility.
+        log_path: Path for the injection-log JSONL file. When ``None``,
+                  defaults to the production ``_LOG_PATH`` under the user's
+                  cache directory. Tests inject a tmp_path so they don't
+                  scribble on the user's real injection log.
     """
+    paths = paths or KairixPaths.resolve()
+
     p = Path(path)
     if p.suffix != ".md":
         return []
@@ -371,21 +420,28 @@ def inject_file(path: str, entities: list[WikiEntity], dry_run: bool = False) ->
     except (OSError, UnicodeDecodeError):
         return []
 
-    modified, injected = inject_wikilinks(content, entities, source_path=path)
+    modified, injected = inject_wikilinks(content, entities, source_path=path, paths=paths)
 
     if injected and not dry_run:
         p.write_text(modified, encoding="utf-8")
-        _log_injection(path, injected, dry_run=False)
+        _log_injection(path, injected, dry_run=False, paths=paths, log_path=log_path)
     elif injected and dry_run:
-        _log_injection(path, injected, dry_run=True)
+        _log_injection(path, injected, dry_run=True, paths=paths, log_path=log_path)
 
     return injected
 
 
-def _log_injection(file_path: str, injected: list[str], dry_run: bool) -> None:
+def _log_injection(
+    file_path: str,
+    injected: list[str],
+    dry_run: bool,
+    paths: KairixPaths,
+    *,
+    log_path: Path | None = None,
+) -> None:
     """Append an entry to the injection log."""
     # Use relative document path when possible
-    doc_root = f"{_DOCUMENT_ROOT}/"
+    doc_root = f"{paths.document_root}/"
     rel_path = file_path
     if file_path.startswith(doc_root):
         rel_path = file_path[len(doc_root) :]
@@ -397,9 +453,9 @@ def _log_injection(file_path: str, injected: list[str], dry_run: bool) -> None:
         "dry_run": dry_run,
     }
     try:
-        log_path = Path(_LOG_PATH)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as fh:
+        target = log_path if log_path is not None else Path(_LOG_PATH)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
     except OSError:
         pass  # log failure is non-fatal

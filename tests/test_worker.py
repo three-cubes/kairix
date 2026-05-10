@@ -176,7 +176,9 @@ def test_shutdown_handler_sets_running_false() -> None:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # Send SIGTERM to our own process — signal handler should fire
+            # NOSONAR: test sends a real SIGTERM to itself to
+            # exercise the worker's shutdown handler. Self-targeted; no
+            # external reach.
             os.kill(os.getpid(), signal.SIGTERM)
 
     main(
@@ -204,6 +206,7 @@ def test_main_loop_runs_embed_on_interval() -> None:
         nonlocal call_count
         call_count += 1
         if call_count >= 2:
+            # NOSONAR: self-signal to drive worker shutdown loop.
             os.kill(os.getpid(), signal.SIGTERM)
 
     def entity_then_noop() -> None:
@@ -242,6 +245,7 @@ def test_shutdown_handler_via_sigint() -> None:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
+            # NOSONAR: self-signal to drive Ctrl-C path on the worker.
             os.kill(os.getpid(), signal.SIGINT)
 
     main(

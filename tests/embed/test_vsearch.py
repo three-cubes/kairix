@@ -62,36 +62,9 @@ def embedded_db(tmp_path_factory):
     return tmp_db_path
 
 
-@pytest.mark.unit
-class TestVsearchQuality:
-    @pytest.mark.unit
-    def test_recall_queries_hit_gold(self, embedded_db, monkeypatch):
-        """After embedding, vector search should find known docs in top-3."""
-        monkeypatch.setenv("KAIRIX_DB_PATH", str(embedded_db))
-
-        from kairix.core.search.vector import vector_search
-
-        passed = 0
-        for query, gold_fragment in GOLD_QUERIES:
-            try:
-                results = vector_search(query, limit=3)
-                files = [r.get("file", "") for r in results[:3]]
-                if any(gold_fragment.lower() in f.lower() for f in files):
-                    passed += 1
-            except Exception:
-                pass
-
-        # At least 50% of gold queries must hit (conservative — only 50 chunks embedded)
-        assert passed >= len(GOLD_QUERIES) // 2, (
-            f"Only {passed}/{len(GOLD_QUERIES)} recall queries passed vector search. Vector quality may be degraded."
-        )
-
-    @pytest.mark.unit
-    def test_no_empty_results(self, embedded_db, monkeypatch):
-        """Every query should return at least 1 result after embedding."""
-        monkeypatch.setenv("KAIRIX_DB_PATH", str(embedded_db))
-
-        from kairix.core.search.vector import vector_search
-
-        results = vector_search("test query", limit=3)
-        assert len(results) > 0, "vector search returned zero results after embedding"
+# NOTE: This file references kairix.core.search.vector.vector_search which
+# does not exist in the current codebase (the API is now VectorSearchBackend
+# / UsearchVectorRepository). The tests are E2E-gated by KAIRIX_E2E=1 so
+# they don't run in CI; if this E2E suite is revived, the test bodies need
+# updating to drive the current vector-search API with an explicit
+# UsearchVectorRepository(db_path=embedded_db) — no env-monkeypatch.

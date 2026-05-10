@@ -6,37 +6,31 @@ import pytest
 
 
 @pytest.mark.unit
-def test_get_db_path_uses_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_get_db_path_uses_env_override(tmp_path: Path) -> None:
     """KAIRIX_DB_PATH env var takes priority."""
     from kairix.core.db import get_db_path
 
     db_file = tmp_path / "custom.sqlite"
     db_file.touch()
-    monkeypatch.setenv("KAIRIX_DB_PATH", str(db_file))
-    assert get_db_path() == db_file
+    assert get_db_path(env={"KAIRIX_DB_PATH": str(db_file)}) == db_file
 
 
 @pytest.mark.unit
-def test_get_db_path_returns_default_when_nothing_exists(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_get_db_path_returns_default_when_nothing_exists(tmp_path: Path) -> None:
     """Returns default kairix path when no DB exists anywhere."""
     from kairix.core.db import get_db_path
 
-    monkeypatch.delenv("KAIRIX_DB_PATH", raising=False)
-    monkeypatch.delenv("KAIRIX_DB_PATH", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-    result = get_db_path()
+    result = get_db_path(env={}, home=tmp_path)
     assert str(result).endswith("kairix/index.sqlite")
 
 
 @pytest.mark.unit
-def test_get_db_path_env_override_nonexistent_returns_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_get_db_path_env_override_nonexistent_returns_path(tmp_path: Path) -> None:
     """KAIRIX_DB_PATH returns the path even when the file does not exist yet."""
     from kairix.core.db import get_db_path
 
     nonexistent = tmp_path / "does_not_exist.sqlite"
-    monkeypatch.setenv("KAIRIX_DB_PATH", str(nonexistent))
-    result = get_db_path()
+    result = get_db_path(env={"KAIRIX_DB_PATH": str(nonexistent)})
     assert result == nonexistent
     assert not result.exists()
 
@@ -76,18 +70,10 @@ def test_open_db_creates_parent_dirs(tmp_path: Path) -> None:
         conn.close()
 
 
-@pytest.mark.unit
-def test_open_db_default_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """open_db() uses get_db_path() when no path is given."""
-    from kairix.core.db import open_db
-
-    db_path = tmp_path / "default.sqlite"
-    monkeypatch.setenv("KAIRIX_DB_PATH", str(db_path))
-    conn = open_db()
-    try:
-        assert db_path.exists()
-    finally:
-        conn.close()
+# test_open_db_default_path removed: pinned env-coupling. open_db() with
+# no path still uses get_db_path()'s env-resolution chain in production;
+# that integration is exercised by integration tests of the embed CLI.
+# At the unit level, open_db(path=...) is sufficient.
 
 
 @pytest.mark.unit

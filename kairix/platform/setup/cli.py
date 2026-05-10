@@ -4,9 +4,20 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kairix.platform.setup.prompts import SetupContext
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, *, ctx: SetupContext | None = None) -> None:
+    """Entry point for `kairix setup`.
+
+    The ``ctx`` keyword lets BDD/integration tests pass an explicit
+    ``SetupContext`` (interactive=False, json_mode=…, deterministic
+    state_path) instead of relying on ``SetupContext.auto_detect()``,
+    which reads ``$XDG_CONFIG_HOME``, ``$CI``, and stdout TTY state.
+    """
     parser = argparse.ArgumentParser(
         prog="kairix setup",
         description="Interactive setup wizard — configures LLM, documents, and search in a few steps",
@@ -46,13 +57,15 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    from kairix.platform.setup.prompts import SetupContext
     from kairix.platform.setup.wizard import run_setup
 
-    ctx = SetupContext.auto_detect(
-        non_interactive=args.non_interactive,
-        json_mode=args.json,
-    )
+    if ctx is None:
+        from kairix.platform.setup.prompts import SetupContext
+
+        ctx = SetupContext.auto_detect(
+            non_interactive=args.non_interactive,
+            json_mode=args.json,
+        )
 
     success = run_setup(
         ctx=ctx,

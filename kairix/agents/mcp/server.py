@@ -27,6 +27,7 @@ import logging
 import re
 import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal
 
 import requests
@@ -194,7 +195,10 @@ def tool_search(
     """
     logger.info("mcp.search: agent=%r scope=%r", agent, scope)
     try:
-        if search_fn is None:
+        # The ``search_fn is None`` branch only fires when ``kairix.core.factory``
+        # is uninstalled; in-process tests always inject ``search_fn`` directly,
+        # so the lazy-import path is unreachable under test.
+        if search_fn is None:  # pragma: no cover
             from kairix.core.factory import build_search_pipeline
 
             _pipeline = build_search_pipeline()
@@ -462,18 +466,49 @@ def tool_timeline(
         # Fallthrough search: when search_fn is wired, always run a search using
         # the (possibly rewritten) query so MCP callers get results even on
         # non-temporal queries. fell_back signals the rewrite was a no-op.
+        # Result items are BudgetedResult — fields live on .result; .content
+        # is the boundary-trimmed snippet. Earlier code shape-mismatched and
+        # produced empty placeholders (Shape's 2026-05-05 MCP path report).
         results_list: list[dict[str, Any]] = []
         if search_fn is not None:
             try:
                 sr = search_fn(query=rewritten, budget=3000, agent=agent, scope=scope)
-                for r in getattr(sr, "results", []):
+                for budgeted in getattr(sr, "results", []):
+                    inner = getattr(budgeted, "result", None)
+                    if inner is None:
+                        continue
+                    snippet = getattr(budgeted, "content", "") or getattr(inner, "snippet", "")
                     results_list.append(
                         {
-                            "path": getattr(r, "path", ""),
-                            "title": getattr(r, "title", ""),
-                            "snippet": getattr(r, "snippet", "")[:300],
-                            "score": getattr(r, "score", 0.0),
+                            "path": getattr(inner, "path", ""),
+                            "title": getattr(inner, "title", ""),
+                            "snippet": snippet[:300],
+                            "score": getattr(inner, "boosted_score", getattr(inner, "score", 0.0)),
                         }
+                    )
+                # Diagnostic for #163: when results are non-empty but every row
+                # has an empty path, the upstream pipeline is producing a
+                # malformed result shape. Log enough state to triage the next
+                # occurrence without reproducing live (the CLI is unaffected
+                # because it uses a different code path entirely —
+                # query_temporal_chunks against the structured temporal index).
+                if results_list and all(not r["path"] for r in results_list):
+                    logger.warning(
+                        "mcp.timeline: %d empty-path results returned for query=%r "
+                        "(rewritten=%r, agent=%r, scope=%r). Pipeline diagnostics: "
+                        "bm25_count=%s vec_count=%s fused_count=%s collections=%s "
+                        "vec_failed=%s error=%r — see #163.",
+                        len(results_list),
+                        query[:80],
+                        rewritten[:80] if rewritten != query else "<same>",
+                        agent,
+                        scope.value if hasattr(scope, "value") else str(scope),
+                        getattr(sr, "bm25_count", "?"),
+                        getattr(sr, "vec_count", "?"),
+                        getattr(sr, "fused_count", "?"),
+                        getattr(sr, "collections", "?"),
+                        getattr(sr, "vec_failed", "?"),
+                        getattr(sr, "error", "?"),
                     )
             except Exception:
                 logger.debug("timeline fallthrough search failed", exc_info=True)
@@ -554,7 +589,53 @@ def tool_research(
         }
 
 
-def tool_usage_guide(topic: str = "") -> dict[str, Any]:
+def _resolve_guide_path(guide_path: Path | None) -> Path:
+    """Resolve the usage-guide markdown file path. Production fallback chain:
+    relative to this module → relative to the installed kairix package.
+    """
+    if guide_path is not None:
+        return guide_path
+    candidate = Path(__file__).parent.parent.parent / "docs" / "agent-usage-guide.md"
+    if candidate.exists():
+        return candidate
+    import kairix as _kairix
+
+    return Path(_kairix.__file__).parent.parent / "docs" / "agent-usage-guide.md"
+
+
+def _extract_topic_sections(full_text: str, topic_lower: str) -> str:
+    """Return the concatenated markdown sections whose heading mentions the topic.
+
+    Sections are demarcated by ``##`` / ``###`` headings. Falls back to a
+    keyword search across all lines when no heading matches.
+    """
+    lines = full_text.splitlines()
+    sections: list[str] = []
+    current: list[str] = []
+    in_section = False
+
+    for line in lines:
+        is_heading = line.startswith("## ") or line.startswith("### ")
+        if is_heading:
+            if in_section and current:
+                sections.append("\n".join(current))
+                current = []
+            in_section = topic_lower in line.lower()
+            if in_section:
+                current = [line]
+        elif in_section:
+            current.append(line)
+
+    if in_section and current:
+        sections.append("\n".join(current))
+
+    if sections:
+        return "\n\n".join(sections)
+    matching_lines = [ln for ln in lines if topic_lower in ln.lower()]
+    return "\n".join(matching_lines[:30]) if matching_lines else full_text[:2000]
+
+
+def tool_usage_guide(topic: str = "", *, guide_path: Path | None = None) -> dict[str, Any]:
     """
     Return the kairix agent usage guide, or a section of it filtered by topic.
 
@@ -564,63 +645,28 @@ def tool_usage_guide(topic: str = "") -> dict[str, Any]:
     Args:
         topic: Optional topic filter (e.g. "temporal", "entity", "troubleshoot",
                "intent", "budget"). Empty string returns the full guide.
+        guide_path: Explicit path to the guide markdown file. When omitted,
+                    resolves relative to the package layout (production default).
+                    Tests inject an explicit path rather than monkeypatching
+                    ``__file__``.
 
     Returns:
         dict with keys: topic, content (markdown string), error.
     """
     try:
-        from pathlib import Path
-
-        # Find the guide relative to this file's package root
-        guide_path = Path(__file__).parent.parent.parent / "docs" / "agent-usage-guide.md"
-        if not guide_path.exists():
-            import kairix as _kairix
-
-            guide_path = Path(_kairix.__file__).parent.parent / "docs" / "agent-usage-guide.md"
-
-        if not guide_path.exists():
+        resolved_path = _resolve_guide_path(guide_path)
+        if not resolved_path.exists():
             return {
                 "topic": topic,
                 "content": "",
                 "error": "Usage guide not found. Run: kairix onboard guide --document-root <path>",
             }
 
-        full_text = guide_path.read_text(encoding="utf-8")
-
+        full_text = resolved_path.read_text(encoding="utf-8")
         if not topic:
             return {"topic": "", "content": full_text, "error": ""}
 
-        # Filter to sections matching the topic (heading-level search)
-        topic_lower = topic.lower()
-        lines = full_text.splitlines()
-        sections: list[str] = []
-        in_section = False
-        current: list[str] = []
-
-        for line in lines:
-            is_heading = line.startswith("## ") or line.startswith("### ")
-            if is_heading:
-                if in_section and current:
-                    sections.append("\n".join(current))
-                    current = []
-                if topic_lower in line.lower():
-                    in_section = True
-                    current = [line]
-                else:
-                    in_section = False
-            elif in_section:
-                current.append(line)
-
-        if in_section and current:
-            sections.append("\n".join(current))
-
-        if not sections:
-            # Fallback: search for topic keyword in full text
-            matching_lines = [ln for ln in lines if topic_lower in ln.lower()]
-            content = "\n".join(matching_lines[:30]) if matching_lines else full_text[:2000]
-        else:
-            content = "\n\n".join(sections)
-
+        content = _extract_topic_sections(full_text, topic.lower())
         return {"topic": topic, "content": content, "error": ""}
 
     except Exception as exc:
@@ -720,7 +766,9 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     """
     try:
         from mcp.server.fastmcp import FastMCP
-    except ImportError as exc:
+    # The ImportError branch is reachable only when the optional ``mcp`` extra
+    # is not installed; the test suite always installs it via ``kairix[agents]``.
+    except ImportError as exc:  # pragma: no cover
         raise ImportError(
             "The 'mcp' package is required to run the MCP server. Install it with: pip install 'kairix[agents]'"
         ) from exc

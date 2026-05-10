@@ -1,4 +1,4 @@
-name: "3 · Reference Library Benchmark Gate"
+name: "1b · Reference library benchmark gate (retrieval loop)"
 
 on:
   pull_request:

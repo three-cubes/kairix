@@ -17,7 +17,18 @@ from kairix.core.search.scope import Scope
 
 def _config_with_shared(*names: str, pattern: str = "{agent}-memory") -> CollectionsConfig:
     return CollectionsConfig(
-        shared=[CollectionDef(name=n, path=n, glob="*.md") for n in names],
+        shared=tuple(CollectionDef(name=n, path=n, glob="*.md") for n in names),
+        agent_pattern=pattern,
+        agent_paths={},
+    )
+
+
+def _config_with_flags(*name_default_pairs: tuple[str, bool], pattern: str = "{agent}-memory") -> CollectionsConfig:
+    """Build a CollectionsConfig where each entry declares its in_default flag."""
+    return CollectionsConfig(
+        shared=tuple(
+            CollectionDef(name=n, path=n, glob="*.md", in_default=in_default) for n, in_default in name_default_pairs
+        ),
         agent_pattern=pattern,
         agent_paths={},
     )
@@ -123,3 +134,84 @@ def test_unknown_scope_string_raises_value_error() -> None:
     resolver = DefaultCollectionResolver(collections_config=None)
     with pytest.raises(ValueError, match="unknown scope"):
         resolver.resolve("alpha", "not-a-scope")
+
+
+# ---------------------------------------------------------------------------
+# in_default flag — opt-in collections are excluded from default scopes but
+# remain reachable via explicit --collection lookups. Replaces the historical
+# hardcoded reference-library carve-out (deleted 2026-05-07): policy now
+# lives in the operator's yaml, not in resolver source.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_in_default_false_excluded_from_shared_scope() -> None:
+    config = _config_with_flags(("docs", True), ("archive", False), ("research", True))
+    resolver = DefaultCollectionResolver(collections_config=config)
+    cols = resolver.resolve("alpha", Scope.SHARED)
+    assert cols == ["docs", "research"]
+    assert "archive" not in (cols or [])
+
+
+@pytest.mark.unit
+def test_in_default_false_excluded_from_shared_agent_scope() -> None:
+    config = _config_with_flags(("docs", True), ("archive", False))
+    resolver = DefaultCollectionResolver(collections_config=config)
+    cols = resolver.resolve("alpha", Scope.SHARED_AGENT)
+    assert cols == ["docs", "alpha-memory"]
+    assert "archive" not in (cols or [])
+
+
+@pytest.mark.unit
+def test_in_default_field_defaults_to_true_when_omitted() -> None:
+    """A CollectionDef constructed without ``in_default=`` keeps the historical behaviour."""
+    config = _config_with_shared("docs", "research")  # no flag → defaults True
+    resolver = DefaultCollectionResolver(collections_config=config)
+    cols = resolver.resolve("alpha", Scope.SHARED)
+    assert cols == ["docs", "research"]
+
+
+@pytest.mark.unit
+def test_extra_collections_always_in_default_scope() -> None:
+    """Operator extras (KAIRIX_EXTRA_COLLECTIONS) are treated as in_default=True.
+
+    No flag plumbing today — extras are operator-supplied at the boundary and
+    deliberately additive. Phase 2 (composable named scopes) is where richer
+    extras semantics will land if needed.
+    """
+    config = _config_with_shared("docs")
+    resolver = DefaultCollectionResolver(
+        collections_config=config,
+        extra_collections=["operator-extra"],
+    )
+    cols = resolver.resolve("alpha", Scope.SHARED_AGENT)
+    assert cols == ["docs", "operator-extra", "alpha-memory"]
+
+
+@pytest.mark.unit
+def test_in_default_false_excluded_from_everything_scope() -> None:
+    """Scope.EVERYTHING respects in_default — opt-in collections never auto-join.
+
+    Operators reach opt-in collections only by passing
+    ``collections=["archive"]`` (or whatever the name is) explicitly to the
+    search pipeline. This is the same contract Scope.AGENT already had: the
+    resolver builds default-scope membership; explicit collection arguments
+    bypass the resolver entirely.
+    """
+
+    class _StubRegistry:
+        @staticmethod
+        def list_agents():
+            from types import SimpleNamespace
+
+            return [SimpleNamespace(collection="alpha-memory")]
+
+    config = _config_with_flags(("docs", True), ("archive", False))
+    resolver = DefaultCollectionResolver(
+        collections_config=config,
+        agent_registry=_StubRegistry(),
+    )
+    cols = resolver.resolve("alpha", Scope.EVERYTHING)
+    assert "archive" not in (cols or [])
+    assert "docs" in (cols or [])
+    assert "alpha-memory" in (cols or [])

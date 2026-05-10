@@ -12,10 +12,12 @@ Registry:
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kairix.quality.eval.metrics import ndcg_graded
+
+if TYPE_CHECKING:
+    from kairix.core.protocols import ChatBackend
 
 
 class ExactMatchScorer:
@@ -27,14 +29,14 @@ class ExactMatchScorer:
     def score(self, retrieved: list[str], gold: list[dict[str, Any]]) -> float:
         if not gold:
             return 0.0
-        from kairix.quality.benchmark.runner import _exact_match
+        from kairix.quality.benchmark.runner import exact_match
 
         # Score against each gold entry; return max (any match is a hit)
         best = 0.0
         for g in gold:
             ref = g.get("title") or g.get("path", "")
             if ref:
-                best = max(best, _exact_match(retrieved[: self._top_k], ref))
+                best = max(best, exact_match(retrieved[: self._top_k], ref))
         return best
 
 
@@ -47,13 +49,13 @@ class FuzzyMatchScorer:
     def score(self, retrieved: list[str], gold: list[dict[str, Any]]) -> float:
         if not gold:
             return 0.0
-        from kairix.quality.benchmark.runner import _fuzzy_match
+        from kairix.quality.benchmark.runner import fuzzy_match
 
         best = 0.0
         for g in gold:
             ref = g.get("title") or g.get("path", "")
             if ref:
-                best = max(best, _fuzzy_match(retrieved[: self._top_k], ref))
+                best = max(best, fuzzy_match(retrieved[: self._top_k], ref))
         return best
 
 
@@ -71,25 +73,25 @@ class LLMJudgeScorer:
     """LLM-based relevance scoring (gpt-4o-mini rates 0.0-1.0).
 
     Args:
-        chat_fn: Optional chat completion callable for dependency injection.
-                 Defaults to kairix._azure.chat_completion at call time.
+        chat_backend: ``ChatBackend`` protocol implementation. Defaults to
+                      ``AzureChatBackend`` constructed lazily inside ``llm_judge``.
     """
 
-    def __init__(self, chat_fn: Callable[..., str] | None = None) -> None:
-        self._chat_fn = chat_fn
+    def __init__(self, chat_backend: ChatBackend | None = None) -> None:
+        self._chat_backend = chat_backend
 
     def score(self, retrieved: list[str], gold: list[dict[str, Any]]) -> float:
-        from kairix.quality.benchmark.runner import _llm_judge
+        from kairix.quality.benchmark.runner import llm_judge
 
         # LLM judge needs a query — extract from gold context or use empty
         query = ""
         if gold:
             query = gold[0].get("query", "")
-        return _llm_judge(
+        return llm_judge(
             query=query,
             paths=retrieved,
             snippets=[],
-            chat_fn=self._chat_fn,
+            chat_backend=self._chat_backend,
         )
 
 

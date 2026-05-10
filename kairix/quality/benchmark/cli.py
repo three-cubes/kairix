@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -166,7 +167,10 @@ def _direction_marker(delta: float, threshold: float = 0.0) -> str:
         return "▲"
     if delta < -threshold:
         return "▼"
-    return "=" if threshold == 0.0 else " "
+    # threshold == 0.0 is an exact equality but on a value that comes from
+    # argparse default or operator-supplied --threshold; use math.isclose for
+    # the SonarCloud-flagged float comparison.
+    return "=" if math.isclose(threshold, 0.0) else " "
 
 
 def cmd_compare(args: argparse.Namespace) -> int:

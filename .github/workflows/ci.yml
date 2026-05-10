@@ -1,4 +1,4 @@
-name: "1 · CI Pipeline"
+name: "1 · Quality gate"
 
 # Engineering hub compliance: 4-stage pipeline (contracts -> unit+type -> integration -> security)
 # Ref: engineering-hub/standards/DEVELOPMENT-WORKFLOW.md, TESTING-STRATEGY.md
@@ -72,6 +72,28 @@ jobs:
 
   # ── Stage 1: Contracts (fast -- <30s) ──────────────────────────────────────
   # Engineering hub: "Stop pipeline on failure. Contract tests must execute in <30s."
+  # ── Stage 0: Architecture fitness functions ───────────────────────────────
+  # Block at PR time on any net-new violation of the architectural rules
+  # encoded in scripts/checks/. Pre-existing files are grandfathered in
+  # .architecture/baseline/ and the baseline is expected to shrink over
+  # time. See docs/architecture/fitness-functions.md.
+  arch-fitness:
+    name: "Stage 0 -- Architecture fitness"
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Run F1-F6 + F8 + F10-F13 (no test runtime needed)
+        run: bash scripts/checks/run-all.sh --skip-coverage
+
   contracts:
     name: "Stage 1 -- Contracts"
     runs-on: ubuntu-latest
@@ -87,12 +109,32 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # The [agents] extras provide starlette (transitively via mcp>=1.20)
+        # so the MCP transport contract test runs here instead of being
+        # silently skipped by `pytest.importorskip("starlette")`.
+        run: pip install -e ".[dev,agents]"
 
       - name: Contract tests (schema validation, interface agreements)
         run: |
           pytest tests/ -m contract -v --tb=short --timeout=30 \
             --junitxml=results-contracts.xml
+
+      - name: "paths-DI deprecation: count remaining monkeypatch.setenv(KAIRIX_*)"
+        # Tracks progress of the paths-DI refactor (see docs/architecture/paths-di-refactor.md
+        # and umbrella issue #139). Phase 0 ships warn-only. Phase 4 flips to fail.
+        # Operates only on checked-out repo files; no untrusted GitHub-event input.
+        run: |
+          set +e
+          MATCHES=$(grep -rln 'monkeypatch.setenv("KAIRIX_' tests/ --include='*.py' 2>/dev/null | sort -u)
+          COUNT=$(printf '%s\n' "$MATCHES" | grep -c .)
+          echo "::notice::paths-DI: ${COUNT} test files still call monkeypatch.setenv(KAIRIX_*) -- see docs/architecture/paths-di-refactor.md"
+          if [ "$COUNT" -gt 0 ]; then
+            echo "Files using monkeypatch.setenv(KAIRIX_*):"
+            printf '  %s\n' $MATCHES
+          fi
+          # WARN-ONLY in Phase 0 -- exit 0 regardless. Phase 4 will switch to:
+          #   if [ "$COUNT" -gt 0 ]; then exit 1; fi
+          exit 0
 
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -101,6 +143,16 @@ jobs:
           name: test-results-contracts
           path: results-contracts.xml
           retention-days: 14
+
+      - name: Upload contract test results to Codecov (test analytics)
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1
+        with:
+          files: results-contracts.xml
+          flags: contract
+          fail_ci_if_error: false  # codecov outage / rate-limit must not block merge — analytics is diagnostic, not gate
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   # ── Stage 2: Unit tests + type checking (2 min) ───────────────────────────
   # Engineering hub: "Type checking: zero errors. Coverage: >=80%."
@@ -126,8 +178,14 @@ jobs:
           cache: pip
 
       - name: Install dependencies (with type stubs)
+        # The [agents] extras pull in mcp>=1.20 (and starlette transitively) so
+        # tests/agents/mcp/test_transport_composition.py — which guards its
+        # imports with `pytest.importorskip("starlette")` — actually runs in
+        # the unit job rather than silently skipping. Without this, the
+        # transport composer's coverage measures as 0% even though the unit
+        # tests exist, and F7 fails the per-file floor.
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,agents]"
 
       - name: Type checking -- mypy strict
         # Engineering hub: "mypy -- zero errors". Strict mode from Phase 1.
@@ -160,6 +218,18 @@ jobs:
             --junitxml=results-unit.xml \
             -v --tb=short
 
+
+      - name: F7 — per-file coverage floor (85%)
+        # Repo-wide coverage averages can hide files at 0%. F7 requires every
+        # file in coverage.xml to clear the 85% floor; pre-existing files
+        # below the floor are grandfathered in
+        # .architecture/baseline/per-file-coverage-floor-files.txt and the
+        # baseline is expected to shrink over time. Runs only on 3.12 to
+        # match the Codecov upload step (XML uses Python-version-specific
+        # paths in some configs).
+        if: matrix.python-version == '3.12'
+        run: python3 scripts/checks/check_per_file_coverage.py coverage.xml
+
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
@@ -170,10 +240,25 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           files: coverage.xml
-          fail_ci_if_error: false
+          flags: unit
+          fail_ci_if_error: false  # codecov upload race must not block merge; F7 is the mechanical floor, not Codecov
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload unit test results to Codecov (test analytics)
+        # Codecov Test Analytics: tracks flaky tests, slow tests, and
+        # failure trends across runs. Free for OSS. Same CODECOV_TOKEN as
+        # the coverage upload. Only the 3.12 matrix uploads (consistent
+        # with the coverage upload).
+        if: ${{ !cancelled() && matrix.python-version == '3.12' }}
+        uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1
+        with:
+          files: results-unit.xml
+          flags: unit
+          fail_ci_if_error: false  # codecov outage / rate-limit must not block merge — analytics is diagnostic, not gate
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
@@ -182,6 +267,13 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-data
+          # `include-hidden-files: true` is required because upload-artifact@v4
+          # excludes dotfiles by default — `.coverage` is a dotfile that
+          # py-cov-action needs to render the PR coverage comment. F9 itself
+          # reads coverage.xml (not .coverage), so this upload is purely
+          # for the Coverage report job below; if .coverage isn't present
+          # at upload time the job degrades but doesn't block.
+          include-hidden-files: true
           path: |
             .coverage
             coverage.xml
@@ -204,12 +296,12 @@ jobs:
         with:
           name: coverage-data
 
-      - uses: py-cov-action/python-coverage-comment-action@v3
+      - uses: py-cov-action/python-coverage-comment-action@53ff7553078bad69030786e486677315346c2dd2 # v3
         with:
           GITHUB_TOKEN: ${{ github.token }}
           MINIMUM_GREEN: 80
           MINIMUM_ORANGE: 60
-        continue-on-error: true
+        continue-on-error: true  # PR comment is informational; failure (e.g. fork PR with no token) must not block
 
   # ── Stage 3: Integration tests ─────────────────────────────────────────────
   # Engineering hub: "Stop on >3 failures. Only mock external systems."
@@ -230,12 +322,62 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # The agents extras (mcp>=1.20) are required for
+        # tests/integration/test_mcp_build_server.py — those probes exercise
+        # the production build_server() wiring and need the real FastMCP
+        # package, not a stub.
+        run: pip install -e ".[dev,agents]"
 
       - name: Integration tests
+        # Coverage collected and uploaded so production-wiring code
+        # exercised only at integration scope (factory.build_search_pipeline,
+        # mcp.server.build_server, db.repository SQL surface) is measured.
+        # `--cov-fail-under=0` overrides pyproject's `fail_under = 80` —
+        # integration tests target wiring, not the full surface, and the
+        # 80% floor is enforced by Stage 2 (where the unit suite runs).
+        # F7 enforces per-file coverage from the unit run; F9 (Stage 5)
+        # combines this with the unit .coverage to enforce the same floor
+        # over the union, which catches integration-only files.
         run: |
           pytest tests/ -m integration -v --tb=short --maxfail=3 \
+            --cov=kairix \
+            --cov-report=xml:coverage-integration.xml \
+            --cov-fail-under=0 \
             --junitxml=results-integration.xml
+
+      - name: Upload integration coverage XML (for F9 union)
+        # F9 reads the XML reports from unit + integration and merges
+        # them per-line in Python (scripts/checks/merge_coverage_xml.py).
+        # We deliberately upload the XML rather than the .coverage data
+        # file — the XML is not a hidden file (no `include-hidden-files`
+        # workaround needed), and the merge tool reads Cobertura XML
+        # directly so we don't depend on `coverage combine`'s data-file
+        # behaviour.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-data-integration
+          path: coverage-integration.xml
+          retention-days: 7
+
+      - name: Upload integration coverage to Codecov
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
+        with:
+          files: coverage-integration.xml
+          flags: integration
+          fail_ci_if_error: false  # codecov upload race must not block merge; F7 is the mechanical floor, not Codecov
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload integration test results to Codecov (test analytics)
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1
+        with:
+          files: results-integration.xml
+          flags: integration
+          fail_ci_if_error: false  # codecov outage / rate-limit must not block merge — analytics is diagnostic, not gate
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Verify core imports
         run: |
@@ -250,6 +392,59 @@ jobs:
           name: test-results-integration
           path: results-integration.xml
           retention-days: 14
+
+  # ── Stage 5: Union coverage floor (F9) ─────────────────────────────────────
+  # Runs F7's per-file 85% floor against the UNION of unit + integration
+  # coverage. Catches files exercised only at integration scope (factory.py,
+  # mcp/server.py, db/repository.py) that F7 alone would still see at 0%.
+  # The union baseline lives in
+  # .architecture/baseline/per-file-coverage-floor-union-files.txt and
+  # ratchets independently of F7's unit-only baseline.
+  union-coverage:
+    name: "Stage 5 -- Union coverage floor (F9)"
+    runs-on: ubuntu-latest
+    needs: [unit-and-type, integration]
+    if: needs.changes.outputs.python == 'true'
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Download unit coverage XML
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: coverage-data
+
+      - name: Download integration coverage XML
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: coverage-data-integration
+
+      - name: Merge unit + integration coverage XMLs
+        # We merge the Cobertura XML reports per-line instead of running
+        # `coverage combine` on .coverage data files. Reasons:
+        #   1. .coverage is a hidden dotfile; upload-artifact@v4 excludes
+        #      dotfiles by default — workarounds were unreliable.
+        #   2. pytest-cov's data-file behaviour differs subtly between
+        #      unit and integration invocations (notably with
+        #      --cov-fail-under=0), making `.coverage` an inconsistent
+        #      target.
+        #   3. The XML is the source of truth that F7 already consumes,
+        #      so reusing it keeps the data path identical for both
+        #      gates.
+        # The merger lives at scripts/checks/merge_coverage_xml.py.
+        run: |
+          python3 scripts/checks/merge_coverage_xml.py coverage.xml coverage-integration.xml coverage-union.xml
+
+      - name: F9 -- per-file 85% floor on union coverage
+        run: |
+          python3 scripts/checks/check_per_file_coverage.py coverage-union.xml per-file-coverage-floor-union
 
   # ── Stage 4: Security ──────────────────────────────────────────────────────
   # Engineering hub: "4-layer defence: SAST, dependency analysis, dynamic, source control."
@@ -340,19 +535,19 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: test-results-unit-3.12
-        continue-on-error: true
+        continue-on-error: true  # artifact missing on path-filtered runs; Sonar still scans without it
 
       - name: Download coverage
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: coverage-data
-        continue-on-error: true
+        continue-on-error: true  # artifact missing on path-filtered runs; Sonar still scans without it
 
       - name: SonarCloud Scan
-        uses: SonarSource/sonarqube-scan-action@v6
+        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        continue-on-error: true
+        continue-on-error: true  # gate is the separate "SonarCloud Code Analysis" check; this step's failure is benign
 
   # ── Docker build verification ──────────────────────────────────────────────
   docker:
@@ -407,44 +602,53 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - changes
+      - arch-fitness
       - pre-commit
       - contracts
       - unit-and-type
       - coverage
       - integration
+      - union-coverage
       - security
       - docker
     permissions: {}
     steps:
       - name: Evaluate job results
         env:
+          RESULT_ARCH: ${{ needs.arch-fitness.result }}
           RESULT_PRECOMMIT: ${{ needs.pre-commit.result }}
           RESULT_CONTRACTS: ${{ needs.contracts.result }}
           RESULT_UNIT: ${{ needs.unit-and-type.result }}
           RESULT_COVERAGE: ${{ needs.coverage.result }}
           RESULT_INTEGRATION: ${{ needs.integration.result }}
+          RESULT_UNION: ${{ needs.union-coverage.result }}
           RESULT_SECURITY: ${{ needs.security.result }}
           RESULT_DOCKER: ${{ needs.docker.result }}
         run: |
+          echo "arch-fitness:  $RESULT_ARCH"
           echo "pre-commit:    $RESULT_PRECOMMIT"
           echo "contracts:     $RESULT_CONTRACTS"
           echo "unit-and-type: $RESULT_UNIT"
           echo "coverage:      $RESULT_COVERAGE"
           echo "integration:   $RESULT_INTEGRATION"
+          echo "union-cov:     $RESULT_UNION"
           echo "security:      $RESULT_SECURITY"
           echo "docker:        $RESULT_DOCKER"
 
           # Fail if any required job failed (skipped is OK -- path filter)
           for result in \
+            "$RESULT_ARCH" \
             "$RESULT_PRECOMMIT" \
             "$RESULT_CONTRACTS" \
             "$RESULT_UNIT" \
             "$RESULT_INTEGRATION" \
+            "$RESULT_UNION" \
             "$RESULT_SECURITY" \
             "$RESULT_DOCKER"; do
             # Note: RESULT_COVERAGE excluded from gate — coverage enforcement
-            # is done by --cov-fail-under=80 in the unit test job. The coverage
-            # report action only posts a PR comment (non-critical).
+            # is done by --cov-fail-under=80 in the unit test job and per-file
+            # 85% floor (F7) inside arch-fitness. The coverage report action
+            # only posts a PR comment (non-critical).
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "FAILED: at least one required job did not succeed ($result)"
               exit 1

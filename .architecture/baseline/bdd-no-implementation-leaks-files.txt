@@ -1,0 +1,2 @@
+tests/bdd/features/benchmark_run.feature
+tests/bdd/features/summarise_cli.feature

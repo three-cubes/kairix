@@ -37,6 +37,19 @@ class BM25SearchBackend:
         """Delegate to DocumentRepository.search_fts."""
         return self._doc_repo.search_fts(query, collections=collections, limit=limit)
 
+    def get_chunk_dates(self, paths: list[str]) -> dict[str, str]:
+        """Proxy DocumentRepository.get_chunk_dates so the pipeline can enrich
+        FusedResults with chunk_date metadata before the boost chain runs.
+
+        Returns ``{path: chunk_date_iso}`` for paths that carry a chunk_date;
+        absent paths are simply not in the dict. Returns ``{}`` on repo failure.
+        """
+        try:
+            return self._doc_repo.get_chunk_dates(paths)
+        except Exception as e:
+            logger.warning("BM25SearchBackend.get_chunk_dates: %s", e)
+            return {}
+
 
 class VectorSearchBackend:
     """SearchBackend adapter wrapping vector search with optional HyDE.
@@ -62,16 +75,23 @@ class VectorSearchBackend:
         collections: list[str] | None = None,
         limit: int = 10,
     ) -> list[dict]:
-        """Embed query and run ANN vector search. Returns [] on any failure."""
-        try:
-            vec = self._embedding.embed(query)
-            if not vec:
-                return []
-            results = self._vector_repo.search(vec, k=limit, collections=collections)
-            return results
-        except Exception as e:
-            logger.warning("VectorSearchBackend.search failed — %s", e)
-            return []
+        """Embed query and run ANN vector search.
+
+        Propagates exceptions to the caller — symmetrical with
+        ``BM25SearchBackend.search``. The pipeline's outer try/except catches
+        them and sets ``vec_failed=True``. An empty result list is a
+        successful no-match (``vec_failed=False``); a raised exception is a
+        genuine backend failure (``vec_failed=True``). Conflating empty with
+        failed produced false-positive operator alerts before this change.
+
+        An empty embedding from the EmbeddingService is treated as a failure
+        (raised, not returned as ``[]``) so operators see vec_failed=True
+        when the embedding pipeline is broken.
+        """
+        vec = self._embedding.embed(query)
+        if not vec:
+            raise RuntimeError("VectorSearchBackend: embedding service returned no vector")
+        return self._vector_repo.search(vec, k=limit, collections=collections)
 
 
 class AzureEmbeddingService:

@@ -14,13 +14,13 @@ from kairix.core.search.scope import Scope
 
 def _registry_with(*names: str) -> ConfigDrivenAgentRegistry:
     return ConfigDrivenAgentRegistry(
-        agents=[AgentDef(name=n, collection=f"{n}-memory", write_path=f"agents/{n}") for n in names]
+        agents=[AgentDef(name=n, legacy_collection_name=f"{n}-memory", write_path=f"agents/{n}") for n in names]
     )
 
 
 def _config(*shared: str) -> CollectionsConfig:
     return CollectionsConfig(
-        shared=[CollectionDef(name=s, path=s, glob="*.md") for s in shared],
+        shared=tuple(CollectionDef(name=s, path=s, glob="*.md") for s in shared),
         agent_pattern="{agent}-memory",
         agent_paths={},
     )
@@ -57,13 +57,17 @@ def test_all_agents_without_registry_still_raises() -> None:
 
 
 @pytest.mark.unit
-def test_empty_registry_returns_none_for_all_agents() -> None:
-    """A registry with no agents is a valid configuration; resolve returns None."""
+def test_empty_registry_raises_for_all_agents() -> None:
+    """An empty registry is treated the same as no registry: scope=ALL_AGENTS
+    must raise NotImplementedError so the misconfiguration is loud rather
+    than silently falling through to "search everything" downstream (#164).
+    """
     resolver = DefaultCollectionResolver(
         collections_config=None,
         agent_registry=ConfigDrivenAgentRegistry(),
     )
-    assert resolver.resolve(None, Scope.ALL_AGENTS) is None
+    with pytest.raises(NotImplementedError, match="at least one agent"):
+        resolver.resolve(None, Scope.ALL_AGENTS)
 
 
 @pytest.mark.unit

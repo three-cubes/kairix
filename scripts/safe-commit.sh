@@ -9,8 +9,9 @@
 #   2. ruff format (black-compatible formatting)
 #   3. mypy --strict type checking
 #   4. pytest (unit + bdd + contract)
-#   5. detect-secrets
-#   6. confidential data check
+#   5. architecture fitness functions (F1-F6; F7 needs coverage.xml)
+#   6. detect-secrets
+#   7. confidential data check
 
 set -euo pipefail
 
@@ -63,12 +64,30 @@ fi
 PASSED=$(echo "$TEST_OUT" | grep -oE '[0-9]+ passed')
 echo -e "${GREEN}OK${NC} ($PASSED)"
 
-# 5. Secret detection
-echo -n "  secrets... "
-detect-secrets scan kairix/ --exclude-files '\.pyc$' --baseline .secrets.baseline 2>/dev/null || { echo -e "${RED}FAIL${NC}"; exit 1; }
+# 5. Architecture fitness functions (F1-F6 — F7 runs in CI on the coverage.xml
+# emitted by the unit-and-type job).
+echo -n "  arch fitness... "
+ARCH_OUT=$(bash scripts/checks/run-all.sh --skip-coverage 2>&1) || {
+    echo -e "${RED}FAIL${NC}"
+    echo "$ARCH_OUT" | tail -30
+    echo "See docs/architecture/fitness-functions.md for remediation."
+    exit 1
+}
 echo -e "${GREEN}OK${NC}"
 
-# 6. Confidential check
+# 6. Secret detection — pre-commit hook mirrors CI; do not invoke `detect-secrets scan`
+# directly here (it overwrites the baseline and only scans the path you pass it).
+echo -n "  secrets... "
+SECRETS_OUT=$(pre-commit run detect-secrets --all-files 2>&1) || true
+if echo "$SECRETS_OUT" | grep -q "Failed"; then
+    echo -e "${RED}FAIL${NC}"
+    echo "$SECRETS_OUT" | tail -20
+    echo "If a test fixture is a false positive, mark with: # pragma: allowlist secret"
+    exit 1
+fi
+echo -e "${GREEN}OK${NC}"
+
+# 7. Confidential check
 echo -n "  confidential... "
 bash scripts/pre-commit-confidential-check.sh 2>/dev/null || { echo -e "${RED}FAIL${NC}"; exit 1; }
 echo -e "${GREEN}OK${NC}"

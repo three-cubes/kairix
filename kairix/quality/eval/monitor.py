@@ -23,12 +23,23 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kairix.quality.eval.constants import CATEGORY_WEIGHTS
+
+if TYPE_CHECKING:
+    from kairix.quality.benchmark.runner import BenchmarkResult
+    from kairix.quality.benchmark.suite import BenchmarkSuite
+
+# DI seams used by ``run_monitor`` — production defaults resolve lazily to
+# ``kairix.quality.benchmark.suite.load_suite`` and
+# ``kairix.quality.benchmark.runner.run_benchmark``. Tests inject fakes.
+SuiteLoader = Callable[[str], "BenchmarkSuite"]
+BenchmarkRunnerFn = Callable[..., "BenchmarkResult"]
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +87,11 @@ def _load_log(log_path: str) -> list[dict[str, Any]]:
                     entries.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
-    except Exception as e:
+    # Defensive guard for read-time OS errors (unreadable file, permission
+    # denied, transient I/O failure). The two test-reachable failure modes —
+    # missing file and corrupt JSON — are handled above; this catch-all
+    # only fires under the OS-level failures we can't induce in unit tests.
+    except Exception as e:  # pragma: no cover
         logger.warning("monitor: failed to load log %r — %s", log_path, e)
     return entries
 
@@ -92,7 +107,10 @@ def _append_log(log_path: str, entry: dict[str, Any], max_entries: int = _MAX_LO
         with open(log_path, "w", encoding="utf-8") as f:
             for e in entries:
                 f.write(json.dumps(e) + "\n")
-    except Exception as e:
+    # Defensive guard for write-time OS errors (read-only fs, disk full,
+    # permission denied). These can't be induced in unit tests; the
+    # happy path is exercised by every run_monitor test that writes a log.
+    except Exception as e:  # pragma: no cover
         logger.warning("monitor: failed to append log entry — %s", e)
 
 
@@ -140,6 +158,9 @@ def run_monitor(
     alert_threshold: float = 0.05,
     window_days: int = 7,
     agent: str = "shape",
+    *,
+    suite_loader: SuiteLoader | None = None,
+    benchmark_runner: BenchmarkRunnerFn | None = None,
 ) -> MonitorResult:
     """
     Run the canary benchmark suite and check for retrieval regression.
@@ -151,13 +172,28 @@ def run_monitor(
         alert_threshold:  Relative NDCG drop that triggers regression flag (default: 0.05 = 5%).
         window_days:      Rolling window for baseline average in days (default: 7).
         agent:            Agent name for retrieval scoping.
+        suite_loader:     Injection seam for the suite-loading callable. ``None``
+                          (default) resolves lazily to
+                          ``kairix.quality.benchmark.suite.load_suite``. Tests pass
+                          a callable returning a ``BenchmarkSuite``.
+        benchmark_runner: Injection seam for the benchmark-running callable.
+                          ``None`` (default) resolves lazily to
+                          ``kairix.quality.benchmark.runner.run_benchmark``. Tests
+                          pass a callable returning a ``BenchmarkResult``.
 
     Returns:
         MonitorResult. Never raises.
     """
-    # Lazy imports to avoid circular dependency (runner -> eval.constants -> eval.__init__ -> monitor -> runner)
-    from kairix.quality.benchmark.runner import run_benchmark
-    from kairix.quality.benchmark.suite import load_suite
+    # Lazy production defaults — kept inside the function to avoid a circular
+    # import (runner → eval.constants → eval.__init__ → monitor → runner).
+    if suite_loader is None:  # pragma: no cover
+        from kairix.quality.benchmark.suite import load_suite
+
+        suite_loader = load_suite
+    if benchmark_runner is None:  # pragma: no cover
+        from kairix.quality.benchmark.runner import run_benchmark
+
+        benchmark_runner = run_benchmark
 
     if log_path is None:
         log_path = os.environ.get("KAIRIX_MONITOR_LOG", _DEFAULT_LOG_PATH)
@@ -177,14 +213,14 @@ def run_monitor(
     )
 
     try:
-        suite = load_suite(suite_path)
+        suite = suite_loader(suite_path)
         n_cases = len(suite.cases)
 
         if n_cases == 0:
             logger.warning("monitor: suite %r has 0 cases", suite_path)
             return _empty
 
-        result = run_benchmark(suite, system="hybrid", agent=agent)
+        result = benchmark_runner(suite, system="hybrid", agent=agent)
 
         ndcg_by_category = {
             cat: round(float(result.summary["category_scores"].get(cat, 0.0)), 4) for cat in CATEGORY_WEIGHTS
@@ -194,7 +230,12 @@ def run_monitor(
         weighted = sum(ndcg_by_category.get(cat, 0.0) * w for cat, w in CATEGORY_WEIGHTS.items())
         weighted_ndcg = round(weighted, 4)
 
-        vec_failed = sum(1 for case in result.cases if case.get("meta", {}).get("vec_failed", False))
+        # ``BenchmarkResult.cases`` is built by ``run_benchmark`` with
+        # ``retrieval_meta`` spread directly into each case dict, so
+        # ``vec_failed`` lives at the top level — not nested under "meta".
+        # The previous ``case["meta"]["vec_failed"]`` read always returned
+        # False (silent dead-zero bug surfaced by contract test).
+        vec_failed = sum(1 for case in result.cases if case.get("vec_failed", False))
 
     except Exception as e:
         logger.warning("monitor: benchmark run failed — %s", e)

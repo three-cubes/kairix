@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import Any
 
 
 def cmd_suggest(args: argparse.Namespace) -> int:
@@ -82,21 +83,40 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_seed(args: argparse.Namespace) -> int:
-    """kairix entity seed — discover entities from indexed documents and seed Neo4j."""
+def cmd_seed(args: argparse.Namespace, *, db_path: Any = None, neo4j_client: Any = None) -> int:
+    """kairix entity seed — discover entities from indexed documents and seed Neo4j.
+
+    ``db_path`` and ``neo4j_client`` are DI seams for tests: passing them
+    avoids touching the global ``KAIRIX_DB_PATH`` env var or constructing
+    a real Neo4j client.
+    """
+    import sqlite3
     from pathlib import Path
 
-    from kairix.core.db import get_db_path, open_db
+    from kairix.core.db import open_db
     from kairix.knowledge.entities.seed import scan_for_entities, seed_graph
 
-    try:
-        db_path = get_db_path()
-    except FileNotFoundError:
+    if db_path is None:
+        from kairix.core.db import get_db_path
+
+        db_path = Path(get_db_path())
+    else:
+        db_path = Path(str(db_path))
+    if not db_path.exists():
         print("ERROR: kairix index not found. Run 'kairix embed' first.", file=sys.stderr)
         return 1
 
-    db = open_db(Path(db_path))
-    candidates = scan_for_entities(db, limit=args.limit)
+    db = open_db(db_path)
+    try:
+        candidates = scan_for_entities(db, limit=args.limit)
+    except sqlite3.OperationalError as exc:
+        # Index file exists but isn't populated — same operator remediation.
+        print(
+            f"ERROR: kairix index not found or unpopulated ({exc}). Run 'kairix embed' first.",
+            file=sys.stderr,
+        )
+        db.close()
+        return 1
     db.close()
 
     if not candidates:
@@ -113,9 +133,12 @@ def cmd_seed(args: argparse.Namespace) -> int:
         print("\nDry run — no changes made. Remove --dry-run to seed Neo4j.")
         return 0
 
-    from kairix.knowledge.graph.client import get_client
+    if neo4j_client is None:
+        from kairix.knowledge.graph.client import get_client
 
-    neo4j = get_client()
+        neo4j: Any = get_client()
+    else:
+        neo4j = neo4j_client
     if not neo4j.available:
         print("ERROR: Neo4j not available. Check connection settings.", file=sys.stderr)
         return 1
@@ -160,8 +183,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, db_path: Any = None, neo4j_client: Any = None) -> int:
+    """Entry point for `kairix entity`.
+
+    ``db_path`` and ``neo4j_client`` are DI seams for tests; production
+    callers leave them ``None`` and the CLI resolves them from the
+    environment.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
-    result: int = args.func(args)
-    return result
+    if args.command == "seed":
+        return cmd_seed(args, db_path=db_path, neo4j_client=neo4j_client)
+    if args.command == "suggest":
+        return cmd_suggest(args)
+    if args.command == "validate":
+        return cmd_validate(args)
+    return 1  # pragma: no cover — unreachable; subparsers required=True

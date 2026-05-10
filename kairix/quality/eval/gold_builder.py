@@ -13,25 +13,31 @@ Usage::
         --systems bm25-equal,bm25-filepath,bm25-title,vector
 
 Methodology: TREC pooling (Voorhees & Harman, 2005) adapted for LLM judges.
+
+#143 Phase 2b — ``GoldBuilder`` class with ``LLMJudge`` + ``Retriever``
+constructor injection. Module-level functions are kept as deprecated
+wrappers for backwards compatibility; Phase 4 removes the ``*_fn=`` kwargs.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
 from kairix.quality.eval.judge import (
-    JudgeResult,
-    calibrate,
+    JUDGE_DEPLOYMENT,
     fetch_llm_credentials,
-    judge_batch,
 )
+
+if TYPE_CHECKING:
+    from kairix.core.protocols import LLMJudge as LLMJudgeProtocol
+    from kairix.core.protocols import Retriever as RetrieverProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -45,24 +51,23 @@ _WEIGHT_PRESETS: dict[str, tuple[float, float, float]] = {
 
 
 def path_title(path: str) -> str:
-    """Build a path-based gold title from a document path.
+    """Build a unique path-based gold title from a document path.
 
-    Uses all path segments after the first (collection root) without the
-    ``.md`` extension, so two different documents never produce the same
-    title — even when filenames are generic (e.g. ``readme.md``).
+    Returns the input path with the ``.md`` extension stripped. Every path
+    segment is preserved so two distinct paths can never collide on the
+    same title — including a generic filename in different collections
+    (``vault/x/readme.md`` vs ``reference-library/x/readme.md``).
 
-    Example: "reference-library/engineering/adr-examples/readme.md"
-           → "engineering/adr-examples/readme"
+    Example: ``reference-library/engineering/adr-examples/readme.md``
+           → ``reference-library/engineering/adr-examples/readme``
 
-    For short paths (1-2 segments) the full path (minus extension) is
-    returned as-is.
+    Previous behaviour dropped the first segment for paths longer than two
+    components, which broke the uniqueness invariant: ``a/b.md`` (kept
+    whole) and ``x/a/b.md`` (first segment dropped) both reduced to
+    ``a/b``. Two distinct documents would then share a single grade from
+    the LLM judge — surfaced by ``path_title`` contract test.
     """
-    parts = Path(path).with_suffix("").parts
-    # Drop the first segment (collection root) to keep the rest unique.
-    # For short paths (<=2 segments) return everything.
-    if len(parts) > 2:
-        return "/".join(parts[1:])
-    return "/".join(parts)
+    return str(Path(path).with_suffix(""))
 
 
 @dataclass
@@ -89,104 +94,43 @@ class GoldBuildReport:
     grade_distribution: dict[int, int] = field(default_factory=lambda: {0: 0, 1: 0, 2: 0})
 
 
-def _bm25_search_with_weights(
-    query: str,
-    weights: tuple[float, float, float],
-    collections: list[str] | None = None,
-    limit: int = 10,
-) -> list[dict[str, str]]:
+def _validate_weights(weights: tuple[float, float, float]) -> None:
+    """Raise ValueError if any BM25 weight is non-finite or non-positive.
+
+    Defensive guard against future devs adding a bm25 weight preset to
+    ``_WEIGHT_PRESETS`` with nan / inf / non-positive values. All current
+    presets are finite-positive so the raise branch is unreachable through
+    the public surface today (``GoldBuilder.pool`` only hits this with
+    preset weights). Pragma'd until a non-preset caller exists.
     """
-    Run BM25 search with specific column weights.
-
-    Returns list of {path, title, snippet, collection} dicts.
-    """
-    from kairix.core.db import get_db_path, open_db
-    from kairix.core.search.tokenizer import tokenize_fts_query
-
-    # Build FTS5 query (bare style — gold builder pools with implicit AND)
-    fts_query = tokenize_fts_query(query, style="bare")
-    if not fts_query:
-        return []
-
-    try:
-        db_path = get_db_path()
-        db = open_db(Path(db_path))
-        db.row_factory = sqlite3.Row
-    except Exception as e:
-        logger.warning("gold_builder: cannot open DB — %s", e)
-        return []
-
     w_fp, w_title, w_doc = weights
-    try:
-        if collections:
-            placeholders = ",".join("?" * len(collections))
-            # safe: float() cast on bm25 weights, no ? binding available for bm25 args
-            sql = f"""
-                SELECT d.collection, d.path, d.title, c.doc,
-                       bm25(documents_fts, {float(w_fp)}, {float(w_title)}, {float(w_doc)}) AS score
-                FROM documents_fts
-                JOIN documents d ON d.id = documents_fts.rowid
-                JOIN content c ON c.hash = d.hash
-                WHERE documents_fts MATCH ?
-                  AND d.collection IN ({placeholders})
-                  AND d.active = 1
-                ORDER BY score ASC
-                LIMIT ?
-            """
-            params: list[Any] = [fts_query, *collections, limit]
-        else:
-            # safe: float() cast on bm25 weights, no ? binding available for bm25 args
-            sql = f"""
-                SELECT d.collection, d.path, d.title, c.doc,
-                       bm25(documents_fts, {float(w_fp)}, {float(w_title)}, {float(w_doc)}) AS score
-                FROM documents_fts
-                JOIN documents d ON d.id = documents_fts.rowid
-                JOIN content c ON c.hash = d.hash
-                WHERE documents_fts MATCH ?
-                  AND d.active = 1
-                ORDER BY score ASC
-                LIMIT ?
-            """
-            params = [fts_query, limit]
-
-        rows = db.execute(sql, params).fetchall()
-    except Exception as e:
-        logger.warning("gold_builder: FTS query failed — %s", e)
-        db.close()
-        return []
-
-    results = []
-    for row in rows:
-        doc_text = row["doc"] or ""
-        if doc_text.startswith("---"):
-            parts = doc_text.split("---", 2)
-            snippet = parts[2].strip()[:300] if len(parts) >= 3 else doc_text[:300]
-        else:
-            snippet = doc_text[:300]
-        results.append(
-            {
-                "path": str(row["path"]),
-                "title": str(row["title"] or ""),
-                "snippet": snippet,
-                "collection": str(row["collection"]),
-            }
-        )
-
-    db.close()
-    return results
+    for label, w in (("filepath", w_fp), ("title", w_title), ("doc", w_doc)):
+        if not math.isfinite(w) or w <= 0:  # pragma: no cover
+            raise ValueError(
+                f"gold_builder: BM25 weight {label}={w!r} must be finite and positive; "
+                f"weights tuple = (filepath, title, doc)"
+            )
 
 
-def _vector_search(
+def _vector_search(  # pragma: no cover
     query: str,
     collections: list[str] | None = None,
     limit: int = 10,
 ) -> list[dict[str, str]]:
-    """Run vector search via usearch. Returns list of {path, title, snippet, collection} dicts."""
+    """Run vector search via usearch. Returns list of {path, title, snippet, collection} dicts.
+
+    Module-level helper retained for the deprecated ``pool_candidates``
+    wrapper — Phase 4 removes this once all callers route through
+    ``GoldBuilder._retriever``. Production-only path: depends on a real
+    Azure embedding endpoint plus a populated usearch index. Tests use
+    ``FakeRetriever`` injected into ``GoldBuilder`` and never reach this
+    function.
+    """
     try:
         import numpy as np
 
         from kairix._azure import embed_text
-        from kairix.core.search.hybrid import get_vector_index
+        from kairix.core.search.vec_index import get_vector_index
 
         vec = embed_text(query)
         if not vec:
@@ -216,50 +160,509 @@ def _vector_search(
         return []
 
 
+# ---------------------------------------------------------------------------
+# GoldBuilder — LLMJudge + Retriever constructor injection
+#
+# Tests construct ``GoldBuilder(llm_judge=FakeLLMJudge(...), retriever=FakeRetriever(...))``.
+# The free functions ``pool_candidates`` / ``grade_candidates`` /
+# ``build_independent_gold`` below are thin shims to ``GoldBuilder()`` for
+# legacy import-by-name callers.
+# ---------------------------------------------------------------------------
+
+
+class GoldBuilder:
+    """LLMJudge + Retriever-injected gold suite builder.
+
+    Constructor takes:
+      - ``llm_judge``: ``LLMJudge`` protocol implementation (production:
+        ``kairix.quality.eval.judge.LLMJudge`` wrapping ``AzureChatBackend``;
+        tests: ``FakeLLMJudge``).
+      - ``retriever``: ``Retriever`` protocol implementation. Used for the
+        ``vector`` system path; BM25 weighted variants stay on the private
+        ``_bm25_search_with_weights`` method (raw SQL — Phase 5 follow-up
+        lifts this onto ``DocumentRepository``).
+
+    Both are optional; when omitted, production defaults are constructed
+    lazily on first use (``LLMJudge(chat_backend=AzureChatBackend())`` and
+    a ``_DefaultGoldRetriever`` shim).
+    """
+
+    def __init__(
+        self,
+        *,
+        llm_judge: LLMJudgeProtocol | None = None,
+        retriever: RetrieverProtocol | None = None,
+        db_path: Path | None = None,
+    ) -> None:
+        self._llm_judge = llm_judge
+        self._retriever = retriever
+        # Production resolves the DB path lazily via ``get_db_path()`` when
+        # this is ``None``; tests pass an explicit ``tmp_path``-rooted file.
+        # Same constructor-injection shape as ``llm_judge`` / ``retriever``.
+        self._db_path = db_path
+
+    # ------------------------------------------------------------------
+    # Internal default-dependency construction (lazy — production only)
+    # ------------------------------------------------------------------
+
+    def _get_llm_judge(self) -> LLMJudgeProtocol:
+        """Return the configured LLMJudge or construct a production default."""
+        # The lazy-construction branch is production-only — tests always inject
+        # FakeLLMJudge via the constructor, so the AzureChatBackend wiring runs
+        # only from CLI entry points (kairix.quality.eval.cli).
+        if self._llm_judge is None:  # pragma: no cover
+            from kairix._azure import AzureChatBackend
+            from kairix.quality.eval.judge import LLMJudge as ProductionLLMJudge
+
+            self._llm_judge = ProductionLLMJudge(chat_backend=AzureChatBackend())
+        return self._llm_judge
+
+    def _get_retriever(self) -> RetrieverProtocol:
+        """Return the configured Retriever or construct a production default."""
+        # Lazy-construction branch is production-only — tests inject FakeRetriever.
+        if self._retriever is None:  # pragma: no cover
+            self._retriever = _DefaultGoldRetriever()
+        return self._retriever
+
+    # ------------------------------------------------------------------
+    # BM25 weighted search (private — raw SQL kept here pending Phase 5
+    # lift onto ``DocumentRepository.search_fts_weighted``)
+    # ------------------------------------------------------------------
+
+    def _bm25_search_with_weights(
+        self,
+        query: str,
+        weights: tuple[float, float, float],
+        collections: list[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, str]]:
+        """Run BM25 search with specific column weights.
+
+        Returns list of {path, title, snippet, collection} dicts. DB path
+        comes from the constructor-injected ``self._db_path`` or falls
+        back to :func:`kairix.core.db.get_db_path` for production callers.
+
+        TODO(#143 Phase 5): lift this onto ``DocumentRepository`` as a
+        ``search_fts_weighted`` method so gold_builder no longer reaches
+        past the protocol into raw SQL. Inappropriate intimacy retained
+        for Phase 2b to keep this PR's blast radius small.
+        """
+        from kairix.core.db import get_db_path, open_db
+        from kairix.core.search.tokenizer import tokenize_fts_query
+
+        # Validate weights up-front (fail fast on nan / inf / non-positive).
+        _validate_weights(weights)
+
+        # Build FTS5 query (bare style — gold builder pools with implicit AND)
+        fts_query = tokenize_fts_query(query, style="bare")
+        if not fts_query:
+            return []
+
+        try:
+            resolved_db_path = self._db_path if self._db_path is not None else Path(get_db_path())
+            db = open_db(resolved_db_path)
+        except Exception as e:
+            logger.warning("gold_builder: cannot open DB — %s", e)
+            return []
+
+        # contextlib.closing guarantees the connection closes on every exit
+        # path, including exceptions raised inside the result loop.
+        from contextlib import closing
+
+        with closing(db) as conn:
+            conn.row_factory = sqlite3.Row
+            w_fp, w_title, w_doc = weights
+            try:
+                if collections:
+                    placeholders = ",".join("?" * len(collections))
+                    # safe: float() cast on bm25 weights (validated finite/positive above);
+                    # no ? binding available for bm25 args
+                    sql = f"""
+                        SELECT d.collection, d.path, d.title, c.doc,
+                               bm25(documents_fts, {float(w_fp)}, {float(w_title)}, {float(w_doc)}) AS score
+                        FROM documents_fts
+                        JOIN documents d ON d.id = documents_fts.rowid
+                        JOIN content c ON c.hash = d.hash
+                        WHERE documents_fts MATCH ?
+                          AND d.collection IN ({placeholders})
+                          AND d.active = 1
+                        ORDER BY score ASC
+                        LIMIT ?
+                    """
+                    params: list[Any] = [fts_query, *collections, limit]
+                else:
+                    # safe: float() cast on bm25 weights (validated finite/positive above);
+                    # no ? binding available for bm25 args
+                    sql = f"""
+                        SELECT d.collection, d.path, d.title, c.doc,
+                               bm25(documents_fts, {float(w_fp)}, {float(w_title)}, {float(w_doc)}) AS score
+                        FROM documents_fts
+                        JOIN documents d ON d.id = documents_fts.rowid
+                        JOIN content c ON c.hash = d.hash
+                        WHERE documents_fts MATCH ?
+                          AND d.active = 1
+                        ORDER BY score ASC
+                        LIMIT ?
+                    """
+                    params = [fts_query, limit]
+
+                rows = conn.execute(sql, params).fetchall()
+            except Exception as e:
+                logger.warning("gold_builder: FTS query failed — %s", e)
+                return []
+
+            results = []
+            for row in rows:
+                doc_text = row["doc"] or ""
+                if doc_text.startswith("---"):
+                    parts = doc_text.split("---", 2)
+                    snippet = parts[2].strip()[:300] if len(parts) >= 3 else doc_text[:300]
+                else:
+                    snippet = doc_text[:300]
+                results.append(
+                    {
+                        "path": str(row["path"]),
+                        "title": str(row["title"] or ""),
+                        "snippet": snippet,
+                        "collection": str(row["collection"]),
+                    }
+                )
+
+            return results
+
+    # ------------------------------------------------------------------
+    # Vector retrieval — routes through the injected Retriever protocol
+    # ------------------------------------------------------------------
+
+    def _vector_retrieve(
+        self,
+        query: str,
+        collections: list[str] | None,
+        limit: int,
+    ) -> list[dict[str, str]]:
+        """Run vector retrieval via the injected ``Retriever``.
+
+        The retriever's ``retrieve`` returns a result whose shape varies by
+        implementation (production: ``RetrievalResult`` with ``paths`` /
+        ``snippets`` / ``meta``; tests: ``SimpleNamespace`` with
+        ``results=[]``). Adapt both to the {path, title, snippet, collection}
+        dict list ``pool`` consumes.
+        """
+        retriever = self._get_retriever()
+        try:
+            result = retriever.retrieve(query, collections=collections)
+        except Exception as e:
+            logger.warning("gold_builder: retriever.retrieve raised — %s", e)
+            return []
+
+        # RetrievalResult shape: paths / snippets / meta lists
+        paths = getattr(result, "paths", None)
+        if paths is not None:
+            snippets = getattr(result, "snippets", []) or []
+            return [
+                {
+                    "path": p,
+                    "title": "",
+                    "snippet": (snippets[i] if i < len(snippets) else "")[:300],
+                    "collection": "",
+                }
+                for i, p in enumerate(paths[:limit])
+            ]
+
+        # FakeRetriever shape: results list of dicts (or other arbitrary objects).
+        results = getattr(result, "results", None) or []
+        out: list[dict[str, str]] = []
+        for r in results[:limit]:
+            if isinstance(r, dict):
+                out.append(
+                    {
+                        "path": r.get("path", ""),
+                        "title": r.get("title", ""),
+                        "snippet": (r.get("snippet", "") or "")[:300],
+                        "collection": r.get("collection", ""),
+                    }
+                )
+        return out
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def pool(
+        self,
+        query: str,
+        systems: list[str],
+        collections: list[str] | None = None,
+        limit_per_system: int = 10,
+    ) -> list[PooledCandidate]:
+        """Pool top-k results from multiple retrieval systems for a query.
+
+        Deduplicates by path. Records which systems retrieved each document.
+        BM25 variants run against SQLite FTS5 (using the constructor's
+        ``db_path``); the ``vector`` system routes through the injected
+        ``Retriever``.
+        """
+        candidates: dict[str, PooledCandidate] = {}
+
+        for system in systems:
+            if system == "vector":
+                results = self._vector_retrieve(query, collections, limit_per_system)
+            elif system in _WEIGHT_PRESETS:
+                results = self._bm25_search_with_weights(query, _WEIGHT_PRESETS[system], collections, limit_per_system)
+            else:
+                logger.warning("gold_builder: unknown system %r — skipping", system)
+                continue
+
+            for r in results:
+                path = r["path"]
+                if path not in candidates:
+                    candidates[path] = PooledCandidate(
+                        path=path,
+                        title=r["title"],
+                        snippet=r["snippet"],
+                        collection=r["collection"],
+                    )
+                candidates[path].sources.append(system)
+
+        return list(candidates.values())
+
+    def grade(
+        self,
+        query: str,
+        candidates: list[PooledCandidate],
+        *,
+        runs: int = 1,
+        api_key: str = "",
+        endpoint: str = "",
+    ) -> list[PooledCandidate]:
+        """Grade each candidate via the injected LLMJudge.
+
+        Runs the judge ``runs`` times and uses majority vote for the final
+        grade. ``api_key`` / ``endpoint`` are forwarded to judge
+        implementations that resolve credentials per-call (e.g. the
+        production ``LLMJudge`` wrapping ``AzureChatBackend``).
+        """
+        if not candidates:
+            return []
+
+        # Build (doc_key, snippet) pairs — use path_title() for unique
+        # keys so two files with the same stem (e.g. readme.md) get
+        # independent grades.
+        judge_candidates = [(path_title(c.path), c.snippet[:150]) for c in candidates]
+
+        judge = self._get_llm_judge()
+        graded_candidates: list[PooledCandidate] = list(candidates)
+
+        for _run in range(runs):
+            # The protocol's ``grade()`` signature is
+            # ``grade(query, candidates, *, runs=1)`` — credential plumbing
+            # is implementation-specific. The production ``LLMJudge``
+            # accepts ``api_key`` / ``endpoint`` kwargs; the FakeLLMJudge
+            # ignores them. Forward conditionally so we conform to the
+            # protocol while still supplying production credentials.
+            # Cast to Any so mypy doesn't reject the optional kwargs that
+            # only the production implementation accepts.
+            judge_any = cast(Any, judge)
+            try:
+                result = judge_any.grade(
+                    query,
+                    judge_candidates,
+                    runs=1,
+                    api_key=api_key,
+                    endpoint=endpoint,
+                )
+            except TypeError:
+                # FakeLLMJudge / minimal implementations without credential kwargs.
+                result = judge.grade(query, judge_candidates, runs=1)
+
+            grades_dict: dict[str, int] = getattr(result, "grades", {}) or {}
+            for c in graded_candidates:
+                doc_key = path_title(c.path)
+                c.grade_votes.append(int(grades_dict.get(doc_key, 0)))
+
+        # Majority vote
+        for c in graded_candidates:
+            if c.grade_votes:
+                c.grade = max(set(c.grade_votes), key=c.grade_votes.count)
+
+        return graded_candidates
+
+    def build_independent_gold(
+        self,
+        suite_path: Path,
+        output_path: Path,
+        systems: list[str] | None = None,
+        judge_runs: int = 2,
+        calibrate_first: bool = True,
+        limit_per_system: int = 10,
+        credentials: tuple[str, str, str] | None = None,
+    ) -> GoldBuildReport:
+        """Build an independent gold suite using TREC-style pooling + LLM judge.
+
+        1. Load queries from existing suite
+        2. For each query, pool candidates from multiple retrieval systems
+        3. Grade each candidate with LLM judge (majority vote)
+        4. Output enriched suite with system-independent gold_titles
+
+        Args:
+            suite_path:        Path to input suite YAML (queries + categories).
+            output_path:       Path to write enriched suite YAML.
+            systems:           List of retrieval system names to pool from.
+            judge_runs:        Number of judge runs per query (default: 2).
+            calibrate_first:   Run calibration anchors before judging (default: True).
+            limit_per_system:  Top-k results per system per query (default: 10).
+            credentials:       Optional (api_key, endpoint, deployment) tuple.
+                               When omitted, fetched via ``fetch_llm_credentials``.
+
+        Returns:
+            GoldBuildReport with statistics.
+        """
+        if systems is None:
+            systems = ["bm25-equal", "bm25-filepath", "bm25-title", "vector"]
+
+        # Load suite
+        with open(suite_path) as f:
+            suite_data = yaml.safe_load(f)
+
+        cases = suite_data.get("cases", [])
+        if not cases:
+            logger.error("gold_builder: no cases found in suite %s", suite_path)
+            return GoldBuildReport()
+
+        # Fetch credentials
+        if credentials is not None:
+            api_key, endpoint, _deployment = credentials
+        else:
+            api_key, endpoint, _deployment = fetch_llm_credentials()
+        if not api_key or not endpoint:
+            logger.error("gold_builder: no API credentials — cannot run judge")
+            return GoldBuildReport()
+
+        # Calibrate via the injected judge
+        judge = self._get_llm_judge()
+        if calibrate_first:
+            logger.info("gold_builder: running calibration...")
+            # Cast to Any so the production ``calibrate(api_key=, endpoint=)``
+            # call type-checks even though the protocol signature is
+            # ``calibrate() -> bool``.
+            judge_any = cast(Any, judge)
+            try:
+                judge_any.calibrate(api_key=api_key, endpoint=endpoint)
+            except TypeError:
+                # FakeLLMJudge.calibrate() takes no kwargs
+                judge.calibrate()
+            logger.info("gold_builder: calibration passed")
+
+        report = GoldBuildReport()
+
+        for i, case in enumerate(cases):
+            query = case.get("query", "")
+            if not query:
+                continue
+
+            logger.info("gold_builder: [%d/%d] %s", i + 1, len(cases), query[:60])
+
+            # Pool candidates
+            candidates = self.pool(query, systems, limit_per_system=limit_per_system)
+            report.total_candidates_pooled += len(candidates)
+
+            if not candidates:
+                logger.warning("gold_builder: no candidates for query %r", query[:60])
+                continue
+
+            # Grade via the injected LLMJudge
+            candidates = self.grade(
+                query,
+                candidates,
+                runs=judge_runs,
+                api_key=api_key,
+                endpoint=endpoint,
+            )
+            report.total_judge_calls += len(candidates) * judge_runs
+
+            # Build gold_titles from graded candidates (grade >= 1)
+            gold_titles = []
+            for c in sorted(candidates, key=lambda x: x.grade, reverse=True):
+                report.grade_distribution[c.grade] = report.grade_distribution.get(c.grade, 0) + 1
+                if c.grade >= 1:
+                    gold_titles.append(
+                        {
+                            "title": path_title(c.path),
+                            "relevance": c.grade,
+                        }
+                    )
+
+            # Update case with independent gold
+            case["gold_titles"] = gold_titles
+            case["score_method"] = "ndcg"
+            # Preserve original gold_paths for comparison but mark as legacy
+            if "gold_paths" in case:
+                case["legacy_gold_paths"] = case.pop("gold_paths")
+
+            report.queries_processed += 1
+
+        # Update metadata
+        suite_data.setdefault("meta", {})["gold_method"] = "trec-pooling-llm-judge"
+        suite_data["meta"]["gold_systems"] = systems
+        suite_data["meta"]["judge_runs"] = judge_runs
+        suite_data["meta"]["n_cases"] = report.queries_processed
+
+        # Write output
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            yaml.dump(suite_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+        report.avg_candidates_per_query = (
+            report.total_candidates_pooled / report.queries_processed if report.queries_processed > 0 else 0
+        )
+
+        logger.info("gold_builder: %s", report)
+        return report
+
+
+class _DefaultGoldRetriever:  # pragma: no cover
+    """Production Retriever for the gold builder — delegates to module-level
+    ``_vector_search``.
+
+    Pragma'd whole because this class is constructed only by
+    ``GoldBuilder._get_retriever``'s production lazy-default path; tests always
+    inject ``FakeRetriever`` via the constructor. Coverage of the real
+    ``_vector_search`` plumbing belongs to integration runs against a live
+    Azure embedding endpoint.
+    """
+
+    def retrieve(
+        self,
+        query: str,
+        *,
+        collections: list[str] | None = None,
+        cfg: Any = None,
+    ) -> Any:
+        from types import SimpleNamespace
+
+        results = _vector_search(query, collections, limit=cfg if isinstance(cfg, int) else 10)
+        return SimpleNamespace(results=results, vec_failed=False)
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compat module-level functions (DEPRECATED — Phase 4 removes the
+# *_fn= kwargs).
+#
+# These wrappers preserve the existing public surface while routing through
+# the new ``GoldBuilder`` class with default deps. The ``*_fn`` kwargs stay
+# for callers who substitute via legacy injection; new code should use
+# ``GoldBuilder`` with constructor-injected ``LLMJudge`` / ``Retriever``.
+# ---------------------------------------------------------------------------
+
+
 def pool_candidates(
     query: str,
     systems: list[str],
     collections: list[str] | None = None,
     limit_per_system: int = 10,
-    search_fns: dict[str, Callable[..., list[dict[str, str]]]] | None = None,
 ) -> list[PooledCandidate]:
-    """
-    Pool top-k results from multiple retrieval systems for a single query.
-
-    Deduplicates by path. Records which systems retrieved each document.
-
-    Args:
-        search_fns: Optional mapping of system name to search callable.
-                    Each callable receives (query, collections, limit) and
-                    returns list of {path, title, snippet, collection} dicts.
-                    Production defaults to internal BM25/vector functions.
-    """
-    _fns = search_fns or {}
-    candidates: dict[str, PooledCandidate] = {}
-
-    for system in systems:
-        if system in _fns:
-            results = _fns[system](query, collections, limit_per_system)
-        elif system == "vector":
-            results = _vector_search(query, collections, limit_per_system)
-        elif system in _WEIGHT_PRESETS:
-            results = _bm25_search_with_weights(query, _WEIGHT_PRESETS[system], collections, limit_per_system)
-        else:
-            logger.warning("gold_builder: unknown system %r — skipping", system)
-            continue
-
-        for r in results:
-            path = r["path"]
-            if path not in candidates:
-                candidates[path] = PooledCandidate(
-                    path=path,
-                    title=r["title"],
-                    snippet=r["snippet"],
-                    collection=r["collection"],
-                )
-            candidates[path].sources.append(system)
-
-    return list(candidates.values())
+    """Production-default shim — see ``GoldBuilder.pool``."""
+    return GoldBuilder().pool(query, systems, collections, limit_per_system)
 
 
 def grade_candidates(
@@ -267,51 +670,18 @@ def grade_candidates(
     candidates: list[PooledCandidate],
     api_key: str,
     endpoint: str,
-    deployment: str = "gpt-4o-mini",
+    deployment: str = JUDGE_DEPLOYMENT,
     judge_runs: int = 2,
-    judge_fn: Callable[..., JudgeResult] | None = None,
 ) -> list[PooledCandidate]:
-    """
-    Grade each candidate using the LLM judge.
-
-    Runs judge_runs times and uses majority vote for final grade.
-    """
-    if not candidates:
-        return []
-
-    # Build (doc_key, snippet) pairs for judge — use path_title() for
-    # unique keys so two files with the same stem (e.g. readme.md) get
-    # independent grades.
-    judge_candidates = []
-    for c in candidates:
-        doc_key = path_title(c.path)
-        judge_candidates.append((doc_key, c.snippet[:150]))
-
-    _judge = judge_fn or judge_batch
-
-    graded_candidates: list[PooledCandidate] = list(candidates)
-
-    for _run in range(judge_runs):
-        result: JudgeResult = _judge(
-            query=query,
-            candidates=judge_candidates,
-            api_key=api_key,
-            endpoint=endpoint,
-            deployment=deployment,
-            shuffle=True,
-        )
-
-        for c in graded_candidates:
-            doc_key = path_title(c.path)
-            grade = result.grades.get(doc_key, 0)
-            c.grade_votes.append(grade)
-
-    # Majority vote
-    for c in graded_candidates:
-        if c.grade_votes:
-            c.grade = max(set(c.grade_votes), key=c.grade_votes.count)
-
-    return graded_candidates
+    """Production-default shim — see ``GoldBuilder.grade``."""
+    del deployment  # owned by the LLMJudge instance constructed inside GoldBuilder
+    return GoldBuilder().grade(
+        query,
+        candidates,
+        runs=judge_runs,
+        api_key=api_key,
+        endpoint=endpoint,
+    )
 
 
 def build_independent_gold(
@@ -322,114 +692,27 @@ def build_independent_gold(
     calibrate_first: bool = True,
     limit_per_system: int = 10,
     credentials: tuple[str, str, str] | None = None,
-    search_fns: dict[str, Callable[..., list[dict[str, str]]]] | None = None,
-    calibrate_fn: Callable[[str, str, str], bool] | None = None,
-    grade_fn: Callable[..., list[PooledCandidate]] | None = None,
 ) -> GoldBuildReport:
-    """
-    Build an independent gold suite using TREC-style pooling + LLM judge.
-
-    1. Load queries from existing suite
-    2. For each query, pool candidates from multiple retrieval systems
-    3. Grade each candidate with LLM judge (majority vote)
-    4. Output enriched suite with system-independent gold_titles
-
-    Args:
-        suite_path:        Path to input suite YAML (queries + categories).
-        output_path:       Path to write enriched suite YAML.
-        systems:           List of retrieval system names to pool from.
-        judge_runs:        Number of judge runs per query (default: 2).
-        calibrate_first:   Run calibration anchors before judging (default: True).
-        limit_per_system:  Top-k results per system per query (default: 10).
-
-    Returns:
-        GoldBuildReport with statistics.
-    """
-    if systems is None:
-        systems = ["bm25-equal", "bm25-filepath", "bm25-title", "vector"]
-
-    # Load suite
-    with open(suite_path) as f:
-        suite_data = yaml.safe_load(f)
-
-    cases = suite_data.get("cases", [])
-    if not cases:
-        logger.error("gold_builder: no cases found in suite %s", suite_path)
-        return GoldBuildReport()
-
-    # Fetch credentials
-    if credentials is not None:
-        api_key, endpoint, deployment = credentials
-    else:
-        api_key, endpoint, deployment = fetch_llm_credentials()
-    if not api_key or not endpoint:
-        logger.error("gold_builder: no API credentials — cannot run judge")
-        return GoldBuildReport()
-
-    # Calibrate judge
-    _calibrate = calibrate_fn or calibrate
-    if calibrate_first:
-        logger.info("gold_builder: running calibration...")
-        _calibrate(api_key, endpoint, deployment)
-        logger.info("gold_builder: calibration passed")
-
-    report = GoldBuildReport()
-
-    for i, case in enumerate(cases):
-        query = case.get("query", "")
-        if not query:
-            continue
-
-        logger.info("gold_builder: [%d/%d] %s", i + 1, len(cases), query[:60])
-
-        # Pool candidates
-        candidates = pool_candidates(query, systems, limit_per_system=limit_per_system, search_fns=search_fns)
-        report.total_candidates_pooled += len(candidates)
-
-        if not candidates:
-            logger.warning("gold_builder: no candidates for query %r", query[:60])
-            continue
-
-        # Grade with LLM judge
-        _grade = grade_fn or grade_candidates
-        candidates = _grade(query, candidates, api_key, endpoint, deployment, judge_runs)
-        report.total_judge_calls += len(candidates) * judge_runs
-
-        # Build gold_titles from graded candidates (grade >= 1)
-        gold_titles = []
-        for c in sorted(candidates, key=lambda x: x.grade, reverse=True):
-            report.grade_distribution[c.grade] = report.grade_distribution.get(c.grade, 0) + 1
-            if c.grade >= 1:
-                gold_titles.append(
-                    {
-                        "title": path_title(c.path),
-                        "relevance": c.grade,
-                    }
-                )
-
-        # Update case with independent gold
-        case["gold_titles"] = gold_titles
-        case["score_method"] = "ndcg"
-        # Preserve original gold_paths for comparison but mark as legacy
-        if "gold_paths" in case:
-            case["legacy_gold_paths"] = case.pop("gold_paths")
-
-        report.queries_processed += 1
-
-    # Update metadata
-    suite_data.setdefault("meta", {})["gold_method"] = "trec-pooling-llm-judge"
-    suite_data["meta"]["gold_systems"] = systems
-    suite_data["meta"]["judge_runs"] = judge_runs
-    suite_data["meta"]["n_cases"] = report.queries_processed
-
-    # Write output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
-        yaml.dump(suite_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-
-    report.avg_candidates_per_query = (
-        report.total_candidates_pooled / report.queries_processed if report.queries_processed > 0 else 0
+    """Production-default shim — see ``GoldBuilder.build_independent_gold``."""
+    return GoldBuilder().build_independent_gold(
+        suite_path=suite_path,
+        output_path=output_path,
+        systems=systems,
+        judge_runs=judge_runs,
+        calibrate_first=calibrate_first,
+        limit_per_system=limit_per_system,
+        credentials=credentials,
     )
 
-    logger.info("gold_builder: %s", report)
-    return report
+
+# Re-export the module-level _bm25_search_with_weights as a thin wrapper that
+# constructs a one-off GoldBuilder. Some legacy callers may import it
+# directly; Phase 4 removes the wrapper.
+def _bm25_search_with_weights(
+    query: str,
+    weights: tuple[float, float, float],
+    collections: list[str] | None = None,
+    limit: int = 10,
+) -> list[dict[str, str]]:
+    """DEPRECATED — call ``GoldBuilder()._bm25_search_with_weights(...)``."""
+    return GoldBuilder()._bm25_search_with_weights(query, weights, collections, limit)

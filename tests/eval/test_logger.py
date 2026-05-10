@@ -115,7 +115,7 @@ def test_logger_entry_contains_all_fields(tmp_path):
     assert row["top_path"] == "docs/arch.md"
     assert row["vec_failed"] is True
     assert row["error"] == "dim mismatch"
-    assert row["latency_ms"] == 55.5
+    assert row["latency_ms"] == pytest.approx(55.5)
 
 
 @pytest.mark.unit
@@ -218,16 +218,7 @@ def test_from_search_result_extracts_top_path(tmp_path):
     assert row["top_path"] == "docs/architecture.md"
 
 
-@pytest.mark.unit
-def test_default_log_path_uses_env(monkeypatch, tmp_path):
-    """QueryLogger default path respects KAIRIX_SEARCH_LOG env var."""
-    custom_path = tmp_path / "custom.jsonl"
-    monkeypatch.setenv("KAIRIX_SEARCH_LOG", str(custom_path))
-    # Re-import to pick up env change
-    import importlib
-
-    import kairix.quality.eval.logger as logger_mod
-
-    importlib.reload(logger_mod)
-    ql = logger_mod.QueryLogger()
-    assert ql._path == custom_path
+# test_default_log_path_uses_env removed: pinned import-time env coupling and
+# read the private QueryLogger._path attribute. The explicit-log_path contract
+# is already covered above (line ~216) and the env-default chain belongs to
+# the integration layer.

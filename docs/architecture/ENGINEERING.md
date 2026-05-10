@@ -29,20 +29,24 @@ Every merge to `main` must pass all four CI stages. No exceptions without a docu
 | Type checking | mypy (strict) | Zero errors | ✅ Yes |
 | Linting | ruff | Zero errors | ✅ Yes |
 | Unit tests | pytest | 100% pass | ✅ Yes |
-| Test coverage | pytest-cov | ≥ 80% overall | ✅ Yes |
+| Test coverage (per-file) | F7 | ≥ 85% on every kairix/* file (ratcheted) | ✅ Yes |
 | SAST | bandit | Zero HIGH findings | ✅ Yes |
 | Dependency CVEs | pip-audit | Zero CVEs with fixes | ✅ Yes |
 | Contract tests | pytest -m contract | Zero failures | ✅ Yes |
+| Architecture fitness functions (atomic) | F1–F6, F8, F10–F13 | Zero net-new violations | ✅ Yes |
+| Architecture fitness functions (holistic) | F9 (unit ∪ integration coverage union ≥ 85%) | Zero net-new violations | ✅ Yes |
 | Build | pip install -e . | Succeeds | ✅ Yes |
 
-**Per-module coverage targets:**
-- `embed/`: ≥ 90%
-- `search/`, `classify/`: ≥ 85%
-- `temporal/`: ≥ 80%
-- `summaries/`, `briefing/`, `contradict/`: ≥ 75%
-- `_azure.py`, `_db.py` (shared utilities): ≥ 95%
+**Architecture fitness functions** are mechanical, blocking checks that encode rejected patterns (e.g. forbidden monkeypatching, internal-name imports in tests, unmarked tests). They run at three layers — pre-commit, `safe-commit.sh`, and CI Stage 0. Pre-existing violations are grandfathered in `.architecture/baseline/`; net-new violations block. Canonical reference: [`fitness-functions.md`](./fitness-functions.md).
 
-CI enforces the aggregate 80% gate. Per-module targets are verified manually during phase review.
+**Per-file coverage floor (mechanical, F7):** every `kairix/*` source file must clear 85% line coverage. Pre-existing violations are grandfathered in `.architecture/baseline/per-file-coverage-floor-files.txt`; new files must land at >=85% from day one. The aggregate 80% pytest-cov gate stays in place as a backstop.
+
+**Codecov surfaces:**
+- **Coverage** — two flags upload from CI: `unit` (Stage 2: `pytest -m "unit or bdd or contract" --cov`) and `integration` (Stage 3: `pytest -m integration --cov`). Carryforward is enabled for both so the dashboard doesn't flap when only one stage runs. Patch target = 85% (matches F7). Components: Search / Agents / Knowledge / Quality / Core for per-area dashboards.
+- **Test analytics** — JUnit XMLs from contracts, unit (3.12), and integration jobs upload via `codecov/test-results-action@v1`. Codecov tracks flaky tests, slow-test trends, and failure history across runs.
+- **Bundles** — not applicable; kairix is Python-only with no JS/TS frontend bundle.
+
+Configuration source-of-truth: `codecov.yml` in repo root (validated against `https://codecov.io/validate`). The `[tool.coverage.run].omit` list in `pyproject.toml` is the *only* place files are excluded from coverage measurement; do not add an `ignore:` block to `codecov.yml` (would create a second omit list that drifts).
 
 ---
 
@@ -50,30 +54,36 @@ CI enforces the aggregate 80% gate. Per-module targets are verified manually dur
 
 ### 2.1 Workflow overview
 
-Four stages run on every push and PR. Stages 3 and 4 run in parallel after Stage 2.
+Five stages run on every push and PR. Stages 3 and 4 run in parallel after Stage 2.
 
 ```
 push/PR
   │
-  ├── Stage 1: Contracts (30s)     ← fast gate, fails fast
-  │     schema validation
-  │     interface agreement tests
+  ├── Stage 0: Architecture fitness (30s)   ← runs F1-F6, F8 (F7 in Stage 2)
+  │     bash scripts/checks/run-all.sh --skip-coverage
   │
-  ├── Stage 2: Unit + Type (2min)  ← runs on py3.10, 3.11, 3.12
+  ├── Stage 1: Contracts (30s)              ← fast gate, fails fast
+  │     pytest -m contract  → results-contracts.xml
+  │     ↳ codecov/test-results-action (flag=contract)   [test analytics]
+  │
+  ├── Stage 2: Unit + Type (2-3min)         ← runs on py3.10, 3.11, 3.12
   │     mypy --strict
   │     ruff check + format
-  │     pytest (unit tests)
-  │     coverage ≥ 80%
+  │     pytest -m "unit or bdd or contract" --cov  → coverage.xml + results-unit.xml
+  │     F7: per-file 85% coverage floor (3.12 only)
+  │     ↳ codecov/codecov-action (flag=unit, 3.12 only) [coverage]
+  │     ↳ codecov/test-results-action (flag=unit, 3.12 only) [test analytics]
   │
   ├── Stage 3: Integration (5min)  ─┐
-  │     pytest -m integration       │ parallel
-  │     usearch required          │
-  │     backward compat shim check  │
-  │                                  │
+  │     pytest -m integration --cov  → coverage-integration.xml + results-integration.xml
+  │     ↳ codecov/codecov-action (flag=integration)     [coverage]
+  │     ↳ codecov/test-results-action (flag=integration) [test analytics]
+  │                                  │ parallel with Stage 4
   └── Stage 4: Security (5min)    ──┘
         bandit (SAST)
         pip-audit (CVE scan)
         detect-secrets (secret scan)
+        SonarCloud scan (consumes coverage.xml from Stage 2)
         artifact upload
 ```
 

@@ -55,8 +55,14 @@ def setup_logging(verbose: bool = False) -> None:
 def acquire_lock() -> IO[str]:
     """
     Acquire exclusive lock using the same lockfile as kairix-maintenance.sh.
-    Waits up to LOCK_WAIT_SECS. If the lock holder is dead, takes over.
-    Exits with code 3 if timeout and holder is still alive.
+
+    Waits up to ``LOCK_WAIT_SECS`` retrying ``LOCK_EX | LOCK_NB``. The kernel
+    releases ``flock`` automatically when the holding process exits (clean or
+    crash), so a "stale lockfile" is self-healing — the next worker simply
+    succeeds at LOCK_NB once the holder is gone. No PID inspection needed.
+
+    Exits with code 3 if the wait window expires while the holder is still
+    actively running.
     """
     lock_fh = open(LOCKFILE, "w")
     deadline = time.time() + LOCK_WAIT_SECS
@@ -70,31 +76,14 @@ def acquire_lock() -> IO[str]:
             logging.info("Waiting for embed lock...")
             time.sleep(5)
 
-    # Timeout — check if the lock holder is still alive
+    # Wait window exhausted and we still couldn't acquire — the holder is
+    # genuinely alive and working. Exit cleanly.
     lock_fh.close()
-    try:
-        holder_pid = int(LOCKFILE.read_text().strip())
-        os.kill(holder_pid, 0)  # signal 0 = existence check
-        # Process is alive — genuine contention
-        logging.error(
-            "Could not acquire lock after %ds — PID %d is still running",
-            LOCK_WAIT_SECS,
-            holder_pid,
-        )
-        sys.exit(3)
-    except (ProcessLookupError, ValueError, OSError):
-        # Holder is dead or PID unreadable — stale lock
-        logging.warning("Stale embed lock (holder no longer running) — taking over")
-        LOCKFILE.unlink(missing_ok=True)
-        lock_fh = open(LOCKFILE, "w")
-        try:
-            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            lock_fh.write(str(os.getpid()))
-            lock_fh.flush()
-            return lock_fh
-        except BlockingIOError:
-            logging.error("Failed to acquire lock even after stale lock cleanup")
-            sys.exit(3)
+    logging.error(
+        "Could not acquire lock after %ds — another embed is still running",
+        LOCK_WAIT_SECS,
+    )
+    sys.exit(3)
 
 
 def release_lock(lock_fh: IO[str]) -> None:
@@ -126,11 +115,30 @@ def cmd_embed(args: argparse.Namespace) -> int:
             # Scan document store for new/changed documents before embedding.
             # This ensures first-run embed works without a separate scan step.
             from kairix.core.db.scanner import CollectionConfig, DocumentScanner
-            from kairix.core.search.config_loader import load_collections
+            from kairix.core.search.config_loader import _resolve_config_path, load_collections
+            from kairix.core.search.registry import build_agent_owner_resolver, parse_agent_registry
             from kairix.paths import document_root
 
             droot = document_root()
-            scanner = DocumentScanner(db, document_root=droot)
+
+            # Build agent_owner resolver from the agents: section of kairix.config.yaml
+            # so each scanned document is tagged with its owning agent (#114).
+            # Documents not under any agent's write_path get agent_owner=NULL.
+            agent_resolver = None
+            try:
+                config_path = _resolve_config_path()
+                if config_path is not None:
+                    import yaml as _yaml
+
+                    with config_path.open(encoding="utf-8") as _f:
+                        _raw_yaml = _yaml.safe_load(_f) or {}
+                    _registry = parse_agent_registry(_raw_yaml)
+                    if _registry.list_agents():
+                        agent_resolver = build_agent_owner_resolver(_registry)
+            except Exception as _exc:
+                logging.warning("embed: agent_owner resolver unavailable — %s", _exc)
+
+            scanner = DocumentScanner(db, document_root=droot, agent_owner_resolver=agent_resolver)
 
             # Load collections from config; fall back to scanning entire document root
             collections_cfg = load_collections()
@@ -315,7 +323,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="kairix embed",
         description="Embed documents into the kairix vector index",
@@ -350,7 +358,7 @@ def main() -> None:
     # status
     sub.add_parser("status", help="Show embedding status")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     setup_logging(args.verbose)
 
     if args.command is None or args.command == "embed":

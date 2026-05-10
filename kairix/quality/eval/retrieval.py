@@ -35,6 +35,7 @@ def retrieve(
     fusion_override: str | None = None,
     config: Any | None = None,
     search_fn: Any | None = None,
+    pipeline_builder: Any | None = None,
 ) -> RetrievalResult:
     """
     Run retrieval and return a RetrievalResult.
@@ -49,6 +50,11 @@ def retrieve(
         collections:      Explicit collections list (takes precedence over collection).
         fusion_override:  Override fusion strategy (hybrid only).
         config:           Pre-built RetrievalConfig (hybrid only; overrides fusion_override).
+        search_fn:        Pre-bound search function. Bypasses pipeline construction
+                          when provided (used by tests + agents that own their own pipeline).
+        pipeline_builder: Pipeline factory; defaults to ``build_search_pipeline``.
+                          Tests pass a spy to verify the resolved RetrievalConfig
+                          flows through (mirrors the ``search_fn=`` seam).
 
     Returns:
         RetrievalResult with paths, snippets, and metadata.
@@ -65,6 +71,7 @@ def retrieve(
             fusion_override=fusion_override,
             config=config,
             search_fn=search_fn,
+            pipeline_builder=pipeline_builder,
         )
     elif system == "bm25":
         return _retrieve_bm25(query=query, agent=agent, limit=limit)
@@ -90,20 +97,37 @@ def _retrieve_hybrid(
     fusion_override: str | None = None,
     config: Any | None = None,
     search_fn: Any | None = None,
+    pipeline_builder: Any | None = None,
 ) -> RetrievalResult:
-    """Hybrid search backend."""
-    if search_fn is None:
-        from kairix.core.factory import build_search_pipeline
+    """Hybrid search backend.
 
-        _pipeline = build_search_pipeline(config=config)
-        search_fn = _pipeline.search
+    Resolves the effective ``RetrievalConfig`` before building the pipeline:
+    explicit ``config=`` wins; otherwise per-collection overrides for a
+    single-collection scope are merged on top of the YAML global config;
+    ``fusion_override`` is then layered on top. This closes #112 for the
+    eval/benchmark path so ``--collection reference-library`` actually
+    receives reflib's tuned overrides.
+    """
+    # Resolve config BEFORE building the pipeline. The historical bug
+    # (config reassigned after pipeline already built) is closed by doing
+    # all resolution up front.
+    if config is None:
+        from kairix.core.search.config_loader import resolve_retrieval_config
 
-    if config is None and fusion_override:
+        config = resolve_retrieval_config(collection=collection, collections=collections)
+
+    if fusion_override:
         from dataclasses import replace
 
-        from kairix.core.search.config_loader import load_config
+        config = replace(config, fusion_strategy=fusion_override)
 
-        config = replace(load_config(), fusion_strategy=fusion_override)
+    if search_fn is None:
+        if pipeline_builder is None:
+            from kairix.core.factory import build_search_pipeline
+
+            pipeline_builder = build_search_pipeline
+        _pipeline = pipeline_builder(config=config)
+        search_fn = _pipeline.search
 
     # Build explicit collections list when --collection is set
     effective_collections = collections or ([collection] if collection else None)

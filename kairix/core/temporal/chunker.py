@@ -74,9 +74,12 @@ _DATE_FIELD_RE = re.compile(
 _MEMORY_LOG_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.md$")
 
 # Card line: starts with "- [ ]" or "- [x]" (checklist item)
+# NOSONAR: no quantifiers on character classes that overlap;
+# anchored to start-of-line via re.MULTILINE — no backtracking risk.
 _CARD_LINE_RE = re.compile(r"^[-*]\s+\[[ xX]\]\s+", re.MULTILINE)
 
 # Section heading for boards (## Heading at start of line)
+# NOSONAR: single-line via re.MULTILINE — bounded by line length.
 _SECTION_H2_RE = re.compile(r"^##\s+(.+)$", re.MULTILINE)
 
 
@@ -166,9 +169,6 @@ def chunk_board(path: str) -> list[TemporalChunk]:
         if not buf:
             return
         card_text = "\n".join(buf).strip()
-        if not card_text:
-            return
-
         card_date, date_field = _extract_date_from_card(card_text)
         card_id = _make_card_id(path, col, idx)
 

@@ -1,26 +1,22 @@
 """
 Tests for the briefing synthesiser (kairix/briefing/synthesiser.py).
 
-Uses injected LLM backend — no monkey-patching needed.
+Uses canonical FakeLLMBackend from tests/fakes.py — no MagicMock.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 import pytest
 
 from kairix.agents.briefing.synthesiser import fallback_briefing, synthesise
+from tests.fakes import FakeLLMBackend
 
 
-def _make_backend(return_value: str | None = None, side_effect=None):
-    """Build a fake LLM backend with a .chat method."""
-    backend = MagicMock()
+def _make_backend(return_value: str | None = None, side_effect: BaseException | None = None) -> FakeLLMBackend:
+    """Build a FakeLLMBackend with the given chat behaviour."""
     if side_effect is not None:
-        backend.chat.side_effect = side_effect
-    else:
-        backend.chat.return_value = return_value
-    return backend
+        return FakeLLMBackend(chat_raises=side_effect)
+    return FakeLLMBackend(chat_response=return_value or "")
 
 
 @pytest.mark.unit
@@ -72,37 +68,25 @@ class TestSynthesise:
     @pytest.mark.unit
     def test_context_is_included_in_prompt(self):
         """Verify context content is passed to the LLM."""
-        captured_messages = []
-
-        def mock_chat(messages, max_tokens=800):
-            captured_messages.extend(messages)
-            return "## Pending & Blocked\nNone."
-
         context = {"memory_logs": "UNIQUE_MARKER_12345"}
-        backend = MagicMock()
-        backend.chat = mock_chat
+        backend = FakeLLMBackend(chat_response="## Pending & Blocked\nNone.")
         synthesise("builder", context, llm_backend=backend)
 
-        full_prompt = " ".join(str(m) for m in captured_messages)
+        # FakeLLMBackend captures every chat() call with its messages.
+        all_messages = [m for call in backend.chat_calls for m in call["messages"]]
+        full_prompt = " ".join(str(m) for m in all_messages)
         assert "UNIQUE_MARKER_12345" in full_prompt
 
     @pytest.mark.unit
     def test_long_context_is_truncated(self):
         """Verify very long context doesn't exceed limits."""
         context = {"memory_logs": " ".join(["word"] * 5000)}
-        captured_messages = []
-
-        def mock_chat(messages, max_tokens=800):
-            captured_messages.extend(messages)
-            return "## Pending & Blocked\nNone."
-
-        backend = MagicMock()
-        backend.chat = mock_chat
+        backend = FakeLLMBackend(chat_response="## Pending & Blocked\nNone.")
         synthesise("builder", context, llm_backend=backend)
 
-        full_prompt = " ".join(str(m) for m in captured_messages)
-        # Should be truncated — context block should not contain all 5000 words
-        assert "truncated" in full_prompt or len(full_prompt) < 25000
+        all_messages = [m for call in backend.chat_calls for m in call["messages"]]
+        full_prompt = " ".join(str(m) for m in all_messages)
+        assert len(full_prompt) < 25000, f"context not truncated: {len(full_prompt)} chars"
 
 
 @pytest.mark.unit

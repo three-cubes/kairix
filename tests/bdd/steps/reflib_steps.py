@@ -1,7 +1,8 @@
 """Step definitions for reference_library.feature.
 
-Indexes the 30-document fixture into a temp SQLite DB with FTS5,
-then runs BM25 search against it via KAIRIX_DB_PATH. No external API calls.
+Indexes the 30-document fixture into a temp SQLite DB with FTS5, then runs
+BM25 search against it. The fixture DB path is threaded through the
+``bm25_search(db_path=...)`` kwarg — no env-var monkeypatch.
 """
 
 import sqlite3
@@ -31,24 +32,9 @@ def _build_fixture_db(db_path: Path) -> None:
     if db_path.exists():
         return  # already built
     db = sqlite3.connect(str(db_path))
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            collection TEXT NOT NULL,
-            path TEXT NOT NULL,
-            title TEXT,
-            hash TEXT NOT NULL,
-            created_at TEXT,
-            modified_at TEXT,
-            active INTEGER DEFAULT 1,
-            UNIQUE(collection, path)
-        );
-        CREATE TABLE IF NOT EXISTS content (
-            hash TEXT PRIMARY KEY,
-            doc TEXT,
-            created_at TEXT
-        );
-    """)
+    from kairix.core.db.schema import create_schema
+
+    create_schema(db)
 
     scanner = DocumentScanner(db, document_root=FIXTURE_ROOT)
     collections = []
@@ -62,15 +48,14 @@ def _build_fixture_db(db_path: Path) -> None:
 
 
 @given("the reference library fixture is indexed")
-def reflib_indexed(monkeypatch):
+def reflib_indexed():
     _build_fixture_db(_DB_PATH)
-    monkeypatch.setenv("KAIRIX_DB_PATH", str(_DB_PATH))
     _state["results"] = None
 
 
 @when(parsers.re(r'I search for "(?P<query>.*)"'))
 def search_for(query):
-    results = bm25_search(query)
+    results = bm25_search(query, db_path=_DB_PATH)
     _state["results"] = results
     _state["query"] = query
 

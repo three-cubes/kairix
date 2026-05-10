@@ -1,4 +1,4 @@
-name: "5 · Dependency Review"
+name: "2a · Dependency review (PR → main)"
 
 on:
   pull_request:
@@ -20,3 +20,17 @@ jobs:
         with:
           fail-on-severity: moderate
           comment-summary-in-pr: always
+          # Allow-listed advisories with documented rationale. Each entry must
+          # name the affected code path that kairix does not exercise. Review
+          # this list every release: drop entries when the upstream fix lands
+          # in a version the dependency tree allows.
+          #
+          # GHSA-69w3-r845-3855 — transformers <5.0.0rc3 arbitrary code execution
+          # in the `Trainer` class. kairix imports only `sentence_transformers.
+          # CrossEncoder` for inference (kairix/core/search/rerank.py:49); the
+          # Trainer class is for fine-tuning and is never reached. Upstream
+          # blocker: every sentence-transformers version on PyPI caps
+          # transformers<5.0.0, so the lockfile cannot resolve to the patched
+          # version until sentence-transformers ships a release that supports
+          # transformers 5.x.
+          allow-ghsas: GHSA-69w3-r845-3855

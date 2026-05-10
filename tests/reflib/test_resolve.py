@@ -1,11 +1,17 @@
-"""Tests for kairix.knowledge.reflib.resolve — entity resolution and dedup."""
+"""Tests for kairix.knowledge.reflib.resolve — entity resolution and dedup.
+
+Drives every test through the public ``resolve_entities`` surface plus
+the public ``slugify`` helper. The internal Levenshtein / similarity
+helpers are exercised by the fuzzy-match scenarios; if a branch in those
+helpers can't be reached through ``resolve_entities``, it's dead code.
+"""
 
 from __future__ import annotations
 
 import pytest
 
 from kairix.knowledge.reflib.extract import RawEntity
-from kairix.knowledge.reflib.resolve import _levenshtein, _similarity, resolve_entities
+from kairix.knowledge.reflib.resolve import resolve_entities
 from kairix.utils import slugify
 
 pytestmark = pytest.mark.unit
@@ -35,39 +41,6 @@ class TestToSlug:
     @pytest.mark.unit
     def test_empty(self):
         assert slugify("") == ""
-
-
-# ---------------------------------------------------------------------------
-# Levenshtein / similarity tests
-# ---------------------------------------------------------------------------
-
-
-class TestLevenshtein:
-    @pytest.mark.unit
-    def test_identical(self):
-        assert _levenshtein("abc", "abc") == 0
-
-    @pytest.mark.unit
-    def test_one_edit(self):
-        assert _levenshtein("abc", "ab") == 1
-
-    @pytest.mark.unit
-    def test_empty(self):
-        assert _levenshtein("", "abc") == 3
-
-    @pytest.mark.unit
-    def test_similarity_identical(self):
-        assert _similarity("hello", "hello") == pytest.approx(1.0)
-
-    @pytest.mark.unit
-    def test_similarity_close(self):
-        # "hello" vs "helo" — distance 1, max_len 5 → similarity 0.8
-        assert _similarity("hello", "helo") == pytest.approx(0.8)
-
-    @pytest.mark.unit
-    def test_similarity_threshold(self):
-        # Strings that should be >= 0.85 similar
-        assert _similarity("opentelemetry", "open-telemetry") >= 0.85
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +118,20 @@ class TestResolveEntities:
         frameworks = [e for e in resolved if e.entity_type == "Framework"]
         # Should merge because slugs are very similar
         assert len(frameworks) == 1
+
+    @pytest.mark.unit
+    def test_dissimilar_slugs_do_not_merge(self):
+        """Names that aren't fuzzy-similar stay as separate entities — pins
+        the upper edge of the fuzzy-match contract so a regression that
+        merges everything would fail loud."""
+        raw = [
+            _raw("PostgreSQL", "Technology"),
+            _raw("MySQL", "Technology"),
+            _raw("MongoDB", "Technology"),
+        ]
+        resolved = resolve_entities(raw)
+        techs = [e for e in resolved if e.entity_type == "Technology"]
+        assert len(techs) == 3, f"expected 3 distinct techs, got {[e.id for e in techs]}"
 
     @pytest.mark.unit
     def test_confidence_preserved(self):

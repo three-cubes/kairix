@@ -128,13 +128,16 @@ class TestRealImplementationCompliance:
     @pytest.mark.contract
     def test_usearch_repo_satisfies_protocol(self):
         """UsearchVectorRepository satisfies VectorRepository protocol."""
-        from unittest.mock import MagicMock
-
         from kairix.core.search.vector_repository import UsearchVectorRepository
 
-        mock_index = MagicMock()
-        mock_index.__len__ = MagicMock(return_value=0)
-        repo = UsearchVectorRepository(index=mock_index)
+        # Protocol compliance is structural — the constructor's ``index``
+        # parameter is opaque at this layer. A trivial empty-length stand-in
+        # is sufficient; no behavioural mocking required.
+        class _EmptyIndex:
+            def __len__(self) -> int:
+                return 0
+
+        repo = UsearchVectorRepository(index=_EmptyIndex())
         assert isinstance(repo, VectorRepository)
 
 
@@ -516,7 +519,10 @@ class TestFakeBoost:
     def test_boost_returns_unmodified(self):
         b = FakeBoost()
         items = [{"score": 1.0}]
-        assert b.boost(items, "q", {}) is items
+        # `is` is intentional — the contract is that no-op boost returns the
+        # same list object, not just an equal one. SonarCloud python:S6738
+        # flags this; rule is a false positive in this case.
+        assert b.boost(items, "q", {}) is items  # NOSONAR — identity check is the contract
 
 
 @pytest.mark.contract
@@ -524,12 +530,12 @@ class TestFakeScorer:
     @pytest.mark.contract
     def test_returns_configured_score(self):
         s = FakeScorer(score=0.75)
-        assert s.score(["a.md"], [{"path": "a.md"}]) == 0.75
+        assert s.score(["a.md"], [{"path": "a.md"}]) == pytest.approx(0.75)
 
     @pytest.mark.contract
     def test_default_score_is_one(self):
         s = FakeScorer()
-        assert s.score([], []) == 1.0
+        assert s.score([], []) == pytest.approx(1.0)
 
 
 @pytest.mark.contract
@@ -664,33 +670,33 @@ class TestScoringStrategyImplementations:
     @pytest.mark.contract
     def test_exact_match_scorer_empty_gold(self):
         s = ExactMatchScorer()
-        assert s.score(["a.md"], []) == 0.0
+        assert s.score(["a.md"], []) == pytest.approx(0.0)
 
     @pytest.mark.contract
     def test_fuzzy_match_scorer_empty_gold(self):
         s = FuzzyMatchScorer()
-        assert s.score(["a.md"], []) == 0.0
+        assert s.score(["a.md"], []) == pytest.approx(0.0)
 
     @pytest.mark.contract
     def test_ndcg_scorer_empty_gold(self):
         s = NDCGScorer()
-        assert s.score(["a.md"], []) == 0.0
+        assert s.score(["a.md"], []) == pytest.approx(0.0)
 
     @pytest.mark.contract
     def test_exact_match_scorer_hit(self):
         s = ExactMatchScorer(top_k=5)
-        assert s.score(["docs/readme.md"], [{"path": "readme.md"}]) == 1.0
+        assert s.score(["docs/readme.md"], [{"path": "readme.md"}]) == pytest.approx(1.0)
 
     @pytest.mark.contract
     def test_fuzzy_match_scorer_hit(self):
         s = FuzzyMatchScorer(top_k=10)
-        assert s.score(["docs/readme.md"], [{"path": "readme.md"}]) == 1.0
+        assert s.score(["docs/readme.md"], [{"path": "readme.md"}]) == pytest.approx(1.0)
 
     @pytest.mark.contract
     def test_ndcg_scorer_perfect(self):
         s = NDCGScorer(k=5)
         gold = [{"path": "a.md", "relevance": 2}]
-        assert s.score(["a.md"], gold) == 1.0
+        assert s.score(["a.md"], gold) == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -708,8 +714,10 @@ class TestScorerRegistry:
 
     @pytest.mark.contract
     def test_all_registry_entries_are_scoring_strategies(self):
+        from tests.fakes import FakeChatBackend
+
         for name, cls in SCORERS.items():
-            instance = cls() if name != "llm" else cls(chat_fn=lambda msgs, **kw: "0.5")
+            instance = cls(chat_backend=FakeChatBackend(responses=["0.5"])) if name == "llm" else cls()
             assert isinstance(instance, ScoringStrategy), f"{name} does not satisfy ScoringStrategy"
 
 
@@ -788,7 +796,14 @@ class TestVectorSearchBackendAdapter:
         assert results[0]["path"] == "a.md"
 
     @pytest.mark.contract
-    def test_search_returns_empty_when_embedding_fails(self):
+    def test_search_raises_when_embedding_returns_no_vector(self):
+        """An empty embedding from the EmbeddingService is a failure — the
+        backend now propagates instead of silently returning ``[]``, so the
+        pipeline's ``vec_failed`` flag honestly reflects backend health.
+        Previously the silent-empty return masked broken embeddings as
+        successful no-match queries.
+        """
+
         class _FailingEmbedding:
             def embed(self, text: str) -> list[float]:
                 return []
@@ -798,8 +813,8 @@ class TestVectorSearchBackendAdapter:
 
         vector_repo = FakeVectorRepository(results=[{"path": "a.md"}])
         backend = VectorSearchBackend(_FailingEmbedding(), vector_repo)
-        results = backend.search("query")
-        assert results == []
+        with pytest.raises(RuntimeError, match="embedding service returned no vector"):
+            backend.search("query")
 
     @pytest.mark.contract
     def test_search_passes_collections(self):

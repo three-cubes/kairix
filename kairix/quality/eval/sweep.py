@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import math
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -89,6 +90,22 @@ def _build_query(query: str, style: str) -> str | None:
     return tokenize_fts_query(query, style=style)
 
 
+def _validate_weights(weights: tuple[float, float, float]) -> None:
+    """Raise ValueError if any BM25 weight is non-finite or non-positive.
+
+    Guards the f-string injection at ``_bm25_search_config`` against nan/inf
+    leaking into the SQL ORDER BY clause. SQLite's bm25() accepts those as
+    legal floats but produces nondeterministic ordering, which silently
+    invalidates the sweep results.
+    """
+    w_fp, w_title, w_doc = weights
+    for label, w in (("filepath", w_fp), ("title", w_title), ("doc", w_doc)):
+        if not math.isfinite(w) or w <= 0:
+            raise ValueError(
+                f"sweep: BM25 weight {label}={w!r} must be finite and positive; weights tuple = (filepath, title, doc)"
+            )
+
+
 def _bm25_search_config(
     db: sqlite3.Connection,
     query: str,
@@ -104,7 +121,8 @@ def _bm25_search_config(
         return []
 
     w_fp, w_title, w_doc = weights
-    # safe: float() cast on bm25 weights, no ? binding available for bm25 args
+    # safe: float() cast on bm25 weights (validated finite/positive at sweep entry);
+    # no ? binding available for bm25 args
     try:
         rows = db.execute(
             f"""
@@ -130,6 +148,7 @@ def sweep_bm25_params(
     output_path: Path | None = None,
     weight_configs: list[tuple[float, float, float]] | None = None,
     query_styles: list[str] | None = None,
+    db_path: Path | None = None,
 ) -> SweepReport:
     """
     Grid search over BM25 column weights and query styles.
@@ -142,6 +161,9 @@ def sweep_bm25_params(
         output_path:     Optional CSV output for results.
         weight_configs:  Column weight tuples (filepath, title, doc).
         query_styles:    Query construction styles to test.
+        db_path:         Optional explicit kairix DB path. Defaults to
+                         ``get_db_path()`` (env-resolved). Tests pass a
+                         tmp_path-rooted DB to avoid env mutation.
 
     Returns:
         SweepReport with results sorted by weighted_total descending.
@@ -150,6 +172,12 @@ def sweep_bm25_params(
         weight_configs = DEFAULT_WEIGHT_CONFIGS
     if query_styles is None:
         query_styles = DEFAULT_QUERY_STYLES
+
+    # Validate every weight tuple before opening the DB or scanning the suite,
+    # so non-finite/non-positive inputs surface as ValueError up front rather
+    # than silently corrupting ORDER BY ordering inside the inner loop.
+    for cfg in weight_configs:
+        _validate_weights(cfg)
 
     # Load suite
     with open(suite_path) as f:
@@ -174,9 +202,13 @@ def sweep_bm25_params(
     )
 
     # Open DB once for all configs
-    from kairix.core.db import get_db_path, open_db
+    from kairix.core.db import open_db
 
-    db = open_db(Path(get_db_path()))
+    if db_path is None:
+        from kairix.core.db import get_db_path
+
+        db_path = Path(get_db_path())
+    db = open_db(Path(db_path))
     db.row_factory = sqlite3.Row
 
     report = SweepReport()

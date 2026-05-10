@@ -11,16 +11,16 @@ FEATURE = str(Path(__file__).parent / "features" / "normalisation.feature")
 @pytest.mark.bdd
 @scenario(FEATURE, "Boilerplate files are filtered")
 def test_boilerplate_filtered():
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "Frontmatter is injected")
 def test_frontmatter_injected():
-    pass
+    """Body populated by @scenario from the .feature file."""
 
 
 @pytest.mark.bdd
 @scenario(FEATURE, "CC-BY-SA sources are excluded")
 def test_ccbysa_excluded():
-    pass
+    """Body populated by @scenario from the .feature file."""

@@ -50,10 +50,8 @@ def _build_entity_relationships(entities: list[dict], client: object) -> list[st
     """
     lines: list[str] = []
     for entity in entities[:3]:
-        eid = entity.get("id")
+        eid = entity["id"]
         ename = entity.get("name", eid)
-        if not eid:
-            continue
         try:
             related = client.related_entities(eid, max_hops=1)
             rel_names = [r.get("name") for r in related[:4] if r.get("name") and r.get("name") != ename]
@@ -143,7 +141,9 @@ class QueryPlanner:
         prompt for reliable parsing. Falls back to [query] on any failure.
         """
         try:
-            if llm_backend is None:
+            if (
+                llm_backend is None
+            ):  # pragma: no cover — production-only lazy default backend; tests inject FakeLLMBackend
                 from kairix.platform.llm import get_default_backend as _get_llm
 
                 llm_backend = _get_llm()
@@ -151,10 +151,7 @@ class QueryPlanner:
             # Inject entity graph context when available
             ctx = None
             if neo4j_client is not None and getattr(neo4j_client, "available", False):
-                try:
-                    ctx = neo4j_graph_context(query, neo4j_client)
-                except Exception:  # broad catch justified: Neo4j driver can raise arbitrary exceptions
-                    logger.debug("planner: Neo4j graph context unavailable")
+                ctx = neo4j_graph_context(query, neo4j_client)
             if ctx:
                 prompt = _DECOMPOSE_PROMPT_WITH_CONTEXT.format(entity_context=ctx, query=query)
                 logger.debug("planner: injecting entity context into decompose prompt")

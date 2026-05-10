@@ -47,10 +47,9 @@ class _FakeNeo4jClient:
 
 
 @pytest.mark.unit
-def test_wrapper_check_skipped_in_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_wrapper_check_skipped_in_docker() -> None:
     """In Docker, wrapper_installed check returns ok=True without probing the binary."""
-    monkeypatch.setenv("KAIRIX_DOCKER", "1")
-    result = check_wrapper_installed()
+    result = check_wrapper_installed(is_docker_fn=lambda: True)
     assert result.ok is True
     assert "Docker" in result.detail
 
@@ -129,35 +128,30 @@ def test_neo4j_check_exception_surfaces_as_failed_result() -> None:
 
 
 @pytest.mark.unit
-def test_secrets_loaded_ok_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KAIRIX_LLM_API_KEY", "key-abc12345")
-    monkeypatch.setenv("KAIRIX_LLM_ENDPOINT", "https://example.openai.azure.com/")
-    result = check_secrets_loaded()
+def test_secrets_loaded_ok_from_env() -> None:
+    env = {
+        "KAIRIX_LLM_API_KEY": "key-abc12345",  # pragma: allowlist secret
+        "KAIRIX_LLM_ENDPOINT": "https://example.openai.azure.com/",
+    }
+    result = check_secrets_loaded(env=env)
     assert result.ok
     assert "key-abc1" in result.detail  # masked key present
 
 
 @pytest.mark.unit
-def test_secrets_loaded_fail_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
-    monkeypatch.delenv("KAIRIX_LLM_ENDPOINT", raising=False)
-    monkeypatch.delenv("KAIRIX_SECRETS_FILE", raising=False)
-    result = check_secrets_loaded()
+def test_secrets_loaded_fail_when_missing() -> None:
+    result = check_secrets_loaded(env={})
     assert not result.ok
     assert result.fix is not None
 
 
 @pytest.mark.unit
-def test_secrets_loaded_ok_from_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_secrets_loaded_ok_from_file(tmp_path: Path) -> None:
     """Tier 2: secrets file with both keys present returns ok=True."""
-    monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
-    monkeypatch.delenv("KAIRIX_LLM_ENDPOINT", raising=False)
-
     secrets_file = tmp_path / "kairix.env"
     secrets_file.write_text("KAIRIX_LLM_API_KEY=test-key\nKAIRIX_LLM_ENDPOINT=https://example.openai.azure.com/\n")
-    monkeypatch.setenv("KAIRIX_SECRETS_FILE", str(secrets_file))
 
-    result = check_secrets_loaded()
+    result = check_secrets_loaded(env={"KAIRIX_SECRETS_FILE": str(secrets_file)})
     assert result.ok
     assert "Secrets file" in result.detail
 
@@ -168,28 +162,24 @@ def test_secrets_loaded_ok_from_file(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
 
 @pytest.mark.unit
-def test_document_root_configured_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_document_root_configured_ok(tmp_path: Path) -> None:
     md_file = tmp_path / "note.md"
     md_file.write_text("# test")
-    monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", str(tmp_path))
-    result = check_document_root_configured()
+    result = check_document_root_configured(env={"KAIRIX_DOCUMENT_ROOT": str(tmp_path)})
     assert result.ok
     assert str(tmp_path) in result.detail
 
 
 @pytest.mark.unit
-def test_document_root_configured_missing_dir(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/nonexistent/path/vault")
-    result = check_document_root_configured()
+def test_document_root_configured_missing_dir() -> None:
+    result = check_document_root_configured(env={"KAIRIX_DOCUMENT_ROOT": "/nonexistent/path/vault"})
     assert not result.ok
     assert result.fix is not None
 
 
 @pytest.mark.unit
-def test_document_root_configured_not_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KAIRIX_DOCUMENT_ROOT", raising=False)
-    monkeypatch.delenv("VAULT_ROOT", raising=False)
-    result = check_document_root_configured()
+def test_document_root_configured_not_set() -> None:
+    result = check_document_root_configured(env={})
     assert not result.ok
     assert result.fix is not None
 

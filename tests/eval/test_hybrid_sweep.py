@@ -19,7 +19,7 @@ from kairix.quality.eval.hybrid_sweep import (
     sweep_config_to_retrieval_config,
     sweep_hybrid_params,
 )
-from kairix.quality.eval.metrics import relevance_for_path as _match_relevance
+from kairix.quality.eval.metrics import relevance_for_path
 
 # ---------------------------------------------------------------------------
 # HybridSweepConfig
@@ -114,7 +114,7 @@ class TestBuildDefaultConfigs:
 
 
 # ---------------------------------------------------------------------------
-# Metrics: _match_relevance (path-based gold matching)
+# Metrics: relevance_for_path (path-based gold matching)
 # ---------------------------------------------------------------------------
 
 
@@ -123,31 +123,31 @@ class TestMatchRelevance:
     @pytest.mark.unit
     def test_stem_only_match(self) -> None:
         gold = [{"title": "patterns", "relevance": 2}]
-        assert _match_relevance("vault/knowledge/patterns.md", gold) == 2
+        assert relevance_for_path("vault/knowledge/patterns.md", gold) == 2
 
     @pytest.mark.unit
     def test_path_based_match(self) -> None:
         gold = [{"title": "engineering/adr-examples/readme", "relevance": 2}]
-        assert _match_relevance("reference-library/engineering/adr-examples/readme.md", gold) == 2
+        assert relevance_for_path("reference-library/engineering/adr-examples/readme.md", gold) == 2
 
     @pytest.mark.unit
     def test_path_based_rejects_different_stem(self) -> None:
         gold = [{"title": "engineering/adr-examples/readme", "relevance": 2}]
-        assert _match_relevance("data-and-analysis/dbt-docs/readme.md", gold) == 0
+        assert relevance_for_path("data-and-analysis/dbt-docs/readme.md", gold) == 0
 
     @pytest.mark.unit
     def test_no_match(self) -> None:
         gold = [{"title": "other-doc", "relevance": 1}]
-        assert _match_relevance("areas/kairix.md", gold) == 0
+        assert relevance_for_path("areas/kairix.md", gold) == 0
 
     @pytest.mark.unit
     def test_empty_gold(self) -> None:
-        assert _match_relevance("any/path.md", []) == 0
+        assert relevance_for_path("any/path.md", []) == 0
 
     @pytest.mark.unit
     def test_gold_paths_format(self) -> None:
         gold = [{"path": "areas/kairix.md", "relevance": 1}]
-        assert _match_relevance("vault/areas/kairix.md", gold) == 1
+        assert relevance_for_path("vault/areas/kairix.md", gold) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +284,7 @@ def test_sweep_report_defaults() -> None:
 
 
 @pytest.mark.unit
-def testsweep_config_to_retrieval_config_hybrid() -> None:
+def test_sweep_config_to_retrieval_config_hybrid() -> None:
     """Hybrid mode produces RRF fusion strategy."""
     cfg = HybridSweepConfig(name="test", mode="hybrid", rrf_k=40, entity_enabled=False)
     rc = sweep_config_to_retrieval_config(cfg)
@@ -294,7 +294,7 @@ def testsweep_config_to_retrieval_config_hybrid() -> None:
 
 
 @pytest.mark.unit
-def testsweep_config_to_retrieval_config_bm25_only() -> None:
+def test_sweep_config_to_retrieval_config_bm25_only() -> None:
     """BM25-only mode sets skip_vector and bm25_primary fusion."""
     cfg = HybridSweepConfig(name="test", mode="bm25_only")
     rc = sweep_config_to_retrieval_config(cfg)
@@ -303,7 +303,7 @@ def testsweep_config_to_retrieval_config_bm25_only() -> None:
 
 
 @pytest.mark.unit
-def testsweep_config_to_retrieval_config_bm25_primary() -> None:
+def test_sweep_config_to_retrieval_config_bm25_primary() -> None:
     """BM25-primary mode sets bm25_primary fusion without skip_vector."""
     cfg = HybridSweepConfig(name="test", mode="bm25_primary")
     rc = sweep_config_to_retrieval_config(cfg)
@@ -312,7 +312,7 @@ def testsweep_config_to_retrieval_config_bm25_primary() -> None:
 
 
 @pytest.mark.unit
-def testsweep_config_to_retrieval_config_preserves_boost_params() -> None:
+def test_sweep_config_to_retrieval_config_preserves_boost_params() -> None:
     """Boost parameters are forwarded to RetrievalConfig."""
     cfg = HybridSweepConfig(
         name="test",
@@ -325,10 +325,10 @@ def testsweep_config_to_retrieval_config_preserves_boost_params() -> None:
     )
     rc = sweep_config_to_retrieval_config(cfg)
     assert rc.entity.enabled is True
-    assert rc.entity.factor == 1.5
-    assert rc.entity.cap == 3
+    assert rc.entity.factor == pytest.approx(1.5)
+    assert rc.entity.cap == pytest.approx(3.0)
     assert rc.procedural.enabled is True
-    assert rc.procedural.factor == 2.0
+    assert rc.procedural.factor == pytest.approx(2.0)
 
 
 # ---------------------------------------------------------------------------
@@ -339,9 +339,10 @@ def testsweep_config_to_retrieval_config_preserves_boost_params() -> None:
 @pytest.mark.unit
 def test_sweep_hybrid_params_with_mock(tmp_path: Path) -> None:
     """Sweep runs against a minimal suite and produces sorted results."""
-    from unittest.mock import patch
-
     import yaml
+
+    from kairix.quality.eval.retrieval import RetrievalResult
+    from tests.fakes import FakeRetriever
 
     suite = {
         "meta": {"version": "1.0"},
@@ -358,21 +359,23 @@ def test_sweep_hybrid_params_with_mock(tmp_path: Path) -> None:
     with open(suite_path, "w") as f:
         yaml.dump(suite, f)
 
-    def mock_retrieve(query, collections, cfg):
-        return ["test-doc.md", "other.md"], {
+    canned = RetrievalResult(
+        paths=["test-doc.md", "other.md"],
+        meta={
             "bm25_count": 5,
             "vec_count": 3,
             "fused_count": 8,
             "vec_failed": False,
-        }
+        },
+    )
+    retriever = FakeRetriever(results_by_query={"test query": canned})
 
     configs = [
         HybridSweepConfig(name="config-a", mode="hybrid", rrf_k=20),
         HybridSweepConfig(name="config-b", mode="hybrid", rrf_k=60),
     ]
 
-    with patch("kairix.quality.eval.hybrid_sweep._retrieve", side_effect=mock_retrieve):
-        report = sweep_hybrid_params(suite_path, configs=configs)
+    report = sweep_hybrid_params(suite_path, configs=configs, retriever=retriever)
 
     assert report.total_configs == 2
     assert len(report.results) == 2
@@ -419,9 +422,10 @@ def test_sweep_hybrid_params_no_ndcg_cases(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_sweep_hybrid_params_writes_csv(tmp_path: Path) -> None:
     """Sweep writes CSV when output_path is provided."""
-    from unittest.mock import patch
-
     import yaml
+
+    from kairix.quality.eval.retrieval import RetrievalResult
+    from tests.fakes import FakeRetriever
 
     suite = {
         "meta": {"version": "1.0"},
@@ -441,16 +445,13 @@ def test_sweep_hybrid_params_writes_csv(tmp_path: Path) -> None:
     csv_path = tmp_path / "results.csv"
     configs = [HybridSweepConfig(name="only", mode="hybrid")]
 
-    def mock_retrieve(query, collections, cfg):
-        return ["test-doc.md"], {
-            "bm25_count": 1,
-            "vec_count": 1,
-            "fused_count": 2,
-            "vec_failed": False,
-        }
+    canned = RetrievalResult(
+        paths=["test-doc.md"],
+        meta={"bm25_count": 1, "vec_count": 1, "fused_count": 2, "vec_failed": False},
+    )
+    retriever = FakeRetriever(results_by_query={"test query": canned})
 
-    with patch("kairix.quality.eval.hybrid_sweep._retrieve", side_effect=mock_retrieve):
-        sweep_hybrid_params(suite_path, output_path=csv_path, configs=configs)
+    sweep_hybrid_params(suite_path, output_path=csv_path, configs=configs, retriever=retriever)
 
     assert csv_path.exists()
     lines = csv_path.read_text().splitlines()

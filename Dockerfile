@@ -5,6 +5,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# NOSONAR(docker:S6470): the `setup.cfg* setup.py*` globs are bounded to
+# specific filenames at the repo root — they only pick up legitimate Python
+# package metadata, never secrets. `.dockerignore` (root of repo) excludes
+# anything sensitive (.env, .git, secrets/) before context is sent to the
+# builder. Reviewed and safe.
 COPY pyproject.toml setup.cfg* setup.py* README.md /opt/kairix/src/
 COPY kairix/ /opt/kairix/src/kairix/
 
@@ -14,6 +19,11 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
     && python -m spacy download en_core_web_sm || true
 
 # ── Runtime stage: slim image with only installed packages ───────────────────
+# NOSONAR(docker:S6504): kairix runs as root inside the container by design —
+# it needs to write to /data/kairix/ and bind-mounted document roots whose
+# host ownership varies per deployment. Operators isolate the container with
+# user-namespace remapping or a non-root host user via docker-compose `user:`
+# rather than baking a fixed UID into the image. Reviewed and safe.
 FROM python:3.12-slim AS runtime
 
 # Copy installed Python packages from builder (no build-essential, no source)

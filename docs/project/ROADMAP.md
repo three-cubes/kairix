@@ -75,8 +75,64 @@ The benchmark uses strict NDCG@10 scoring with graded relevance (0/1/2), generat
 
 ---
 
+## Tune retrieval to your knowledge — and why it matters
+
+Different knowledge stores reward different retrieval strategies. A reference library full of curated technical docs reads differently from a stream of daily working notes, which reads differently from project plans or meeting transcripts. There is no single "best" search configuration that works equally well across all of them. A configuration that performs strongly on one corpus is often mediocre on another.
+
+Kairix lets you tune retrieval per collection so each gets the strategy that suits its shape.
+
+**The shipped reference library (≈6,000 open-source engineering docs) runs through a standard 200-query benchmark every release.** This is the single most useful number we publish: it shows what kairix actually delivers on a corpus you have access to and can re-run yourself.
+
+Latest sweep (2026-05-08, post eval-pipeline standardisation, against `suites/reflib-gold-v3.yaml`):
+
+| Strategy | What it does | NDCG@10 | Hit@5 | MRR@10 |
+|---|---|---|---|---|
+| **Hybrid (BM25 + vector, RRF k=20)** ★ | Keyword + meaning, fused by reciprocal rank | **0.949** | **0.965** | **0.896** |
+| Hybrid (BM25 + vector, RRF k=40) | Same, broader candidate pool | 0.947 | 0.965 | 0.894 |
+| Hybrid (BM25 + vector, RRF k=60) | Same, broadest pool | 0.947 | 0.965 | 0.894 |
+| Hybrid (BM25 + vector, k=60, default boosts) | Hybrid + entity + procedural boosts | 0.945 | 0.965 | 0.892 |
+| BM25-primary (vector backup, top-20) | Keywords first, vectors break ties | 0.725 | 0.845 | 0.675 |
+| BM25-primary (top-10) | Same, smaller backup pool | 0.696 | 0.840 | 0.671 |
+| BM25-primary (top-5) | Same, narrowest backup | 0.672 | 0.840 | 0.671 |
+| BM25-only (keywords only) | No semantic understanding | 0.524 | 0.685 | 0.567 |
+
+**Hit@5 = "the right document is in the top 5 results."** For a curated technical library, hybrid search puts the answer in the top 5 for **96.5% of queries** — vs **68.5%** for keyword-only.
+
+The lift between BM25-only (0.524 NDCG) and hybrid-RRF (0.949 NDCG) is **+81%**. That's the whole game: keyword search alone misses anything that's worded differently from how it was indexed; semantic search alone misses exact-term matches; the two together cover both. RRF with a small k tightens the fusion further.
+
+**Why your knowledge probably needs different settings**
+
+The reference library is dense, technical, structured, with consistent terminology. Real working knowledge usually isn't:
+
+- **Daily notes / journals** — date-shaped paths, conversational tone, reward temporal boosts (kairix `chunk_date_boost: enabled`).
+- **People-heavy content** — meeting notes, CRM exports, performance reviews — reward entity boosts (`entity.factor`) so a query for "Acme Corp" surfaces the docs that genuinely mention them.
+- **How-to and runbook content** — procedural-path boosts (`procedural.factor`) push tutorials and runbooks above general conceptual hits.
+- **Long-form prose / research papers** — vector-primary fusion (`fusion_strategy: rrf`) outperforms keyword-primary because the wording is intentionally varied.
+- **Wikis with strict naming conventions** — keyword-primary (`fusion_strategy: bm25_primary`) outperforms vector-primary because filename and heading matches carry signal.
+
+**What you get from tuning**
+
+- **Faster correct answers.** Your agent finds the right doc on the first attempt, not after three follow-up queries.
+- **Less wasted context.** A higher Hit@5 means more of the top results are genuinely relevant — fewer adjacent-but-wrong docs eating context window.
+- **Confident synthesis.** The agent's answers are grounded in the right sources, not in adjacent-topic ones it had to settle for.
+- **Visible regressions.** Once you have a gold suite for your knowledge, every kairix upgrade runs the same benchmark and tells you concretely whether it got better or worse.
+
+**How to tune for your own knowledge**
+
+1. Build a small gold suite from your corpus — typically 30–50 questions with the documents you'd want returned. `kairix eval auto-gold` generates a starter suite from your indexed content.
+2. Run a sweep against it: `kairix eval hybrid-sweep --suite suites/your-gold.yaml --collection your-collection`. Takes ~10–15 minutes for 200 queries × 8 configs.
+3. Look at the top config's `weighted_total` and `NDCG@10`. Set the matching `retrieval:` block on that collection in `kairix.config.yaml`.
+4. Re-run periodically. Recent kairix work standardised the eval pipeline (issue [#143](https://github.com/quanyeomans/kairix/issues/143)) so the same benchmark machinery, gold-builder, and judge are now used consistently across the reference library, the bundled examples, and your own knowledge — meaning the numbers compare cleanly across releases and across corpora.
+
+The reference-library numbers above are the upper bound for clean, well-curated content. Yours will likely be lower in absolute terms but the *shape* of the sweep (which strategy wins for which content) is the actionable signal.
+
+---
+
 ## Near-term
 
+- **CLI / MCP feature parity** ([#168](https://github.com/quanyeomans/kairix/issues/168)) — every kairix feature exposed via both the CLI and the MCP server with uniform UX. One use case per operation in `kairix/use_cases/`; CLI and MCP become thin adapters with shared parameter names, defaults, output shapes, and help text. Closes the timeline code-path divergence ([#163](https://github.com/quanyeomans/kairix/issues/163)) by collapsing it onto the same use case both surfaces consume; subsumes the MCP error envelope shape gap ([#165](https://github.com/quanyeomans/kairix/issues/165)) by pushing error-envelope construction into the use case. 8 surface-parity gaps identified (entity suggest/validate missing on MCP; entity get missing on CLI; prep, research, brief, usage_guide each missing on one side). Phased: Phase 1 timeline (template + #163 fix), Phase 2 UX parity audit on already-converged tools, Phase 3 fill missing surfaces in operator-priority order, Phase 4 uniformity polish + help-text single source of truth. See [cli-mcp-feature-parity.md](../architecture/cli-mcp-feature-parity.md). **Targeted for next sprint.**
+- **Eval-module rectification** ([#143](https://github.com/quanyeomans/kairix/issues/143)) — fix accumulated structural debt across `kairix/quality/eval/`: 6 silent bugs (4 silently-skipped tests, procedural-pattern filter applied to titles, inverted credential-merge logic, DB-leak in gold_builder), 2 BLOCKER S2083 vulnerabilities + prompt-injection vectors, 11+ `*_fn=None` test-substitution kwargs (eliminated via `LLMJudge` / `QueryGenerator` / `Retriever` / `ChatBackend` protocols + fakes + DI), `_call_llm` private-symbol cross-module import, raw-SQL FTS access in gold_builder (moved onto `DocumentRepository`), missing BDD + integration coverage for the gold-builder / judge / generator pipelines. `generate.py` (876 lines) split into 3 modules. Phased: Phase 0 bug fixes, Phase 0b security pass, Phase 1 protocols + fakes (foundation), Phase 2a owner-led judge refactor, Phase 2b parallel agent fan-out (file-isolated: sweep, gold_builder, generate), Phase 3 cli.py integration + deprecated-kwarg removal, Phase 4 VM deploy, Phase 5 reference-library benchmark validation against v2026.4.27 baseline (R10 0.8171, NDCG@10 0.8385). See [eval-module-refactor.md](../architecture/eval-module-refactor.md).
+- **Configurable default search scope** — operators control which collections participate in default search scopes from `kairix.config.yaml` via a per-collection `in_default: bool` flag, replacing the hardcoded `_RESERVED_COLLECTIONS = {"reference-library"}` carve-out. Includes a `DefaultCollectionResolver` refactor that consolidates today's 5-branch elif chain into a `match` dispatch with predicates owned by `CollectionsConfig` / `AgentDef` rather than the resolver. **Phase 2** (composable named scopes — `scopes.research`, `scopes.with-history`) is design-tracked but uncommitted; held until a second concrete use case lands. **Phase 3** lifts the parallel `reference-library` retrieval-config hardcode in `config_loader.py:384` into per-collection `retrieval:` overrides. See [configurable-default-scope.md](../architecture/configurable-default-scope.md).
 - **Pre-release container registry** — CI builds and pushes alpha Docker images to GHCR on green `develop` builds (`ghcr.io/quanyeomans/kairix:2026.5.1a1`). VM deploys via `docker compose pull` instead of building from source. Tests the exact same image end users will get. Stable tags pushed on merge to `main`.
 - **File watcher** — `watchfiles`-based daemon replacing the 60-second embed cron. Document store changes embedded within seconds of write, reducing lag for session-prep queries against recently-added content.
 - **Observability dashboard** — structured JSON log output (`LOG_LEVEL=json`) parsed by a lightweight dashboard. Per-query latency, intent distribution, entity hit rate, RRF score distributions surfaced without third-party tooling.
