@@ -19,7 +19,6 @@ import re
 import sys
 from pathlib import Path
 
-
 _HEADING_RE = re.compile(r"^## \[(?P<version>[^\]]+)\]")
 
 
