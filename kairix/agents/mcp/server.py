@@ -122,14 +122,18 @@ def tool_search(
     scope: Scope = Scope.SHARED_AGENT,
     budget: int = 3000,
     limit: int = 10,
+    *,
+    deps: Any = None,
 ) -> dict[str, Any]:
     """Search the knowledge store.
 
     Thin adapter around ``kairix.use_cases.search.run_search``. CLI and
     MCP both delegate to the same use case so the surfaces stay aligned
-    (closes Phase-2 drift in #168). Entity-graph augmentation, intent
-    classification, budget inference, and error envelopes all live in
-    the use case.
+    (closes Phase-2 drift in #168).
+
+    The optional ``deps`` parameter forwards a ``SearchDeps`` directly
+    to the use case — production callers leave it None; tests pass a
+    ``SearchDeps`` to drive without touching live services.
     """
     from kairix.use_cases.search import run_search, search_output_to_envelope
 
@@ -140,6 +144,7 @@ def tool_search(
         scope=scope,
         budget=budget,
         limit=limit,
+        deps=deps,
     )
     return search_output_to_envelope(out)
 
@@ -459,6 +464,8 @@ def tool_contradict(
     threshold: float = 0.45,
     top_claims: int = 3,
     scope: Scope = DEFAULT_SCOPE,
+    *,
+    deps: Any = None,
 ) -> dict[str, Any]:
     """Check new content against existing knowledge for contradictions.
 
@@ -466,6 +473,9 @@ def tool_contradict(
     Use before writing new facts — catches conflicts with what's already
     in the knowledge base. Returns a list of contradicting documents with
     scores and explanations.
+
+    The optional ``deps`` parameter forwards a ``ContradictDeps`` directly
+    to the use case — production callers leave it None.
     """
     from kairix.use_cases.contradict import contradict_output_to_envelope, run_contradict
 
@@ -476,6 +486,7 @@ def tool_contradict(
         top_k=top_k,
         threshold=threshold,
         top_claims=top_claims,
+        deps=deps,
     )
     return contradict_output_to_envelope(out)
 

@@ -37,12 +37,9 @@ def given_search_raises():
 
 @when(parsers.re(r'the agent calls tool_contradict with content "(?P<content>[^"]*)"'))
 def call_tool_contradict(content):
-    """Drive the use case + envelope projection just like the MCP adapter does."""
-    from kairix.use_cases.contradict import (
-        ContradictDeps,
-        contradict_output_to_envelope,
-        run_contradict,
-    )
+    """Drive the MCP adapter ``tool_contradict`` end-to-end via ContradictDeps."""
+    from kairix.agents.mcp.server import tool_contradict
+    from kairix.use_cases.contradict import ContradictDeps
 
     _state["exception"] = None
     _state["result"] = None
@@ -57,8 +54,7 @@ def call_tool_contradict(content):
     deps = ContradictDeps(check_fn=_check_fn, llm_backend=fake_llm)
 
     try:
-        out = run_contradict(content, deps=deps)
-        _state["result"] = contradict_output_to_envelope(out)
+        _state["result"] = tool_contradict(content=content, deps=deps)
     except Exception as exc:
         _state["exception"] = exc
 

@@ -82,14 +82,16 @@ def given_neo4j_entity_card(name, summary):
 
 @when(parsers.re(r'the agent calls tool_search with query "(?P<query>.*)"'))
 def when_agent_calls_search(query):
-    """Drive the use case + envelope projection just like the MCP adapter does.
+    """Drive the MCP adapter ``tool_search`` end-to-end via SearchDeps.
 
-    Phase 2 of #168 moved business logic into ``run_search``; ``tool_search``
-    is now a thin adapter that calls ``run_search`` and serialises through
-    ``search_output_to_envelope``. This step exercises the same composition
-    via ``SearchDeps`` injection.
+    Phase 2 of #168: ``tool_search`` is a thin adapter that forwards to
+    ``run_search`` (passing ``deps`` through) and projects via
+    ``search_output_to_envelope``. This step exercises the full path —
+    adapter shell + use case body + envelope projection — without
+    touching live Azure/Neo4j.
     """
-    from kairix.use_cases.search import SearchDeps, run_search, search_output_to_envelope
+    from kairix.agents.mcp.server import tool_search
+    from kairix.use_cases.search import SearchDeps
 
     _state["exception"] = None
 
@@ -99,18 +101,14 @@ def when_agent_calls_search(query):
         return _state["mock_result"]
 
     entity_card = _state.get("entity_card")
-
     deps = SearchDeps(
         search_fn=_search_fn,
         entity_card_fn=lambda name: entity_card,
-        # Force-classify whatever the SearchResult mock declares so the
-        # entity-card branch fires for ENTITY-flagged scenarios.
         classify_fn=lambda q: _state["mock_result"].intent,
     )
 
     try:
-        out = run_search(query, deps=deps)
-        _state["response"] = search_output_to_envelope(out)
+        _state["response"] = tool_search(query=query, deps=deps)
     except Exception as exc:
         _state["exception"] = exc
         _state["response"] = {}
