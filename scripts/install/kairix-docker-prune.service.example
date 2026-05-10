@@ -50,14 +50,14 @@ ExecStart=/usr/bin/docker builder prune -f
 # the timer should fire again next week — non-fatal.
 SuccessExitStatus=0 1
 
-# No environment variables or secrets needed; runs as root because the
-# Docker socket on this VM is owned by root:docker.
+# Runs as root because the Docker socket is owned by root:docker.
+# The unit's job is intrinsically root-privileged — talking to the
+# Docker daemon — so additional hardening (ProtectHome / ProtectSystem)
+# is security theatre AND breaks docker's config-cache write to
+# /root/.docker on first run. Keep NoNewPrivileges as the one
+# meaningful guard.
 User=root
 Group=root
-
-# Don't write anything outside the systemd journal.
-ProtectHome=yes
-ProtectSystem=strict
 NoNewPrivileges=yes
 
 [Install]
