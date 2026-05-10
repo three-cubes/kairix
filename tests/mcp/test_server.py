@@ -18,7 +18,6 @@ from kairix.agents.mcp.server import (
     tool_entity,
     tool_prep,
     tool_search,
-    tool_timeline,
     tool_usage_guide,
 )
 
@@ -94,22 +93,6 @@ def _fake_prep_search(*args: object, **kw: object) -> SimpleNamespace:
 
 def _fake_prep_search_empty(*args: object, **kw: object) -> SimpleNamespace:
     return SimpleNamespace(results=[])
-
-
-def _fake_extract_temporal(query: str, reference_date: object = None) -> tuple[str, str]:
-    return ("2026-04-06", "2026-04-13")
-
-
-def _fake_rewrite_temporal(query: str, reference_date: object = None) -> str:
-    return "what happened 2026-04-06..2026-04-13"
-
-
-def _fake_extract_non_temporal(query: str, reference_date: object = None) -> tuple[None, None]:
-    return (None, None)
-
-
-def _fake_rewrite_none(query: str, reference_date: object = None) -> None:
-    return None
 
 
 def _fake_contradict_empty(**kw: object) -> list:
@@ -378,67 +361,8 @@ def test_tool_prep_default_tier_is_l0() -> None:
     assert captured_kwargs["max_tokens"] == 150
 
 
-# ---------------------------------------------------------------------------
-# tool_timeline
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_tool_timeline_temporal_query() -> None:
-    result = tool_timeline(
-        query="what happened last week",
-        extract_fn=_fake_extract_temporal,
-        rewrite_fn=_fake_rewrite_temporal,
-    )
-
-    assert result["is_temporal"] is True
-    assert result["rewritten_query"] == "what happened 2026-04-06..2026-04-13"
-    assert result["time_window"]["start"] == "2026-04-06"
-    assert result["time_window"]["end"] == "2026-04-13"
-    assert result["error"] == ""
-
-
-@pytest.mark.unit
-def test_tool_timeline_non_temporal_query() -> None:
-    result = tool_timeline(query="tell me about Acme", extract_fn=_fake_extract_non_temporal)
-
-    assert result["is_temporal"] is False
-    assert result["rewritten_query"] == "tell me about Acme"
-    assert result["time_window"] == {}
-    assert result["error"] == ""
-
-
-@pytest.mark.unit
-def test_tool_timeline_preserves_original_query() -> None:
-    result = tool_timeline(query="original question here", extract_fn=_fake_extract_non_temporal)
-
-    assert result["original_query"] == "original question here"
-    assert result["rewritten_query"] == "original question here"
-
-
-@pytest.mark.unit
-def test_tool_timeline_error_handled() -> None:
-    """When extract_fn fails, timeline gracefully returns non-temporal result."""
-
-    def failing_extract(query: str, reference_date: object = None) -> None:
-        raise RuntimeError("oops")
-
-    result = tool_timeline(query="any query", extract_fn=failing_extract)
-
-    assert result["is_temporal"] is False
-    assert result["rewritten_query"] == "any query"
-    assert result["error"] == ""
-
-
-@pytest.mark.unit
-def test_tool_timeline_rewrite_none_returns_original() -> None:
-    result = tool_timeline(
-        query="last month update",
-        extract_fn=_fake_extract_non_temporal,
-        rewrite_fn=_fake_rewrite_none,
-    )
-
-    assert result["rewritten_query"] == "last month update"
+# tool_timeline behaviour is now covered in tests/use_cases/test_timeline.py
+# (Phase 1 of #168 — tool_timeline is a thin adapter around run_timeline).
 
 
 # NOTE: the ``build_server`` defensive ImportError branch (when the optional

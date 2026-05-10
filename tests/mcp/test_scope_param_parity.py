@@ -1,8 +1,12 @@
-"""Sprint-20 follow-on tests: scope parameter parity on tool_timeline + tool_contradict.
+"""Sprint-20 follow-on tests: scope parameter parity on tool_contradict.
 
-These tools accept ``scope`` as a parameter and forward it to the underlying
-search call. Tests verify the parameter is plumbed through correctly without
-exercising the production search pipeline.
+Verifies the scope parameter is plumbed through to the underlying check
+without exercising the production search pipeline.
+
+Note: ``tool_timeline`` scope-passthrough is now covered by
+``tests/use_cases/test_timeline.py`` after the Phase-1 #168 refactor —
+``tool_timeline`` is a thin adapter and its scope parameter is forwarded
+verbatim to ``run_timeline`` (asserted by the contract test).
 """
 
 from __future__ import annotations
@@ -11,63 +15,8 @@ from typing import Any
 
 import pytest
 
-from kairix.agents.mcp.server import tool_contradict, tool_timeline
+from kairix.agents.mcp.server import tool_contradict
 from kairix.core.search.scope import Scope
-
-# tool_timeline ------------------------------------------------------
-
-
-def _extract_non_temporal(query: str, reference_date: Any = None) -> tuple[Any, Any]:
-    return None, None
-
-
-@pytest.mark.unit
-def test_tool_timeline_forwards_scope_to_search() -> None:
-    """When tool_timeline runs the fallthrough search, scope is forwarded."""
-    captured: dict[str, Any] = {}
-
-    class _SR:
-        def __init__(self) -> None:
-            self.results: list[Any] = []
-
-    def _fake_search(**kwargs: Any) -> _SR:
-        captured.update(kwargs)
-        return _SR()
-
-    tool_timeline(
-        query="anything",
-        agent="shape",
-        scope=Scope.ALL_AGENTS,
-        extract_fn=_extract_non_temporal,
-        search_fn=_fake_search,
-    )
-
-    assert captured["scope"] is Scope.ALL_AGENTS
-    assert captured["agent"] == "shape"
-
-
-@pytest.mark.unit
-def test_tool_timeline_default_scope_is_shared_agent() -> None:
-    captured: dict[str, Any] = {}
-
-    class _SR:
-        def __init__(self) -> None:
-            self.results: list[Any] = []
-
-    def _fake_search(**kwargs: Any) -> _SR:
-        captured.update(kwargs)
-        return _SR()
-
-    tool_timeline(
-        query="anything",
-        extract_fn=_extract_non_temporal,
-        search_fn=_fake_search,
-    )
-
-    assert captured["scope"] is Scope.SHARED_AGENT
-
-
-# tool_contradict ----------------------------------------------------
 
 
 @pytest.mark.unit
