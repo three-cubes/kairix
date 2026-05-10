@@ -1,0 +1,38 @@
+# systemd timer that fires kairix-docker-prune.service weekly.
+#
+# Schedule: Sundays at 03:30 local time. Misses while the VM is off
+# are caught up on next boot (Persistent=true) so a missed weekly
+# prune still happens shortly after the VM comes back online.
+#
+# Install:
+#
+#   sudo cp kairix-docker-prune.{service,timer}.example \
+#           /etc/systemd/system/kairix-docker-prune.{service,timer}
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now kairix-docker-prune.timer
+#
+# Verify:
+#
+#   systemctl list-timers kairix-docker-prune.timer
+#   journalctl -u kairix-docker-prune.service
+
+[Unit]
+Description=Weekly Docker image+builder prune for kairix VM
+Documentation=https://github.com/quanyeomans/kairix
+Requires=kairix-docker-prune.service
+
+[Timer]
+# Every Sunday 03:30 local — outside agent activity windows.
+OnCalendar=Sun *-*-* 03:30:00
+
+# Catch up missed runs (e.g. VM was off at 03:30 Sunday) on next boot.
+Persistent=true
+
+# Bound the run delay to 30 minutes after the schedule so a slow boot
+# doesn't queue many runs in quick succession.
+RandomizedDelaySec=30min
+
+Unit=kairix-docker-prune.service
+
+[Install]
+WantedBy=timers.target
