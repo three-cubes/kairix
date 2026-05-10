@@ -240,12 +240,15 @@ each agent owns one production file. Dispatch with `isolation="worktree"`,
 all in parallel, all in the same Agent message. Each agent runs
 `safe-commit.sh` in its loop and reports SHA + branch when green.
 
-From the main checkout (on `develop`), `git cherry-pick <sha>` each
-agent's commit in completion order. Do **not** merge worktree branches
-directly — worktrees branch off `main` (latest tagged release), not
-current `develop`, so a direct merge reverts session work. Push after
-each cherry-pick; auto-merge is irrelevant because we're committing
-direct.
+Because `develop` is now the default branch and the main checkout sits
+on `develop`, `git worktree add` without an explicit branch starts at
+develop's HEAD — agent branches share a base with develop. Verified
+2026-05-10. Default integration is therefore **PR + auto-merge**: each
+agent's branch is pushed and opened as a PR against develop; CI gates
+the merge; auto-merge lands them in completion order. Cherry-pick is
+the fallback for the case where develop has advanced enough that
+re-merging would be churn — in that case rebase the agent branch onto
+develop and continue, or cherry-pick the SHA.
 
 Recommended Wave-1 batch (one issue ↔ one agent):
 
@@ -285,20 +288,20 @@ F-rules for un-rationaled silencers. Config-only.
 
 ### What changes from the default delegation playbook
 
-The session's standing instruction (from
-`feedback_subagent_dispatch.md`) is "batches ≥2 use parallel worktrees +
-cherry-pick; singletons go sequential on main checkout." That still
-applies — the wave plan above is just an instance of it, scaled to a
-multi-week effort. Two non-default points worth flagging:
+Two non-default points worth flagging:
 
+- **Agents commit and push; main session resolves merges.** Each
+  worktree agent runs `safe-commit.sh` in its loop, commits to its own
+  branch, and pushes. The main session opens PRs (or lets the agents
+  open their own) and the only orchestration left is reviewing each PR
+  and resolving conflicts on `tests/fakes.py` / `tests/conftest.py` if
+  multiple agents touch them. CI gates everything else; auto-merge
+  lands the PRs in completion order.
 - **Wave 0 is sequential by design.** Even though it's "just adding
-  fakes," front-loading it removes the conflict that would otherwise
-  hit every Wave-1 cherry-pick.
-- **No agent gets autonomy over the merge.** Auto-merge is on for the
-  repo, but agents in worktrees commit to their own branches and we
-  cherry-pick from the main checkout — agent PRs do **not** auto-merge.
-  This is an explicit constraint from the worktree pattern, not a
-  weakness of auto-merge.
+  fakes," front-loading it removes the most common Wave-1 conflict
+  (overlapping `tests/fakes.py` adds) before it starts. Without it,
+  every Wave-1 PR would conflict on `fakes.py` and the main session
+  would walk through them one at a time anyway.
 
 ## Tracking
 
