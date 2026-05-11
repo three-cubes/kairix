@@ -20,24 +20,39 @@ def rebuild_fts(db: sqlite3.Connection) -> int:
     and populates ``documents_fts``.
 
     Returns the number of documents indexed.
+
+    The rebuild runs inside a single ``BEGIN IMMEDIATE`` transaction so
+    concurrent readers see either the old FTS table or the new one, never
+    a window where ``documents_fts`` is missing. Without this, a reader
+    that runs `SELECT ... FROM documents_fts` between the DROP and the
+    INSERT/commit gets "no such table: documents_fts" and the BM25 leg
+    of hybrid retrieval silently degrades to vector-only.
     """
-    db.execute("DROP TABLE IF EXISTS documents_fts")
     # Use regular content FTS5 (not contentless content='') for accurate BM25 scoring.
     # Contentless mode saves disk but degrades ranking because term frequency
     # statistics are computed differently.
-    db.execute("CREATE VIRTUAL TABLE documents_fts USING fts5(filepath, title, doc, tokenize='porter unicode61')")
+    started_transaction = not db.in_transaction
+    if started_transaction:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("DROP TABLE IF EXISTS documents_fts")
+        db.execute("CREATE VIRTUAL TABLE documents_fts USING fts5(filepath, title, doc, tokenize='porter unicode61')")
+        db.execute("""
+            INSERT INTO documents_fts(rowid, filepath, title, doc)
+            SELECT d.id, COALESCE(d.path, ''), COALESCE(d.title, ''), COALESCE(c.doc, '')
+            FROM documents d
+            JOIN content c ON c.hash = d.hash
+            WHERE d.active = 1
+        """)
+        row = db.execute("SELECT COUNT(*) FROM documents_fts").fetchone()
+        count: int = int(row[0]) if row else 0
+        if started_transaction:
+            db.commit()
+    except Exception:
+        if started_transaction:
+            db.rollback()
+        raise
 
-    db.execute("""
-        INSERT INTO documents_fts(rowid, filepath, title, doc)
-        SELECT d.id, COALESCE(d.path, ''), COALESCE(d.title, ''), COALESCE(c.doc, '')
-        FROM documents d
-        JOIN content c ON c.hash = d.hash
-        WHERE d.active = 1
-    """)
-
-    row = db.execute("SELECT COUNT(*) FROM documents_fts").fetchone()
-    count: int = int(row[0]) if row else 0
-    db.commit()
     logger.info("db.fts: rebuilt FTS5 index — %d documents indexed", count)
     return count
 
