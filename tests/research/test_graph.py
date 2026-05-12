@@ -26,7 +26,7 @@ def _mock_search_result(paths_snippets: list[tuple[str, str]]):
 @pytest.mark.unit
 def test_run_research_sufficient_first_pass() -> None:
     """Graph completes in one pass when results are sufficient."""
-    from kairix.agents.research.graph import run_research
+    from kairix.agents.research.graph import ResearchGraphDeps, run_research
 
     mock_backend = MagicMock()
     # evaluate_sufficiency returns high confidence
@@ -45,9 +45,11 @@ def test_run_research_sufficient_first_pass() -> None:
     result = run_research(
         "simple question",
         max_turns=4,
-        search_fn=lambda **kwargs: _mock_search_result([("doc.md", "content")]),
-        llm_backend=mock_backend,
-        classify_fn=lambda q: MagicMock(value="semantic"),
+        deps=ResearchGraphDeps(
+            search_fn=lambda **kwargs: _mock_search_result([("doc.md", "content")]),
+            classify_fn=lambda q: MagicMock(value="semantic"),
+            llm_backend=mock_backend,
+        ),
     )
 
     assert result["confidence"] >= 0.7
@@ -58,7 +60,7 @@ def test_run_research_sufficient_first_pass() -> None:
 @pytest.mark.unit
 def test_run_research_refines_then_succeeds() -> None:
     """Graph refines query and succeeds on second pass."""
-    from kairix.agents.research.graph import run_research
+    from kairix.agents.research.graph import ResearchGraphDeps, run_research
 
     mock_backend = MagicMock()
     mock_backend.chat.side_effect = [
@@ -94,9 +96,11 @@ def test_run_research_refines_then_succeeds() -> None:
     result = run_research(
         "complex question",
         max_turns=4,
-        search_fn=mock_search,
-        llm_backend=mock_backend,
-        classify_fn=lambda q: MagicMock(value="semantic"),
+        deps=ResearchGraphDeps(
+            search_fn=mock_search,
+            classify_fn=lambda q: MagicMock(value="semantic"),
+            llm_backend=mock_backend,
+        ),
     )
 
     assert result["turns"] == 1  # refined once
@@ -107,7 +111,7 @@ def test_run_research_refines_then_succeeds() -> None:
 @pytest.mark.unit
 def test_run_research_synthesises_best_effort_after_max_turns() -> None:
     """Graph synthesises a best-effort answer when max turns exhausted at low confidence."""
-    from kairix.agents.research.graph import run_research
+    from kairix.agents.research.graph import ResearchGraphDeps, run_research
 
     mock_backend = MagicMock()
     # Evaluation always returns low confidence; final call is synthesis
@@ -142,9 +146,11 @@ def test_run_research_synthesises_best_effort_after_max_turns() -> None:
     result = run_research(
         "hard question",
         max_turns=2,
-        search_fn=mock_search,
-        llm_backend=mock_backend,
-        classify_fn=lambda q: MagicMock(value="semantic"),
+        deps=ResearchGraphDeps(
+            search_fn=mock_search,
+            classify_fn=lambda q: MagicMock(value="semantic"),
+            llm_backend=mock_backend,
+        ),
     )
 
     assert result["synthesis"] != ""

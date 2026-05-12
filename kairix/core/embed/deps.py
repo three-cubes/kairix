@@ -1,61 +1,61 @@
 """Dependency container for the embedding pipeline.
 
-Production code calls run_embed() without deps — defaults are wired to real services.
-Tests construct EmbedDependencies with fakes — no monkey-patching needed.
+Production code calls run_embed() without deps — defaults are wired to
+real services via ``default_factory`` references on each field. Tests
+construct ``EmbedDependencies`` with explicit fake callables and never
+reach the production defaults.
+
+Each field is a typed (non-Optional) ``Callable``; production wiring
+lives in ``_deps_defaults`` so mypy can narrow the dataclass shape and
+no caller needs ``assert deps.x is not None`` lines (the
+``Optional[Callable]`` pattern flagged in #204).
 """
 
 from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from kairix.core.embed._deps_defaults import (
+    default_embed_batch,
+    default_get_azure_config,
+    default_get_document_root,
+    default_migrate_content_vectors,
+    default_open_usearch_index,
+    default_preflight_check,
+)
 
 
 @dataclass
 class EmbedDependencies:
-    """Injectable dependencies for run_embed().
+    """Injectable dependencies for ``run_embed``.
 
-    Each field defaults to the production implementation.
-    Tests override specific fields with fakes.
+    Each field defaults via ``default_factory`` to a thin wrapper around
+    the real production implementation (see
+    ``kairix.core.embed._deps_defaults``). Tests pass fakes explicitly:
+
+    .. code-block:: python
+
+        deps = EmbedDependencies(
+            get_azure_config=lambda: ("k", "e", "d"),
+            preflight_check=lambda *_: 1536,
+            embed_batch=lambda texts, *a, **kw: [[0.0] * 1536 for _ in texts],
+            open_usearch_index=lambda: None,
+            migrate_content_vectors=lambda _db: None,
+            get_document_root=lambda: None,
+        )
+
+    All fields are non-Optional callables — callers do not need to guard
+    against ``None`` (closes the ``narrow on Optional`` regression in
+    #204).
     """
 
-    get_azure_config: Callable[[], tuple[str, str, str]] | None = None
-    preflight_check: Callable[[str, str, str], int] | None = None
-    embed_batch: Callable[..., list[list[float]]] | None = None
-    open_usearch_index: Callable[[], object | None] | None = None
-    migrate_content_vectors: Callable[[sqlite3.Connection], None] | None = None
-    get_document_root: Callable[[], str | None] | None = None
-
-    def __post_init__(self) -> None:
-        """Wire production defaults for any unset dependencies."""
-        if self.get_azure_config is None:
-            from kairix.core.embed.embed import _get_azure_config
-
-            self.get_azure_config = _get_azure_config
-        if self.preflight_check is None:
-            from kairix.core.embed.embed import preflight_check
-
-            self.preflight_check = preflight_check
-        if self.embed_batch is None:
-            from kairix.core.embed.embed import embed_batch
-
-            self.embed_batch = embed_batch
-        if self.open_usearch_index is None:
-            from kairix.core.embed.embed import _open_usearch_index
-
-            self.open_usearch_index = _open_usearch_index
-        if self.migrate_content_vectors is None:
-            from kairix.core.embed.schema import migrate_content_vectors
-
-            self.migrate_content_vectors = migrate_content_vectors
-        if self.get_document_root is None:
-
-            def _default_doc_root() -> str | None:
-                try:
-                    from kairix.paths import document_root
-
-                    return str(document_root())
-                except Exception:
-                    return None
-
-            self.get_document_root = _default_doc_root
+    get_azure_config: Callable[[], tuple[str, str, str]] = field(default_factory=lambda: default_get_azure_config)
+    preflight_check: Callable[[str, str, str], int] = field(default_factory=lambda: default_preflight_check)
+    embed_batch: Callable[..., list[list[float]]] = field(default_factory=lambda: default_embed_batch)
+    open_usearch_index: Callable[[], object | None] = field(default_factory=lambda: default_open_usearch_index)
+    migrate_content_vectors: Callable[[sqlite3.Connection], None] = field(
+        default_factory=lambda: default_migrate_content_vectors
+    )
+    get_document_root: Callable[[], str | None] = field(default_factory=lambda: default_get_document_root)

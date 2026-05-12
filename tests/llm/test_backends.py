@@ -1,7 +1,7 @@
 """
 Tests for kairix.platform.llm — LLM backend abstraction (P1-2).
 
-Uses injected callables via AzureOpenAIBackend constructor — no monkey-patching needed.
+Uses ``LLMBackendDeps`` for dependency injection — no monkey-patching needed.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from kairix.platform.llm import AzureOpenAIBackend, get_default_backend
+from kairix.platform.llm.backends import LLMBackendDeps
 from kairix.platform.llm.protocol import LLMBackend
 from tests.fakes import FakeLLMBackend
 
@@ -42,7 +43,7 @@ def test_azure_backend_chat_delegates_to_injected_fn() -> None:
         calls.append((messages, max_tokens))
         return "Hi there"
 
-    backend = AzureOpenAIBackend(chat_fn=fake_chat)
+    backend = AzureOpenAIBackend(deps=LLMBackendDeps(chat=fake_chat))
     messages = [{"role": "user", "content": "Hello"}]
     result = backend.chat(messages, max_tokens=100)
 
@@ -59,7 +60,7 @@ def test_azure_backend_chat_default_max_tokens() -> None:
         calls.append(max_tokens)
         return "ok"
 
-    backend = AzureOpenAIBackend(chat_fn=fake_chat)
+    backend = AzureOpenAIBackend(deps=LLMBackendDeps(chat=fake_chat))
     backend.chat([{"role": "user", "content": "test"}])
 
     assert calls[0] == 800
@@ -68,21 +69,21 @@ def test_azure_backend_chat_default_max_tokens() -> None:
 @pytest.mark.unit
 def test_azure_backend_embed_delegates_to_injected_fn() -> None:
     expected = [0.1, 0.2, 0.3]
-    backend = AzureOpenAIBackend(embed_fn=lambda text: expected)
+    backend = AzureOpenAIBackend(deps=LLMBackendDeps(embed=lambda text: expected))
     result = backend.embed("some text")
     assert result == expected
 
 
 @pytest.mark.unit
 def test_azure_backend_chat_returns_empty_string_on_failure() -> None:
-    backend = AzureOpenAIBackend(chat_fn=lambda msgs, max_tokens=800: "")
+    backend = AzureOpenAIBackend(deps=LLMBackendDeps(chat=lambda msgs, max_tokens=800: ""))
     result = backend.chat([{"role": "user", "content": "test"}])
     assert result == ""
 
 
 @pytest.mark.unit
 def test_azure_backend_embed_returns_empty_list_on_failure() -> None:
-    backend = AzureOpenAIBackend(embed_fn=lambda text: [])
+    backend = AzureOpenAIBackend(deps=LLMBackendDeps(embed=lambda text: []))
     result = backend.embed("text")
     assert result == []
 
@@ -99,7 +100,7 @@ def _do_summarise(text: str, llm: LLMBackend) -> str:
 
 @pytest.mark.unit
 def test_caller_accepts_protocol_type() -> None:
-    backend = AzureOpenAIBackend(chat_fn=lambda msgs, max_tokens=800: "Summary.")
+    backend = AzureOpenAIBackend(deps=LLMBackendDeps(chat=lambda msgs, max_tokens=800: "Summary."))
     result = _do_summarise("long document", backend)
     assert result == "Summary."
 

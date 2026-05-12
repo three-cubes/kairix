@@ -1,0 +1,65 @@
+# systemd oneshot that prunes Docker images + builder cache on the kairix VM.
+#
+# Pairs with kairix-docker-prune.timer.example which fires this on a
+# weekly schedule. Together they prevent the kairix VM from filling up
+# as `docker compose pull` accumulates dangling image layers from
+# release deploys (each release is ~2.5GB; a month of weekly releases
+# without pruning is ~10GB of dead layers).
+#
+# Copy both files to /etc/systemd/system/, then:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now kairix-docker-prune.timer
+#
+# Verify the timer is scheduled:
+#
+#   systemctl list-timers kairix-docker-prune.timer
+#
+# Inspect the most recent prune run:
+#
+#   journalctl -u kairix-docker-prune.service --since "7 days ago"
+
+[Unit]
+Description=Prune dangling Docker images + builder cache for kairix VM
+Documentation=https://github.com/quanyeomans/kairix
+# Don't run while the VM is shutting down.
+DefaultDependencies=yes
+# Only run if Docker is actually up.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+
+# Two independent prune passes, each survives the other failing:
+#   1. `docker image prune -f` — removes UNTAGGED images (the dangling
+#      layers left behind when `docker pull` replaces a tag's underlying
+#      SHA). Does NOT touch tagged images, so 2026.5.10.5 / develop /
+#      neo4j stay safe even if their tags exist.
+#   2. `docker builder prune -f` — clears the build cache (mostly empty
+#      on this VM since builds happen in CI, but harmless to run).
+#
+# Conservative scope by design: this oneshot does NOT remove tagged
+# images. Tag rotation is the deploy script's concern. Operators who
+# want to clear old release tags should do that explicitly during a
+# release cycle, not via a scheduled timer.
+ExecStart=/usr/bin/docker image prune -f
+ExecStart=/usr/bin/docker builder prune -f
+
+# Even if either prune fails (e.g. concurrent build holding a lock),
+# the timer should fire again next week — non-fatal.
+SuccessExitStatus=0 1
+
+# Runs as root because the Docker socket is owned by root:docker.
+# The unit's job is intrinsically root-privileged — talking to the
+# Docker daemon — so additional hardening (ProtectHome / ProtectSystem)
+# is security theatre AND breaks docker's config-cache write to
+# /root/.docker on first run. Keep NoNewPrivileges as the one
+# meaningful guard.
+User=root
+Group=root
+NoNewPrivileges=yes
+
+[Install]
+# Not started directly — the timer is the entry point.
+WantedBy=multi-user.target

@@ -12,6 +12,7 @@ import pytest
 
 from kairix.agents.briefing.pipeline import (
     _TOTAL_CONTEXT_CAP,
+    BriefingDeps,
     BriefingPipeline,
     _trim_context,
     generate_briefing,
@@ -141,8 +142,10 @@ class TestGenerateBriefing:
         """Test that pipeline runs and returns a string."""
         result = generate_briefing(
             "builder",
-            synthesise_fn=_fake_synthesise,
-            write_fn=_make_fake_writer(tmp_path),
+            deps=BriefingDeps(
+                synthesise_fn=_fake_synthesise,
+                write_fn=_make_fake_writer(tmp_path),
+            ),
             sources=_all_content_sources(),
         )
 
@@ -154,8 +157,10 @@ class TestGenerateBriefing:
     def test_header_is_included(self, tmp_path):
         result = generate_briefing(
             "builder",
-            synthesise_fn=lambda agent, ctx, max_tokens=800: "## Pending\nNone.",
-            write_fn=_make_fake_writer(tmp_path),
+            deps=BriefingDeps(
+                synthesise_fn=lambda agent, ctx, max_tokens=800: "## Pending\nNone.",
+                write_fn=_make_fake_writer(tmp_path),
+            ),
             sources=_all_empty_sources(),
         )
 
@@ -170,8 +175,10 @@ class TestGenerateBriefing:
 
         result = generate_briefing(
             "builder",
-            synthesise_fn=_fake_synthesise,
-            write_fn=_make_fake_writer(tmp_path),
+            deps=BriefingDeps(
+                synthesise_fn=_fake_synthesise,
+                write_fn=_make_fake_writer(tmp_path),
+            ),
             sources=sources,
         )
 
@@ -182,8 +189,10 @@ class TestGenerateBriefing:
         """Synthesis API failure should return a partial/fallback briefing, not raise."""
         result = generate_briefing(
             "builder",
-            synthesise_fn=lambda agent, ctx, max_tokens=800: "synthesis unavailable",
-            write_fn=_make_fake_writer(tmp_path),
+            deps=BriefingDeps(
+                synthesise_fn=lambda agent, ctx, max_tokens=800: "synthesis unavailable",
+                write_fn=_make_fake_writer(tmp_path),
+            ),
             sources=_all_content_sources(),
         )
 
@@ -194,8 +203,10 @@ class TestGenerateBriefing:
     def test_output_file_is_written(self, tmp_path):
         generate_briefing(
             "builder",
-            synthesise_fn=_fake_synthesise,
-            write_fn=_make_fake_writer(tmp_path),
+            deps=BriefingDeps(
+                synthesise_fn=_fake_synthesise,
+                write_fn=_make_fake_writer(tmp_path),
+            ),
             sources=_all_content_sources(),
         )
 
@@ -212,8 +223,10 @@ class TestBriefingPipeline:
         """BriefingPipeline.generate delegates to generate_briefing."""
         pipeline = BriefingPipeline(
             sources=_all_content_sources(),
-            synthesise_fn=_fake_synthesise,
-            write_fn=_make_fake_writer(tmp_path),
+            deps=BriefingDeps(
+                synthesise_fn=_fake_synthesise,
+                write_fn=_make_fake_writer(tmp_path),
+            ),
         )
 
         result = pipeline.generate("builder")
@@ -226,8 +239,10 @@ class TestBriefingPipeline:
         """BriefingPipeline handles empty sources gracefully."""
         pipeline = BriefingPipeline(
             sources=_all_empty_sources(),
-            synthesise_fn=lambda agent, ctx, max_tokens=800: "## Pending\nNone.",
-            write_fn=_make_fake_writer(tmp_path),
+            deps=BriefingDeps(
+                synthesise_fn=lambda agent, ctx, max_tokens=800: "## Pending\nNone.",
+                write_fn=_make_fake_writer(tmp_path),
+            ),
         )
 
         result = pipeline.generate("shape")
@@ -240,8 +255,10 @@ class TestBriefingPipeline:
         """BriefingPipeline.generate writes the briefing file."""
         pipeline = BriefingPipeline(
             sources=_all_content_sources(),
-            synthesise_fn=_fake_synthesise,
-            write_fn=_make_fake_writer(tmp_path),
+            deps=BriefingDeps(
+                synthesise_fn=_fake_synthesise,
+                write_fn=_make_fake_writer(tmp_path),
+            ),
         )
 
         pipeline.generate("builder")

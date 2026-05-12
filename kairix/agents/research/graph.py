@@ -7,9 +7,13 @@ finds a good answer or runs out of turns.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from kairix.agents.research.nodes import (
+    ClassifyIntentDeps,
+    RetrieveDeps,
     classify_intent,
     evaluate_sufficiency,
     refine_query,
@@ -22,21 +26,65 @@ from kairix.agents.research.state import DEFAULT_MAX_TURNS, ResearcherState
 logger = logging.getLogger(__name__)
 
 
+def _default_classify() -> Callable[..., Any]:
+    """Lazy production import for intent classification."""
+    from kairix.core.search.intent import classify
+
+    return classify
+
+
+def _default_search() -> Callable[..., Any]:
+    """Lazy production import for the search pipeline.
+
+    Wraps ``build_search_pipeline().search`` in a closure so the pipeline
+    is constructed lazily (and cached implicitly through Python's import
+    machinery for the call shape we expose to the graph).
+    """
+
+    def _search(**kwargs: Any) -> Any:
+        from kairix.core.factory import build_search_pipeline
+
+        return build_search_pipeline().search(**kwargs)
+
+    return _search
+
+
+@dataclass
+class ResearchGraphDeps:
+    """Injectable dependencies for the research graph.
+
+    All fields are typed as concrete callables/objects (no ``Optional``) so
+    mypy sees a real type at every call site. Production callers leave deps
+    None — the dataclass wires real implementations via ``default_factory``.
+    Tests construct ``ResearchGraphDeps(search_fn=fake, ...)``.
+
+    Attributes:
+        search_fn:         Search callable. Signature: (query=, budget=) -> SearchResult.
+        classify_fn:       Intent classifier callable. Signature: (query) -> QueryIntent.
+        llm_backend:       LLM backend object exposing ``.chat(messages, max_tokens=)``.
+                           ``None`` means the nodes lazy-load the default backend.
+        confidence_parser: ConfidenceParser instance for evaluate_sufficiency.
+                           ``None`` means the node uses the default parser chain.
+    """
+
+    search_fn: Callable[..., Any] = field(default_factory=_default_search)
+    classify_fn: Callable[..., Any] = field(default_factory=_default_classify)
+    # llm_backend and confidence_parser are not test-only-callable kwargs —
+    # they are stateful objects (or absent) and live as plain object slots.
+    llm_backend: Any = None
+    confidence_parser: Any = None
+
+
 def build_researcher_graph(
     *,
-    search_fn: Any | None = None,
-    llm_backend: Any | None = None,
-    classify_fn: Any | None = None,
-    confidence_parser: Any | None = None,
+    deps: ResearchGraphDeps | None = None,
 ) -> Any:
     """Build the LangGraph state machine for iterative research.
 
     Args:
-        search_fn:         Injectable search function (passed to retrieve node).
-        llm_backend:       Injectable LLM backend (passed to evaluate/synthesise nodes).
-        classify_fn:       Injectable intent classifier (passed to classify_intent node).
-        confidence_parser: Injectable ConfidenceParser (passed to evaluate node).
-                           If None, evaluate_sufficiency uses default_confidence_parser_chain().
+        deps: Injectable dependencies (search, classify, llm_backend,
+              confidence_parser). Production callers leave None; tests
+              pass a ``ResearchGraphDeps`` with fakes.
 
     Returns a compiled graph ready to invoke with an initial state.
     """
@@ -44,21 +92,29 @@ def build_researcher_graph(
 
     from langgraph.graph import END, StateGraph
 
+    d = deps or ResearchGraphDeps()
+
     graph = StateGraph(ResearcherState)
 
-    # Add nodes — inject dependencies via partial where provided
-    _classify = partial(classify_intent, classify_fn=classify_fn) if classify_fn else classify_intent
-    _retrieve = partial(retrieve, search_fn=search_fn) if search_fn else retrieve
+    # Add nodes — inject dependencies via partial against typed Deps shapes.
+    _classify = partial(
+        classify_intent,
+        deps=ClassifyIntentDeps(classify_fn=d.classify_fn),
+    )
+    _retrieve = partial(
+        retrieve,
+        deps=RetrieveDeps(search_fn=d.search_fn),
+    )
 
     # evaluate gets both llm_backend and confidence_parser if either is set
     _eval_kwargs: dict[str, Any] = {}
-    if llm_backend is not None:
-        _eval_kwargs["llm_backend"] = llm_backend
-    if confidence_parser is not None:
-        _eval_kwargs["confidence_parser"] = confidence_parser
+    if d.llm_backend is not None:
+        _eval_kwargs["llm_backend"] = d.llm_backend
+    if d.confidence_parser is not None:
+        _eval_kwargs["confidence_parser"] = d.confidence_parser
     _eval = partial(evaluate_sufficiency, **_eval_kwargs) if _eval_kwargs else evaluate_sufficiency
 
-    _synth = partial(synthesise, llm_backend=llm_backend) if llm_backend else synthesise
+    _synth = partial(synthesise, llm_backend=d.llm_backend) if d.llm_backend else synthesise
 
     graph.add_node("classify_intent", _classify)
     graph.add_node("retrieve", _retrieve)
@@ -88,10 +144,7 @@ def run_research(
     query: str,
     max_turns: int = DEFAULT_MAX_TURNS,
     *,
-    search_fn: Any | None = None,
-    llm_backend: Any | None = None,
-    classify_fn: Any | None = None,
-    confidence_parser: Any | None = None,
+    deps: ResearchGraphDeps | None = None,
 ) -> dict[str, Any]:
     """Run a research query through the full iterative search pipeline.
 
@@ -99,24 +152,16 @@ def run_research(
     question, and refines the search if needed — up to max_turns rounds.
 
     Args:
-        query:             The question to research.
-        max_turns:         Maximum search rounds before giving up (default 4).
-        search_fn:         Injectable search function for testing.
-        llm_backend:       Injectable LLM backend for testing.
-        classify_fn:       Injectable intent classifier for testing.
-        confidence_parser: Injectable ConfidenceParser for testing.
+        query:     The question to research.
+        max_turns: Maximum search rounds before giving up (default 4).
+        deps:      Injectable dependencies; production callers leave None.
 
     Returns:
         dict with: query, synthesis, retrieved_chunks, entities_found,
         gaps, confidence, turns, error.
     """
     try:
-        compiled = build_researcher_graph(
-            search_fn=search_fn,
-            llm_backend=llm_backend,
-            classify_fn=classify_fn,
-            confidence_parser=confidence_parser,
-        )
+        compiled = build_researcher_graph(deps=deps)
 
         initial_state: ResearcherState = {
             "query": query,

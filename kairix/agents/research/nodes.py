@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from kairix.agents.research.state import (
@@ -22,33 +23,78 @@ from kairix.agents.research.state import (
 logger = logging.getLogger(__name__)
 
 
-def classify_intent(state: ResearcherState, *, classify_fn: Callable[..., Any] | None = None) -> dict[str, Any]:
+def _default_classify() -> Callable[..., Any]:
+    """Lazy production import for intent classification."""
+    from kairix.core.search.intent import classify
+
+    return classify
+
+
+def _default_search() -> Callable[..., Any]:
+    """Lazy production import for the search pipeline."""
+
+    def _search(**kwargs: Any) -> Any:
+        from kairix.core.factory import build_search_pipeline
+
+        return build_search_pipeline().search(**kwargs)
+
+    return _search
+
+
+@dataclass
+class ClassifyIntentDeps:
+    """Injectable dependencies for ``classify_intent``.
+
+    The single ``classify_fn`` field is typed as a concrete callable so
+    mypy sees a real type at every call site. Tests construct
+    ``ClassifyIntentDeps(classify_fn=fake)``; production callers leave
+    ``deps=None`` and the default factory wires the real classifier.
+    """
+
+    classify_fn: Callable[..., Any] = field(default_factory=_default_classify)
+
+
+@dataclass
+class RetrieveDeps:
+    """Injectable dependencies for ``retrieve``.
+
+    ``search_fn`` is typed as a concrete callable so mypy sees a real type
+    at every call site. Tests construct ``RetrieveDeps(search_fn=fake)``;
+    production callers leave ``deps=None`` and the default factory wires
+    the real search pipeline.
+    """
+
+    search_fn: Callable[..., Any] = field(default_factory=_default_search)
+
+
+def classify_intent(
+    state: ResearcherState,
+    *,
+    deps: ClassifyIntentDeps | None = None,
+) -> dict[str, Any]:
     """Work out what kind of question this is (entity lookup, date-based, etc.).
 
     Args:
-        classify_fn: Injectable intent classifier for testing.
-                     Defaults to ``kairix.core.search.intent.classify``.
+        deps: Injectable dependencies; production callers leave None.
+              Tests pass ``ClassifyIntentDeps(classify_fn=fake)``.
     """
+    d = deps or ClassifyIntentDeps()
     try:
-        if classify_fn is None:
-            from kairix.core.search.intent import classify
-
-            classify_fn = classify
-
-        intent = classify_fn(state["query"])
+        intent = d.classify_fn(state["query"])
         return {"intent": intent.value}
     except Exception as exc:
         logger.warning("research: classify_intent failed — %s", exc)
         return {"intent": "semantic"}
 
 
-def retrieve(state: ResearcherState, *, search_fn: Callable[..., Any] | None = None) -> dict[str, Any]:
+def retrieve(
+    state: ResearcherState,
+    *,
+    deps: RetrieveDeps | None = None,
+) -> dict[str, Any]:
     """Search the knowledge base for answers to the current query."""
-    if search_fn is None:
-        from kairix.core.factory import build_search_pipeline
-
-        _pipeline = build_search_pipeline()
-        search_fn = _pipeline.search
+    d = deps or RetrieveDeps()
+    search_fn = d.search_fn
 
     query = state.get("refined_query") or state["query"]
     turns = state.get("turns", 0)

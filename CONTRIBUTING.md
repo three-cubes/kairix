@@ -12,11 +12,14 @@ pip install -e ".[dev,neo4j,agents,rerank]"
 
 ## Making changes
 
-1. Create a branch from `develop`
+1. Branch from `develop` (the default branch — also where PRs target)
 2. Make your changes
 3. Commit via the gated script: `bash scripts/safe-commit.sh "your message"`
 4. The script runs lint, format, mypy, tests, and security checks. If any fail, fix and re-run.
-5. Open a PR targeting `develop`
+5. Run `pre-commit run --all-files` once before pushing — `safe-commit.sh` historically diverges from CI's pre-commit; the explicit run catches it locally.
+6. Open a PR targeting `develop` — the repo only allows **merge commits** (no squash, no rebase) to preserve per-commit history.
+
+For routine work where you're confident in `safe-commit` + `pre-commit`, direct push to develop is also fine — the same CI gate runs on push and PR.
 
 ## Running tests
 
@@ -95,9 +98,11 @@ tests/
 
 | Branch | Purpose |
 |---|---|
-| `main` | Validated stable releases. |
-| `develop` | All PRs merge here. |
-| `feature/*` | One branch per feature or fix. PR targets `develop`. |
+| `develop` | **Default branch.** All work lands here — direct push or PR. |
+| `main` | Release-only: each commit is the SHA of a tagged release. Promoted from `develop` via the `5 · Release` workflow at release time. |
+| `feat/*`, `fix/*` | Optional feature branches when grouping multiple commits — PR targets `develop`. |
+
+The `raw.githubusercontent.com/.../main/...` URLs in [README.md](README.md) and [docker-compose.yml](docker-compose.yml) deliberately point at `main` so users following the quick-start get the last-released compose, not in-progress work.
 
 ## Versioning
 
@@ -106,5 +111,9 @@ CalVer: `YYYY.MM.DD`. Pre-release: `YYYY.MM.DDaN`.
 ## Cutting a release
 
 1. Validate on deployment target
-2. PR `develop → main` — update version in `pyproject.toml`, update `CHANGELOG.md`
-3. Merge, tag: `git tag v2026.X.Y && git push origin v2026.X.Y`
+2. Confirm `CHANGELOG.md` `[Unreleased]` section is fully populated (no empty sub-sections) and the version label matches CalVer (`vYYYY.M.D[.N]`)
+3. Open a PR `develop → main` — gates on the same CI checks as any other PR
+4. Once green, merge with the standard merge commit
+5. Trigger the **`5 · Release`** workflow (Actions tab → workflow_dispatch) with `version=vYYYY.M.D[.N]`. It tags `main` HEAD, extracts the `[Unreleased]` CHANGELOG section as release notes, and creates the GitHub Release. The release-created event then fires Docker + PyPI publish workflows automatically.
+
+See [scripts/release-checklist.md](scripts/release-checklist.md) for the full end-to-end checklist including post-deploy UAT.

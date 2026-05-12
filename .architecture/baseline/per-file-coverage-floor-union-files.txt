@@ -5,11 +5,8 @@ kairix/agents/curator/cli.py
 kairix/agents/mcp/cli.py
 kairix/cli.py
 kairix/core/classify/cli.py
-kairix/core/db/repository.py
 kairix/core/embed/_pipeline_defaults.py
 kairix/core/embed/cli.py
-kairix/core/embed/deps.py
-kairix/core/factory.py
 kairix/core/search/config_validator.py
 kairix/core/search/rerank.py
 kairix/core/search/vector_repository.py
@@ -28,3 +25,9 @@ kairix/platform/setup/agent.py
 kairix/platform/setup/wizard.py
 kairix/quality/eval/cli.py
 kairix/secrets.py
+kairix/use_cases/_brief_defaults.py
+kairix/use_cases/_entity_defaults.py
+kairix/use_cases/_entity_get_defaults.py
+kairix/use_cases/_prep_defaults.py
+kairix/use_cases/_research_defaults.py
+kairix/use_cases/_usage_guide_defaults.py

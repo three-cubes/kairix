@@ -1,0 +1,74 @@
+# Kairix — eval/benchmark overlay
+#
+# Closes #88. Running `kairix benchmark run` (350 cases) and
+# `kairix embed --force` (50K chunks) on the production VM previously
+# caused agent outages — CPU pinned at 200%, Telegram agents became
+# unresponsive. This overlay defines a sandboxed `kairix-eval` service
+# with hard resource limits so eval workloads can't starve production.
+#
+# Profile-gated: the `eval` profile means the service is NOT started by
+# `docker compose up -d`. Only `--profile eval` brings it in.
+#
+# Quick examples — run from /opt/kairix/app on the VM. The Dockerfile's
+# entrypoint auto-prepends `kairix` for non-mode args, so the leading
+# `kairix` is omitted in the run command.
+#
+#   # Canned reflib benchmark (uses the entrypoint's built-in 'eval' mode):
+#   docker compose -f docker-compose.yml -f docker-compose.override.yml \
+#                  -f docker-compose.eval.yml --profile eval \
+#       run --rm kairix-eval eval
+#
+#   # Custom suite:
+#   docker compose -f docker-compose.yml -f docker-compose.override.yml \
+#                  -f docker-compose.eval.yml --profile eval \
+#       run --rm kairix-eval benchmark run --suite suites/reflib-gold.yaml
+#
+#   # Hybrid sweep (--quick takes ~1 minute):
+#   docker compose -f docker-compose.yml -f docker-compose.override.yml \
+#                  -f docker-compose.eval.yml --profile eval \
+#       run --rm kairix-eval eval hybrid-sweep --suite suites/reflib-gold.yaml --quick
+#
+# The container exits when the command finishes — `--rm` cleans up.
+#
+# Resource budget rationale:
+#   - cpus: 1.0  — leaves ~3 CPU for production (kairix=4.0 cap, neo4j=2.0).
+#                  Eval workloads are CPU-bound (BM25 scoring + rerank);
+#                  capping at 1.0 prevents the host from saturating.
+#   - mem_limit: 2g — eval RSS observed ~800MB-1.5GB depending on suite.
+#                  2GB is enough for the largest gold suite + working set.
+#   - cpus + memory limits are HARD (Docker enforces); production's
+#     `mem_reservation` doesn't help here because cgroups schedule by limit.
+#
+# The eval container shares /data/kairix (the index volume) with
+# production. Reads are concurrent-safe; eval should not write to the
+# production index — use a separate workdir for any eval-only output.
+
+services:
+  kairix-eval:
+    profiles: ["eval"]
+    image: ghcr.io/quanyeomans/kairix:latest
+    # Same image as production; commands are passed at `run` time.
+    # The default ('--help') is overridden by anything passed to
+    # `docker compose run`. The entrypoint auto-prepends `kairix`.
+    command: ["--help"]
+    volumes:
+      # Read-only mount of production's documents — eval reads but never writes.
+      - ./documents:/data/documents:ro
+      # Read-write index volume (eval may write run-logs to /data/kairix/eval-logs/).
+      - kairix-data:/data/kairix
+      # Optional: mount the same config the production kairix sees.
+      # Keep this in sync with the kairix service's config mount.
+      # - ./kairix.config.yaml:/opt/kairix/kairix.config.yaml:ro
+    env_file:
+      - .env
+    environment:
+      - KAIRIX_NEO4J_URI=bolt://neo4j:7687
+      - KAIRIX_NEO4J_USER=neo4j
+      - KAIRIX_NEO4J_PASSWORD=${KAIRIX_NEO4J_PASSWORD}
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    # Hard resource limits — keep eval out of production's path.
+    mem_limit: 2g
+    mem_reservation: 1g
+    cpus: 1.0

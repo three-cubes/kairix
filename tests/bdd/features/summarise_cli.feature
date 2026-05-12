@@ -4,9 +4,9 @@ Feature: kairix summarise CLI
   So that I know whether the summary index is fresh enough for the budget step
   to fall back from full snippets to L0 abstracts.
 
-  Note: --all, --stale, and --path workflows go through the Azure LLM and
-  read kairix.paths.document_root captured at module-import time. Those
-  workflows are not yet BDD-testable without a SummaryGenerator Protocol +
+  Note: --all, --stale, and --path workflows go through the LLM backend and
+  read the configured document root captured at module-import time. Those
+  workflows are not yet BDD-testable without a generator-protocol +
   document-root injection seam (filed as a follow-up). The --status path is
   fully covered here.
 

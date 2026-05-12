@@ -6,6 +6,7 @@ import pytest
 
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.config_loader import (
+    ResolveConfigDeps,
     _merge_retrieval_config,
     resolve_retrieval_config,
 )
@@ -66,6 +67,31 @@ class TestMergeRetrievalConfig:
         assert merged.entity.enabled is False
         assert merged.procedural.enabled is False
 
+    @pytest.mark.unit
+    def test_rerank_intents_override(self) -> None:
+        """Per-collection rerank_intents override (closes #74) — operators can
+        narrow which intents trigger rerank for a specific collection. e.g.
+        reference-library benchmarks show rerank helps conceptual but hurts
+        multi_hop, so reflib's collection should override the global default
+        of ('multi_hop', 'semantic') to ('conceptual',) only.
+        """
+        base = RetrievalConfig.defaults()
+        # Default is ("multi_hop", "semantic") on RetrievalConfig.
+        merged = _merge_retrieval_config(base, {"rerank_intents": ["conceptual"]})
+        assert merged.rerank_intents == ("conceptual",)
+        # Other fields unchanged.
+        assert merged.fusion_strategy == base.fusion_strategy
+
+    @pytest.mark.unit
+    def test_rerank_intents_empty_disables_per_intent_rerank(self) -> None:
+        """An empty list disables rerank entirely for the collection — the
+        rerank trigger requires intent-membership, so empty == always-off
+        unless ``rerank.enabled`` is True (the global force-on lever).
+        """
+        base = RetrievalConfig.defaults()
+        merged = _merge_retrieval_config(base, {"rerank_intents": []})
+        assert merged.rerank_intents == ()
+
 
 class TestResolveRetrievalConfig:
     @pytest.mark.unit
@@ -99,8 +125,10 @@ class TestResolveRetrievalConfig:
         }
         result = resolve_retrieval_config(
             collections=["reference-library"],
-            config_fn=RetrievalConfig.defaults,
-            overrides_fn=lambda: baseline_overrides,
+            deps=ResolveConfigDeps(
+                config_fn=RetrievalConfig.defaults,
+                overrides_fn=lambda: baseline_overrides,
+            ),
         )
         assert result.fusion_strategy == "bm25_primary"
         assert result.vec_limit == 5
@@ -119,8 +147,10 @@ class TestResolveRetrievalConfig:
         global_cfg = RetrievalConfig.defaults()
         result = resolve_retrieval_config(
             collections=["reference-library"],
-            config_fn=lambda: global_cfg,
-            overrides_fn=lambda: {},
+            deps=ResolveConfigDeps(
+                config_fn=lambda: global_cfg,
+                overrides_fn=lambda: {},
+            ),
         )
         assert result is global_cfg
 
@@ -128,8 +158,10 @@ class TestResolveRetrievalConfig:
     def test_single_collection_with_yaml_config(self) -> None:
         result = resolve_retrieval_config(
             collections=["my-docs"],
-            config_fn=RetrievalConfig.defaults,
-            overrides_fn=lambda: {"my-docs": {"fusion_strategy": "rrf", "vec_limit": 30}},
+            deps=ResolveConfigDeps(
+                config_fn=RetrievalConfig.defaults,
+                overrides_fn=lambda: {"my-docs": {"fusion_strategy": "rrf", "vec_limit": 30}},
+            ),
         )
         assert result.fusion_strategy == "rrf"
         assert result.vec_limit == 30
@@ -137,13 +169,16 @@ class TestResolveRetrievalConfig:
     @pytest.mark.unit
     def test_multi_collection_uses_global(self) -> None:
         global_cfg = RetrievalConfig.defaults()
-        result = resolve_retrieval_config(collections=["a", "b"], config_fn=lambda: global_cfg)
+        result = resolve_retrieval_config(
+            collections=["a", "b"],
+            deps=ResolveConfigDeps(config_fn=lambda: global_cfg),
+        )
         assert result is global_cfg
 
     @pytest.mark.unit
     def test_no_collection_uses_global(self) -> None:
         global_cfg = RetrievalConfig.defaults()
-        result = resolve_retrieval_config(config_fn=lambda: global_cfg)
+        result = resolve_retrieval_config(deps=ResolveConfigDeps(config_fn=lambda: global_cfg))
         assert result is global_cfg
 
     @pytest.mark.unit
@@ -151,8 +186,10 @@ class TestResolveRetrievalConfig:
         global_cfg = RetrievalConfig.defaults()
         result = resolve_retrieval_config(
             collections=["unknown"],
-            config_fn=lambda: global_cfg,
-            overrides_fn=lambda: {},
+            deps=ResolveConfigDeps(
+                config_fn=lambda: global_cfg,
+                overrides_fn=lambda: {},
+            ),
         )
         assert result is global_cfg
 

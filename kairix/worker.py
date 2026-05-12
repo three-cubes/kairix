@@ -17,6 +17,7 @@ import os
 import signal
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 EMBED_INTERVAL = 3600  # 1 hour
 ENTITY_SEED_INTERVAL = 86400  # 24 hours
 HEALTH_CHECK_INTERVAL = 21600  # 6 hours
+WIKILINKS_INTERVAL = 3600  # 1 hour — runs after embed; --changed mtime-filters
 
 
 def _default_embed() -> EmbedPipelineResult:
@@ -59,6 +61,18 @@ def _default_entity_seed() -> None:
     )
 
 
+def _default_wikilinks_inject() -> None:
+    """Default wikilinks inject — runs ``kairix wikilinks inject --changed``.
+
+    The CLI's ``main`` may raise ``SystemExit`` (e.g. when no entities
+    are loaded yet, before the entity seed has run). The worker's
+    ``run_wikilinks_inject`` catches that to keep the worker alive.
+    """
+    from kairix.knowledge.wikilinks.cli import main as wikilinks_main
+
+    wikilinks_main(["inject", "--changed"])
+
+
 def _default_health_check() -> list[Any]:
     """Default health check — lazy-imports and runs all deployment checks."""
     from kairix.platform.onboard.check import run_all_checks
@@ -66,7 +80,32 @@ def _default_health_check() -> list[Any]:
     return run_all_checks()
 
 
-def run_embed(embed_fn: Callable[[], Any] | None = None) -> None:
+@dataclass
+class WorkerDeps:
+    """Injectable dependencies for the worker loop and its task helpers.
+
+    Replaces the F6-violating ``embed_fn=None`` / ``entity_seed_fn=None`` /
+    ``health_check_fn=None`` / ``wikilinks_fn=None`` / ``sleep_fn=None``
+    test-only kwargs with a typed dataclass. Production code calls
+    ``main()`` without ``deps`` and the default factory wires the real
+    task callables. Tests construct
+    ``WorkerDeps(embed=fake, sleep=lambda _s: None)`` and pass it through.
+
+    Each callable field is non-Optional with a ``default_factory`` (per
+    CLAUDE.md F6 guidance: avoid the ``Optional[Callable] + post-init``
+    pattern that "just landed a mypy bug") so mypy sees the production
+    callable directly — no ``assert deps.x is not None`` ladder is
+    needed inside the worker loop.
+    """
+
+    embed: Callable[[], Any] = field(default_factory=lambda: _default_embed)
+    entity_seed: Callable[[], None] = field(default_factory=lambda: _default_entity_seed)
+    health_check: Callable[[], list[Any]] = field(default_factory=lambda: _default_health_check)
+    wikilinks: Callable[[], None] = field(default_factory=lambda: _default_wikilinks_inject)
+    sleep: Callable[[float], None] = field(default_factory=lambda: time.sleep)
+
+
+def run_embed(deps: WorkerDeps | None = None) -> None:
     """Run incremental embed — indexes new and changed documents.
 
     The worker treats every outcome of the embed pipeline as
@@ -82,15 +121,14 @@ def run_embed(embed_fn: Callable[[], Any] | None = None) -> None:
     worker process. That coupling is removed here: the use case
     returns a ``EmbedPipelineResult`` dataclass; we inspect it and log.
 
-    ``embed_fn`` injection seam: tests pass a callable returning either
-    the result dataclass or None (legacy). Production passes
+    ``deps.embed`` is the injection seam: tests pass a callable returning
+    either the result dataclass or None (legacy). Production passes
     ``_default_embed`` which runs the use case.
     """
-    if embed_fn is None:
-        embed_fn = _default_embed
+    deps = deps if deps is not None else WorkerDeps()
     try:
         logger.info("worker: starting incremental embed")
-        result = embed_fn()
+        result = deps.embed()
         if result is None:
             logger.info("worker: embed complete")
             return
@@ -128,34 +166,60 @@ def run_embed(embed_fn: Callable[[], Any] | None = None) -> None:
         logger.warning("worker: embed pipeline raised — %s", exc)
 
 
-def run_entity_seed(entity_seed_fn: Callable[[], None] | None = None) -> None:
+def run_entity_seed(deps: WorkerDeps | None = None) -> None:
     """Run entity relationship seeding from document store structure.
 
     Args:
-        entity_seed_fn: Callable that performs the entity seed. Defaults to
-                        the production store crawl CLI entry point.
+        deps: Injectable worker dependencies. Tests construct
+              ``WorkerDeps(entity_seed=fake)``; production omits the
+              kwarg and the default factory wires the real store crawl
+              CLI entry point.
     """
-    if entity_seed_fn is None:
-        entity_seed_fn = _default_entity_seed
+    deps = deps if deps is not None else WorkerDeps()
     try:
         logger.info("worker: starting entity seed")
-        entity_seed_fn()
+        deps.entity_seed()
         logger.info("worker: entity seed complete")
     except Exception as exc:
         logger.warning("worker: entity seed failed — %s", exc)
 
 
-def run_health_check(health_check_fn: Callable[[], list[Any]] | None = None) -> None:
+def run_wikilinks_inject(deps: WorkerDeps | None = None) -> None:
+    """Inject ``[[wikilinks]]`` on first mention into agent-written documents.
+
+    Closes #100 — the host cron's nightly ``kairix wikilinks inject
+    --changed`` was lost in the Docker migration. The worker now runs
+    it on the same cadence as embed (hourly) so new agent-written notes
+    get linked to known entities.
+
+    Treats every outcome as non-fatal: the wikilinks CLI may
+    ``sys.exit(1)`` when entities aren't loaded yet (pre-first-seed
+    bootstrapping), and that must NOT terminate the worker. Same
+    ``(Exception, SystemExit)`` discipline as ``run_embed``.
+
+    ``deps.wikilinks`` is the injection seam tests use; production
+    falls through to ``_default_wikilinks_inject``.
+    """
+    deps = deps if deps is not None else WorkerDeps()
+    try:
+        logger.info("worker: starting wikilinks inject")
+        deps.wikilinks()
+        logger.info("worker: wikilinks inject complete")
+    except (Exception, SystemExit) as exc:
+        logger.warning("worker: wikilinks inject raised — %s", exc)
+
+
+def run_health_check(deps: WorkerDeps | None = None) -> None:
     """Log a health check.
 
     Args:
-        health_check_fn: Callable that returns a list of check results.
-                         Defaults to the production run_all_checks.
+        deps: Injectable worker dependencies. Tests construct
+              ``WorkerDeps(health_check=fake)``; production omits the
+              kwarg and the default factory wires ``run_all_checks``.
     """
-    if health_check_fn is None:
-        health_check_fn = _default_health_check
+    deps = deps if deps is not None else WorkerDeps()
     try:
-        results = health_check_fn()
+        results = deps.health_check()
         passed = sum(1 for r in results if r.ok)
         total = len(results)
         logger.info("worker: health check %d/%d passed", passed, total)
@@ -165,39 +229,43 @@ def run_health_check(health_check_fn: Callable[[], list[Any]] | None = None) -> 
 
 def main(
     *,
-    embed_fn: Callable[[], None] | None = None,
-    entity_seed_fn: Callable[[], None] | None = None,
-    health_check_fn: Callable[[], list[Any]] | None = None,
-    sleep_fn: Callable[[float], None] | None = None,
+    deps: WorkerDeps | None = None,
     embed_interval: int | None = None,
     entity_seed_interval: int | None = None,
     health_check_interval: int | None = None,
+    wikilinks_interval: int | None = None,
 ) -> None:
     """Run the worker loop.
 
-    All dependencies are injectable for testing. Production defaults are
-    used when arguments are None.
+    All callable dependencies are bundled into ``WorkerDeps``;
+    interval ints stay as plain kwargs because they're scalar
+    config (not test-substitution seams). Production omits ``deps``
+    and the default factory wires the real task callables.
     """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
+    deps = deps if deps is not None else WorkerDeps()
+
     _embed_interval = embed_interval if embed_interval is not None else EMBED_INTERVAL
     _entity_interval = entity_seed_interval if entity_seed_interval is not None else ENTITY_SEED_INTERVAL
     _health_interval = health_check_interval if health_check_interval is not None else HEALTH_CHECK_INTERVAL
-    _sleep = sleep_fn if sleep_fn is not None else time.sleep
+    _wikilinks_interval = wikilinks_interval if wikilinks_interval is not None else WIKILINKS_INTERVAL
 
     logger.info(
-        "kairix worker starting — embed every %ds, entity seed every %ds",
+        "kairix worker starting — embed every %ds, entity seed every %ds, wikilinks every %ds",
         _embed_interval,
         _entity_interval,
+        _wikilinks_interval,
     )
 
     # Track when each task last ran
     last_embed = 0.0
     last_entity = 0.0
     last_health = 0.0
+    last_wikilinks = 0.0
 
     # Graceful shutdown
     running = True
@@ -211,29 +279,33 @@ def main(
     signal.signal(signal.SIGINT, _shutdown)
 
     # Run embed immediately on startup
-    run_embed(embed_fn)
+    run_embed(deps)
     last_embed = time.monotonic()
 
     while running:
         now = time.monotonic()
 
         if now - last_embed >= _embed_interval:
-            run_embed(embed_fn)
+            run_embed(deps)
             last_embed = now
 
         if now - last_entity >= _entity_interval:
-            run_entity_seed(entity_seed_fn)
+            run_entity_seed(deps)
             last_entity = now
 
         if now - last_health >= _health_interval:
-            run_health_check(health_check_fn)
+            run_health_check(deps)
             last_health = now
+
+        if now - last_wikilinks >= _wikilinks_interval:
+            run_wikilinks_inject(deps)
+            last_wikilinks = now
 
         # Sleep 60 seconds between checks
         for _ in range(60):
             if not running:
                 break
-            _sleep(1)
+            deps.sleep(1)
 
     logger.info("kairix worker stopped")
 

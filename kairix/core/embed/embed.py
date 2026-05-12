@@ -90,7 +90,7 @@ def chunk_text(
 # ── Azure API ─────────────────────────────────────────────────────────────────
 
 
-def _get_azure_config() -> tuple[str, str, str]:  # pragma: no cover
+def _get_azure_config() -> tuple[str, str, str]:  # pragma: no cover  # prod lazy default; deps injection
     """
     Read embed API config via ``get_credentials("embed")``. Supports Azure,
     OpenRouter, or any OpenAI-compatible endpoint.
@@ -144,7 +144,7 @@ def preflight_check(
     ``.data[0].embedding`` list. Production callers leave it as ``None`` so
     the real client is built lazily via ``make_openai_client``.
     """
-    if client is None:  # pragma: no cover
+    if client is None:  # pragma: no cover  # prod lazy default; tests inject client=fake
         from kairix.credentials import make_openai_client
 
         client = make_openai_client(api_key, endpoint, max_retries=2, timeout=30.0)
@@ -165,7 +165,7 @@ _embed_client = None
 _embed_client_key: tuple[str, str] = ("", "")
 
 
-def _get_embed_client(api_key: str, endpoint: str) -> Any:  # pragma: no cover
+def _get_embed_client(api_key: str, endpoint: str) -> Any:  # pragma: no cover  # prod-only module cache
     """Return a cached OpenAI client. Creates a new one if credentials change.
 
     Production-only — every test that exercises ``embed_batch`` injects a
@@ -214,7 +214,7 @@ def embed_batch(
     if not texts:
         return []
 
-    if client is None:  # pragma: no cover
+    if client is None:  # pragma: no cover  # prod lazy default; tests inject client=fake
         client = _get_embed_client(api_key, endpoint)
 
     try:
@@ -286,7 +286,7 @@ def batched(items: list[Any], size: int) -> Generator[list[Any], None, None]:
 # ── usearch index update ─────────────────────────────────────────────────────
 
 
-def _open_usearch_index() -> Any:  # pragma: no cover
+def _open_usearch_index() -> Any:  # pragma: no cover  # prod lazy default; deps injection
     """Open (or create) the usearch ANN index for the embed run.
 
     Production-only — every test that exercises ``run_embed`` injects an
@@ -382,17 +382,22 @@ def _embed_and_store_batch(
     dims: int,
     now: int,
     save_interval: int,
-    embed_batch_fn: Callable[..., list[list[float]]] | None = None,
+    embed_batch_fn: Callable[..., list[list[float]]],
 ) -> tuple[int, list[dict[str, Any]]]:
     """Embed a single batch and write results to DB + usearch index.
 
     Returns (embedded_count, failed_chunks) for this batch.
+
+    ``embed_batch_fn`` is the embedding callable — production passes the
+    Azure-backed ``embed_batch``; tests pass a fake. No default — caller
+    constructs the right callable at the boundary (the ``run_embed``
+    function below threads ``deps.embed_batch`` through). Removing the
+    legacy ``= None`` default closes the F6 test-seam violation.
     """
-    _embed = embed_batch_fn or embed_batch
     texts = [c["text"] for c in batch]
 
     try:
-        vectors = _embed(texts, api_key, endpoint, deployment, dims)
+        vectors = embed_batch_fn(texts, api_key, endpoint, deployment, dims)
     except (RuntimeError, KeyError, ValueError, OSError) as e:
         logger.error(
             "Batch %d failed: %s — logging %d chunks as failed",
@@ -478,14 +483,8 @@ def run_embed(
 
     Returns dict with: embedded, skipped, failed, duration_s, estimated_cost_usd
     """
-    if deps is None:  # pragma: no cover
+    if deps is None:  # pragma: no cover  # prod lazy default; tests pass deps=
         deps = EmbedDependencies()
-
-    assert deps.get_document_root is not None
-    assert deps.get_azure_config is not None
-    assert deps.preflight_check is not None
-    assert deps.migrate_content_vectors is not None
-    assert deps.open_usearch_index is not None
 
     doc_root = deps.get_document_root()
 

@@ -10,6 +10,7 @@ import pytest
 
 from kairix.platform.onboard.check import (
     CheckResult,
+    OnboardChecksDeps,
     check_document_root_configured,
     check_neo4j_reachable,
     check_secrets_loaded,
@@ -49,7 +50,7 @@ class _FakeNeo4jClient:
 @pytest.mark.unit
 def test_wrapper_check_skipped_in_docker() -> None:
     """In Docker, wrapper_installed check returns ok=True without probing the binary."""
-    result = check_wrapper_installed(is_docker_fn=lambda: True)
+    result = check_wrapper_installed(deps=OnboardChecksDeps(is_docker=lambda: True))
     assert result.ok is True
     assert "Docker" in result.detail
 

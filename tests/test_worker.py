@@ -4,8 +4,8 @@ Covers:
   - run_embed catches exceptions without crashing
   - run_entity_seed catches exceptions without crashing
   - run_health_check catches exceptions without crashing
-  - run_embed calls embed_fn on success
-  - run_entity_seed calls entity_seed_fn on success
+  - run_embed calls deps.embed on success
+  - run_entity_seed calls deps.entity_seed on success
   - run_health_check counts results on success
   - Shutdown signal (SIGTERM / SIGINT) sets running=False and exits the loop
   - Main loop scheduling logic
@@ -22,10 +22,13 @@ from kairix.worker import (
     EMBED_INTERVAL,
     ENTITY_SEED_INTERVAL,
     HEALTH_CHECK_INTERVAL,
+    WIKILINKS_INTERVAL,
+    WorkerDeps,
     main,
     run_embed,
     run_entity_seed,
     run_health_check,
+    run_wikilinks_inject,
 )
 
 pytestmark = pytest.mark.unit
@@ -42,7 +45,7 @@ def test_run_embed_catches_exceptions() -> None:
     def _failing_embed() -> None:
         raise RuntimeError("embed failed")
 
-    run_embed(embed_fn=_failing_embed)  # should not raise
+    run_embed(deps=WorkerDeps(embed=_failing_embed))  # should not raise
 
 
 def test_run_embed_catches_import_error() -> None:
@@ -51,21 +54,21 @@ def test_run_embed_catches_import_error() -> None:
     def _import_error_embed() -> None:
         raise ImportError("no module")
 
-    run_embed(embed_fn=_import_error_embed)
+    run_embed(deps=WorkerDeps(embed=_import_error_embed))
 
 
-def test_run_embed_calls_embed_fn() -> None:
-    """run_embed should call the injected embed_fn."""
+def test_run_embed_calls_embed_callable() -> None:
+    """run_embed should call the injected ``deps.embed`` callable."""
     calls: list[bool] = []
 
     def _tracking_embed() -> None:
         calls.append(True)
 
-    run_embed(embed_fn=_tracking_embed)
+    run_embed(deps=WorkerDeps(embed=_tracking_embed))
     assert len(calls) == 1
 
 
-def test_run_embed_survives_systemexit_from_embed_fn() -> None:
+def test_run_embed_survives_systemexit_from_embed_callable() -> None:
     """A ``SystemExit`` from the embed step MUST NOT propagate.
 
     This pins the v2026.5.10 fix: pre-fix, the worker called the embed
@@ -79,7 +82,7 @@ def test_run_embed_survives_systemexit_from_embed_fn() -> None:
         raise SystemExit(1)
 
     # Must not raise — SystemExit is caught and logged, worker continues.
-    run_embed(embed_fn=_exiting_embed)
+    run_embed(deps=WorkerDeps(embed=_exiting_embed))
 
 
 def test_run_embed_logs_recall_alert_from_pipeline_result(caplog: pytest.LogCaptureFixture) -> None:
@@ -102,7 +105,7 @@ def test_run_embed_logs_recall_alert_from_pipeline_result(caplog: pytest.LogCapt
     )
 
     with caplog.at_level("WARNING"):
-        run_embed(embed_fn=lambda: result)
+        run_embed(deps=WorkerDeps(embed=lambda: result))
 
     assert any("recall gate alert" in rec.message for rec in caplog.records), (
         f"expected 'recall gate alert' in logs; got: {[r.message for r in caplog.records]}"
@@ -124,7 +127,7 @@ def test_run_embed_logs_failed_chunk_count_from_pipeline_result(caplog: pytest.L
     )
 
     with caplog.at_level("WARNING"):
-        run_embed(embed_fn=lambda: result)
+        run_embed(deps=WorkerDeps(embed=lambda: result))
 
     assert any("3 chunks failed" in rec.message for rec in caplog.records), (
         f"expected '3 chunks failed' in logs; got: {[r.message for r in caplog.records]}"
@@ -142,7 +145,7 @@ def test_run_entity_seed_catches_exceptions() -> None:
     def _failing_seed() -> None:
         raise RuntimeError("store crawl failed")
 
-    run_entity_seed(entity_seed_fn=_failing_seed)  # should not raise
+    run_entity_seed(deps=WorkerDeps(entity_seed=_failing_seed))  # should not raise
 
 
 def test_run_entity_seed_catches_import_error() -> None:
@@ -151,17 +154,17 @@ def test_run_entity_seed_catches_import_error() -> None:
     def _import_error_seed() -> None:
         raise ImportError("no module")
 
-    run_entity_seed(entity_seed_fn=_import_error_seed)
+    run_entity_seed(deps=WorkerDeps(entity_seed=_import_error_seed))
 
 
-def test_run_entity_seed_calls_entity_seed_fn() -> None:
-    """run_entity_seed should call the injected entity_seed_fn."""
+def test_run_entity_seed_calls_entity_seed_callable() -> None:
+    """run_entity_seed should call the injected ``deps.entity_seed``."""
     calls: list[bool] = []
 
     def _tracking_seed() -> None:
         calls.append(True)
 
-    run_entity_seed(entity_seed_fn=_tracking_seed)
+    run_entity_seed(deps=WorkerDeps(entity_seed=_tracking_seed))
     assert len(calls) == 1
 
 
@@ -181,7 +184,7 @@ def test_run_health_check_catches_exceptions() -> None:
     def _failing_check() -> list:
         raise RuntimeError("check failed")
 
-    run_health_check(health_check_fn=_failing_check)  # should not raise
+    run_health_check(deps=WorkerDeps(health_check=_failing_check))  # should not raise
 
 
 def test_run_health_check_catches_import_error() -> None:
@@ -190,7 +193,7 @@ def test_run_health_check_catches_import_error() -> None:
     def _import_error_check() -> list:
         raise ImportError("no module")
 
-    run_health_check(health_check_fn=_import_error_check)
+    run_health_check(deps=WorkerDeps(health_check=_import_error_check))
 
 
 def test_run_health_check_counts_results() -> None:
@@ -203,7 +206,7 @@ def test_run_health_check_counts_results() -> None:
             _FakeCheckResult(ok=True),
         ]
 
-    run_health_check(health_check_fn=_mixed_results)  # should not raise
+    run_health_check(deps=WorkerDeps(health_check=_mixed_results))  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +231,54 @@ def test_worker_constants() -> None:
 
 
 # ---------------------------------------------------------------------------
+# WorkerDeps default factories — F6 sabotage proofs
+# ---------------------------------------------------------------------------
+
+
+def test_worker_deps_default_factory_binds_callable_for_every_field() -> None:
+    """``WorkerDeps()`` with no overrides constructs a deps bag whose every
+    callable field is non-None and callable.
+
+    Sabotage proof: the F6 issue specifically rejects the
+    ``Optional[Callable] = None`` self-resolving pattern as having "just
+    landed a mypy bug". Every field on this dataclass uses
+    ``default_factory`` instead. If any field regressed to ``None`` by
+    default, the corresponding ``callable()`` check fires. The test reads
+    only the public field names (``embed``, ``entity_seed``, etc.) and
+    does not import the private ``_default_*`` helpers — that would
+    violate F5 (no internal-name imports in tests).
+    """
+    deps = WorkerDeps()
+    for name in ("embed", "entity_seed", "health_check", "wikilinks", "sleep"):
+        value = getattr(deps, name)
+        assert callable(value), (
+            f"default_factory for WorkerDeps.{name} must bind a callable; "
+            f"got {value!r}. Regressing to ``{name}: Callable | None = None`` would leave this None."
+        )
+
+
+def test_worker_deps_partial_override_preserves_other_defaults() -> None:
+    """Constructing ``WorkerDeps(embed=fake)`` overrides only ``embed``;
+    the other four fields keep their default-factory-bound callables.
+
+    Sabotage proof: production tests rely on this — they swap one callable
+    while letting the rest fall through. If the dataclass demanded every
+    field set explicitly, this would fail with TypeError. If a default
+    regressed to ``None``, ``callable()`` would fail for that field.
+    """
+
+    def fake_embed() -> None:
+        return None
+
+    deps = WorkerDeps(embed=fake_embed)
+    assert deps.embed is fake_embed, "the override field must be the injected callable"
+    # Other fields keep their factory-bound defaults — none are None.
+    for name in ("entity_seed", "health_check", "wikilinks", "sleep"):
+        value = getattr(deps, name)
+        assert callable(value), f"WorkerDeps.{name} must remain callable after partial override"
+
+
+# ---------------------------------------------------------------------------
 # Shutdown signal tests
 # ---------------------------------------------------------------------------
 
@@ -248,10 +299,12 @@ def test_shutdown_handler_sets_running_false() -> None:
             os.kill(os.getpid(), signal.SIGTERM)
 
     main(
-        embed_fn=embed_then_signal,
-        entity_seed_fn=lambda: None,
-        health_check_fn=lambda: [],
-        sleep_fn=lambda _s: None,
+        deps=WorkerDeps(
+            embed=embed_then_signal,
+            entity_seed=lambda: None,
+            health_check=lambda: [],
+            sleep=lambda _s: None,
+        ),
         embed_interval=999999,
         entity_seed_interval=999999,
         health_check_interval=999999,
@@ -285,10 +338,12 @@ def test_main_loop_runs_embed_on_interval() -> None:
         return []
 
     main(
-        embed_fn=embed_counter,
-        entity_seed_fn=entity_then_noop,
-        health_check_fn=health_then_noop,
-        sleep_fn=lambda _s: None,
+        deps=WorkerDeps(
+            embed=embed_counter,
+            entity_seed=entity_then_noop,
+            health_check=health_then_noop,
+            sleep=lambda _s: None,
+        ),
         # Set all intervals to 0 so every task fires on every loop iteration
         embed_interval=0,
         entity_seed_interval=0,
@@ -315,13 +370,87 @@ def test_shutdown_handler_via_sigint() -> None:
             os.kill(os.getpid(), signal.SIGINT)
 
     main(
-        embed_fn=embed_then_sigint,
-        entity_seed_fn=lambda: None,
-        health_check_fn=lambda: [],
-        sleep_fn=lambda _s: None,
+        deps=WorkerDeps(
+            embed=embed_then_sigint,
+            entity_seed=lambda: None,
+            health_check=lambda: [],
+            sleep=lambda _s: None,
+        ),
         embed_interval=999999,
         entity_seed_interval=999999,
         health_check_interval=999999,
     )
 
     assert call_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# run_wikilinks_inject() — Phase 3 of #100
+# ---------------------------------------------------------------------------
+
+
+def test_run_wikilinks_inject_calls_wikilinks_callable() -> None:
+    called = False
+
+    def _inject() -> None:
+        nonlocal called
+        called = True
+
+    run_wikilinks_inject(deps=WorkerDeps(wikilinks=_inject))
+    assert called
+
+
+def test_run_wikilinks_inject_catches_exceptions() -> None:
+    def _failing() -> None:
+        raise RuntimeError("kapow")
+
+    run_wikilinks_inject(deps=WorkerDeps(wikilinks=_failing))  # must not raise
+
+
+def test_run_wikilinks_inject_survives_systemexit() -> None:
+    """The wikilinks CLI raises SystemExit when entities aren't loaded.
+    The worker must catch it (same discipline as run_embed).
+    """
+
+    def _exits() -> None:
+        raise SystemExit(1)
+
+    run_wikilinks_inject(deps=WorkerDeps(wikilinks=_exits))  # must not propagate
+
+
+def test_main_loop_calls_wikilinks_at_interval() -> None:
+    """When the wikilinks interval has elapsed, main() invokes it once per cycle."""
+    call_counts = {"embed": 0, "wikilinks": 0}
+
+    def _embed_then_shutdown() -> None:
+        call_counts["embed"] += 1
+        if call_counts["embed"] >= 2:
+            import os
+
+            # NOSONAR: self-signal so the loop exits after we observe wikilinks running.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def _wikilinks() -> None:
+        call_counts["wikilinks"] += 1
+
+    main(
+        deps=WorkerDeps(
+            embed=_embed_then_shutdown,
+            entity_seed=lambda: None,
+            health_check=lambda: [],
+            wikilinks=_wikilinks,
+            sleep=lambda _s: None,
+        ),
+        embed_interval=0,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=0,
+    )
+
+    assert call_counts["embed"] >= 1
+    assert call_counts["wikilinks"] >= 1
+
+
+def test_wikilinks_interval_constant_matches_embed() -> None:
+    """Per #100 the inject runs on the same hourly cadence as embed."""
+    assert WIKILINKS_INTERVAL == EMBED_INTERVAL

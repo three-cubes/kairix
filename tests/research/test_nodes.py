@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from kairix.agents.research.nodes import (
+    ClassifyIntentDeps,
+    RetrieveDeps,
     classify_intent,
     evaluate_sufficiency,
     refine_query,
@@ -42,7 +44,7 @@ class TestClassifyIntent:
     def test_sets_intent(self) -> None:
         result = classify_intent(
             _state(query="who is Jordan Blake"),
-            classify_fn=lambda q: MagicMock(value="entity"),
+            deps=ClassifyIntentDeps(classify_fn=lambda q: MagicMock(value="entity")),
         )
         assert result["intent"] == "entity"
 
@@ -51,7 +53,7 @@ class TestClassifyIntent:
         def _failing(q):
             raise RuntimeError("boom")
 
-        result = classify_intent(_state(), classify_fn=_failing)
+        result = classify_intent(_state(), deps=ClassifyIntentDeps(classify_fn=_failing))
         assert result["intent"] == "semantic"
 
 
@@ -75,7 +77,7 @@ class TestRetrieve:
     @pytest.mark.unit
     def test_calls_search(self) -> None:
         mock_search = MagicMock(return_value=_mock_search_result([("a.md", "hello")]))
-        result = retrieve(_state(), search_fn=mock_search)
+        result = retrieve(_state(), deps=RetrieveDeps(search_fn=mock_search))
         assert len(result["retrieved_chunks"]) == 1
         assert result["retrieved_chunks"][0]["path"] == "a.md"
 
@@ -83,20 +85,26 @@ class TestRetrieve:
     def test_accumulates_across_turns(self) -> None:
         existing = [{"path": "old.md", "snippet": "existing"}]
         mock_search = MagicMock(return_value=_mock_search_result([("new.md", "new")]))
-        result = retrieve(_state(retrieved_chunks=existing, turns=1), search_fn=mock_search)
+        result = retrieve(
+            _state(retrieved_chunks=existing, turns=1),
+            deps=RetrieveDeps(search_fn=mock_search),
+        )
         assert len(result["retrieved_chunks"]) == 2
 
     @pytest.mark.unit
     def test_deduplicates_by_path(self) -> None:
         existing = [{"path": "same.md", "snippet": "v1"}]
         mock_search = MagicMock(return_value=_mock_search_result([("same.md", "v2")]))
-        result = retrieve(_state(retrieved_chunks=existing), search_fn=mock_search)
+        result = retrieve(
+            _state(retrieved_chunks=existing),
+            deps=RetrieveDeps(search_fn=mock_search),
+        )
         assert len(result["retrieved_chunks"]) == 1
 
     @pytest.mark.unit
     def test_higher_budget_on_refinement(self) -> None:
         mock_search = MagicMock(return_value=_mock_search_result([]))
-        retrieve(_state(turns=2), search_fn=mock_search)
+        retrieve(_state(turns=2), deps=RetrieveDeps(search_fn=mock_search))
         mock_search.assert_called_once()
         assert mock_search.call_args.kwargs["budget"] == 5000
 

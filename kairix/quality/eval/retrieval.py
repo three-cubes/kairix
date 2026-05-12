@@ -9,6 +9,7 @@ retrieve() from here rather than maintaining local wrappers.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,6 +25,46 @@ class RetrievalResult:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+def _default_pipeline_builder(*, config: Any) -> Any:
+    """Production pipeline factory — wraps ``build_search_pipeline``.
+
+    The lazy local-import avoids a module-import-time circular when
+    callers reach ``kairix.quality.eval.retrieval`` before
+    ``kairix.core.factory`` finishes loading. The wrapper exists so
+    ``RetrievalDeps.pipeline_builder`` has a stable, typed default.
+    """
+    from kairix.core.factory import build_search_pipeline
+
+    return build_search_pipeline(config=config)
+
+
+@dataclass
+class RetrievalDeps:
+    """Injectable dependencies for ``retrieve`` and ``_retrieve_hybrid``.
+
+    Replaces the F6-violating ``search_fn=None`` / ``pipeline_builder=None``
+    test-only kwargs with a typed dataclass. Production code calls
+    ``retrieve(...)`` without ``deps`` and the default factory wires the
+    real ``build_search_pipeline``. Tests construct
+    ``RetrievalDeps(searcher=fake)`` (to bypass pipeline construction) or
+    ``RetrievalDeps(pipeline_builder=spy)`` (to observe the resolved
+    ``RetrievalConfig`` that flows through).
+
+    ``searcher`` stays Optional because the two seams are mutually
+    exclusive: a pre-bound searcher means "skip pipeline construction"
+    and ``None`` means "build the pipeline via ``pipeline_builder``."
+    The name doesn't end in ``_fn`` so it stays clear of F6 even with
+    the ``None`` default.
+
+    ``pipeline_builder`` is non-Optional with a ``default_factory`` (per
+    CLAUDE.md F6 guidance) so mypy sees the production callable directly —
+    no ``assert deps.x is not None`` ladder is needed inside ``retrieve``.
+    """
+
+    pipeline_builder: Callable[..., Any] = field(default_factory=lambda: _default_pipeline_builder)
+    searcher: Callable[..., Any] | None = None
+
+
 def retrieve(
     query: str,
     system: str = "hybrid",
@@ -34,8 +75,7 @@ def retrieve(
     collections: list[str] | None = None,
     fusion_override: str | None = None,
     config: Any | None = None,
-    search_fn: Any | None = None,
-    pipeline_builder: Any | None = None,
+    deps: RetrievalDeps | None = None,
 ) -> RetrievalResult:
     """
     Run retrieval and return a RetrievalResult.
@@ -50,11 +90,11 @@ def retrieve(
         collections:      Explicit collections list (takes precedence over collection).
         fusion_override:  Override fusion strategy (hybrid only).
         config:           Pre-built RetrievalConfig (hybrid only; overrides fusion_override).
-        search_fn:        Pre-bound search function. Bypasses pipeline construction
-                          when provided (used by tests + agents that own their own pipeline).
-        pipeline_builder: Pipeline factory; defaults to ``build_search_pipeline``.
-                          Tests pass a spy to verify the resolved RetrievalConfig
-                          flows through (mirrors the ``search_fn=`` seam).
+        deps:             Injectable dependencies. Tests construct
+                          ``RetrievalDeps(searcher=fake)`` or
+                          ``RetrievalDeps(pipeline_builder=spy)``; production omits the
+                          kwarg and the default factory wires
+                          ``build_search_pipeline``.
 
     Returns:
         RetrievalResult with paths, snippets, and metadata.
@@ -62,6 +102,7 @@ def retrieve(
     Raises:
         ValueError: Unknown system name.
     """
+    deps = deps if deps is not None else RetrievalDeps()
     if system == "hybrid":
         return _retrieve_hybrid(
             query=query,
@@ -70,8 +111,7 @@ def retrieve(
             collections=collections,
             fusion_override=fusion_override,
             config=config,
-            search_fn=search_fn,
-            pipeline_builder=pipeline_builder,
+            deps=deps,
         )
     elif system == "bm25":
         return _retrieve_bm25(query=query, agent=agent, limit=limit)
@@ -96,8 +136,7 @@ def _retrieve_hybrid(
     collections: list[str] | None = None,
     fusion_override: str | None = None,
     config: Any | None = None,
-    search_fn: Any | None = None,
-    pipeline_builder: Any | None = None,
+    deps: RetrievalDeps | None = None,
 ) -> RetrievalResult:
     """Hybrid search backend.
 
@@ -108,6 +147,7 @@ def _retrieve_hybrid(
     eval/benchmark path so ``--collection reference-library`` actually
     receives reflib's tuned overrides.
     """
+    deps = deps if deps is not None else RetrievalDeps()
     # Resolve config BEFORE building the pipeline. The historical bug
     # (config reassigned after pipeline already built) is closed by doing
     # all resolution up front.
@@ -121,13 +161,10 @@ def _retrieve_hybrid(
 
         config = replace(config, fusion_strategy=fusion_override)
 
-    if search_fn is None:
-        if pipeline_builder is None:
-            from kairix.core.factory import build_search_pipeline
-
-            pipeline_builder = build_search_pipeline
-        _pipeline = pipeline_builder(config=config)
-        search_fn = _pipeline.search
+    searcher = deps.searcher
+    if searcher is None:
+        _pipeline = deps.pipeline_builder(config=config)
+        searcher = _pipeline.search
 
     # Build explicit collections list when --collection is set
     effective_collections = collections or ([collection] if collection else None)
@@ -141,7 +178,7 @@ def _retrieve_hybrid(
         search_kwargs["agent"] = agent
         search_kwargs["scope"] = "shared+agent"
 
-    sr = search_fn(**search_kwargs)
+    sr = searcher(**search_kwargs)
     paths = [b.result.path for b in sr.results]
     snippets = [b.content[:500] for b in sr.results]
     meta = {

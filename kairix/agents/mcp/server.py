@@ -24,18 +24,11 @@ Design principles:
 from __future__ import annotations
 
 import logging
-import re
-import sqlite3
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
-import requests
-
 from kairix.agents.mcp.errors import async_tool_handler
-from kairix.core.search.intent import QueryIntent
 from kairix.core.search.scope import Scope
-from kairix.text import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -44,56 +37,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_SCOPE: Scope = Scope.SHARED_AGENT
-
-# ---------------------------------------------------------------------------
-# Budget inference + entity name extraction (AFF-1, AFF-3)
-# ---------------------------------------------------------------------------
-
-_RESEARCH_WORDS = re.compile(r"\b(research|compare|analyse|analyze|comprehensive|detailed)\b", re.IGNORECASE)
-
-_ENTITY_PREFIX_RE = re.compile(
-    r"^(what\s+is|who\s+is|tell\s+me\s+about|what\s+do\s+we\s+know\s+about)\s+",
-    re.IGNORECASE,
-)
-
-
-def _infer_budget(
-    query: str,
-    explicit_budget: int,
-    classify_fn: Callable[[str], QueryIntent] | None = None,
-) -> int:
-    """Automatically adjust the token budget based on question type.
-
-    Quick lookups (person/company names, keywords) get a small budget.
-    Research-style questions get a larger one. If the caller explicitly
-    set a budget, that value is used unchanged.
-
-    Args:
-        classify_fn: Injectable intent classifier for testing.
-                     Defaults to ``kairix.core.search.intent.classify``.
-    """
-    if explicit_budget != 3000:
-        return explicit_budget
-    try:
-        from kairix.core.search.intent import QueryIntent as _QueryIntent
-        from kairix.core.search.intent import classify as _default_classify
-
-        _classify = classify_fn or _default_classify
-        intent = _classify(query)
-        if intent in (_QueryIntent.ENTITY, _QueryIntent.KEYWORD):
-            return 1500
-    except (ImportError, ValueError, TypeError, RuntimeError):
-        logger.debug("_infer_budget: classify failed, using heuristics", exc_info=True)
-    if _RESEARCH_WORDS.search(query):
-        return 5000
-    return 3000
-
-
-def _extract_entity_name(query: str) -> str:
-    """Best-effort extraction of the entity name from a query string."""
-    name = _ENTITY_PREFIX_RE.sub("", query).strip()
-    return name.rstrip("?!. ")
-
 
 # ---------------------------------------------------------------------------
 # Shared service helpers — MCP tools call these, not each other
@@ -176,136 +119,60 @@ def tool_search(
     agent: str | None = None,
     scope: Scope = Scope.SHARED_AGENT,
     budget: int = 3000,
+    limit: int = 10,
     *,
-    search_fn: Callable[..., Any] | None = None,
-    entity_card_fn: Callable[..., Any] | None = None,
+    deps: Any = None,
 ) -> dict[str, Any]:
-    """Search for anything in the knowledge base.
+    """Search the knowledge store.
 
-    Just ask your question — the system works out the best way to find
-    what you need, including handling date-based queries (temporal) and
-    setting the right amount of context automatically. You don't need
-    to configure anything.
+    Thin adapter around ``kairix.use_cases.search.run_search``. CLI and
+    MCP both delegate to the same use case so the surfaces stay aligned
+    (closes Phase-2 drift in #168).
 
-    Args:
-        search_fn:      Injectable search function for testing.
-                        Defaults to the production hybrid search.
-        entity_card_fn: Injectable entity card function for testing.
-                        Defaults to _fetch_entity_card.
+    The optional ``deps`` parameter forwards a ``SearchDeps`` directly
+    to the use case — production callers leave it None; tests pass a
+    ``SearchDeps`` to drive without touching live services.
     """
+    from kairix.use_cases.search import run_search, search_output_to_envelope
+
     logger.info("mcp.search: agent=%r scope=%r", agent, scope)
-    try:
-        # The ``search_fn is None`` branch only fires when ``kairix.core.factory``
-        # is uninstalled; in-process tests always inject ``search_fn`` directly,
-        # so the lazy-import path is unreachable under test.
-        if search_fn is None:  # pragma: no cover
-            from kairix.core.factory import build_search_pipeline
-
-            _pipeline = build_search_pipeline()
-            search_fn = _pipeline.search
-
-        budget = _infer_budget(query, budget)
-        result = search_fn(query=query, agent=agent, scope=scope, budget=budget)
-
-        intent_value = result.intent.value if hasattr(result.intent, "value") else str(result.intent)
-        results_list = [
-            {
-                "path": r.result.path,
-                "score": r.result.boosted_score,
-                "snippet": r.content[:500],
-                "tokens": r.token_estimate,
-            }
-            for r in result.results
-        ]
-
-        # AFF-3: When the question is about a known person/company, show
-        # their knowledge graph summary at the top of results.
-        # Uses _fetch_entity_card (direct Neo4j call) — MCP tools should
-        # not call other MCP tools; they share underlying services.
-        if intent_value == QueryIntent.ENTITY.value:
-            entity_name = _extract_entity_name(query)
-            if entity_name:
-                _entity_card = entity_card_fn or _fetch_entity_card
-                card = _entity_card(entity_name)
-                if card is not None:
-                    results_list.insert(
-                        0,
-                        {
-                            "path": card.get("vault_path", ""),
-                            "score": 1.0,
-                            "snippet": card.get("summary", ""),
-                            "tokens": estimate_tokens(card.get("summary", "")),
-                            "source": "entity_graph",
-                            "entity": {
-                                "id": card.get("id", ""),
-                                "name": card.get("name", ""),
-                                "type": card.get("type", ""),
-                            },
-                        },
-                    )
-
-        return {
-            "query": result.query,
-            "intent": intent_value,
-            "results": results_list,
-            "total_tokens": result.total_tokens,
-            "latency_ms": result.latency_ms,
-            "error": result.error,
-        }
-    except (
-        ImportError,
-        sqlite3.Error,
-        requests.RequestException,
-        KeyError,
-        ValueError,
-    ) as exc:
-        logger.warning("mcp.search failed: %s", exc, exc_info=True)
-        return {
-            "query": query,
-            "intent": "",
-            "results": [],
-            "total_tokens": 0,
-            "latency_ms": 0.0,
-            "error": "Search failed — check server logs for details.",
-        }
-    except Exception as exc:  # broad catch justified: tool_search must never raise to MCP callers
-        logger.warning("mcp.search failed (unexpected): %s", exc, exc_info=True)
-        return {
-            "query": query,
-            "intent": "",
-            "results": [],
-            "total_tokens": 0,
-            "latency_ms": 0.0,
-            "error": "Search failed — check server logs for details.",
-        }
+    out = run_search(
+        query,
+        agent=agent,
+        scope=scope,
+        budget=budget,
+        limit=limit,
+        deps=deps,
+    )
+    return search_output_to_envelope(out)
 
 
 def tool_entity(
     name: str,
     *,
+    deps: Any = None,
     neo4j_client: Any | None = None,
 ) -> dict[str, Any]:
     """Look up a specific person, company, or topic by name.
 
+    Thin adapter around ``kairix.use_cases.entity_get.run_entity_get``.
     This is a quick, direct lookup from the knowledge graph (Neo4j) —
     use it when you already know the name of what you're looking for.
 
-    Args:
-        neo4j_client: Injectable Neo4j client for testing.
-                      Defaults to the production client.
-    """
-    card = _fetch_entity_card(name, neo4j_client=neo4j_client)
-    if card is not None:
-        return {**card, "error": ""}
+    The optional ``deps`` parameter forwards an ``EntityGetDeps`` directly
+    to the use case — production callers leave it None.
 
-    return {
-        "id": "",
-        "name": name,
-        "type": "",
-        "summary": "",
-        "vault_path": "",
-        "error": f"Entity not found: {name}",
-    }
+    The legacy ``neo4j_client`` parameter is retained for back-compat;
+    when set, it overrides the default ``_fetch_entity_card`` helper's
+    Neo4j client. Prefer ``deps`` for new code.
+    """
+    from kairix.use_cases.entity_get import EntityGetDeps, entity_get_output_to_envelope, run_entity_get
+
+    if deps is None and neo4j_client is not None:
+        deps = EntityGetDeps(fetch_fn=lambda n: _fetch_entity_card(n, neo4j_client=neo4j_client))
+
+    out = run_entity_get(name, deps=deps)
+    return entity_get_output_to_envelope(out)
 
 
 def tool_prep(
@@ -314,84 +181,22 @@ def tool_prep(
     tier: Literal["l0", "l1"] = "l0",
     scope: Scope = DEFAULT_SCOPE,
     *,
-    search_fn: Callable[..., Any] | None = None,
-    chat_fn: Callable[..., Any] | None = None,
+    deps: Any = None,
 ) -> dict[str, Any]:
     """Get a short summary of a topic before committing to a full search.
 
-    Choose 'l0' for 2-3 sentences or 'l1' for a structured overview.
-    Uses less resources than a full search — good for quick context checks.
+    Thin adapter around ``kairix.use_cases.prep.run_prep``. Choose 'l0'
+    for 2-3 sentences or 'l1' for a structured overview. Uses less
+    resources than a full search — good for quick context checks.
     Retrieves relevant documents first, then summarises from them.
 
-    Args:
-        scope:     Search scope — shared, agent, shared+agent, all-agents,
-                   or everything. Default shared+agent.
-        search_fn: Injectable search function for testing.
-                   Defaults to the production hybrid search.
-        chat_fn:   Injectable chat completion function for testing.
-                   Defaults to the production Azure chat completion.
+    The optional ``deps`` parameter forwards a ``PrepDeps`` directly
+    to the use case — production callers leave it None.
     """
-    try:
-        if search_fn is None:
-            from kairix.core.factory import build_search_pipeline
+    from kairix.use_cases.prep import prep_output_to_envelope, run_prep
 
-            _pipeline = build_search_pipeline()
-            search_fn = _pipeline.search
-        if chat_fn is None:
-            from kairix._azure import chat_completion
-
-            chat_fn = chat_completion
-
-        # Retrieve context first — prep is grounded, not hallucinated
-        budget = 1500 if tier == "l0" else 3000
-        sr = search_fn(query, agent=agent, scope=scope, budget=budget)
-        context_parts = []
-        for r in sr.results[:5]:
-            context_parts.append(f"[{r.result.title or r.result.path}]\n{r.content[:500]}")
-        context = "\n\n---\n\n".join(context_parts) if context_parts else ""
-
-        if not context:
-            return {
-                "query": query,
-                "tier": tier,
-                "summary": "No relevant documents found for this topic.",
-                "tokens": 0,
-                "error": "",
-            }
-
-        max_tokens = 150 if tier == "l0" else 600
-        system = (
-            "You are a concise knowledge assistant. Based ONLY on the provided documents, "
-            "summarise what is known about the topic in 2-3 sentences. "
-            "Do not add information that is not in the documents."
-            if tier == "l0"
-            else "You are a knowledge assistant. Based ONLY on the provided documents, "
-            "provide a structured overview of the topic. "
-            "Do not add information that is not in the documents."
-        )
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": f"Topic: {query}\n\nDocuments:\n{context}"},
-        ]
-        summary = chat_fn(messages, max_tokens=max_tokens)
-        return {
-            "query": query,
-            "tier": tier,
-            "summary": summary,
-            "tokens": estimate_tokens(summary),
-            "sources": [r.result.title or r.result.path for r in sr.results[:5]],
-            "error": "",
-        }
-    except (ImportError, OSError, RuntimeError, KeyError, ValueError) as exc:
-        logger.warning("mcp.prep failed: %s", exc, exc_info=True)
-        return {
-            "query": query,
-            "tier": tier,
-            "summary": "",
-            "tokens": 0,
-            "sources": [],
-            "error": "Prep failed — check server logs for details.",
-        }
+    out = run_prep(query, agent=agent, scope=scope, tier=tier, deps=deps)
+    return prep_output_to_envelope(out)
 
 
 def tool_timeline(
@@ -399,140 +204,50 @@ def tool_timeline(
     anchor_date: str | None = None,
     agent: str | None = None,
     scope: Scope = DEFAULT_SCOPE,
-    *,
-    extract_fn: Callable[..., Any] | None = None,
-    rewrite_fn: Callable[..., Any] | None = None,
-    search_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Date-aware retrieval: rewrite a temporal query and fetch results.
 
-    Behaviour matches the CLI's ``kairix timeline`` (closes the WS2-C asymmetry
-    flagged in the 2026-05-02 dogfood):
-
-      - When the query contains a temporal expression ("last week", "April 2026"),
-        the rewriter expands it into a date range; ``rewritten_query`` carries
-        the expanded form.
-      - When no temporal expression is found, ``is_temporal=False`` and
-        ``fell_back=True``; the search is performed against the original query
-        rather than returning nothing useful.
-      - Either way, ``results`` carries the search hits when ``search_fn`` is
-        provided. Tests that don't want the search side-effect omit ``search_fn``
-        and get an empty ``results`` list.
-
-    Args:
-        extract_fn: Injectable time window extraction for testing. Defaults to
-            extract_time_window in production via build_server wiring.
-        rewrite_fn: Injectable temporal rewriter for testing.
-        search_fn:  Injectable search function. When None, no search is
-            performed (rewriter-only mode for unit tests). Production
-            invocations from build_server pass a wired SearchPipeline.search.
+    Thin adapter around ``kairix.use_cases.timeline.run_timeline``. CLI and
+    MCP both call the same use case so behaviour is identical (closes #163,
+    Phase 1 of #168). The use case extracts a time window from the query
+    (or accepts explicit since/until), tries the temporal-chunks index
+    first, then falls through to the search pipeline.
     """
-    try:
-        from datetime import date as _date
+    from datetime import date as _date
 
-        if extract_fn is None:
-            from kairix.core.temporal.rewriter import extract_time_window
+    from kairix.use_cases.timeline import run_timeline
 
-            extract_fn = extract_time_window
-        if rewrite_fn is None:
-            from kairix.core.temporal.rewriter import rewrite_temporal_query
-
-            rewrite_fn = rewrite_temporal_query
-
-        anchor: _date | None = None
-        if anchor_date:
-            try:
-                anchor = _date.fromisoformat(anchor_date)
-            except ValueError:
-                pass
-
-        # Detect temporal intent from BOTH relative ("last week") and absolute ("April 2026") expressions
-        time_window: dict[str, str] = {}
+    anchor: _date | None = None
+    if anchor_date:
         try:
-            start, end = extract_fn(query=query, reference_date=anchor)
-            if start or end:
-                time_window = {
-                    "start": str(start) if start else "",
-                    "end": str(end) if end else "",
-                }
-        except Exception:
-            start, end = None, None
-            logger.debug("extract_time_window failed", exc_info=True)
+            anchor = _date.fromisoformat(anchor_date)
+        except ValueError:
+            pass
 
-        is_temporal = bool(time_window)
-        rewritten = rewrite_fn(query=query, reference_date=anchor) if is_temporal else query
-        rewritten = rewritten if rewritten is not None else query
+    result = run_timeline(
+        query,
+        anchor_date=anchor,
+        agent=agent,
+        scope=scope,
+    )
 
-        # Fallthrough search: when search_fn is wired, always run a search using
-        # the (possibly rewritten) query so MCP callers get results even on
-        # non-temporal queries. fell_back signals the rewrite was a no-op.
-        # Result items are BudgetedResult — fields live on .result; .content
-        # is the boundary-trimmed snippet. Earlier code shape-mismatched and
-        # produced empty placeholders (Shape's 2026-05-05 MCP path report).
-        results_list: list[dict[str, Any]] = []
-        if search_fn is not None:
-            try:
-                sr = search_fn(query=rewritten, budget=3000, agent=agent, scope=scope)
-                for budgeted in getattr(sr, "results", []):
-                    inner = getattr(budgeted, "result", None)
-                    if inner is None:
-                        continue
-                    snippet = getattr(budgeted, "content", "") or getattr(inner, "snippet", "")
-                    results_list.append(
-                        {
-                            "path": getattr(inner, "path", ""),
-                            "title": getattr(inner, "title", ""),
-                            "snippet": snippet[:300],
-                            "score": getattr(inner, "boosted_score", getattr(inner, "score", 0.0)),
-                        }
-                    )
-                # Diagnostic for #163: when results are non-empty but every row
-                # has an empty path, the upstream pipeline is producing a
-                # malformed result shape. Log enough state to triage the next
-                # occurrence without reproducing live (the CLI is unaffected
-                # because it uses a different code path entirely —
-                # query_temporal_chunks against the structured temporal index).
-                if results_list and all(not r["path"] for r in results_list):
-                    logger.warning(
-                        "mcp.timeline: %d empty-path results returned for query=%r "
-                        "(rewritten=%r, agent=%r, scope=%r). Pipeline diagnostics: "
-                        "bm25_count=%s vec_count=%s fused_count=%s collections=%s "
-                        "vec_failed=%s error=%r — see #163.",
-                        len(results_list),
-                        query[:80],
-                        rewritten[:80] if rewritten != query else "<same>",
-                        agent,
-                        scope.value if hasattr(scope, "value") else str(scope),
-                        getattr(sr, "bm25_count", "?"),
-                        getattr(sr, "vec_count", "?"),
-                        getattr(sr, "fused_count", "?"),
-                        getattr(sr, "collections", "?"),
-                        getattr(sr, "vec_failed", "?"),
-                        getattr(sr, "error", "?"),
-                    )
-            except Exception:
-                logger.debug("timeline fallthrough search failed", exc_info=True)
-
-        return {
-            "original_query": query,
-            "rewritten_query": rewritten,
-            "is_temporal": is_temporal,
-            "fell_back": not is_temporal,
-            "time_window": time_window,
-            "results": results_list,
-            "error": "",
-        }
-    except Exception as exc:
-        logger.warning("mcp.timeline failed: %s", exc, exc_info=True)
-        return {
-            "original_query": query,
-            "rewritten_query": query,
-            "is_temporal": False,
-            "fell_back": True,
-            "time_window": {},
-            "results": [],
-            "error": "Timeline processing failed — check server logs for details.",
-        }
+    return {
+        "original_query": result.original_query,
+        "rewritten_query": result.rewritten_query,
+        "is_temporal": result.is_temporal,
+        "fell_back": result.fell_back,
+        "time_window": result.time_window,
+        "results": [
+            {
+                "path": h.path,
+                "title": h.title,
+                "snippet": h.snippet,
+                "score": h.score,
+            }
+            for h in result.results
+        ],
+        "error": result.error,
+    }
 
 
 def tool_research(
@@ -540,142 +255,45 @@ def tool_research(
     agent: str | None = None,
     max_turns: int = 4,
     *,
-    research_fn: Callable[..., Any] | None = None,
+    deps: Any = None,
 ) -> dict[str, Any]:
     """Ask a research question. The system searches multiple times, refining
     its approach until it finds a good answer or reports what's missing.
 
+    Thin adapter around ``kairix.use_cases.research.run_research_use_case``.
     Use this for complex questions that need more than a quick search.
     For simple lookups, use search instead — it's faster.
 
-    Args:
-        query:       The question to research.
-        agent:       Agent name for collection scoping.
-        max_turns:   Maximum search rounds (default 4).
-        research_fn: Injectable research function for testing.
-                     Defaults to run_research.
-
-    Returns:
-        dict with: query, synthesis, retrieved_chunks, gaps, confidence, turns, error.
+    The optional ``deps`` parameter forwards a ``ResearchDeps`` directly
+    to the use case — production callers leave it None.
     """
-    # Clamp max_turns to prevent unbounded LLM call amplification
-    max_turns = min(max(1, max_turns), 10)
-    try:
-        if research_fn is None:
-            from kairix.agents.research.graph import run_research
+    from kairix.use_cases.research import research_output_to_envelope, run_research_use_case
 
-            research_fn = run_research
-
-        result = research_fn(query=query, max_turns=max_turns)
-        return {
-            "query": result.get("query", query),
-            "synthesis": result.get("synthesis", ""),
-            "retrieved_chunks": result.get("retrieved_chunks", [])[:10],
-            "gaps": result.get("gaps", []),
-            "confidence": result.get("confidence", 0.0),
-            "turns": result.get("turns", 0),
-            "error": result.get("error", ""),
-        }
-    except Exception as exc:
-        logger.warning("mcp.research failed: %s", exc, exc_info=True)
-        return {
-            "query": query,
-            "synthesis": "",
-            "retrieved_chunks": [],
-            "gaps": [],
-            "confidence": 0.0,
-            "turns": 0,
-            "error": "Research failed — check server logs for details.",
-        }
+    out = run_research_use_case(query, max_turns=max_turns, deps=deps)
+    return research_output_to_envelope(out)
 
 
-def _resolve_guide_path(guide_path: Path | None) -> Path:
-    """Resolve the usage-guide markdown file path. Production fallback chain:
-    relative to this module → relative to the installed kairix package.
-    """
-    if guide_path is not None:
-        return guide_path
-    candidate = Path(__file__).parent.parent.parent / "docs" / "agent-usage-guide.md"
-    if candidate.exists():
-        return candidate
-    import kairix as _kairix
-
-    return Path(_kairix.__file__).parent.parent / "docs" / "agent-usage-guide.md"
-
-
-def _extract_topic_sections(full_text: str, topic_lower: str) -> str:
-    """Return the concatenated markdown sections whose heading mentions the topic.
-
-    Sections are demarcated by ``##`` / ``###`` headings. Falls back to a
-    keyword search across all lines when no heading matches.
-    """
-    lines = full_text.splitlines()
-    sections: list[str] = []
-    current: list[str] = []
-    in_section = False
-
-    for line in lines:
-        is_heading = line.startswith("## ") or line.startswith("### ")
-        if is_heading:
-            if in_section and current:
-                sections.append("\n".join(current))
-                current = []
-            in_section = topic_lower in line.lower()
-            if in_section:
-                current = [line]
-        elif in_section:
-            current.append(line)
-
-    if in_section and current:
-        sections.append("\n".join(current))
-
-    if sections:
-        return "\n\n".join(sections)
-    matching_lines = [ln for ln in lines if topic_lower in ln.lower()]
-    return "\n".join(matching_lines[:30]) if matching_lines else full_text[:2000]
-
-
-def tool_usage_guide(topic: str = "", *, guide_path: Path | None = None) -> dict[str, Any]:
+def tool_usage_guide(
+    topic: str = "",
+    *,
+    guide_path: Path | None = None,
+    deps: Any = None,
+) -> dict[str, Any]:
     """
     Return the kairix agent usage guide, or a section of it filtered by topic.
 
-    Use this tool when you are unsure how to use kairix, when a search returns
-    unexpected results, or when you want to understand a specific feature.
+    Thin adapter around ``kairix.use_cases.usage_guide.run_usage_guide``.
+    Use this tool when you are unsure how to use kairix, when a search
+    returns unexpected results, or when you want to understand a feature.
 
-    Args:
-        topic: Optional topic filter (e.g. "temporal", "entity", "troubleshoot",
-               "intent", "budget"). Empty string returns the full guide.
-        guide_path: Explicit path to the guide markdown file. When omitted,
-                    resolves relative to the package layout (production default).
-                    Tests inject an explicit path rather than monkeypatching
-                    ``__file__``.
-
-    Returns:
-        dict with keys: topic, content (markdown string), error.
+    The optional ``deps`` parameter forwards a ``UsageGuideDeps`` directly
+    to the use case — production callers leave it None. The legacy
+    ``guide_path`` parameter is preserved as the operator-facing override.
     """
-    try:
-        resolved_path = _resolve_guide_path(guide_path)
-        if not resolved_path.exists():
-            return {
-                "topic": topic,
-                "content": "",
-                "error": "Usage guide not found. Run: kairix onboard guide --document-root <path>",
-            }
+    from kairix.use_cases.usage_guide import run_usage_guide, usage_guide_output_to_envelope
 
-        full_text = resolved_path.read_text(encoding="utf-8")
-        if not topic:
-            return {"topic": "", "content": full_text, "error": ""}
-
-        content = _extract_topic_sections(full_text, topic.lower())
-        return {"topic": topic, "content": content, "error": ""}
-
-    except Exception as exc:
-        logger.warning("mcp.usage_guide failed: %s", exc)
-        return {
-            "topic": topic,
-            "content": "",
-            "error": "Usage guide lookup failed — check server logs for details.",
-        }
+    out = run_usage_guide(topic, guide_path=guide_path, deps=deps)
+    return usage_guide_output_to_envelope(out)
 
 
 def tool_contradict(
@@ -683,69 +301,89 @@ def tool_contradict(
     agent: str | None = None,
     top_k: int = 5,
     threshold: float = 0.45,
+    top_claims: int = 3,
     scope: Scope = DEFAULT_SCOPE,
     *,
-    llm_backend: Any | None = None,
-    contradict_fn: Callable[..., Any] | None = None,
+    deps: Any = None,
 ) -> dict[str, Any]:
     """Check new content against existing knowledge for contradictions.
 
+    Thin adapter around ``kairix.use_cases.contradict.run_contradict``.
     Use before writing new facts — catches conflicts with what's already
     in the knowledge base. Returns a list of contradicting documents with
     scores and explanations.
 
-    Args:
-        llm_backend:   Injectable LLM backend for testing.
-                       Defaults to the production backend.
-        contradict_fn: Injectable contradiction checker for testing.
-                       Defaults to check_contradiction.
+    The optional ``deps`` parameter forwards a ``ContradictDeps`` directly
+    to the use case — production callers leave it None.
     """
-    try:
-        if contradict_fn is None:
-            from kairix.knowledge.contradict.detector import check_contradiction
+    from kairix.use_cases.contradict import contradict_output_to_envelope, run_contradict
 
-            contradict_fn = check_contradiction
-        if llm_backend is None:
-            from kairix.platform.llm import get_default_backend
+    out = run_contradict(
+        content,
+        agent=agent,
+        scope=scope,
+        top_k=top_k,
+        threshold=threshold,
+        top_claims=top_claims,
+        deps=deps,
+    )
+    return contradict_output_to_envelope(out)
 
-            llm_backend = get_default_backend()
 
-        # Agent forwarding stays conditional — the WS2-B design intentionally
-        # doesn't lock contradict to a single agent's collection so cross-agent
-        # contradictions surface. Scope is always forwarded so callers who want
-        # explicit broadening (scope=everything) or narrowing get it.
-        extra: dict[str, Any] = {"scope": scope}
-        if agent is not None:
-            extra["agent"] = agent
-        results = contradict_fn(
-            content=content,
-            llm=llm_backend,
-            top_k=top_k,
-            threshold=threshold,
-            **extra,
-        )
-        return {
-            "content": content,
-            "contradictions": [
-                {
-                    "path": r.doc_path,
-                    "score": r.score,
-                    "reason": r.reason,
-                    "snippet": r.snippet,
-                }
-                for r in results
-            ],
-            "has_contradictions": len(results) > 0,
-            "error": "",
-        }
-    except Exception as exc:
-        logger.warning("mcp.contradict failed: %s", exc, exc_info=True)
-        return {
-            "content": content,
-            "contradictions": [],
-            "has_contradictions": False,
-            "error": "Contradiction check failed — check server logs for details.",
-        }
+def tool_entity_suggest(
+    text: str,
+    *,
+    deps: Any = None,
+) -> dict[str, Any]:
+    """Suggest entities found in arbitrary text by running NER + Neo4j cross-ref.
+
+    Thin adapter around ``kairix.use_cases.entity.run_entity_suggest``.
+    Use to spot people, organisations, places mentioned in prose so an
+    operator (or another agent) can decide whether to add them to the
+    knowledge graph.
+    """
+    from kairix.use_cases.entity import entity_suggest_output_to_envelope, run_entity_suggest
+
+    out = run_entity_suggest(text, deps=deps)
+    return entity_suggest_output_to_envelope(out)
+
+
+def tool_entity_validate(
+    name: str,
+    update: bool = False,
+    *,
+    deps: Any = None,
+) -> dict[str, Any]:
+    """Validate an entity against Wikidata and optionally update Neo4j.
+
+    Thin adapter around ``kairix.use_cases.entity.run_entity_validate``.
+    Use to confirm a graph entity has a real-world match (qid) and
+    optionally write that qid back to the Neo4j node.
+    """
+    from kairix.use_cases.entity import entity_validate_output_to_envelope, run_entity_validate
+
+    out = run_entity_validate(name, update=update, deps=deps)
+    return entity_validate_output_to_envelope(out)
+
+
+def tool_brief(
+    agent: str,
+    *,
+    deps: Any = None,
+) -> dict[str, Any]:
+    """Generate a session briefing and return its content + path.
+
+    Thin adapter around ``kairix.use_cases.brief.run_brief``. Use before
+    starting work — gives an agent the operator's recent decisions,
+    notes, and entity stub in one structured payload.
+
+    The optional ``deps`` parameter forwards a ``BriefDeps`` directly to
+    the use case — production callers leave it None.
+    """
+    from kairix.use_cases.brief import brief_output_to_envelope, run_brief
+
+    out = run_brief(agent, deps=deps)
+    return brief_output_to_envelope(out)
 
 
 # ---------------------------------------------------------------------------
@@ -782,9 +420,10 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         agent: str | None = None,
         scope: Scope = DEFAULT_SCOPE,
         budget: int = 3000,
+        limit: int = 10,
     ) -> dict[str, Any]:
         """Search your knowledge store — finds the best answers to any question."""
-        return tool_search(query=query, agent=agent, scope=scope, budget=budget)
+        return tool_search(query=query, agent=agent, scope=scope, budget=budget, limit=limit)
 
     @server.tool()
     @async_tool_handler
@@ -812,15 +451,11 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Temporal query rewriting + date-aware retrieval."""
-        from kairix.core.factory import build_search_pipeline
-
-        _timeline_pipeline = build_search_pipeline()
         return tool_timeline(
             query=query,
             anchor_date=anchor_date,
             agent=agent,
             scope=scope,
-            search_fn=_timeline_pipeline.search,
         )
 
     @server.tool()
@@ -836,6 +471,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         agent: str | None = None,
         top_k: int = 5,
         threshold: float = 0.45,
+        top_claims: int = 3,
         scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Check new content against existing knowledge for contradictions."""
@@ -844,6 +480,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
             agent=agent,
             top_k=top_k,
             threshold=threshold,
+            top_claims=top_claims,
             scope=scope,
         )
 
@@ -852,5 +489,23 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     def usage_guide(topic: str = "") -> dict[str, Any]:
         """Return the kairix agent usage guide. Call this when unsure how to use kairix."""
         return tool_usage_guide(topic=topic)
+
+    @server.tool()
+    @async_tool_handler
+    def brief(agent: str) -> dict[str, Any]:
+        """Generate a session briefing for an agent. Returns content + on-disk path."""
+        return tool_brief(agent=agent)
+
+    @server.tool()
+    @async_tool_handler
+    def entity_suggest(text: str) -> dict[str, Any]:
+        """Suggest entities (people, organisations, places) found in text via NER + Neo4j cross-ref."""
+        return tool_entity_suggest(text=text)
+
+    @server.tool()
+    @async_tool_handler
+    def entity_validate(name: str, update: bool = False) -> dict[str, Any]:
+        """Validate a named entity against Wikidata and optionally write the qid to Neo4j."""
+        return tool_entity_validate(name=name, update=update)
 
     return server

@@ -21,7 +21,6 @@ Tests construct SearchPipeline with fakes from tests.fakes:
   - FakeSearchLogger     (telemetry side-effect)
 """
 
-import json
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -359,80 +358,10 @@ def test_search_intent_is_classified() -> None:
     assert result.intent == QueryIntent.PROCEDURAL
 
 
-# ---------------------------------------------------------------------------
-# CLI tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_cli_formats_output(capsys: pytest.CaptureFixture) -> None:
-    """CLI prints formatted search results."""
-    from kairix.core.search.cli import main as search_cli
-
-    # Create a mock pipeline that returns a PipelineSearchResult
-    mock_pipeline = MagicMock()
-    mock_pipeline.search.return_value = PipelineSearchResult(
-        query="test query",
-        intent=QueryIntent.SEMANTIC,
-        results=[],
-        bm25_count=0,
-        vec_count=0,
-        fused_count=0,
-    )
-
-    search_cli(["test query"], pipeline=mock_pipeline)
-
-    captured = capsys.readouterr()
-    assert "test query" in captured.out
-    assert "semantic" in captured.out
-
-
-@pytest.mark.unit
-def test_cli_json_flag(capsys: pytest.CaptureFixture) -> None:
-    """--json flag outputs valid JSON."""
-    from kairix.core.search.cli import main as search_cli
-
-    mock_pipeline = MagicMock()
-    mock_pipeline.search.return_value = PipelineSearchResult(
-        query="test",
-        intent=QueryIntent.SEMANTIC,
-        results=[],
-        bm25_count=0,
-        vec_count=0,
-        fused_count=0,
-    )
-
-    search_cli(["test", "--json"], pipeline=mock_pipeline)
-
-    captured = capsys.readouterr()
-    data = json.loads(captured.out)
-    assert data["query"] == "test"
-    assert "results" in data
-
-
-@pytest.mark.unit
-def test_cli_agent_flag_passed_to_search(capsys: pytest.CaptureFixture) -> None:
-    """--agent flag is forwarded to pipeline.search()."""
-    from kairix.core.search.cli import main as search_cli
-
-    mock_pipeline = MagicMock()
-    mock_pipeline.search.return_value = PipelineSearchResult(
-        query="test",
-        intent=QueryIntent.SEMANTIC,
-        results=[],
-        bm25_count=0,
-        vec_count=0,
-        fused_count=0,
-    )
-
-    search_cli(["test", "--agent", "shape"], pipeline=mock_pipeline)
-
-    assert mock_pipeline.search.call_count == 1
-    call_kwargs = mock_pipeline.search.call_args.kwargs
-    assert call_kwargs["query"] == "test"
-    assert call_kwargs["agent"] == "shape"
-    assert call_kwargs["scope"] == "shared+agent"
-    assert call_kwargs["budget"] == 3000
+# CLI behaviour is now covered in tests/search/test_cli.py (pure-helper unit tests),
+# tests/bdd/test_search_cli.py (operator-visible scenarios), and
+# tests/use_cases/test_search.py (use case behaviour). The CLI no longer accepts
+# a ``pipeline=`` kwarg — Phase 2 of #168 routed it through ``run_search``.
 
 
 # ---------------------------------------------------------------------------
@@ -513,50 +442,8 @@ def test_search_entity_intent_proceeds_when_neo4j_available() -> None:
     assert result.error == ""
 
 
-@pytest.mark.unit
-def test_cli_entity_error_exits_nonzero(capsys: pytest.CaptureFixture) -> None:
-    """CLI exits with code 1 and prints error when entity query fails."""
-    from kairix.core.search.cli import main as search_cli
-
-    mock_pipeline = MagicMock()
-    mock_pipeline.search.return_value = PipelineSearchResult(
-        query="tell me about Acme",
-        intent=QueryIntent.ENTITY,
-        results=[],
-        error="Neo4j is required for entity queries but is unavailable.",
-    )
-
-    with pytest.raises(SystemExit) as exc_info:
-        search_cli(["tell me about Acme"], pipeline=mock_pipeline)
-
-    assert exc_info.value.code == 1
-    captured = capsys.readouterr()
-    assert "Neo4j" in captured.out
-
-
-@pytest.mark.unit
-def test_cli_entity_error_json_includes_error_field(
-    capsys: pytest.CaptureFixture,
-) -> None:
-    """--json output includes 'error' field when entity query fails."""
-    from kairix.core.search.cli import main as search_cli
-
-    mock_pipeline = MagicMock()
-    mock_pipeline.search.return_value = PipelineSearchResult(
-        query="tell me about Acme",
-        intent=QueryIntent.ENTITY,
-        results=[],
-        error="Neo4j is required for entity queries but is unavailable.",
-    )
-
-    with pytest.raises(SystemExit) as exc_info:
-        search_cli(["tell me about Acme", "--json"], pipeline=mock_pipeline)
-
-    assert exc_info.value.code == 1
-    captured = capsys.readouterr()
-    data = json.loads(captured.out)
-    assert "error" in data
-    assert "Neo4j" in data["error"]
+# CLI entity-error exit code + JSON envelope are covered by
+# tests/search/test_cli.py and tests/bdd/test_search_cli.py.
 
 
 # ---------------------------------------------------------------------------

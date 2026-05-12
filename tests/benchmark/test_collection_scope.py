@@ -70,7 +70,7 @@ class TestRetrieveCollectionWiring:
             "hybrid",
             "shape",
             collection="reference-library",
-            search_fn=search,
+            searcher=search,
         )
 
         assert len(search.calls) == 1
@@ -80,7 +80,7 @@ class TestRetrieveCollectionWiring:
         from kairix.quality.benchmark.runner import retrieve
 
         search = _CapturingSearch()
-        retrieve("test query", "hybrid", "shape", search_fn=search)
+        retrieve("test query", "hybrid", "shape", searcher=search)
 
         assert search.calls[0]["collections"] is None
 
@@ -89,7 +89,7 @@ class TestRetrieveCollectionWiring:
         from kairix.quality.benchmark.runner import retrieve
 
         search = _CapturingSearch()
-        retrieve("test query", "hybrid", "shape", fusion_override="rrf", search_fn=search)
+        retrieve("test query", "hybrid", "shape", fusion_override="rrf", searcher=search)
 
         assert len(search.calls) == 1
         assert search.calls[0]["query"] == "test query"
@@ -99,7 +99,7 @@ class TestRunBenchmarkMetadata:
     """Verify that collection and fusion_override appear in result metadata."""
 
     def test_metadata_includes_collection(self) -> None:
-        from kairix.quality.benchmark.runner import run_benchmark
+        from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
         from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
 
         def _fake_retrieve(**kwargs):
@@ -122,13 +122,13 @@ class TestRunBenchmarkMetadata:
             suite,
             collection="reference-library",
             fusion_override="rrf",
-            retrieve_fn=_fake_retrieve,
+            deps=BenchmarkDeps(retrieve=_fake_retrieve),
         )
         assert result.meta["collection"] == "reference-library"
         assert result.meta["fusion_override"] == "rrf"
 
     def test_metadata_none_when_unset(self) -> None:
-        from kairix.quality.benchmark.runner import run_benchmark
+        from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
         from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
 
         def _fake_retrieve(**kwargs):
@@ -147,6 +147,6 @@ class TestRunBenchmarkMetadata:
             ],
         )
 
-        result = run_benchmark(suite, retrieve_fn=_fake_retrieve)
+        result = run_benchmark(suite, deps=BenchmarkDeps(retrieve=_fake_retrieve))
         assert result.meta["collection"] is None
         assert result.meta["fusion_override"] is None

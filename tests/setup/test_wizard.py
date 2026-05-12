@@ -72,7 +72,7 @@ def test_docker_compose_valid_yaml() -> None:
 @pytest.mark.unit
 def test_wizard_rejects_nonexistent_document_root(tmp_path: Path) -> None:
     """Setup wizard fails cleanly when document root doesn't exist."""
-    from kairix.platform.setup.wizard import run_setup
+    from kairix.platform.setup.wizard import WizardDeps, run_setup
 
     output = tmp_path / "test-config.yaml"
     nonexistent = str(tmp_path / "does-not-exist")
@@ -85,7 +85,7 @@ def test_wizard_rejects_nonexistent_document_root(tmp_path: Path) -> None:
         ctx=ctx,
         document_path=nonexistent,
         preset="general",
-        connection_test_fn=lambda *_a, **_k: True,
+        deps=WizardDeps(connection_test=lambda *_a, **_k: True),
     )
 
     assert result is False, "Wizard should reject a non-existent document root"
@@ -97,7 +97,7 @@ def test_wizard_rejects_nonexistent_document_root_no_continue_option(
     tmp_path: Path,
 ) -> None:
     """Wizard must hard-reject a non-existent document root (no 'continue anyway?' escape)."""
-    from kairix.platform.setup.wizard import run_setup
+    from kairix.platform.setup.wizard import WizardDeps, run_setup
 
     output = tmp_path / "test-config.yaml"
     nonexistent = str(tmp_path / "does-not-exist")
@@ -113,7 +113,7 @@ def test_wizard_rejects_nonexistent_document_root_no_continue_option(
         ctx=ctx,
         document_path=nonexistent,
         preset="general",
-        connection_test_fn=lambda *_a, **_k: True,
+        deps=WizardDeps(connection_test=lambda *_a, **_k: True),
     )
 
     assert result is False
@@ -123,7 +123,7 @@ def test_wizard_rejects_nonexistent_document_root_no_continue_option(
 @pytest.mark.unit
 def test_wizard_accepts_valid_document_root(tmp_path: Path) -> None:
     """Setup wizard accepts a valid existing document root."""
-    from kairix.platform.setup.wizard import run_setup
+    from kairix.platform.setup.wizard import WizardDeps, run_setup
 
     output = tmp_path / "test-config.yaml"
     doc_dir = tmp_path / "docs"
@@ -137,7 +137,7 @@ def test_wizard_accepts_valid_document_root(tmp_path: Path) -> None:
         ctx=ctx,
         document_path=str(doc_dir),
         preset="general",
-        connection_test_fn=lambda *_a, **_k: True,
+        deps=WizardDeps(connection_test=lambda *_a, **_k: True),
     )
 
     assert result is True
@@ -147,7 +147,7 @@ def test_wizard_accepts_valid_document_root(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_run_setup_generates_config(tmp_path: Path, monkeypatch) -> None:
     """run_setup writes a valid YAML config file."""
-    from kairix.platform.setup.wizard import run_setup
+    from kairix.platform.setup.wizard import WizardDeps, run_setup
 
     output = tmp_path / "test-config.yaml"
 
@@ -175,7 +175,7 @@ def test_run_setup_generates_config(tmp_path: Path, monkeypatch) -> None:
 
     run_setup(
         output_path=str(output),
-        connection_test_fn=lambda *_a, **_k: False,
+        deps=WizardDeps(connection_test=lambda *_a, **_k: False),
     )
     # Setup may return False due to connection failure + "continue anyway"
     # but the config file should still be written
@@ -187,3 +187,65 @@ def test_run_setup_generates_config(tmp_path: Path, monkeypatch) -> None:
             config = yaml.safe_load(f)
         assert "retrieval" in config
         assert isinstance(config["retrieval"], dict)
+
+
+@pytest.mark.unit
+def test_wizard_deps_default_factory_binds_callable() -> None:
+    """``WizardDeps()`` with no overrides constructs a deps bag whose
+    ``connection_test`` field is a callable, not ``None``.
+
+    Sabotage proof: this is the corner the F6 issue specifically calls
+    out — ``Optional[Callable] = None`` self-resolving in ``__post_init__``
+    has landed mypy bugs. ``default_factory`` must bind a real callable
+    or this assertion fires. The test reads only the public field; it
+    does not import the private default function (that would violate F5).
+    """
+    from kairix.platform.setup.wizard import WizardDeps
+
+    deps = WizardDeps()
+    # The type system narrows this away, but we want a runtime sabotage:
+    # if the implementation regressed to ``Optional[Callable] = None``
+    # without a __post_init__, ``deps.connection_test`` would be None at
+    # runtime even if mypy were satisfied. The cast through callable() is
+    # what catches that.
+    assert callable(deps.connection_test), (
+        f"default_factory must bind a callable; got {deps.connection_test!r}. "
+        "Regressing to ``connection_test: Callable | None = None`` without a "
+        "post-init wire-up would leave this None and break run_setup."
+    )
+
+
+@pytest.mark.unit
+def test_wizard_deps_override_used_by_run_setup(tmp_path: Path) -> None:
+    """``run_setup(deps=WizardDeps(connection_test=fake))`` routes the wizard's
+    connection probe through the injected fake.
+
+    Sabotage proof: the fake records every call. If the wizard ignored
+    ``deps`` and fell through to the production probe, no calls would be
+    recorded and this test would fail.
+    """
+    from kairix.platform.setup.prompts import SetupContext
+    from kairix.platform.setup.wizard import WizardDeps, run_setup
+
+    calls: list[tuple[str, str, str, str]] = []
+
+    def _spy(provider: str, endpoint: str, api_key: str, embed_model: str) -> bool:
+        calls.append((provider, endpoint, api_key, embed_model))
+        return True
+
+    output = tmp_path / "test-config.yaml"
+    doc_dir = tmp_path / "docs"
+    doc_dir.mkdir()
+
+    ctx = SetupContext(interactive=False, json_mode=False, state_path=tmp_path / ".state.json")
+    run_setup(
+        output_path=str(output),
+        ctx=ctx,
+        document_path=str(doc_dir),
+        preset="general",
+        deps=WizardDeps(connection_test=_spy),
+    )
+
+    assert len(calls) == 1, f"injected probe should run exactly once; got {len(calls)} calls"
+    # Provider key from prompt default (Azure)
+    assert calls[0][0] == "azure"

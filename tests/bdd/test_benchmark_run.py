@@ -9,8 +9,8 @@ FEATURE = str(Path(__file__).parent / "features" / "benchmark_run.feature")
 
 
 @pytest.mark.bdd
-@scenario(FEATURE, "Mock benchmark produces category scores and gates")
-def test_mock_benchmark_produces_scores_and_gates():
+@scenario(FEATURE, "Benchmark produces category scores and gates")
+def test_benchmark_produces_scores_and_gates():
     """Body populated by @scenario from the .feature file."""
 
 

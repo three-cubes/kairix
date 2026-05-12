@@ -184,3 +184,47 @@ def test_run_embed_does_not_overcount_when_embed_batch_returns_fewer_vectors_tha
         f"embedded={result['embedded']} but content_vectors has {staged_count} rows — "
         "partial-response chunks were miscounted"
     )
+
+
+# ---------------------------------------------------------------------------
+# Contract: unaccounted chunks (partial response) bubble out as ``failed`` —
+# they don't vanish into ``skipped``. Sabotage check: if the bookkeeping
+# treated the dropped chunk as skipped, this test would fail because the
+# documented contract is that anything that didn't get a vector but was in
+# the batch is a failure to be retried, not a deliberate skip.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_run_embed_partial_response_marks_unaccounted_chunks_as_failed() -> None:
+    """Partial-response chunks must surface in ``failed`` and ``failed_paths`` —
+    not get silently swallowed into ``skipped``. The caller relies on this
+    to retry / log / alert on partial-response chunks.
+    """
+    from kairix.core.embed.embed import run_embed
+
+    db = sqlite3.connect(":memory:")
+    _seed_documents(
+        db,
+        [
+            ("h1", "first body " * 5, "docs/a.md"),
+            ("h2", "second body " * 5, "docs/b.md"),
+            ("h3", "third body " * 5, "docs/c.md"),
+        ],
+    )
+
+    def _partial_embed_batch(texts, *_a, **_kw):
+        # Drop the last text on every call — backend returns N-1 vectors.
+        return [[0.1] * 1536 for _ in texts[:-1]]
+
+    deps = _build_run_embed_deps(embed_batch=_partial_embed_batch)
+    result = run_embed(db, batch_size=10, deps=deps)
+
+    # Exactly one chunk lacks a vector — it must surface as failed, not skipped.
+    assert result["failed"] == 1, f"expected failed=1 (the unaccounted chunk); got failed={result['failed']}"
+    # And the path of the unaccounted chunk must appear in failed_paths so
+    # callers can retry it. The dropped text is the last in the texts list,
+    # which corresponds to docs/c.md (last seeded).
+    assert "docs/c.md" in result["failed_paths"], (
+        f"unaccounted chunk's path missing from failed_paths={result['failed_paths']}"
+    )

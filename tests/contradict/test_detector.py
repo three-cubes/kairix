@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from kairix.knowledge.contradict.detector import (
+    ContradictDetectorDeps,
     ContradictionResult,
     check_contradiction,
 )
@@ -68,6 +69,16 @@ def _llm_response(score: float, reason: str = "test reason") -> str:
     return json.dumps({"score": score, "reason": reason})
 
 
+def _deps_with_search(search: Any, scorer: Any | None = None) -> ContradictDetectorDeps:
+    """Build a ContradictDetectorDeps using the given search/scorer.
+
+    The default extractor is left in place; ``scorer`` is optional so callers
+    that want the production composite scorer (built lazily from llm) can
+    pass ``None``.
+    """
+    return ContradictDetectorDeps(search=search, scorer=scorer)
+
+
 # ---------------------------------------------------------------------------
 # check_contradiction — exercises parse_llm_score's response-parsing branches
 # through the public surface. Each malformed/edge-case LLM response is fed
@@ -94,7 +105,7 @@ def test_unparseable_llm_response_yields_no_contradiction(raw_response: str) -> 
     parse_llm_score's failure branches through the public surface."""
     llm = FakeLLMBackend(chat_response=raw_response)
     bundles = [_make_search_result("doc.md", "candidate")]
-    results = check_contradiction("claim", llm=llm, threshold=0.5, search_fn=_fake_search(bundles))
+    results = check_contradiction("claim", llm=llm, threshold=0.5, deps=_deps_with_search(_fake_search(bundles)))
     assert results == []
 
 
@@ -103,21 +114,38 @@ def test_score_above_one_is_clamped_to_one() -> None:
     """parse_llm_score clamps to [0.0, 1.0]. Observed via the resulting score."""
     llm = FakeLLMBackend(chat_response='{"score": 1.5, "reason": "extreme"}')
     bundles = [_make_search_result("doc.md", "candidate")]
-    results = check_contradiction("claim", llm=llm, threshold=0.0, search_fn=_fake_search(bundles))
+    results = check_contradiction("claim", llm=llm, threshold=0.0, deps=_deps_with_search(_fake_search(bundles)))
     assert len(results) == 1
     assert results[0].score == pytest.approx(1.0)
 
 
 @pytest.mark.unit
 def test_score_below_zero_is_clamped_to_zero() -> None:
-    """Negative scores clamp to 0.0; below threshold → no result."""
+    """Negative scores clamp to 0.0; threshold=0.5 drops them entirely."""
     llm = FakeLLMBackend(chat_response='{"score": -0.3, "reason": "negative"}')
     bundles = [_make_search_result("doc.md", "candidate")]
-    # threshold=0 admits 0.0; the result should be present with score=0.
-    results = check_contradiction("claim", llm=llm, threshold=0.0, search_fn=_fake_search(bundles))
-    # Score below threshold>0 would drop the result — this just asserts the clamp.
-    if results:
-        assert results[0].score == pytest.approx(0.0)
+    # Use a non-zero threshold so the clamp can be observed: clamped 0.0
+    # is below 0.5, so the candidate must be dropped. (Sabotage-prove:
+    # if the clamp returned -0.3 unchanged, it would still be < 0.5
+    # so this assertion alone wouldn't catch the bug — see the partner
+    # test below.)
+    results = check_contradiction("claim", llm=llm, threshold=0.5, deps=_deps_with_search(_fake_search(bundles)))
+    assert results == []
+
+
+@pytest.mark.unit
+def test_score_below_zero_clamp_admits_at_threshold_zero() -> None:
+    """Negative scores clamp to 0.0; with threshold=0.0 the result IS admitted at score=0.0.
+
+    Partner to the above test — if the clamp didn't fire (i.e. -0.3 leaked
+    through), the result would still be admitted but with score=-0.3,
+    which this assertion catches.
+    """
+    llm = FakeLLMBackend(chat_response='{"score": -0.3, "reason": "negative"}')
+    bundles = [_make_search_result("doc.md", "candidate")]
+    results = check_contradiction("claim", llm=llm, threshold=0.0, deps=_deps_with_search(_fake_search(bundles)))
+    assert len(results) == 1
+    assert results[0].score == pytest.approx(0.0)
 
 
 @pytest.mark.unit
@@ -127,7 +155,7 @@ def test_json_with_preamble_parses_correctly() -> None:
         chat_response='Here is my assessment: {"score": 0.7, "reason": "contradicts existing record"}',
     )
     bundles = [_make_search_result("doc.md", "candidate")]
-    results = check_contradiction("claim", llm=llm, threshold=0.5, search_fn=_fake_search(bundles))
+    results = check_contradiction("claim", llm=llm, threshold=0.5, deps=_deps_with_search(_fake_search(bundles)))
     assert len(results) == 1
     assert results[0].score == pytest.approx(0.7)
     assert "contradicts" in results[0].reason.lower()
@@ -142,7 +170,11 @@ def test_json_with_preamble_parses_correctly() -> None:
 def test_check_contradiction_returns_empty_on_search_failure() -> None:
     """Returns [] when hybrid search raises an exception."""
     llm = FakeLLMBackend()
-    results = check_contradiction("some claim", llm=llm, search_fn=_failing_search(RuntimeError("no db")))
+    results = check_contradiction(
+        "some claim",
+        llm=llm,
+        deps=_deps_with_search(_failing_search(RuntimeError("no db"))),
+    )
     assert results == []
 
 
@@ -152,7 +184,7 @@ def test_check_contradiction_returns_empty_when_no_results_above_threshold() -> 
     llm = FakeLLMBackend(chat_response=_llm_response(0.2))  # well below default threshold 0.6
 
     bundles = [_make_search_result("a/doc.md", "some content")]
-    results = check_contradiction("new claim", llm=llm, search_fn=_fake_search(bundles))
+    results = check_contradiction("new claim", llm=llm, deps=_deps_with_search(_fake_search(bundles)))
     assert results == []
 
 
@@ -166,7 +198,7 @@ def test_check_contradiction_returns_result_above_threshold() -> None:
         "The project launched in Q3.",
         llm=llm,
         threshold=0.6,
-        search_fn=_fake_search(bundles),
+        deps=_deps_with_search(_fake_search(bundles)),
     )
     assert len(results) == 1
     r = results[0]
@@ -195,8 +227,7 @@ def test_check_contradiction_respects_top_k() -> None:
         llm=llm,
         top_k=3,
         threshold=0.0,
-        search_fn=_fake_search(bundles),
-        scorer=scorer,
+        deps=ContradictDetectorDeps(search=_fake_search(bundles), scorer=scorer),
     )
     # Only 3 LLM calls should have been made (3 unique candidates x 1 scorer)
     assert len(llm.chat_calls) == 3
@@ -215,7 +246,7 @@ def test_check_contradiction_sorts_by_score_descending() -> None:
     )
 
     bundles = [_make_search_result(f"doc{i}.md", "content") for i in range(3)]
-    results = check_contradiction("claim", llm=llm, threshold=0.0, search_fn=_fake_search(bundles))
+    results = check_contradiction("claim", llm=llm, threshold=0.0, deps=_deps_with_search(_fake_search(bundles)))
     scores = [r.score for r in results]
     assert scores == sorted(scores, reverse=True)
     assert scores[0] == pytest.approx(0.9)
@@ -262,8 +293,7 @@ def test_check_contradiction_handles_llm_exception() -> None:
         "claim",
         llm=llm,
         threshold=0.5,
-        search_fn=_fake_search(bundles),
-        scorer=scorer,
+        deps=ContradictDetectorDeps(search=_fake_search(bundles), scorer=scorer),
     )
     assert len(results) == 1
     assert results[0].doc_path == "ok.md"
@@ -273,7 +303,7 @@ def test_check_contradiction_handles_llm_exception() -> None:
 def test_check_contradiction_no_search_results() -> None:
     """Returns [] when search returns no results."""
     llm = FakeLLMBackend()
-    results = check_contradiction("claim", llm=llm, search_fn=_fake_search([]))
+    results = check_contradiction("claim", llm=llm, deps=_deps_with_search(_fake_search([])))
     assert results == []
     assert len(llm.chat_calls) == 0
 
@@ -300,5 +330,5 @@ def test_check_contradiction_snippet_truncated_to_300_chars() -> None:
 
     long_content = "X" * 1000
     bundles = [_make_search_result("doc.md", long_content)]
-    results = check_contradiction("claim", llm=llm, threshold=0.0, search_fn=_fake_search(bundles))
+    results = check_contradiction("claim", llm=llm, threshold=0.0, deps=_deps_with_search(_fake_search(bundles)))
     assert len(results[0].snippet) <= 300

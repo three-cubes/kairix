@@ -30,6 +30,36 @@ from kairix.text import estimate_tokens, truncate_to_tokens
 
 logger = logging.getLogger(__name__)
 
+
+def _default_synthesise() -> Callable[..., str]:
+    """Return the production synthesiser. Lazy import breaks the module cycle."""
+    from kairix.agents.briefing.synthesiser import synthesise
+
+    return synthesise
+
+
+def _default_write_briefing() -> Callable[..., Path]:
+    """Return the production writer. Lazy import breaks the module cycle."""
+    from kairix.agents.briefing.writer import write_briefing
+
+    return write_briefing
+
+
+@dataclass
+class BriefingDeps:
+    """Injectable dependencies for ``generate_briefing``.
+
+    Each field defaults to the production implementation via
+    ``default_factory`` — fields are typed as concrete callables so mypy
+    sees a real type at every call site (no ``assert deps.x is not None``
+    ladder). Tests construct ``BriefingDeps(synthesise_fn=fake, ...)`` to
+    swap individual collaborators.
+    """
+
+    synthesise_fn: Callable[..., str] = field(default_factory=_default_synthesise)
+    write_fn: Callable[..., Path] = field(default_factory=_default_write_briefing)
+
+
 # Token caps per source (approximate)
 _SOURCE_TOKEN_CAPS: dict[str, int] = {
     "memory_logs": 500,
@@ -96,8 +126,7 @@ def _trim_context(context: dict[str, str]) -> dict[str, str]:
 def generate_briefing(
     agent: str,
     *,
-    synthesise_fn: Callable[..., str] | None = None,
-    write_fn: Callable[..., Path] | None = None,
+    deps: BriefingDeps | None = None,
     sources: dict[str, Callable] | None = None,
     output_dir: Path | None = None,
 ) -> str:
@@ -110,20 +139,21 @@ def generate_briefing(
     8:   Write to file
 
     Args:
-        agent:         Agent name (e.g. "builder", "shape").
-        synthesise_fn: Optional replacement for the LLM synthesis step.
-                       Signature: (agent, context, max_tokens=800) -> str.
-        write_fn:      Optional replacement for the file writer step.
-                       Signature: (agent, content, sources_count, token_estimate) -> Path.
+        agent:      Agent name (e.g. "builder", "shape").
+        deps:       Injectable dependencies (synthesise_fn, write_fn).
+                    Production callers leave None — the dataclass wires
+                    real implementations via ``default_factory``. Tests
+                    construct ``BriefingDeps(synthesise_fn=fake, ...)``.
+        sources:    Per-source callable overrides (key = source name).
+        output_dir: Optional output directory override (currently unused
+                    by this function; reserved for future).
 
     Returns:
         Full briefing content (with header). Never raises.
     """
-    from kairix.agents.briefing.synthesiser import synthesise as _default_synthesise
-    from kairix.agents.briefing.writer import write_briefing as _default_write
-
-    synthesise = synthesise_fn or _default_synthesise
-    write_briefing = write_fn or _default_write
+    d = deps or BriefingDeps()
+    synthesise = d.synthesise_fn
+    write_briefing = d.write_fn
 
     t_start = time.monotonic()
     logger.info("pipeline: generating briefing for agent %r", agent)
@@ -281,18 +311,15 @@ class BriefingPipeline:
     for each agent.
 
     Attributes:
-        sources:        Per-source callable overrides (key = source name).
-        synthesise_fn:  LLM synthesis callable. Signature:
-                        (agent, context, max_tokens=800) -> str.
-        write_fn:       File writer callable. Signature:
-                        (agent, content, sources_count, token_estimate) -> Path.
-        output_dir:     Optional output directory override (unused by
-                        generate_briefing today, reserved for future).
+        sources:    Per-source callable overrides (key = source name).
+        deps:       Injectable dependencies (synthesise_fn, write_fn).
+                    Defaults to production implementations.
+        output_dir: Optional output directory override (unused by
+                    generate_briefing today, reserved for future).
     """
 
     sources: dict[str, Callable] = field(default_factory=dict)
-    synthesise_fn: Callable[..., str] | None = None
-    write_fn: Callable[..., Path] | None = None
+    deps: BriefingDeps = field(default_factory=BriefingDeps)
     output_dir: Path | None = None
 
     def generate(self, agent: str) -> str:
@@ -309,8 +336,7 @@ class BriefingPipeline:
         """
         return generate_briefing(
             agent=agent,
-            synthesise_fn=self.synthesise_fn,
-            write_fn=self.write_fn,
+            deps=self.deps,
             sources=self.sources if self.sources else None,
             output_dir=self.output_dir,
         )

@@ -40,20 +40,41 @@ class CheckResult:
     fix: str | None = field(default=None)
 
 
+def _default_is_docker() -> bool:
+    """Production ``is_docker`` — defers to ``kairix.paths._is_docker``."""
+    from kairix.paths import _is_docker as _impl
+
+    return _impl()
+
+
+@dataclass
+class OnboardChecksDeps:
+    """Injectable dependencies for the onboard health checks.
+
+    Each field defaults to a production implementation; tests construct
+    ``OnboardChecksDeps(which=fake_which, is_docker=lambda: True)``
+    rather than threading per-check ``*_fn=None`` substitution kwargs
+    through the public health-check signatures.
+    """
+
+    which: Callable[[str], str | None] = field(default_factory=lambda: shutil.which)
+    is_docker: Callable[[], bool] = field(default_factory=lambda: _default_is_docker)
+
+
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
 
 
-def check_kairix_on_path(which_fn: Callable[[str], str | None] | None = None) -> CheckResult:
+def check_kairix_on_path(deps: OnboardChecksDeps | None = None) -> CheckResult:
     """kairix is findable via PATH.
 
-    ``which_fn`` is a DI seam (defaults to ``shutil.which``); tests pass
-    a callable returning the desired result so PATH doesn't need mutating.
+    ``deps.which`` is the DI seam (defaults to ``shutil.which``); tests
+    pass a ``OnboardChecksDeps`` with a callable returning the desired
+    result so the live PATH never needs mutating.
     """
-    if which_fn is None:
-        which_fn = shutil.which
-    path = which_fn("kairix")
+    d = deps if deps is not None else OnboardChecksDeps()
+    path = d.which("kairix")
     if path is None:
         return CheckResult(
             name="kairix_on_path",
@@ -68,31 +89,23 @@ def check_kairix_on_path(which_fn: Callable[[str], str | None] | None = None) ->
     return CheckResult(name="kairix_on_path", ok=True, detail=f"kairix found at {path}")
 
 
-def check_wrapper_installed(
-    is_docker_fn: Callable[[], bool] | None = None,
-    which_fn: Callable[[str], str | None] | None = None,
-) -> CheckResult:
+def check_wrapper_installed(deps: OnboardChecksDeps | None = None) -> CheckResult:
     """The kairix symlink points to a shell wrapper, not the raw Python binary.
 
-    ``is_docker_fn`` and ``which_fn`` are DI seams; production callers leave
-    them ``None`` and the implementation defaults to the kairix paths helper
+    ``deps.is_docker`` and ``deps.which`` are the DI seams; production
+    callers leave ``deps=None`` and defaults wire to ``kairix.paths._is_docker``
     and ``shutil.which``.
     """
-    if is_docker_fn is None:
-        from kairix.paths import _is_docker as _default_is_docker
+    d = deps if deps is not None else OnboardChecksDeps()
 
-        is_docker_fn = _default_is_docker
-    if which_fn is None:
-        which_fn = shutil.which
-
-    if is_docker_fn():
+    if d.is_docker():
         return CheckResult(
             name="wrapper_installed",
             ok=True,
             detail="Running in Docker — wrapper check skipped (pip install in image)",
         )
 
-    path = which_fn("kairix")
+    path = d.which("kairix")
     if path is None:
         return CheckResult(
             name="wrapper_installed",

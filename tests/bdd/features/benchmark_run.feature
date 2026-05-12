@@ -3,7 +3,7 @@ Feature: Benchmark suite execution
   I want to run a benchmark suite and see quality gates
   So that I know if my retrieval system meets production standards
 
-  Scenario: Mock benchmark produces category scores and gates
+  Scenario: Benchmark produces category scores and gates
     Given a valid benchmark suite with recall and entity cases
     When the operator runs the benchmark with system "mock"
     Then the result has a weighted_total score
