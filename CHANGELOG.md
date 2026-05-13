@@ -7,6 +7,27 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
+## [2026.5.14] - 2026-05-14 — FTS rebuild atomicity + quality-exceptions Wave 1 burndown
+
+> **Upgrading?** Drop-in. The FTS fix prevents transient `no such table: documents_fts` errors during worker rebuild cycles — operators occasionally seeing those in logs will stop seeing them. Internal refactors land alongside; no public-API changes.
+
+### Fixed
+
+- **`documents_fts` no longer disappears mid-rebuild (#223).** `rebuild_fts()` ran `DROP TABLE`, `CREATE VIRTUAL TABLE`, `INSERT` as three separate auto-commit operations. Python's `sqlite3` default isolation doesn't auto-begin a transaction for DDL, so the DROP committed immediately. Any concurrent reader querying `documents_fts` between the DROP and the subsequent `CREATE`/`INSERT`/`commit` saw "no such table" and BM25 silently fell back to vector-only. The rebuild is now wrapped in `BEGIN IMMEDIATE` / `commit` (or honours an existing caller transaction). Atomic from any reader's perspective. Two regression tests pin the property; one is sabotage-proven.
+
+### Changed (internal — quality-exceptions Wave 1)
+
+- **F6 baseline emptied (12 → 0).** All `*_fn=None` test-only kwargs in production are gone, replaced by typed `*Deps` dataclasses with `default_factory` factories. Modules converted across PRs #209, #213, #215, #212: `quality/benchmark/runner.py`, `agents/briefing/pipeline.py`, `agents/research/{graph,nodes}.py`, `core/search/config_loader.py`, `knowledge/contradict/detector.py`, `knowledge/summaries/generate.py`, `platform/llm/backends.py`, `platform/onboard/check.py`, `platform/setup/wizard.py`, `quality/eval/retrieval.py`, `worker.py`.
+- **`EmbedDependencies` refactored to the `default_factory` pattern (#216, refs #204).** Eliminates the `Optional[Callable] | None = None` + `__post_init__` self-resolution that caused mypy `--strict` regressions and required `assert deps.X is not None` ladders at every call site. 6 such assertions deleted from `embed.py`. The new `kairix/core/embed/_deps_defaults.py` sibling module is the canonical pattern; same shape can roll forward to `SearchDeps`, `SummariesDeps`, `LLMJudgeScorer`.
+- **Coverage backfills (PRs #205, #206, #207, #210):** `rerank.py` 62 → 100%, `vector_repository.py` 0 → 100%, `embed.py` 80 → 100% testable surface, `recall_check.py` 7 pragmas → 0. F7 baseline -4. Dead `FileNotFoundError` guard in `recall_check.py` removed (rationale was self-contradictory; helpers it claimed to defend against don't raise FNF).
+- **Dependency bumps**: `openai` requirement widened to `>=1.40,<3`; `codecov/codecov-action` 5 → 6, `docker/setup-buildx-action` 3 → 4, `SonarSource/sonarqube-scan-action` 6 → 8, `dorny/paths-filter` 3 → 4, plus pinned-SHA updates to `pypa/gh-action-pypi-publish` and `hynek/build-and-inspect-python-package`.
+
+### Operational notes
+
+- **Reflib benchmark verification (2026-05-13):** post-fix reflib-gold-v3 scored 0.872 weighted / 0.944 NDCG@10. Pre-fix steady-state was 0.890 — the 0.018 delta is within Azure embedding stochasticity. The fix's value is preventing the transient BM25-blackout window during worker rebuilds, not a steady-state lift. Both runs ran with zero FTS errors.
+
+---
+
 ## [2026.5.10] - 2026-05-10 — Worker stability, layered health probes, deploy self-heal
 
 > **Upgrading?** Drop-in. The worker now survives recall-gate alerts (which were silently killing the process before this release). The `/healthz/ready` endpoint is new but additive — `/healthz` is unchanged for back-compat with existing load-balancer probes. systemd-managed deployments should adopt the example unit files in `scripts/install/` to fix the post-reboot self-heal gap (#167).
