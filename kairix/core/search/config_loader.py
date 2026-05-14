@@ -385,7 +385,7 @@ def _parse_rerank(d: dict) -> RerankConfig:
 # ---------------------------------------------------------------------------
 
 
-def _merge_retrieval_config(base: RetrievalConfig, overrides: dict) -> RetrievalConfig:
+def merge_retrieval_config(base: RetrievalConfig, overrides: dict) -> RetrievalConfig:
     """Apply a partial YAML override dict on top of a base RetrievalConfig.
 
     Only keys present in the override dict are applied. Sub-configs (entity,
@@ -531,6 +531,6 @@ def resolve_retrieval_config(
     # Per-collection YAML overrides
     overrides = d.overrides_fn().get(target)
     if overrides:
-        return _merge_retrieval_config(global_cfg, overrides)
+        return merge_retrieval_config(global_cfg, overrides)
 
     return global_cfg
