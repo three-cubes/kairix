@@ -6,6 +6,20 @@ Usage:
   kairix benchmark validate --suite SUITE
   kairix benchmark compare  RESULT_A RESULT_B
   kairix benchmark init    --agent AGENT [--collections COL,COL]
+  kairix benchmark list
+
+Suite YAML schema (suites/<name>.yaml):
+  meta:
+    name: <suite-name>
+    description: <one-liner>
+    default_collection: <collection-name>  # auto-scoping target for `run` when
+                                           # --collection is not explicitly passed.
+                                           # Resolves #222: the bundled reflib
+                                           # suite ships default_collection=
+                                           # reference-library because that
+                                           # collection has in_default: false in
+                                           # the stock config.
+  cases: [ ... ]
 
 Exits 0 on success, 1 on error.
 """
@@ -16,7 +30,10 @@ import argparse
 import json
 import math
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from kairix.core.db import get_db_path, open_db
 
@@ -90,25 +107,98 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 # ---------------------------------------------------------------------------
+# Dependencies — injectable seams for the CLI subcommands (F6-clean).
+# Production callers leave ``deps=None``; tests construct ``BenchmarkCLIDeps``
+# with fakes to avoid ``@patch`` (F1) and env-var monkeypatching (F2).
+# ---------------------------------------------------------------------------
+
+
+def _default_run_benchmark(**kwargs: Any) -> Any:
+    """Production benchmark runner — lazy import so tests that inject a fake
+    never load the heavy retrieval stack."""
+    from kairix.quality.benchmark.runner import run_benchmark
+
+    return run_benchmark(**kwargs)
+
+
+def _default_list_suites() -> list[dict]:
+    """Production bundled-suites lister — lazy import for symmetry with
+    ``_default_run_benchmark``."""
+    from kairix.quality.benchmark.suite import list_bundled_suites
+
+    return list_bundled_suites()
+
+
+@dataclass(frozen=True)
+class BenchmarkCLIDeps:
+    """Injectable dependencies for the benchmark CLI subcommands.
+
+    Non-Optional fields wired to production callables via ``default_factory``
+    so the dataclass holds no ``None`` sentinels (mypy-clean and F6-clean).
+    Tests construct ``BenchmarkCLIDeps(run_benchmark=fake, ...)``; production
+    callers leave it ``None`` and the defaults apply.
+
+    Attributes:
+        run_benchmark: Callable matching ``runner.run_benchmark``'s kwargs.
+                       Captures ``collection``, ``system``, etc. so tests can
+                       assert auto-scoping wired the right collection through.
+        list_suites:   Callable returning bundled-suite dicts. Defaults to
+                       ``suite.list_bundled_suites`` (reads
+                       ``kairix.paths.bundled_suites_root()``); tests pass a
+                       fake to avoid env-var monkeypatching for the suites
+                       root (F2-clean).
+    """
+
+    run_benchmark: Callable[..., Any] = field(default_factory=lambda: _default_run_benchmark)
+    list_suites: Callable[[], list[dict]] = field(default_factory=lambda: _default_list_suites)
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: run
 # ---------------------------------------------------------------------------
 
 
-def cmd_run(args: argparse.Namespace) -> int:
-    from kairix.quality.benchmark.runner import format_interpretation, run_benchmark
+def resolve_collection(
+    explicit: str | None,
+    default_collection: str | None,
+) -> tuple[str | None, bool]:
+    """Decide which collection the run should target.
+
+    Returns ``(collection, auto_scoped)`` where ``auto_scoped`` is True only
+    when the suite's ``default_collection`` was applied because the operator
+    didn't pass ``--collection``. Explicit operator input always wins — this
+    is the override semantics the issue asks for.
+    """
+    if explicit is not None:
+        return explicit, False
+    if default_collection:
+        return default_collection, True
+    return None, False
+
+
+def cmd_run(args: argparse.Namespace, deps: BenchmarkCLIDeps | None = None) -> int:
+    from kairix.quality.benchmark.runner import format_interpretation
     from kairix.quality.benchmark.suite import load_suite, resolve_suite_path, validate_suite
 
-    suite_path = resolve_suite_path(args.suite)
+    d = deps or BenchmarkCLIDeps()
+
+    try:
+        suite_path = resolve_suite_path(args.suite)
+    except FileNotFoundError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        print("   did you mean: kairix benchmark list?", file=sys.stderr)
+        return 1
+
     suite = load_suite(str(suite_path))
     print(f"Suite: {suite.meta.get('name', args.suite)}  ({len(suite.cases)} cases)  [{suite_path}]")
 
     # Auto-scope to suite.meta.default_collection when --collection not provided.
     # Resolves #222: bundled reflib suite ships with default_collection=reference-library
     # so users don't need to know that collection has in_default: false.
-    collection = getattr(args, "collection", None)
+    explicit_collection = getattr(args, "collection", None)
     default_collection = suite.meta.get("default_collection")
-    if collection is None and default_collection:
-        collection = default_collection
+    collection, auto_scoped = resolve_collection(explicit_collection, default_collection)
+    if auto_scoped:
         print(f"  auto-scoping to collection '{collection}' (from suite.meta.default_collection)")
 
     # Lightweight validation — warn but don't block on missing gold paths
@@ -125,7 +215,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             for e in errors:
                 print(f"   {e}")
 
-    result = run_benchmark(
+    result = d.run_benchmark(
         suite=suite,
         system=args.system,
         agent=args.agent,
@@ -138,12 +228,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_list(args: argparse.Namespace) -> int:
+def cmd_list(args: argparse.Namespace, deps: BenchmarkCLIDeps | None = None) -> int:
     """List bundled benchmark suites (resolves #222)."""
     del args  # unused — list takes no flags
-    from kairix.quality.benchmark.suite import list_bundled_suites
+    d = deps or BenchmarkCLIDeps()
 
-    suites = list_bundled_suites()
+    suites = d.list_suites()
     if not suites:
         print("No bundled suites found. Set KAIRIX_SUITES_ROOT or cd to a directory containing 'suites/'.")
         return 1
@@ -351,23 +441,35 @@ cases:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, deps: BenchmarkCLIDeps | None = None) -> int:
+    """Dispatch a single ``kairix benchmark`` invocation.
+
+    Returns the exit code so tests can assert without ``SystemExit``. The
+    ``__main__`` shim still calls ``sys.exit(main())`` for the production
+    entry point.
+
+    ``deps`` is threaded through to ``cmd_run`` and ``cmd_list`` — the two
+    subcommands that talk to retrieval/suite-discovery. ``validate``,
+    ``compare``, and ``init`` operate purely on filesystem inputs.
+    """
     args = _parse_args(argv)
 
+    if args.subcommand == "run":
+        return cmd_run(args, deps=deps)
+    if args.subcommand == "list":
+        return cmd_list(args, deps=deps)
+
     handlers = {
-        "run": cmd_run,
         "validate": cmd_validate,
         "compare": cmd_compare,
         "init": cmd_init,
-        "list": cmd_list,
     }
     handler = handlers.get(args.subcommand)
     if handler:
-        sys.exit(handler(args))
-    else:
-        print(f"Unknown subcommand: {args.subcommand}", file=sys.stderr)
-        sys.exit(1)
+        return handler(args)
+    print(f"Unknown subcommand: {args.subcommand}", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
