@@ -200,6 +200,21 @@ def bundled_suites_root() -> Path:
     return Path(os.environ.get("KAIRIX_SUITES_ROOT", "suites"))
 
 
+def worker_state_path() -> Path:
+    """Path to the worker state JSON (#224). Sits in the kairix data dir so
+    ``docker compose down/up`` preserves restart_count across worker restarts."""
+    return _default_data_dir() / "worker-state.json"
+
+
+def worker_pause_flag_path() -> Path:
+    """Touch-file checked by the worker each loop iteration (#224 phase 4).
+
+    When present, the worker enters WorkerPhase.PAUSED until the flag is
+    removed. ``kairix worker pause/resume`` toggles the file's existence.
+    """
+    return _default_data_dir() / ".worker-paused"
+
+
 def db_path() -> Path:
     """Get the database path."""
     return KairixPaths.resolve().db_path
