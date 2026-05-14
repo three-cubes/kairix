@@ -221,6 +221,112 @@ def test_suggest_entities_drops_empty_surface_form():
 
 
 @pytest.mark.unit
+def test_phantom_existing_entity_not_surfaced_when_not_in_input():
+    """#249: phantom-hit defence — a stored entity must not surface when its
+    canonical name is not actually in the input.
+
+    Repro mirrors the dogfood report. ``Neo4jClient.find_by_name`` does a
+    ``CONTAINS`` substring match, so a stub returning ``Brown Corp`` for
+    the surface form ``"brown"`` simulates the production behaviour.
+    Pre-fix: the row carried through and the suggestion surfaced with
+    ``is_new=False`` even though ``"Brown Corp"`` is nowhere in the
+    input. Post-fix: ``_filter_phantom_rows`` drops it.
+
+    Sabotage-prove: remove the ``_filter_phantom_rows`` call from
+    ``suggest_entities`` (or have it return ``rows`` unchanged) and the
+    final assertion that ``matches[0].is_new is True`` fails.
+    """
+
+    class _FuzzyNeo4j:
+        """Production-like CONTAINS substring match."""
+
+        available = True
+
+        def find_by_name(self, name):
+            n = name.lower()
+            rows = [{"id": "brown-corp", "name": "Brown Corp", "label": "Organisation"}]
+            return [r for r in rows if n in r["name"].lower() or r["name"].lower() in n]
+
+    # NER picks up "Brown" (capitalised, e.g. a person's surname). The stored
+    # entity "Brown Corp" must NOT surface because its canonical name is
+    # not present as a phrase in the input.
+    mock_nlp = _make_mock_spacy([("Brown", "PERSON")])
+    result = suggest_entities("the quick Brown fox jumped", _FuzzyNeo4j(), nlp=mock_nlp)
+
+    matches = [s for s in result if s.text == "Brown"]
+    assert matches, f"expected 'Brown' in suggestions; got {[s.text for s in result]}"
+    assert matches[0].is_new is True, (
+        f"expected phantom Brown Corp to be filtered (is_new=True); got is_new={matches[0].is_new}, "
+        f"existing_name={matches[0].existing_name!r}"
+    )
+    assert matches[0].existing_id is None
+    assert matches[0].existing_name is None
+
+
+@pytest.mark.unit
+def test_existing_entity_surfaced_when_referenced_in_input():
+    """#249: post-filter must preserve legitimate existing-entity hits.
+
+    Counter to the phantom-hit test: when the stored entity's name is
+    actually present in the input, the lookup succeeds and the result
+    surfaces with ``is_new=False`` and the canonical id/name. Pins
+    against an over-tight phantom filter that would also reject the
+    valid case.
+
+    Sabotage-prove: change ``_filter_phantom_rows`` to ``return []`` and
+    this test fails (existing_id becomes None).
+    """
+
+    class _FuzzyNeo4j:
+        available = True
+
+        def find_by_name(self, name):
+            n = name.lower()
+            rows = [{"id": "brown-corp", "name": "Brown Corp", "label": "Organisation"}]
+            return [r for r in rows if n in r["name"].lower() or r["name"].lower() in n]
+
+    mock_nlp = _make_mock_spacy([("Brown Corp", "ORG")])
+    result = suggest_entities("Brown Corp announced a new partnership", _FuzzyNeo4j(), nlp=mock_nlp)
+
+    matches = [s for s in result if s.text == "Brown Corp"]
+    assert matches, f"expected Brown Corp in suggestions; got {[s.text for s in result]}"
+    assert matches[0].is_new is False
+    assert matches[0].existing_id == "brown-corp"
+    assert matches[0].existing_name == "Brown Corp"
+
+
+@pytest.mark.unit
+def test_existing_entity_surfaced_when_name_appears_at_word_boundary_even_if_surface_differs():
+    """A surface form that's a substring of a stored entity name still
+    surfaces the entity when the full name appears elsewhere in the
+    input.
+
+    Use case: NER picks ``"Brown"`` from the input as a surface form,
+    but the input also contains ``"Brown Corp"`` further along. The
+    fuzzy match returns ``Brown Corp`` for the surface form ``"Brown"``,
+    and because the full name is present as a token, the post-filter
+    keeps the row.
+    """
+
+    class _FuzzyNeo4j:
+        available = True
+
+        def find_by_name(self, name):
+            n = name.lower()
+            rows = [{"id": "brown-corp", "name": "Brown Corp", "label": "Organisation"}]
+            return [r for r in rows if n in r["name"].lower() or r["name"].lower() in n]
+
+    mock_nlp = _make_mock_spacy([("Brown", "PERSON")])
+    text = "Brown joined Brown Corp last quarter"
+    result = suggest_entities(text, _FuzzyNeo4j(), nlp=mock_nlp)
+
+    matches = [s for s in result if s.text == "Brown"]
+    assert matches
+    assert matches[0].is_new is False
+    assert matches[0].existing_name == "Brown Corp"
+
+
+@pytest.mark.unit
 def test_suggest_entities_load_model_failure_returns_empty():
     """When spaCy is importable but _load_model fails, suggest_entities returns []
     (covers the `except Exception` branch around _load_model and the _load_model

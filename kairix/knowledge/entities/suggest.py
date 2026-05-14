@@ -124,9 +124,10 @@ def suggest_entities(
         is_new = True
         try:
             rows = neo4j_client.find_by_name(surface_form)
-            if rows:
-                existing_id = str(rows[0].get("id", ""))
-                existing_name = str(rows[0].get("name", ""))
+            phantom_filtered = _filter_phantom_rows(rows, surface_form=surface_form, input_text=text)
+            if phantom_filtered:
+                existing_id = str(phantom_filtered[0].get("id", ""))
+                existing_name = str(phantom_filtered[0].get("name", ""))
                 is_new = False
         except Exception as exc:
             logger.debug("suggest_entities: Neo4j lookup for %r failed — %s", surface_form, exc)
@@ -155,6 +156,65 @@ def _load_model() -> Any:
         raise RuntimeError(
             "spaCy model 'en_core_web_sm' not found. Install it with:\n  python -m spacy download en_core_web_sm"
         ) from exc
+
+
+def _filter_phantom_rows(
+    rows: list[dict[str, Any]],
+    *,
+    surface_form: str,
+    input_text: str,
+) -> list[dict[str, Any]]:
+    """Drop phantom existing-entity hits returned by Neo4j fuzzy match.
+
+    ``Neo4jClient.find_by_name`` uses ``CONTAINS`` semantics so a token
+    like ``"brown"`` matches a stored entity ``"Brown Corp"`` even when
+    the input doesn't reference the full canonical name. The planner
+    (BM25 fuzzy expansion) relies on that behaviour, so the fix lives
+    here, post-lookup, instead of in the graph client.
+
+    A row is carried forward only when one of:
+
+    1. The stored ``name`` equals the ``surface_form`` (case-insensitive).
+       NER pulled out the canonical name as a unit — clearly a real hit.
+    2. The stored ``name`` appears as a word-boundary token in the
+       original input text. The CONTAINS expansion picked a fragment but
+       the full name is genuinely present.
+
+    Everything else is a phantom: the graph returned a hit because of
+    substring fuzziness, not because the entity is actually mentioned.
+    """
+    if not rows:
+        return []
+    surface_lower = surface_form.lower()
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        if name.lower() == surface_lower:
+            kept.append(row)
+            continue
+        if _name_appears_in_text(name, input_text):
+            kept.append(row)
+    return kept
+
+
+def _name_appears_in_text(name: str, text: str) -> bool:
+    """Return True when ``name`` appears as a word-boundary token in ``text``.
+
+    Mirrors the word-boundary semantics used by
+    :class:`kairix.knowledge.entities.filters.KnownEntityAllowlist` so
+    both halves of #249's phantom-hit defence apply the same precision
+    floor.
+    """
+    if not name:
+        return False
+    import re
+
+    escaped = re.escape(name)
+    left = r"\b" if name[0].isalnum() or name[0] == "_" else r"(?:^|(?<=\W))"
+    right = r"\b" if name[-1].isalnum() or name[-1] == "_" else r"(?:$|(?=\W))"
+    return bool(re.search(rf"{left}{escaped}{right}", text, re.IGNORECASE))
 
 
 def format_suggestions(suggestions: list[SuggestedEntity], fmt: str = "table") -> str:
