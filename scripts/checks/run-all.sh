@@ -82,6 +82,12 @@ python3 "${SCRIPT_DIR}/check_empty_body_intent.py" || overall=1
 # F21 — actionable-feedback marker rule for check scripts
 python3 "${SCRIPT_DIR}/check_actionable_feedback.py" || overall=1
 
+# F22 — repo path naming conventions per tree
+python3 "${SCRIPT_DIR}/check_path_naming.py" || overall=1
+
+# F23 — every top-level directory has a README.md
+python3 "${SCRIPT_DIR}/check_readme_coverage.py" || overall=1
+
 # F7 — needs coverage.xml. Skip if not present or skip flag set.
 if [[ "$skip_coverage" -eq 0 ]]; then
     if [[ -f "${REPO_ROOT}/coverage.xml" ]]; then

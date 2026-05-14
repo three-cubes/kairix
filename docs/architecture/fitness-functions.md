@@ -172,6 +172,8 @@ fully enforced; new violations anywhere in the codebase block.
 | F19 | Unused function parameters must be `_`-prefixed | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `unused-params-named-files.txt` |
 | F20 | Empty function bodies require docstring or intent comment | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `empty-body-intent-files.txt` |
 | F21 | Check-script failure output must carry an action marker (`fix:`, `next:`, `run:`) | structural | Python AST + shell regex | pre-commit, safe-commit, CI Stage 0 | `actionable-feedback-files.txt` |
+| F22 | Repo paths follow per-tree naming conventions | structural | Python (regex per tree) | pre-commit, safe-commit, CI Stage 0 | `path-naming-files.txt` (empty — clean) |
+| F23 | Every top-level directory has a `README.md` | structural | Python (filesystem walk) | pre-commit, safe-commit, CI Stage 0 | `readme-coverage-files.txt` |
 
 ---
 
@@ -1539,6 +1541,147 @@ phrasing, which is descriptive but doesn't carry a literal marker —
 they are grandfathered in
 `.architecture/baseline/actionable-feedback-files.txt` until each one
 is rewritten in a baseline-burndown follow-up.
+
+### F22 — Repo paths follow per-tree naming conventions
+
+#### Statement
+
+Every tracked file under a registered tree-prefix MUST satisfy the
+naming regex for that tree. The trees and their rules (first match
+wins):
+
+| Tree prefix | Trigger | Allowed basenames |
+|-------------|---------|-------------------|
+| `kairix/` | `*.py` | `__init__.py`, `conftest.py`, `fakes.py`, or `_?snake_case.py` (leading `_` permitted for private modules) |
+| `tests/bdd/features/` | `*.feature` | `snake_case.feature` |
+| `tests/bdd/steps/` | `*.py` | `__init__.py`, `conftest.py`, `fakes.py`, or `_?snake_case.py` |
+| `tests/` (excl. `tests/bdd/`) | `*.py` | `test_<thing>.py`, `conftest.py`, `fakes.py`, `__init__.py`, or `_?snake_case.py` helpers |
+| `scripts/checks/` | `*.py` | `check_<rule>.py`, `_arch_lib.py`, `audit_baselines.py`, `merge_coverage_xml.py` |
+| `scripts/checks/` | `*.sh` | `check-<rule>.sh`, `check_<rule>.sh`, `_lib.sh`, `run-all.sh` |
+| `docs/operations/runbooks/` | `*.md` | `INDEX.md` or `kebab-case.md` |
+| `docs/runbooks/` | `*.md` | `INDEX.md` or `kebab-case.md` |
+| `.architecture/baseline/` | `*.txt` | `<rule-name>-files.txt` |
+
+Files outside every registered tree (top-level config, `.github/`,
+`docker/`, `reference-library/`, etc.) are not constrained by F22.
+Convergence with tc-agent-zone's `path_naming.py` (issue #258);
+kairix uses its own repo layout.
+
+#### Why
+
+Agents and humans cross-reference paths constantly — in CLAUDE.md, in
+runbooks, in error messages, in commit bodies. A consistent shape per
+tree means a path mentioned in one place is greppable everywhere.
+Mixed shapes (`Search-Pipeline.py` next to `pipeline.py`,
+`PipelineTest.py` next to `test_pipeline.py`) force the reader to
+guess which convention applies — and pytest collection silently drops
+the non-conforming one.
+
+#### Detection
+
+`scripts/checks/check_path_naming.py`. Walks `git ls-files`; for each
+tracked path, picks the first tree-rule whose prefix and suffix
+trigger both match; checks the basename against that rule's regex
+tuple. Out-of-scope paths pass silently.
+
+#### Examples
+
+Rejected:
+
+```
+kairix/core/Search-Pipeline.py            # PascalCase + dashes
+tests/search/PipelineTest.py              # not test_<thing>.py
+tests/bdd/features/SearchReturnsHits.feature
+scripts/checks/CheckPathNaming.py         # not check_<rule>.py
+docs/runbooks/my_runbook.md               # snake_case, want kebab
+```
+
+Allowed:
+
+```
+kairix/core/search/pipeline.py
+kairix/_azure.py                          # leading-underscore private
+tests/search/test_pipeline.py
+tests/bdd/features/search_returns_hits.feature
+scripts/checks/check_path_naming.py
+docs/operations/runbooks/how-to-debug-search-ranking.md
+.architecture/baseline/path-naming-files.txt
+```
+
+#### Fix pattern
+
+Rename the file to fit its tree (use `git mv` so history follows),
+update every import / reference that points at the old name, re-run
+`python3 scripts/checks/check_path_naming.py`. If the file is in an
+unfamiliar tree, check the rule table at the top of the check script
+— that's the source of truth.
+
+### F23 — Every top-level directory has a `README.md`
+
+#### Statement
+
+Every top-level directory under the repo root MUST contain a
+`README.md` orientation file, unless it's allow-listed. The
+allow-list (intentionally narrow) covers `.git`, `.github`,
+`.pytest_cache`, `.ruff_cache`, `.architecture`, `.claude`, `.idea`,
+`.vscode`, `.venv`, `__pycache__`, `htmlcov`, `logs`, `node_modules`,
+`coverage`, `dist`, `build`, and any directory whose name starts
+with `.` (dotfile config trees in general).
+
+Convergence with tc-agent-zone's `repo_ia.py` IA1 check (issue #258).
+
+#### Why
+
+Every directory mention in CLAUDE.md, docs/, or an error message
+becomes a click. Landing in a bare directory wastes the click and
+makes the reader spelunk for context. The resolver-README pattern
+(every top-level dir has one) means every path mention lands
+somewhere oriented — what belongs here, what doesn't, where the
+canonical docs live.
+
+#### Detection
+
+`scripts/checks/check_readme_coverage.py`. Walks `REPO_ROOT.iterdir()`
+for directories; subtracts the allow-list; flags any remaining
+directory whose `<dir>/README.md` is not a regular file. The baseline
+records the *missing* README paths (i.e. the files that should exist
+but don't), so a baseline burndown is "write the README and remove
+the line."
+
+#### Examples
+
+Rejected:
+
+```
+benchmark-results/                        # no README.md
+docs/                                     # no README.md (yes, really)
+kairix/                                   # no README.md — the package!
+```
+
+Allowed:
+
+```
+docker/README.md                          # exists
+reference-library/README.md               # exists
+```
+
+Allow-listed (no README required):
+
+```
+.git/, .github/, .architecture/, __pycache__/, htmlcov/, ...
+```
+
+#### Fix pattern
+
+Write a one-screen `<dir>/README.md` with three sections:
+
+1. **What this directory holds** — one sentence.
+2. **What does not belong here** — one or two anti-patterns.
+3. **Where the canonical docs live** — link to `docs/...`.
+
+Then delete the corresponding line from
+`.architecture/baseline/readme-coverage-files.txt`. The baseline is
+expected to shrink monotonically.
 
 ---
 

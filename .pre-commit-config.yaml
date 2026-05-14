@@ -170,3 +170,17 @@ repos:
         language: system
         pass_filenames: false
         files: ^scripts/checks/.*$
+
+      - id: arch-path-naming
+        name: "arch F22: repo path naming conventions per tree"
+        entry: python3 scripts/checks/check_path_naming.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: arch-readme-coverage
+        name: "arch F23: every top-level directory has a README.md"
+        entry: python3 scripts/checks/check_readme_coverage.py
+        language: system
+        pass_filenames: false
+        always_run: true
