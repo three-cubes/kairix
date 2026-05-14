@@ -1,0 +1,91 @@
+# golangci-lint configuration for kairix Go services.
+#
+# Pairs with docs/architecture/go-integration-plan.md. Linters here mirror
+# the Python F1-F24 rule philosophy: mechanical, blocking, no opt-outs
+# without inline rationale. Adding a linter is preferred over disabling one.
+#
+# This file is read by golangci-lint from the repo root regardless of which
+# services/<name>/ the lint targets — golangci-lint walks upward to find it.
+
+run:
+  timeout: 5m
+  # Discover every services/<name> module that golangci-lint is invoked
+  # against. The CI workflow invokes lint per-module so this just sets
+  # behaviour within a given run.
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  # Disable-all + enable-list pattern so a future linter addition is a
+  # deliberate decision, not a silent default flip.
+  disable-all: true
+  enable:
+    - errcheck       # unchecked errors are not allowed
+    - govet          # vet's correctness checks (printf format, shadow, etc.)
+    - staticcheck    # broad set of correctness + style checks
+    - unused         # unused variables, constants, functions, types
+    - gosimple       # simplifications staticcheck can apply
+    - ineffassign    # assignments whose value is never used
+    - gocritic       # opinionated checks; matches our cognitive-complexity stance
+    - errorlint      # wrap with %w; correct errors.Is/As usage
+    - bodyclose      # http.Response.Body must be closed
+    - gosec          # security findings; zero HIGH/MEDIUM per docs/.../ENGINEERING.md §4
+    - revive         # stylistic; replaces deprecated golint
+    - misspell       # typos in user-facing strings
+    - copyloopvar    # Go 1.22+ loop-variable capture footguns
+    - prealloc       # slice preallocation where length is known
+    - dupl           # duplicate code blocks (cousin of F17)
+    - goconst        # repeated literal strings should be constants (cousin of F17)
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true   # `_ = f()` to discard an error requires an inline rationale
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+      - opinionated
+  gosec:
+    severity: medium
+    # G304 (file inclusion via variable) is allowed where the path is
+    # validated upstream; require // #nosec G304 inline with reason.
+    excludes: []
+  revive:
+    rules:
+      - name: exported       # exported types/funcs need doc comments (G5-adjacent)
+      - name: package-comments
+      - name: var-naming
+      - name: errorf         # use fmt.Errorf("%w", err) not Sprintf
+      - name: error-return
+      - name: error-naming
+      - name: indent-error-flow
+      - name: range
+      - name: receiver-naming
+      - name: unexported-return
+      - name: unused-parameter
+        arguments:
+          - allowRegex: "^_"   # F19-equivalent: unused params must be _-prefixed
+  misspell:
+    locale: UK  # match kairix's en-AU/en-UK preference (analyse not analyze)
+  dupl:
+    threshold: 100  # tokens; conservative — only flags substantial duplicates
+  goconst:
+    min-len: 10
+    min-occurrences: 3   # mirrors F17's ≥10-char × ≥3-occurrence rule
+
+issues:
+  # Allow per-line suppression only with rationale (F3 mirror). golangci-lint
+  # honours //nolint:<linter> directives; we require // reason: ... comment.
+  exclude-use-default: false
+  max-issues-per-linter: 0   # report all
+  max-same-issues: 0
+  exclude-rules:
+    # Test files get a little more rope on dupl/goconst — assertion
+    # boilerplate is legitimate duplication.
+    - path: _test\.go
+      linters:
+        - dupl
+        - goconst
+        - errcheck

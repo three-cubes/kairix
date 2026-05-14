@@ -176,6 +176,37 @@ fully enforced; new violations anywhere in the codebase block.
 | F23 | Every top-level directory has a `README.md` | structural | Python (filesystem walk) | pre-commit, safe-commit, CI Stage 0 | `readme-coverage-files.txt` |
 | F24 | No `from tests.*` / `import tests` imports in `kairix/**/*.py` | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-test-imports-in-prod-files.txt` (empty — clean) |
 
+### Go-side rules (G1–G10)
+
+Active when `services/<name>/go.mod` exists. Full text and rationale in
+[`go-integration-plan.md`](go-integration-plan.md) §"Architecture
+fitness — extending F1-F24 to Go". The Go gate (`Go quality` workflow)
+enforces these in parallel with the Python pipeline.
+
+| ID | Rule | Detection | Tool | SDLC layer | Baseline file |
+|----|------|-----------|------|------------|---------------|
+| G1 | Every `cmd/<name>/main.go` exposes `--version` | structural | golangci-lint custom rule (planned) | Go-quality workflow | `go-version-flag-files.txt` (empty — clean) |
+| G2 | Errors wrap with `%w` (`fmt.Errorf("...: %w", err)`) | structural | `errorlint` (golangci-lint) | Go-quality workflow | (none — clean baseline) |
+| G3 | No `interface{}` / `any` in exported signatures | structural | revive `exported` + custom | Go-quality workflow | `go-any-in-exported-files.txt` (planned) |
+| G4 | `context.Context` as first arg on exported I/O functions | structural | revive `context-as-argument` | Go-quality workflow | `go-context-propagation-files.txt` (planned) |
+| G5 | Every Go package has a doc comment | structural | revive `package-comments` | Go-quality workflow | (none — clean baseline) |
+| G6 | No `panic` in non-`main` packages | structural | gocritic + custom | Go-quality workflow | (none — clean baseline) |
+| G7 | Tests follow Go conventions (`*_test.go`, `TestXxx(t *testing.T)`) | structural | `go test` discovery + custom | Go-quality workflow | (none — clean baseline) |
+| G8 | Logging via `log/slog` only (no `fmt.Println` / `log.Printf` in prod) | structural | custom Python check | Go-quality workflow | `go-logging-discipline-files.txt` (planned) |
+| G9 | Every `services/<name>/` has a `README.md` | structural | Python filesystem walk (`check_go_readme_coverage.py`) | safe-commit + Go-quality workflow | `go-readme-coverage-files.txt` (empty — clean) |
+| G10 | Third-party deps require a rationale entry in `services/<name>/DEPENDENCIES.md` | structural | custom Python check | Go-quality workflow | `go-dependency-rationale-files.txt` (planned) |
+
+G1 / G3 / G4 / G8 / G10 are **planned** — their detector scripts land
+when the first real Go service does (alpha-deploy webhook for
+[#272](https://github.com/three-cubes/kairix/issues/272) Phase 4). G2 /
+G5 / G6 / G7 land "for free" via golangci-lint's existing rule set; the
+plan-of-record reserves the rule ID so it survives reviewers asking
+"shouldn't we enforce this?" — yes, we do.
+
+G9 is **active now** because it depends only on filesystem-walk, not on
+any Go source. Empty baseline; will trip if any future
+`services/<name>/` lands without a README.
+
 ---
 
 ## The rules in detail

@@ -16,7 +16,8 @@ Standards, quality gates, and compliance requirements for Kairix contributors.
 8. [CLI Standards](#8-cli-standards)
 9. [Engineering Compliance Checklist](#9-engineering-compliance-checklist)
 10. [Architecture Patterns](#10-architecture-patterns)
-11. [References](#11-references)
+11. [Language choice — when Go, when Python](#11-language-choice--when-go-when-python)
+12. [References](#12-references)
 
 ---
 
@@ -92,7 +93,8 @@ push/PR
 
 | File | Trigger | Purpose |
 |---|---|---|
-| `.github/workflows/ci.yml` | Every push + PR | Four-stage pipeline (all gates) |
+| `.github/workflows/ci.yml` | Every push + PR | Four-stage pipeline (all Python gates) |
+| `.github/workflows/go-quality.yml` | Push/PR touching `services/**`, `tools/**`, `.golangci.yml` | Per-service Go gate: `gofmt -s` / `go vet` / `golangci-lint` / `go test -race -cover` (floor 80%) / cross-compile (linux+darwin × amd64+arm64) |
 | `.github/workflows/integration.yml` | PR to main | Full integration suite + PR compliance checks |
 | `.github/workflows/benchmark-gate.yml` | Manual dispatch | Benchmark comparison (required for retrieval PRs) |
 | `.github/workflows/reflib-benchmark-gate.yml` | Manual dispatch | Reference library benchmark comparison |
@@ -664,7 +666,30 @@ Composes the FastMCP server's `streamable_http_app()` (mounted at `/mcp`) plus `
 
 ---
 
-## 11. References
+## 11. Language choice — when Go, when Python
+
+**Python is the default.** Every component listed in §10 above is Python and stays Python. The hot paths are already in C via SQLite/usearch/spaCy/torch — rewriting Python glue in another language earns nothing.
+
+**Go is allowed only for operational binaries** under `services/<name>/` that run *outside* the Python venv: webhook handlers, deploy wrappers, log shippers, health probes. The decision criteria and full standards live in [`go-integration-plan.md`](go-integration-plan.md).
+
+| Slot | Language | Why |
+|---|---|---|
+| Retrieval, agents, eval, MCP, domain logic | Python | Hot paths are already native; Python is the glue. |
+| Chunking / crawl at very large vault scale | Python today, **watch** | If `kairix store crawl` exceeds 5 min on production, consider Rust+PyO3 — but instrument first. |
+| Operational binaries (webhook, deploy helpers) | **Go** | Single static binary; no venv on host; cross-compile from any laptop. |
+| Bash ops scripts on the VM | Bash | Works for single-Linux ops; Go only when cross-platform matters. |
+
+**Hard rules:**
+- No Rust, no PyO3, no TypeScript in current scope.
+- Adding a third language requires its own plan-of-record.
+- Every new `services/<name>/` ticks at least two of the four criteria in `go-integration-plan.md` §"Decision criteria for future Go binaries".
+- Python F1–F24 + Go G1–G10 fitness functions both enforce structural invariants per their language; canonical reference is [`fitness-functions.md`](fitness-functions.md).
+
+The Go quality gate (`go-quality.yml`) is independent of the Python `1 · Quality gate`. Per-service `go.mod` keeps dependency surface scoped per binary; one binary's CVE bump doesn't drag the others. CI workflow discovers `services/*/go.mod` automatically — no workflow edit needed to add a new service.
+
+---
+
+## 12. References
 
 | Resource | Location |
 |---|---|
