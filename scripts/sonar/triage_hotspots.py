@@ -103,6 +103,21 @@ HOTSPOT_RATIONALES: dict[tuple[str, str], str] = {
         "$). No catastrophic-backtracking shape (no (.+)+/(\\w+)+ nesting). "
         "Reviewed and accepted."
     ),
+    # ── Cleartext HTTP URLs in test fixtures (S5332) ──────────────────────────
+    # All flagged "http://" strings appear inside test-fixture dataclasses or
+    # assertion bodies — they're string literals checked into version control,
+    # never fetched at runtime. The rule stays active for production code,
+    # where any http:// usage would be a real concern.
+    ("python:S5332", "tests/knowledge/entities/test_cli.py"): (
+        "Test fixture — 'http://wiki/Q1' is a literal in an EntityValidateMatch "
+        "dataclass used to exercise the format_validate_table renderer; the "
+        "URL is never fetched. Reviewed and accepted."
+    ),
+    ("python:S5332", "tests/use_cases/test_entity.py"): (
+        "Test fixture — http:// URL is a literal in an entity-card dataclass "
+        "used as test input to run_entity_get; the URL is never fetched. "
+        "Reviewed and accepted."
+    ),
     # ── Pseudorandom number generators (S2245) ───────────────────────────────
     # Every flagged use of `random` is for sampling/scheduling, not security.
     ("python:S2245", "kairix/knowledge/wikilinks/audit.py"): (
