@@ -81,7 +81,9 @@ HOTSPOT_RATIONALES: dict[tuple[str, str], str] = {
     ("python:S5852", "kairix/knowledge/wikilinks/resolver.py"): (
         "Bounded input — wikilinks resolver operates on agent-authored markdown "
         "from the document store. Path strings are normalised at the boundary. "
-        "Reviewed and accepted."
+        "The non-greedy `.*?` bounded by `)` and end-anchor operates on a single "
+        "short path string (≤ a few hundred chars); no catastrophic-backtracking "
+        "shape. Reviewed and accepted."
     ),
     ("python:S5852", "kairix/text.py"): (
         "Bounded input — frontmatter/whitespace utility regexes operate on "

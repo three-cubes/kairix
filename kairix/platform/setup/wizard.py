@@ -229,17 +229,18 @@ def _prompt_neo4j(ctx: SetupContext) -> tuple[bool, str]:
     return True, neo4j_uri
 
 
+_MARKDOWN_GLOB = "**/*.md"
 _PRESET_COLLECTIONS: dict[str, list[dict[str, str]]] = {
     "consulting": [
-        {"name": "clients", "path": "Clients", "glob": "**/*.md"},
-        {"name": "projects", "path": "Projects", "glob": "**/*.md"},
-        {"name": "knowledge", "path": "Knowledge", "glob": "**/*.md"},
-        {"name": "entities", "path": "Entities", "glob": "**/*.md"},
+        {"name": "clients", "path": "Clients", "glob": _MARKDOWN_GLOB},
+        {"name": "projects", "path": "Projects", "glob": _MARKDOWN_GLOB},
+        {"name": "knowledge", "path": "Knowledge", "glob": _MARKDOWN_GLOB},
+        {"name": "entities", "path": "Entities", "glob": _MARKDOWN_GLOB},
     ],
     "technical": [
-        {"name": "docs", "path": "docs", "glob": "**/*.md"},
-        {"name": "runbooks", "path": "runbooks", "glob": "**/*.md"},
-        {"name": "reference", "path": "reference", "glob": "**/*.md"},
+        {"name": "docs", "path": "docs", "glob": _MARKDOWN_GLOB},
+        {"name": "runbooks", "path": "runbooks", "glob": _MARKDOWN_GLOB},
+        {"name": "reference", "path": "reference", "glob": _MARKDOWN_GLOB},
     ],
 }
 
@@ -252,7 +253,7 @@ def _build_workspace_collections() -> dict[str, Any]:
     print(f"  ✓ Documents + agent workspace memories ({workspace_root}) configured.\n")
     return {
         "shared": [
-            {"name": "all", "path": ".", "glob": "**/*.md"},
+            {"name": "all", "path": ".", "glob": _MARKDOWN_GLOB},
             {"name": "workspaces", "path": workspace_root, "glob": "**/memory/**/*.md"},
         ],
     }
@@ -263,9 +264,9 @@ def _resolve_collections(ctx: SetupContext, preset_key: str) -> dict[str, Any] |
     idx = prompt_choice(ctx, "How do you want to organise your documents?", _COLLECTION_OPTIONS)
     if idx == 0:
         print("  ✓ All documents will be searchable.\n")
-        return {"shared": [{"name": "all", "path": ".", "glob": "**/*.md"}]}
+        return {"shared": [{"name": "all", "path": ".", "glob": _MARKDOWN_GLOB}]}
     if idx == 1:
-        shared = _PRESET_COLLECTIONS.get(preset_key, [{"name": "all", "path": ".", "glob": "**/*.md"}])
+        shared = _PRESET_COLLECTIONS.get(preset_key, [{"name": "all", "path": ".", "glob": _MARKDOWN_GLOB}])
         config = {"shared": shared}
         print(f"  ✓ {len(shared)} collections configured.\n")
         return config
