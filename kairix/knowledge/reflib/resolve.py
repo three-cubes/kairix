@@ -243,7 +243,11 @@ def fuzzy_match_and_merge_same_type(
             continue
         merge_map.update(_build_merge_map_for_type(slugs, merged))
 
-    for victim in list(merge_map):
+    # Snapshot via tuple — ``_apply_merge`` pops from ``merged`` (not
+    # ``merge_map``) so a tuple copy here is enough to keep the iteration
+    # stable. ``tuple()`` is the canonical idiom; ``list()`` was an
+    # unnecessary mutable copy (S7504).
+    for victim in tuple(merge_map):
         winner = _resolve_winner(merge_map[victim], merge_map)
         _apply_merge(merged, victim, winner)
 

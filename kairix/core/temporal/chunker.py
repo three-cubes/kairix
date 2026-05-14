@@ -230,9 +230,19 @@ def chunk_board(path: str) -> list[TemporalChunk]:
 # ---------------------------------------------------------------------------
 
 
+def _extract_log_date(name: str) -> date | None:
+    """Pull the ``YYYY-MM-DD`` from a memory-log filename, or ``None`` if absent/invalid."""
+    m = _MEMORY_LOG_RE.match(name)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
 def chunk_memory_log(path: str) -> list[TemporalChunk]:
-    """
-    Parse a daily memory log into per-section TemporalChunk objects.
+    """Parse a daily memory log into per-section TemporalChunk objects.
 
     The date is extracted from the filename (YYYY-MM-DD.md).
     Content is split on ## headings; each section becomes a chunk.
@@ -246,19 +256,7 @@ def chunk_memory_log(path: str) -> list[TemporalChunk]:
         Returns [] on any parse failure.
     """
     p = Path(path)
-
-    # Extract date from filename
-    log_date: date | None = None
-    filename_match = _MEMORY_LOG_RE.match(p.name)
-    if filename_match:
-        try:
-            log_date = date(
-                int(filename_match.group(1)),
-                int(filename_match.group(2)),
-                int(filename_match.group(3)),
-            )
-        except ValueError:
-            pass
+    log_date = _extract_log_date(p.name)
 
     try:
         content = p.read_text(encoding="utf-8")

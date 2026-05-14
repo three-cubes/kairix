@@ -80,6 +80,21 @@ class HealthReport:
         return self.issue_count == 0
 
 
+def _row_to_health_issue(row: dict[str, Any], default_detail: str) -> HealthIssue | None:
+    """Convert one Cypher row to a HealthIssue, or None when neither id nor name is set.
+
+    When the row carries ``last_seen`` (stale-entity queries), the detail
+    field is overridden with a human-readable last-seen marker.
+    """
+    eid = str(row.get("id") or "")
+    name = str(row.get("name") or "")
+    if not (eid or name):
+        return None
+    label = str(row.get("label") or "unknown")
+    detail = f"last seen: {row.get('last_seen') or 'never'}" if "last_seen" in row else default_detail
+    return HealthIssue(entity_id=eid, name=name, entity_type=label.lower(), detail=detail)
+
+
 def _query_entity_issues(
     neo4j_client: Any,
     cypher: str,
@@ -95,28 +110,16 @@ def _query_entity_issues(
 
     Returns [] on query failure (logged at log_level).
     """
-    issues: list[HealthIssue] = []
     try:
         rows = neo4j_client.cypher(cypher, params) if params else neo4j_client.cypher(cypher)
-        for r in rows:
-            eid = str(r.get("id") or "")
-            name = str(r.get("name") or "")
-            label = str(r.get("label") or "unknown")
-            if not (eid or name):
-                continue
-            row_detail = detail
-            if "last_seen" in r:
-                row_detail = f"last seen: {r.get('last_seen') or 'never'}"
-            issues.append(
-                HealthIssue(
-                    entity_id=eid,
-                    name=name,
-                    entity_type=label.lower(),
-                    detail=row_detail,
-                )
-            )
     except Exception as exc:
         getattr(logger, log_level)("health: %s query failed — %s", log_label, exc)
+        return []
+    issues: list[HealthIssue] = []
+    for row in rows:
+        issue = _row_to_health_issue(row, detail)
+        if issue is not None:
+            issues.append(issue)
     return issues
 
 
