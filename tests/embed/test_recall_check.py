@@ -488,7 +488,7 @@ def test_recall_checker_falls_through_to_defaults_when_db_has_no_recall_queries_
     """
     db_path = tmp_path / "no-recall-table.sqlite"
     db = sqlite3.connect(str(db_path))
-    # Just a documents table — _get_recall_queries probes for a recall_queries
+    # Just a documents table — get_recall_queries probes for a recall_queries
     # table; absent → returns DEFAULT_RECALL_QUERIES.
     db.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY, path TEXT)")
     db.commit()
