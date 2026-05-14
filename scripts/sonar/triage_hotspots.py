@@ -94,6 +94,15 @@ HOTSPOT_RATIONALES: dict[tuple[str, str], str] = {
         "date formats. Not on any production code path; not user-facing. "
         "Reviewed and accepted."
     ),
+    ("python:S5852", "kairix/knowledge/entities/overrides.py"): (
+        "Bounded input — admin-controlled entity override file at "
+        "${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md. "
+        "Lines are short markdown list entries (a quoted term + label + "
+        "optional flags); the file is operator-authored, not user-submitted. "
+        "Each regex quantifier is non-nested ([^\"]+, [A-Z_]+, .* anchored to "
+        "$). No catastrophic-backtracking shape (no (.+)+/(\\w+)+ nesting). "
+        "Reviewed and accepted."
+    ),
     # ── Pseudorandom number generators (S2245) ───────────────────────────────
     # Every flagged use of `random` is for sampling/scheduling, not security.
     ("python:S2245", "kairix/knowledge/wikilinks/audit.py"): (
