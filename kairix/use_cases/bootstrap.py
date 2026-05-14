@@ -228,7 +228,6 @@ def _load_goals(agent_dir: Path) -> list[str]:
         # Numbered list item: "1. ..."
         if len(line) >= 3 and line[0].isdigit() and line[1:].startswith(". "):
             goals.append(line.split(". ", 1)[1].strip())
-            continue
 
     if goals:
         return goals

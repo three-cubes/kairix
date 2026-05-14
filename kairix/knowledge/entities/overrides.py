@@ -54,18 +54,26 @@ logger = logging.getLogger(__name__)
 # is silently allowlisted but won't drive NerLabelFilter overrides.
 _VALID_LABELS: frozenset[str] = frozenset({"ORG", "PERSON", "GPE", "PRODUCT", "WORK_OF_ART"})
 
-# A single entry: leading ``- `` then a quoted term, then ``: LABEL``,
-# then an optional ``, key: value`` flag tail. The quotes around the
-# term are required so terms containing colons/commas don't trip the
-# parser.
-_ENTRY_PATTERN = re.compile(
+# Head of a single entry: leading ``- `` then a quoted term, then
+# ``: LABEL``. The quotes around the term are required so terms
+# containing colons/commas don't trip the parser. The optional
+# ``, key: value`` flag tail is matched separately by ``_FLAG_PATTERN``
+# below — splitting the two patterns keeps each regex below SonarCloud's
+# complexity ceiling (previously a single combined pattern scored 24).
+_ENTRY_HEAD_PATTERN = re.compile(
     r"""^\s*-\s+              # leading list marker
         "(?P<term>[^"]+)"     # quoted term
         \s*:\s*
         (?P<label>[A-Z_]+)    # uppercase label
-        (?P<flags>(?:\s*,\s*[A-Za-z_]+\s*:\s*[A-Za-z0-9]+)*)  # optional flag tail
-        \s*$""",
+        (?P<tail>.*)$         # everything after the label — flags parsed separately
+    """,
     re.VERBOSE,
+)
+# Tail must be either empty/whitespace or a sequence of ``, key: value``
+# flag entries. Used to validate the tail before feeding it to
+# ``_FLAG_PATTERN``; a non-matching tail means the entry is malformed.
+_ENTRY_TAIL_PATTERN = re.compile(
+    r"^(?:\s*,\s*[A-Za-z_]+\s*:\s*[A-Za-z0-9]+)*\s*$",
 )
 _FLAG_PATTERN = re.compile(r"\s*,\s*(?P<key>[A-Za-z_]+)\s*:\s*(?P<value>[A-Za-z0-9]+)")
 
@@ -118,54 +126,20 @@ def load_entity_overrides(path: Path | None) -> EntityOverrides:
 def _parse(raw: str, *, source: str) -> EntityOverrides:
     """Parse the markdown body into the override containers.
 
-    Each list item that matches ``_ENTRY_PATTERN`` contributes one or
-    more entries; anything else is ignored (so prose, headings, blank
-    lines in the file are harmless).
+    Each list item that matches the entry grammar contributes one or
+    more entries via :func:`_parse_entry`; anything else is ignored
+    (so prose, headings, blank lines in the file are harmless).
     """
     allowlist: list[Suggestion] = []
     person_overrides: set[str] = set()
     org_overrides: set[str] = set()
 
     for lineno, line in enumerate(raw.splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped or not stripped.startswith("-"):
+        parsed = _parse_entry(line, lineno=lineno, source=source)
+        if parsed is None:
             continue
-        match = _ENTRY_PATTERN.match(line)
-        if not match:
-            # Looks like a list item but isn't a valid entry — warn so
-            # operators see typos rather than have terms silently dropped.
-            logger.warning(
-                "entity-overrides: %s:%d skipping unparseable entry %r",
-                source,
-                lineno,
-                stripped,
-            )
-            continue
-
-        term = match.group("term").strip()
-        label = match.group("label").strip()
-        if not term or not label:
-            logger.warning(
-                "entity-overrides: %s:%d empty term or label in %r",
-                source,
-                lineno,
-                stripped,
-            )
-            continue
-        if label not in _VALID_LABELS:
-            logger.warning(
-                "entity-overrides: %s:%d unknown label %r (allowed: %s)",
-                source,
-                lineno,
-                label,
-                sorted(_VALID_LABELS),
-            )
-            continue
-
-        flags = _parse_flags(match.group("flags") or "")
-        terms = _expand_terms(term, case_insensitive=flags.get("case_insensitive", False))
-
-        for variant in terms:
+        label, variants = parsed
+        for variant in variants:
             allowlist.append({"text": variant, "label": label, "source": "allowlist", "confidence": 1.0})
             if label == "PERSON":
                 person_overrides.add(variant)
@@ -177,6 +151,53 @@ def _parse(raw: str, *, source: str) -> EntityOverrides:
         person_overrides=person_overrides,
         org_overrides=org_overrides,
     )
+
+
+def _parse_entry(line: str, *, lineno: int, source: str) -> tuple[str, list[str]] | None:
+    """Parse one line into ``(label, surface_forms)`` or ``None``.
+
+    Returns ``None`` for blank lines, non-list lines, and unparseable
+    entries (the last logs a warning so operators see typos). The list
+    of surface forms is the expansion driven by the ``case_insensitive``
+    flag — callers iterate it and route each variant by label.
+    """
+    stripped = line.strip()
+    if not stripped or not stripped.startswith("-"):
+        return None
+
+    head = _ENTRY_HEAD_PATTERN.match(line)
+    if head is None or not _ENTRY_TAIL_PATTERN.match(head.group("tail")):
+        logger.warning(
+            "entity-overrides: %s:%d skipping unparseable entry %r",
+            source,
+            lineno,
+            stripped,
+        )
+        return None
+
+    term = head.group("term").strip()
+    label = head.group("label").strip()
+    if not term or not label:
+        logger.warning(
+            "entity-overrides: %s:%d empty term or label in %r",
+            source,
+            lineno,
+            stripped,
+        )
+        return None
+    if label not in _VALID_LABELS:
+        logger.warning(
+            "entity-overrides: %s:%d unknown label %r (allowed: %s)",
+            source,
+            lineno,
+            label,
+            sorted(_VALID_LABELS),
+        )
+        return None
+
+    flags = _parse_flags(head.group("tail") or "")
+    variants = _expand_terms(term, case_insensitive=flags.get("case_insensitive", False))
+    return label, variants
 
 
 def _parse_flags(tail: str) -> dict[str, bool]:

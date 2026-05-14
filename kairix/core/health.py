@@ -260,6 +260,76 @@ def probe_health(
     )
 
 
+def _collect_degradation_reasons(
+    *,
+    secrets_loaded: bool,
+    embed_backend: bool,
+    bm25_available: bool,
+    secrets_timed_out: bool,
+    embed_timed_out: bool,
+    bm25_timed_out: bool,
+) -> list[str]:
+    """Build the ordered list of degradation reasons for ``degraded_reason``.
+
+    Each failing probe contributes one phrase; a timed-out probe gets a
+    distinct phrase so operators can tell ``offline`` from ``slow``.
+    """
+    probe_rows: tuple[tuple[bool, bool, str, str], ...] = (
+        (
+            not secrets_loaded,
+            secrets_timed_out,
+            "secrets probe exceeded 2s budget",
+            "KAIRIX_LLM_API_KEY not resolvable",
+        ),
+        (
+            not embed_backend,
+            embed_timed_out,
+            "embed backend probe exceeded 2s budget",
+            "embed backend unavailable",
+        ),
+        (
+            not bm25_available,
+            bm25_timed_out,
+            "BM25 probe exceeded 2s budget",
+            "BM25 index missing",
+        ),
+    )
+    reasons: list[str] = []
+    for failed, timed_out, timeout_phrase, offline_phrase in probe_rows:
+        if failed:
+            reasons.append(timeout_phrase if timed_out else offline_phrase)
+    return reasons
+
+
+def _pick_degradation_directive(
+    *,
+    secrets_loaded: bool,
+    embed_backend: bool,
+    bm25_available: bool,
+) -> str:
+    """Choose the prescriptive directive for the agent.
+
+    Only called when at least one leg is unhealthy. The branches mirror
+    the three "still useful" affordances: BM25 alone, vector alone, or
+    nothing left.
+    """
+    vector_ok = secrets_loaded and embed_backend
+    if bm25_available and not vector_ok:
+        return (
+            "Vector search degraded — surface this to your human and use BM25 results from tool_search. "
+            "Ask your admin to run 'kairix onboard check'."
+        )
+    if vector_ok and not bm25_available:
+        return (
+            "BM25 offline — vector search still works via tool_search. "
+            "Ask your admin to run 'kairix embed --rebuild-fts'."
+        )
+    return (
+        "Vector search and BM25 both offline — kairix retrieval is unavailable. "
+        "Surface this to your human; ask your admin to run 'kairix onboard check'."
+    )
+
+
 def _summarise_degradation(
     *,
     secrets_loaded: bool,
@@ -273,47 +343,28 @@ def _summarise_degradation(
 
     Returns ``("", "")`` when fully healthy. The directive is always
     prescriptive ("Use ...", "Surface ...") so the agent has a clear
-    next step.
+    next step. Composition lives in two helpers
+    (:func:`_collect_degradation_reasons` and
+    :func:`_pick_degradation_directive`) so this orchestrator stays
+    flat — Sonar cognitive-complexity stays well under the limit.
     """
     if secrets_loaded and embed_backend and bm25_available:
         return "", ""
 
-    reasons: list[str] = []
-    if not secrets_loaded:
-        if secrets_timed_out:
-            reasons.append("secrets probe exceeded 2s budget")
-        else:
-            reasons.append("KAIRIX_LLM_API_KEY not resolvable")
-    if not embed_backend:
-        if embed_timed_out:
-            reasons.append("embed backend probe exceeded 2s budget")
-        else:
-            reasons.append("embed backend unavailable")
-    if not bm25_available:
-        if bm25_timed_out:
-            reasons.append("BM25 probe exceeded 2s budget")
-        else:
-            reasons.append("BM25 index missing")
-    degraded_reason = "; ".join(reasons)
-
-    # Prescriptive directive — depends on which leg(s) survived.
-    if bm25_available and not (secrets_loaded and embed_backend):
-        next_action = (
-            "Vector search degraded — surface this to your human and use BM25 results from tool_search. "
-            "Ask your admin to run 'kairix onboard check'."
-        )
-    elif (secrets_loaded and embed_backend) and not bm25_available:
-        next_action = (
-            "BM25 offline — vector search still works via tool_search. "
-            "Ask your admin to run 'kairix embed --rebuild-fts'."
-        )
-    else:
-        next_action = (
-            "Vector search and BM25 both offline — kairix retrieval is unavailable. "
-            "Surface this to your human; ask your admin to run 'kairix onboard check'."
-        )
-
-    return degraded_reason, next_action
+    reasons = _collect_degradation_reasons(
+        secrets_loaded=secrets_loaded,
+        embed_backend=embed_backend,
+        bm25_available=bm25_available,
+        secrets_timed_out=secrets_timed_out,
+        embed_timed_out=embed_timed_out,
+        bm25_timed_out=bm25_timed_out,
+    )
+    next_action = _pick_degradation_directive(
+        secrets_loaded=secrets_loaded,
+        embed_backend=embed_backend,
+        bm25_available=bm25_available,
+    )
+    return "; ".join(reasons), next_action
 
 
 # ---------------------------------------------------------------------------

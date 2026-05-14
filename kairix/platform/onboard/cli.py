@@ -21,6 +21,10 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kairix.platform.onboard.check import CheckResult
 
 # ---------------------------------------------------------------------------
 # Env self-loader (ERR-003 fix)
@@ -94,32 +98,46 @@ def _self_load_env(explicit_path: str | None) -> tuple[str | None, list[str]]:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    from dataclasses import asdict
-
-    from kairix.platform.onboard.check import run_all_checks, run_onboard_check
-
     # Self-load env files so check results are context-independent (ERR-003)
     env_source, env_keys = _self_load_env(getattr(args, "env_file", None))
 
     if args.json:
-        # Structured JSON output — canonical machine-readable surface.
-        # Shape: {passed, total, fully_passed, failures: [{check, detail, remediation}]}.
-        outcome = run_onboard_check()
-        output = {
-            "passed": outcome.passed,
-            "total": outcome.total,
-            "fully_passed": outcome.fully_passed,
-            "failures": [asdict(f) for f in outcome.failures],
-            # env_source is operator metadata, not part of the OnboardResult shape;
-            # surfaced here so an admin running --json sees which env file was loaded.
-            "env_source": env_source,
-        }
-        print(json.dumps(output, indent=2))
-        return 0 if outcome.fully_passed else 1
+        return _render_check_json(env_source)
+    return _render_check_human(env_source, env_keys)
 
-    # Human-readable output — preserves the existing CLI surface for humans.
-    # We render from CheckResult (which carries the multi-line fix guidance);
-    # JSON renders from OnboardResult (which carries the one-line remediation).
+
+def _render_check_json(env_source: str | None) -> int:
+    """Emit the structured JSON surface and return the exit code.
+
+    Shape: ``{passed, total, fully_passed, failures: [...], env_source}``.
+    ``env_source`` is operator metadata, not part of ``OnboardResult``,
+    surfaced here so an admin running ``--json`` sees which env file was
+    loaded.
+    """
+    from dataclasses import asdict
+
+    from kairix.platform.onboard.check import run_onboard_check
+
+    outcome = run_onboard_check()
+    output = {
+        "passed": outcome.passed,
+        "total": outcome.total,
+        "fully_passed": outcome.fully_passed,
+        "failures": [asdict(f) for f in outcome.failures],
+        "env_source": env_source,
+    }
+    print(json.dumps(output, indent=2))
+    return 0 if outcome.fully_passed else 1
+
+
+def _render_check_human(env_source: str | None, env_keys: list[str]) -> int:
+    """Emit the human-readable surface and return the exit code.
+
+    Renders from ``CheckResult`` (which carries the multi-line fix
+    guidance); JSON renders from ``OnboardResult`` (one-line remediation).
+    """
+    from kairix.platform.onboard.check import run_all_checks
+
     results = run_all_checks()
     passed = sum(1 for r in results if r.ok)
     total = len(results)
@@ -127,38 +145,51 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     print()
     print("kairix deployment check")
+    _print_env_banner(env_source, env_keys)
+    print("─" * 50)
+    for r in results:
+        _print_check_result(r)
+    print("─" * 50)
+    _print_check_summary(passed=passed, total=total, all_ok=all_ok)
+    print()
+    return 0 if all_ok else 1
+
+
+def _print_env_banner(env_source: str | None, env_keys: list[str]) -> None:
+    """Print the ``env:`` line above the check results."""
     if env_source:
         loaded_note = f" ({len(env_keys)} keys loaded)" if env_keys else " (no new keys — already in env)"
         print(f"  env: {env_source}{loaded_note}")
     else:
         print("  env: none — using current environment")
-    print("─" * 50)
-    for r in results:
-        icon = "✓" if r.ok else "✗"
-        print(f"  {icon} {r.name}")
-        print(f"    {r.detail}")
-        if not r.ok and r.fix:
-            for line in r.fix.strip().splitlines():
-                print(f"      {line}")
-        print()
 
-    print("─" * 50)
+
+def _print_check_result(r: CheckResult) -> None:
+    """Render one ``CheckResult`` row (icon + name + detail + fix lines)."""
+    icon = "✓" if r.ok else "✗"
+    print(f"  {icon} {r.name}")
+    print(f"    {r.detail}")
+    if not r.ok and r.fix:
+        for line in r.fix.strip().splitlines():
+            print(f"      {line}")
+    print()
+
+
+def _print_check_summary(*, passed: int, total: int, all_ok: bool) -> None:
+    """Render the trailing summary block (pass count + next steps)."""
     if all_ok:
         print(f"  All {total} checks passed")
         print()
         print("  kairix is fully operational. Try:")
         print('  kairix search "what are our engineering standards" --agent builder')
-    else:
-        failed = total - passed
-        print(f"  {passed}/{total} checks passed — {failed} failed")
-        print()
-        print("  Fix the ✗ items above, then re-run: kairix onboard check")
-        print()
-        print("  Common first fix: run scripts/deploy-vm.sh to install the wrapper")
-        print("  and ensure kairix is on PATH for agent exec contexts.")
+        return
+    failed = total - passed
+    print(f"  {passed}/{total} checks passed — {failed} failed")
     print()
-
-    return 0 if all_ok else 1
+    print("  Fix the ✗ items above, then re-run: kairix onboard check")
+    print()
+    print("  Common first fix: run scripts/deploy-vm.sh to install the wrapper")
+    print("  and ensure kairix is on PATH for agent exec contexts.")
 
 
 # ---------------------------------------------------------------------------

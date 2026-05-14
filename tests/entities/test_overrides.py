@@ -227,6 +227,51 @@ def test_empty_term_quoted_skipped(tmp_path: Path, caplog: pytest.LogCaptureFixt
 
 
 # ---------------------------------------------------------------------------
+# Regex-split regression — the two-stage head + tail grammar must match
+# everything the old single-regex grammar matched and reject everything it
+# rejected. These tests anchor the refactor that split ``_ENTRY_PATTERN``
+# into ``_ENTRY_HEAD_PATTERN`` + ``_ENTRY_TAIL_PATTERN`` (Sonar PR #247).
+# ---------------------------------------------------------------------------
+
+
+def test_garbage_tail_after_label_rejected(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Trailing garbage that isn't a flag list is rejected as malformed.
+
+    Sabotage anchor: removing ``_ENTRY_TAIL_PATTERN.match(...)`` from
+    ``_parse_entry`` would let ``Acme`` slip through with the garbage tail
+    ignored — this test catches that regression by asserting the entry
+    is dropped.
+    """
+    p = _write(tmp_path, '- "Acme": ORG this is not a flag list\n- "Real": ORG\n')
+
+    with caplog.at_level("WARNING", logger="kairix.knowledge.entities.overrides"):
+        overrides = load_entity_overrides(p)
+
+    # Acme rejected by the tail-validator; only Real survives.
+    assert overrides.org_overrides == {"Real"}
+    assert any("unparseable entry" in rec.message for rec in caplog.records)
+
+
+def test_multiple_flags_in_tail_all_parsed(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Multiple comma-separated flags in the tail are all parsed.
+
+    Anchors the regex split: ``_ENTRY_HEAD_PATTERN`` captures the whole
+    tail and ``_FLAG_PATTERN.finditer`` walks it. Two flags must both
+    be honoured (case_insensitive fires the expansion; unknown_flag
+    logs and is dropped).
+    """
+    p = _write(tmp_path, '- "xyz": ORG, case_insensitive: true, future_flag: yes\n')
+
+    with caplog.at_level("WARNING", logger="kairix.knowledge.entities.overrides"):
+        overrides = load_entity_overrides(p)
+
+    # case_insensitive expansion happened — three surface forms register.
+    assert {"xyz", "XYZ", "Xyz"}.issubset(overrides.org_overrides)
+    # future_flag was acknowledged via warning, not silently ignored.
+    assert any("unknown flag" in rec.message and "future_flag" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # Integration with the filter chain — overrides reach suggest_entities
 # ---------------------------------------------------------------------------
 
