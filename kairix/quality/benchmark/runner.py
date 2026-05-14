@@ -423,6 +423,46 @@ def format_interpretation(result: BenchmarkResult) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _score_classification(case: Any, _paths: list[str], deps: BenchmarkDeps) -> tuple[float, dict[str, Any]]:
+    return classification_score(case.query, case.expected_type or "", classifier=deps.classifier), {}
+
+
+def _score_exact(case: Any, paths: list[str], _deps: BenchmarkDeps) -> tuple[float, dict[str, Any]]:
+    if case.gold_title:
+        score = 1.0 if title_in_retrieved(case.gold_title, paths, EXACT_MATCH_TOPK) else 0.0
+    else:
+        score = exact_match(paths, case.gold_path or "")
+    return score, {}
+
+
+def _score_fuzzy(case: Any, paths: list[str], _deps: BenchmarkDeps) -> tuple[float, dict[str, Any]]:
+    if case.gold_title:
+        score = 1.0 if title_in_retrieved(case.gold_title, paths, FUZZY_MATCH_TOPK) else 0.0
+    else:
+        score = fuzzy_match(paths, case.gold_path or "")
+    return score, {}
+
+
+def _score_ndcg(case: Any, paths: list[str], _deps: BenchmarkDeps) -> tuple[float, dict[str, Any]]:
+    effective_gold = (
+        case.gold_titles or case.gold_paths or ([{"path": case.gold_path, "relevance": 2}] if case.gold_path else [])
+    )
+    score = ndcg_graded(paths, effective_gold, k=10)
+    ndcg_detail = {
+        "hit_at_5": hit_at_k_graded(paths, effective_gold, k=5),
+        "rr": reciprocal_rank_graded(paths, effective_gold, k=10),
+    }
+    return score, ndcg_detail
+
+
+_SCORE_DISPATCH: dict[str, Callable[[Any, list[str], BenchmarkDeps], tuple[float, dict[str, Any]]]] = {
+    "classification": _score_classification,
+    "exact": _score_exact,
+    "fuzzy": _score_fuzzy,
+    "ndcg": _score_ndcg,
+}
+
+
 def score_case(
     case: Any,
     paths: list[str],
@@ -444,37 +484,9 @@ def score_case(
     """
     _ = retrieval_meta  # explicit drop documents intent
     deps = deps if deps is not None else BenchmarkDeps()
-
-    if case.score_method == "classification":
-        return classification_score(case.query, case.expected_type or "", classifier=deps.classifier), {}
-
-    if case.score_method == "exact":
-        if case.gold_title:
-            score = 1.0 if title_in_retrieved(case.gold_title, paths, EXACT_MATCH_TOPK) else 0.0
-        else:
-            score = exact_match(paths, case.gold_path or "")
-        return score, {}
-
-    if case.score_method == "fuzzy":
-        if case.gold_title:
-            score = 1.0 if title_in_retrieved(case.gold_title, paths, FUZZY_MATCH_TOPK) else 0.0
-        else:
-            score = fuzzy_match(paths, case.gold_path or "")
-        return score, {}
-
-    if case.score_method == "ndcg":
-        effective_gold = (
-            case.gold_titles
-            or case.gold_paths
-            or ([{"path": case.gold_path, "relevance": 2}] if case.gold_path else [])
-        )
-        score = ndcg_graded(paths, effective_gold, k=10)
-        ndcg_detail = {
-            "hit_at_5": hit_at_k_graded(paths, effective_gold, k=5),
-            "rr": reciprocal_rank_graded(paths, effective_gold, k=10),
-        }
-        return score, ndcg_detail
-
+    handler = _SCORE_DISPATCH.get(case.score_method)
+    if handler is not None:
+        return handler(case, paths, deps)
     # llm fallback
     return llm_judge(query=case.query, paths=paths, snippets=snippets, chat_backend=deps.chat_backend), {}
 
