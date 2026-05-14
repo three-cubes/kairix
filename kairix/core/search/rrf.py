@@ -47,6 +47,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from kairix.core.search.bm25 import BM25Result
 from kairix.core.search.config import (
@@ -354,31 +355,51 @@ def _build_entity_index(
     name_slug_in_degree: dict[str, int] = {}
 
     for row in rows:
-        vp = str(row["vault_path"]).lower().replace("\\", "/")
-        in_deg = int(row.get("in_degree") or 0)
-        path_in_degree[vp] = in_deg
-        parent = str(Path(vp).parent).lower().replace("\\", "/")
-        if parent not in (".", ""):
-            dir_in_degree[parent] = max(dir_in_degree.get(parent, 0), in_deg)
-
-        # Slug-based secondary lookup from entity name + label
-        name = str(row.get("name") or "").strip()
-        labels = row.get("labels") or []
-        if name:
-            for lbl in labels:
-                dir_name = _LABEL_TO_DIR.get(str(lbl).lower())
-                if dir_name:
-                    slug = slugify(name)
-                    if slug:
-                        doc_path = f"{dir_name}/{slug}.md"
-                        existing = name_slug_in_degree.get(doc_path, 0)
-                        name_slug_in_degree[doc_path] = max(existing, in_deg)
+        _index_entity_row(row, path_in_degree, dir_in_degree, name_slug_in_degree)
 
     if not path_in_degree:
         return empty
 
     max_in_degree = max(path_in_degree.values()) or 1
     return path_in_degree, dir_in_degree, name_slug_in_degree, max_in_degree
+
+
+def _index_entity_row(
+    row: dict[str, Any],
+    path_in_degree: dict[str, int],
+    dir_in_degree: dict[str, int],
+    name_slug_in_degree: dict[str, int],
+) -> None:
+    """Fold a single Neo4j entity row into the three lookup dicts."""
+    vp = str(row["vault_path"]).lower().replace("\\", "/")
+    in_deg = int(row.get("in_degree") or 0)
+    path_in_degree[vp] = in_deg
+
+    parent = str(Path(vp).parent).lower().replace("\\", "/")
+    if parent not in (".", ""):
+        dir_in_degree[parent] = max(dir_in_degree.get(parent, 0), in_deg)
+
+    _index_slug_lookups(row, in_deg, name_slug_in_degree)
+
+
+def _index_slug_lookups(
+    row: dict[str, Any],
+    in_deg: int,
+    name_slug_in_degree: dict[str, int],
+) -> None:
+    """Index ``{dir}/{slug}.md`` paths derived from each entity label."""
+    name = str(row.get("name") or "").strip()
+    if not name:
+        return
+    slug = slugify(name)
+    if not slug:
+        return
+    for lbl in row.get("labels") or []:
+        dir_name = _LABEL_TO_DIR.get(str(lbl).lower())
+        if not dir_name:
+            continue
+        doc_path = f"{dir_name}/{slug}.md"
+        name_slug_in_degree[doc_path] = max(name_slug_in_degree.get(doc_path, 0), in_deg)
 
 
 def _lookup_mention_count(

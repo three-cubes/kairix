@@ -219,6 +219,25 @@ def _select_tier(
         return "L0"
 
 
+def _lookup_tier_summary(
+    summary_loader: SummaryLoader,
+    path: str,
+    tier: Tier,
+) -> str | None:
+    """Try the loader for the tier's preferred summary; on L1, fall back to L0.
+
+    Returns ``None`` when no suitable summary exists OR on loader exception.
+    """
+    try:
+        if tier == "L0":
+            return summary_loader.get_l0(path) or None
+        if tier == "L1":
+            return (summary_loader.get_l1(path) or summary_loader.get_l0(path)) or None
+    except Exception as exc:
+        logger.debug("_get_content_for_tier: summary lookup failed — %s", exc)
+    return None
+
+
 def _get_content_for_tier(
     result: FusedResult,
     tier: Tier,
@@ -235,20 +254,9 @@ def _get_content_for_tier(
     snippet, or "" when the snippet is empty.
     """
     if summary_loader is not None:
-        try:
-            if tier == "L0":
-                l0 = summary_loader.get_l0(result.path)
-                if l0:
-                    return l0
-            elif tier == "L1":
-                l1 = summary_loader.get_l1(result.path)
-                if l1:
-                    return l1
-                l0 = summary_loader.get_l0(result.path)
-                if l0:
-                    return l0
-        except Exception as exc:
-            logger.debug("_get_content_for_tier: summary lookup failed — %s", exc)
+        summary = _lookup_tier_summary(summary_loader, result.path, tier)
+        if summary:
+            return summary
 
     # Strip YAML frontmatter — raw frontmatter wastes context budget and is
     # noise for agents consuming search results.

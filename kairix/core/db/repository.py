@@ -25,6 +25,42 @@ class SQLiteDocumentRepository:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
 
+    def _log_fts_operational_error(self, exc: sqlite3.OperationalError) -> None:
+        """Log a SQLite OperationalError with severity based on missing-table vs other.
+
+        The documents_fts-missing case is a real production fault — the
+        entire BM25 leg of hybrid retrieval is offline. Log at ERROR (not
+        WARNING) so it surfaces in alert pipelines, and tell the operator
+        how to fix it. Other operational errors (table locked, corrupt
+        index) keep the WARNING level. See #223.
+        """
+        msg = str(exc)
+        if "no such table" in msg.lower() and "documents_fts" in msg:
+            logger.error(
+                "search_fts: documents_fts is missing — BM25 leg is offline, hybrid retrieval is "
+                "degraded to vector-only. Run 'kairix embed --rebuild-fts' to rebuild the index."
+            )
+        else:
+            logger.warning("SQLiteDocumentRepository.search_fts: FTS query failed — %s", exc)
+
+    def _row_to_search_result(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Map one FTS row into the result dict consumed by the search backend."""
+        raw_score = float(row["bm25_score"])
+        score = abs(raw_score) / (1.0 + abs(raw_score))
+        doc_text = row["doc"] or ""
+        if doc_text.startswith("---"):
+            parts = doc_text.split("---", 2)
+            snippet = parts[2].strip()[:300] if len(parts) >= 3 else doc_text[:300]
+        else:
+            snippet = doc_text[:300]
+        return {
+            "file": str(row["path"]),
+            "title": str(row["title"] or ""),
+            "snippet": snippet,
+            "score": score,
+            "collection": str(row["collection"]),
+        }
+
     def search_fts(
         self,
         query: str,
@@ -53,19 +89,7 @@ class SQLiteDocumentRepository:
         try:
             rows = db.execute(sql, params).fetchall()
         except sqlite3.OperationalError as e:
-            # The documents_fts-missing case is a real production fault — the
-            # entire BM25 leg of hybrid retrieval is offline. Log at ERROR
-            # (not WARNING) so it surfaces in alert pipelines, and tell the
-            # operator how to fix it. Other operational errors (table locked,
-            # corrupt index) keep the WARNING level. See #223.
-            msg = str(e)
-            if "no such table" in msg.lower() and "documents_fts" in msg:
-                logger.error(
-                    "search_fts: documents_fts is missing — BM25 leg is offline, hybrid retrieval is "
-                    "degraded to vector-only. Run 'kairix embed --rebuild-fts' to rebuild the index."
-                )
-            else:
-                logger.warning("SQLiteDocumentRepository.search_fts: FTS query failed — %s", e)
+            self._log_fts_operational_error(e)
             db.close()
             return []
         except Exception as e:
@@ -73,28 +97,7 @@ class SQLiteDocumentRepository:
             db.close()
             return []
 
-        results: list[dict[str, Any]] = []
-        for row in rows:
-            raw_score = float(row["bm25_score"])
-            score = abs(raw_score) / (1.0 + abs(raw_score))
-
-            doc_text = row["doc"] or ""
-            if doc_text.startswith("---"):
-                parts = doc_text.split("---", 2)
-                snippet = parts[2].strip()[:300] if len(parts) >= 3 else doc_text[:300]
-            else:
-                snippet = doc_text[:300]
-
-            results.append(
-                {
-                    "file": str(row["path"]),
-                    "title": str(row["title"] or ""),
-                    "snippet": snippet,
-                    "score": score,
-                    "collection": str(row["collection"]),
-                }
-            )
-
+        results = [self._row_to_search_result(row) for row in rows]
         db.close()
         return results
 

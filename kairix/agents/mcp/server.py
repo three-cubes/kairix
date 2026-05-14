@@ -44,6 +44,62 @@ DEFAULT_SCOPE: Scope = Scope.SHARED_AGENT
 # ---------------------------------------------------------------------------
 
 
+def _build_entity_summary(row: dict[str, Any]) -> str:
+    """Build human-readable summary line from type-specific Neo4j entity fields.
+
+    Each branch appends 0 or 1 phrase; ``industry`` may be a list (joined).
+    """
+    parts: list[str] = []
+    if row.get("role"):
+        parts.append(row["role"])
+    if row.get("org"):
+        parts.append(f"at {row['org']}")
+    if row.get("tier"):
+        parts.append(f"Tier {row['tier']}")
+    if row.get("engagement_status"):
+        parts.append(f"({row['engagement_status']})")
+    industry = row.get("industry")
+    if industry:
+        parts.append(", ".join(industry) if isinstance(industry, list) else industry)
+    if row.get("domain"):
+        parts.append(row["domain"])
+    if row.get("category"):
+        parts.append(row["category"])
+    return " — ".join(parts) if parts else ""
+
+
+def _resolve_neo4j_client(neo4j_client: Any | None) -> Any:
+    """Return the supplied client, or fall back to the production client."""
+    if neo4j_client is not None:
+        return neo4j_client
+    from kairix.knowledge.graph.client import get_client
+
+    return get_client()
+
+
+def _entity_card_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Map a Neo4j row into the entity-card dict shape."""
+    return {
+        "id": row.get("id", ""),
+        "name": row.get("name", ""),
+        "type": row.get("type", ""),
+        "summary": _build_entity_summary(row),
+        "vault_path": row.get("vault_path") or "",
+    }
+
+
+_ENTITY_CARD_CYPHER = (
+    "MATCH (n) WHERE n.id = $id OR toLower(n.name) = toLower($name) "
+    "RETURN labels(n)[0] AS type, n.id AS id, n.name AS name, "
+    "n.vault_path AS vault_path, "
+    "n.role AS role, n.org AS org, "
+    "n.tier AS tier, n.engagement_status AS engagement_status, "
+    "n.domain AS domain, n.industry AS industry, "
+    "n.category AS category "
+    "LIMIT 1"
+)
+
+
 def _fetch_entity_card(name: str, *, neo4j_client: Any | None = None) -> dict[str, Any] | None:
     """Fetch entity card directly from Neo4j, bypassing MCP tool layer.
 
@@ -57,57 +113,16 @@ def _fetch_entity_card(name: str, *, neo4j_client: Any | None = None) -> dict[st
     try:
         from kairix.utils import slugify as _slugify
 
-        if neo4j_client is not None:
-            neo4j = neo4j_client
-        else:
-            from kairix.knowledge.graph.client import get_client
-
-            neo4j = get_client()
+        neo4j = _resolve_neo4j_client(neo4j_client)
         if not neo4j.available:
             return None
-
-        slug = _slugify(name)
-        rows = neo4j.cypher(
-            "MATCH (n) WHERE n.id = $id OR toLower(n.name) = toLower($name) "
-            "RETURN labels(n)[0] AS type, n.id AS id, n.name AS name, "
-            "n.vault_path AS vault_path, "
-            "n.role AS role, n.org AS org, "
-            "n.tier AS tier, n.engagement_status AS engagement_status, "
-            "n.domain AS domain, n.industry AS industry, "
-            "n.category AS category "
-            "LIMIT 1",
-            {"id": slug, "name": name},
-        )
-        if rows:
-            r = rows[0]
-            # Build summary from type-specific fields
-            summary_parts: list[str] = []
-            if r.get("role"):
-                summary_parts.append(r["role"])
-            if r.get("org"):
-                summary_parts.append(f"at {r['org']}")
-            if r.get("tier"):
-                summary_parts.append(f"Tier {r['tier']}")
-            if r.get("engagement_status"):
-                summary_parts.append(f"({r['engagement_status']})")
-            if r.get("industry"):
-                val = r["industry"]
-                summary_parts.append(", ".join(val) if isinstance(val, list) else val)
-            if r.get("domain"):
-                summary_parts.append(r["domain"])
-            if r.get("category"):
-                summary_parts.append(r["category"])
-            return {
-                "id": r.get("id", ""),
-                "name": r.get("name", ""),
-                "type": r.get("type", ""),
-                "summary": " — ".join(summary_parts) if summary_parts else "",
-                "vault_path": r.get("vault_path") or "",
-            }
+        rows = neo4j.cypher(_ENTITY_CARD_CYPHER, {"id": _slugify(name), "name": name})
+        if not rows:
+            return None
+        return _entity_card_from_row(rows[0])
     except (ImportError, RuntimeError, OSError, KeyError) as exc:
         logger.warning("_fetch_entity_card failed: %s", exc, exc_info=True)
-
-    return None
+        return None
 
 
 # ---------------------------------------------------------------------------

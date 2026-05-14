@@ -133,6 +133,24 @@ class QueryPlanner:
     embeddings, no extra SDK dependencies.
     """
 
+    def _build_decompose_prompt(self, query: str, neo4j_client: object | None) -> str:
+        """Pick the entity-context-aware prompt when Neo4j has context; otherwise the plain prompt."""
+        ctx = None
+        if neo4j_client is not None and getattr(neo4j_client, "available", False):
+            ctx = neo4j_graph_context(query, neo4j_client)
+        if ctx:
+            logger.debug("planner: injecting entity context into decompose prompt")
+            return _DECOMPOSE_PROMPT_WITH_CONTEXT.format(entity_context=ctx, query=query)
+        return _DECOMPOSE_PROMPT.format(query=query)
+
+    def _parse_subs_from_json(self, response: str) -> list[str] | None:
+        """Parse the LLM JSON-array response into 1-3 sub-query strings, or None."""
+        subs = json.loads(response.strip())
+        if not (isinstance(subs, list) and 1 <= len(subs) <= 3):
+            return None
+        filtered = [s for s in subs if isinstance(s, str) and s.strip()]
+        return filtered or None
+
     def decompose(self, query: str, neo4j_client: object | None = None, llm_backend=None) -> list[str]:
         """
         Decompose a complex query into 2-3 focused sub-queries.
@@ -140,6 +158,7 @@ class QueryPlanner:
         Uses chat_completion (GPT-4o-mini via Azure AI Foundry) with a JSON-array
         prompt for reliable parsing. Falls back to [query] on any failure.
         """
+        response: str | None = None
         try:
             if (
                 llm_backend is None
@@ -147,30 +166,15 @@ class QueryPlanner:
                 from kairix.platform.llm import get_default_backend as _get_llm
 
                 llm_backend = _get_llm()
-            chat_completion = llm_backend.chat
-            # Inject entity graph context when available
-            ctx = None
-            if neo4j_client is not None and getattr(neo4j_client, "available", False):
-                ctx = neo4j_graph_context(query, neo4j_client)
-            if ctx:
-                prompt = _DECOMPOSE_PROMPT_WITH_CONTEXT.format(entity_context=ctx, query=query)
-                logger.debug("planner: injecting entity context into decompose prompt")
-            else:
-                prompt = _DECOMPOSE_PROMPT.format(query=query)
-            response = chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=150,
-            )
+            prompt = self._build_decompose_prompt(query, neo4j_client)
+            response = llm_backend.chat(messages=[{"role": "user", "content": prompt}], max_tokens=150)
             if not response:
                 logger.warning("planner: chat_completion returned empty response")
                 return [query]
-
-            subs = json.loads(response.strip())
-            if isinstance(subs, list) and 1 <= len(subs) <= 3:
-                subs = [s for s in subs if isinstance(s, str) and s.strip()]
-                if subs:
-                    logger.debug("planner: decomposed into %d sub-queries", len(subs))
-                    return subs
+            subs = self._parse_subs_from_json(response)
+            if subs:
+                logger.debug("planner: decomposed into %d sub-queries", len(subs))
+                return subs
         except json.JSONDecodeError as _e:
             logger.warning("planner: JSON parse failed (%s) — trying regex fallback", _e)
             # Regex fallback: extract quoted strings (min 5 chars) from LLM output

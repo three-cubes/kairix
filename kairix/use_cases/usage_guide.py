@@ -73,6 +73,28 @@ class UsageGuideDeps:
     resolve_guide_fn: Callable[[Path | None], Path] = field(default_factory=lambda: _default_resolve_guide)
 
 
+def _collect_matching_sections(lines: list[str], topic_lower: str) -> list[str]:
+    """Walk the file line-by-line and emit each section whose heading matches topic."""
+    sections: list[str] = []
+    current: list[str] = []
+    in_section = False
+
+    for line in lines:
+        if line.startswith("## ") or line.startswith("### "):
+            if in_section and current:
+                sections.append("\n".join(current))
+            current = []
+            in_section = topic_lower in line.lower()
+            if in_section:
+                current.append(line)
+        elif in_section:
+            current.append(line)
+
+    if in_section and current:
+        sections.append("\n".join(current))
+    return sections
+
+
 def extract_topic_sections(full_text: str, topic_lower: str) -> str:
     """Return the concatenated markdown sections whose heading mentions the topic.
 
@@ -83,25 +105,7 @@ def extract_topic_sections(full_text: str, topic_lower: str) -> str:
     Public so CLI tests can pin the section-extraction contract directly.
     """
     lines = full_text.splitlines()
-    sections: list[str] = []
-    current: list[str] = []
-    in_section = False
-
-    for line in lines:
-        is_heading = line.startswith("## ") or line.startswith("### ")
-        if is_heading:
-            if in_section and current:
-                sections.append("\n".join(current))
-                current = []
-            in_section = topic_lower in line.lower()
-            if in_section:
-                current = [line]
-        elif in_section:
-            current.append(line)
-
-    if in_section and current:
-        sections.append("\n".join(current))
-
+    sections = _collect_matching_sections(lines, topic_lower)
     if sections:
         return "\n\n".join(sections)
     matching_lines = [ln for ln in lines if topic_lower in ln.lower()]

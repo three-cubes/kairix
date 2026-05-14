@@ -13,7 +13,7 @@ BM25Result is a TypedDict for lightweight, serialisable results.
 import logging
 import sqlite3
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from kairix.core.db import get_db_path, open_db
 
@@ -243,6 +243,54 @@ def _build_bm25_query(
     return sql, params
 
 
+def _bm25_via_doc_repo(
+    doc_repo: object,
+    query: str,
+    collections: list[str] | None,
+    limit: int,
+    date_filter_paths: frozenset[str] | None,
+) -> list[BM25Result]:
+    """Delegate BM25 to a DocumentRepository; map raw dicts to BM25Result."""
+    try:
+        raw = doc_repo.search_fts(query, collections=collections, limit=limit)  # type: ignore[union-attr] — duck-typed seam; mypy can't see through `object`
+        results = [
+            BM25Result(
+                file=r.get("file", r.get("path", "")),
+                title=r.get("title", ""),
+                snippet=r.get("snippet", r.get("content", "")[:300]),
+                score=r.get("score", 0.0),
+                collection=r.get("collection", ""),
+            )
+            for r in raw
+        ]
+        if date_filter_paths:
+            results = [r for r in results if r["file"] in date_filter_paths]
+        return results
+    except Exception as e:
+        logger.warning("bm25_search: doc_repo.search_fts failed — %s", e)
+        return []
+
+
+def _extract_snippet(doc_text: str) -> str:
+    """Strip leading YAML frontmatter and return a 300-char snippet."""
+    if not doc_text.startswith("---"):
+        return doc_text[:300]
+    parts = doc_text.split("---", 2)
+    return parts[2].strip()[:300] if len(parts) >= 3 else doc_text[:300]
+
+
+def _row_to_bm25_result(row: Any) -> BM25Result:
+    """Map a single SQLite row from the FTS query into a BM25Result."""
+    raw_score = float(row["bm25_score"])
+    return BM25Result(
+        file=str(row["path"]),
+        title=str(row["title"] or ""),
+        snippet=_extract_snippet(row["doc"] or ""),
+        score=abs(raw_score) / (1.0 + abs(raw_score)),
+        collection=str(row["collection"]),
+    )
+
+
 def bm25_search(
     query: str,
     collections: list[str] | None = None,
@@ -281,26 +329,8 @@ def bm25_search(
     if collections is not None and len(collections) == 0:
         return []
 
-    # Delegate to DocumentRepository when provided
     if doc_repo is not None:
-        try:
-            raw = doc_repo.search_fts(query, collections=collections, limit=limit)  # type: ignore[union-attr] — doc_repo is checked non-None on line above; mypy can't narrow across try
-            results = [
-                BM25Result(
-                    file=r.get("file", r.get("path", "")),
-                    title=r.get("title", ""),
-                    snippet=r.get("snippet", r.get("content", "")[:300]),
-                    score=r.get("score", 0.0),
-                    collection=r.get("collection", ""),
-                )
-                for r in raw
-            ]
-            if date_filter_paths:
-                results = [r for r in results if r["file"] in date_filter_paths]
-            return results
-        except Exception as e:
-            logger.warning("bm25_search: doc_repo.search_fts failed — %s", e)
-            return []
+        return _bm25_via_doc_repo(doc_repo, query, collections, limit, date_filter_paths)
 
     fts_query = _normalise_fts_query(query)
     if not fts_query:
@@ -324,31 +354,8 @@ def bm25_search(
         db.close()
         return []
 
-    results: list[BM25Result] = []
-    for row in rows:
-        raw_score = float(row["bm25_score"])
-        score = abs(raw_score) / (1.0 + abs(raw_score))
-
-        doc_text = row["doc"] or ""
-        if doc_text.startswith("---"):
-            parts = doc_text.split("---", 2)
-            snippet = parts[2].strip()[:300] if len(parts) >= 3 else doc_text[:300]
-        else:
-            snippet = doc_text[:300]
-
-        results.append(
-            BM25Result(
-                file=str(row["path"]),
-                title=str(row["title"] or ""),
-                snippet=snippet,
-                score=score,
-                collection=str(row["collection"]),
-            )
-        )
-
+    results = [_row_to_bm25_result(row) for row in rows]
     db.close()
-
     if date_filter_paths:
         results = [r for r in results if r["file"] in date_filter_paths]
-
     return results

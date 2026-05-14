@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +29,6 @@ from kairix.paths import KairixPaths, wikilinks_last_run_path
 
 # Timestamp file to track last run — env read lives in kairix.paths (F4).
 _LAST_RUN_PATH = str(wikilinks_last_run_path())
-
-# Label appended to per-file status lines when --dry-run is set.
-_DRY_RUN_LABEL = "(dry-run)"
 
 
 def main(argv: list[str] | None = None, *, paths: KairixPaths | None = None) -> None:
@@ -116,7 +114,7 @@ def _inject_single(path: str, entities: list[Any], dry_run: bool, *, paths: Kair
         return
     injected = inject_file(path, entities, dry_run=dry_run, paths=paths)
     if injected:
-        mode = _DRY_RUN_LABEL if dry_run else ""
+        mode = "(dry-run)" if dry_run else ""
         print(f"  ✅ {path} {mode}")
         for name in injected:
             print(f"     + [[{name}]]")
@@ -124,23 +122,38 @@ def _inject_single(path: str, entities: list[Any], dry_run: bool, *, paths: Kair
         print(f"  — {path}: no new links")
 
 
-def _inject_all(entities: list[Any], dry_run: bool, *, paths: KairixPaths) -> None:
-    """Inject wikilinks into all eligible vault and workspace files."""
-    files = _gather_eligible_files(paths)
+def _inject_files(files: list[str], entities: list[Any], dry_run: bool, *, paths: KairixPaths) -> None:
+    """Run inject_file across ``files`` and print a totals line. Shared by all/changed."""
     total_files = 0
     total_links = 0
-
     for path in files:
         injected = inject_file(path, entities, dry_run=dry_run, paths=paths)
-        if injected:
-            total_files += 1
-            total_links += len(injected)
-            mode = _DRY_RUN_LABEL if dry_run else ""
-            print(f"  ✅ {path} {mode}")
-            for name in injected:
-                print(f"     + [[{name}]]")
-
+        if not injected:
+            continue
+        total_files += 1
+        total_links += len(injected)
+        mode = "(dry-run)" if dry_run else ""
+        print(f"  ✅ {path} {mode}")
+        for name in injected:
+            print(f"     + [[{name}]]")
     print(f"\nDone. {total_files} files updated, {total_links} wikilinks injected.")
+
+
+def _inject_all(entities: list[Any], dry_run: bool, *, paths: KairixPaths) -> None:
+    """Inject wikilinks into all eligible vault and workspace files."""
+    _inject_files(_gather_eligible_files(paths), entities, dry_run, paths=paths)
+
+
+def _filter_changed_since(files: list[str], cutoff: float) -> list[str]:
+    """Return paths whose mtime is at or after ``cutoff``; missing-stat paths skipped."""
+    changed: list[str] = []
+    for path in files:
+        try:
+            if Path(path).stat().st_mtime >= cutoff:
+                changed.append(path)
+        except OSError:
+            continue
+    return changed
 
 
 def _inject_changed(entities: list[Any], dry_run: bool, *, paths: KairixPaths) -> None:
@@ -151,52 +164,36 @@ def _inject_changed(entities: list[Any], dry_run: bool, *, paths: KairixPaths) -
         _inject_all(entities, dry_run, paths=paths)
         return
 
-    cutoff = last_run
-    files = _gather_eligible_files(paths)
-    changed = []
-    for path in files:
-        try:
-            mtime = Path(path).stat().st_mtime
-            if mtime >= cutoff:
-                changed.append(path)
-        except OSError:
-            continue
-
+    changed = _filter_changed_since(_gather_eligible_files(paths), last_run)
     if not changed:
-        print(f"No files modified since last run ({_fmt_ts(cutoff)}). Nothing to do.")
+        print(f"No files modified since last run ({_fmt_ts(last_run)}). Nothing to do.")
         return
 
-    print(f"Processing {len(changed)} files modified since {_fmt_ts(cutoff)}.\n")
-    total_files = 0
-    total_links = 0
-    for path in changed:
-        injected = inject_file(path, entities, dry_run=dry_run, paths=paths)
-        if injected:
-            total_files += 1
-            total_links += len(injected)
-            mode = _DRY_RUN_LABEL if dry_run else ""
-            print(f"  ✅ {path} {mode}")
-            for name in injected:
-                print(f"     + [[{name}]]")
+    print(f"Processing {len(changed)} files modified since {_fmt_ts(last_run)}.\n")
+    _inject_files(changed, entities, dry_run, paths=paths)
 
-    print(f"\nDone. {total_files} files updated, {total_links} wikilinks injected.")
+
+def _eligible_md_files_under(root: str, paths: KairixPaths) -> Iterator[str]:
+    """Yield eligible .md files under ``root`` that fit within MAX_FILE_SIZE."""
+    p = Path(root)
+    if not p.exists():
+        return
+    for md_file in p.rglob("*.md"):
+        path_str = str(md_file)
+        if not should_inject(path_str, paths=paths):
+            continue
+        try:
+            if md_file.stat().st_size <= MAX_FILE_SIZE:
+                yield path_str
+        except OSError:
+            continue
 
 
 def _gather_eligible_files(paths: KairixPaths) -> list[str]:
     """Collect all eligible .md files from vault and workspaces."""
     result: list[str] = []
-    for root in [str(paths.document_root), str(paths.workspace_root)]:
-        p = Path(root)
-        if not p.exists():
-            continue
-        for md_file in p.rglob("*.md"):
-            path_str = str(md_file)
-            if should_inject(path_str, paths=paths):
-                try:
-                    if md_file.stat().st_size <= MAX_FILE_SIZE:
-                        result.append(path_str)
-                except OSError:
-                    continue
+    for root in (str(paths.document_root), str(paths.workspace_root)):
+        result.extend(_eligible_md_files_under(root, paths))
     return result
 
 
@@ -232,12 +229,8 @@ def _audit_cmd(argv: list[str], *, paths: KairixPaths) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _status_cmd(_argv: list[str]) -> None:
-    """Handle `kairix wikilinks status`.
-
-    ``_argv`` is accepted for sub-handler signature uniformity with the
-    inject/audit handlers; status takes no flags of its own.
-    """
+def _status_cmd(argv: list[str]) -> None:
+    """Handle `kairix wikilinks status`."""
     entities = get_entities()
     last_run = _read_last_run()
     log_entries = _read_log_entries()

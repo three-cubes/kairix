@@ -85,6 +85,39 @@ def _module_path(path: Path) -> str:
     return str(rel.with_suffix("")).replace("/", ".")
 
 
+def _function_has_test_only_kwarg(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    module_path: str,
+    allow: set[str],
+) -> bool:
+    """True if the function declares any ``*_fn`` arg defaulting to ``None``."""
+    args = node.args
+    positional = args.args
+    defaults = args.defaults
+    positional_with_default = list(zip(positional[len(positional) - len(defaults) :], defaults, strict=True))
+    kw_only = list(zip(args.kwonlyargs, args.kw_defaults, strict=True))
+    for arg, default in positional_with_default + kw_only:
+        param_name = arg.arg
+        if not param_name.endswith("_fn") or not _is_none_constant(default):
+            continue
+        if _qualified_param(module_path, node.name, param_name) not in allow:
+            return True
+    return False
+
+
+def _class_has_test_only_field(node: ast.ClassDef, module_path: str, allow: set[str]) -> bool:
+    """True if the class declares an annotated ``*_fn: ... = None`` field."""
+    for item in node.body:
+        if not isinstance(item, ast.AnnAssign) or not isinstance(item.target, ast.Name):
+            continue
+        field_name = item.target.id
+        if not field_name.endswith("_fn") or not _is_none_constant(item.value):
+            continue
+        if _qualified_param(module_path, node.name, field_name) not in allow:
+            return True
+    return False
+
+
 def file_has_violation(path: Path, allow: set[str]) -> bool:
     """True if ``path`` declares any function param OR dataclass field
     matching the ``*_fn=None`` shape, not on the allow-list.
@@ -105,40 +138,12 @@ def file_has_violation(path: Path, allow: set[str]) -> bool:
         return False
 
     module_path = _module_path(path)
-
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            args = node.args
-            positional = args.args
-            defaults = args.defaults
-            positional_with_default = list(zip(positional[len(positional) - len(defaults) :], defaults, strict=True))
-            kw_only = list(zip(args.kwonlyargs, args.kw_defaults, strict=True))
-            for arg, default in positional_with_default + kw_only:
-                param_name = arg.arg
-                if not param_name.endswith("_fn"):
-                    continue
-                if not _is_none_constant(default):
-                    continue
-                qualified = _qualified_param(module_path, node.name, param_name)
-                if qualified in allow:
-                    continue
+            if _function_has_test_only_kwarg(node, module_path, allow):
                 return True
-        elif isinstance(node, ast.ClassDef):
-            for item in node.body:
-                if not isinstance(item, ast.AnnAssign):
-                    continue
-                if not isinstance(item.target, ast.Name):
-                    continue
-                field_name = item.target.id
-                if not field_name.endswith("_fn"):
-                    continue
-                if not _is_none_constant(item.value):
-                    continue
-                qualified = _qualified_param(module_path, node.name, field_name)
-                if qualified in allow:
-                    continue
-                return True
-
+        elif isinstance(node, ast.ClassDef) and _class_has_test_only_field(node, module_path, allow):
+            return True
     return False
 
 

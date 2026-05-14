@@ -237,6 +237,84 @@ def search_output_to_envelope(out: SearchOutput) -> dict[str, Any]:
     }
 
 
+def _intent_value(sr: Any) -> str:
+    """Coerce ``sr.intent`` (possibly an Enum or string) into a plain value string."""
+    intent = getattr(sr, "intent", None)
+    value = getattr(intent, "value", None)
+    if value is not None:
+        return str(value)
+    return str(intent or "")
+
+
+def _fetch_entity_card_safe(entity_card: Callable[[str], Any], name: str) -> Any:
+    """Call the entity-card lookup; swallow exceptions and return None."""
+    try:
+        return entity_card(name)
+    except Exception:
+        logger.debug("entity card lookup failed", exc_info=True)
+        return None
+
+
+def _entity_card_hit(card: dict[str, Any]) -> SearchHit:
+    """Build the entity-graph SearchHit prepended to ENTITY-intent results."""
+    summary = card.get("summary", "")
+    return SearchHit(
+        path=card.get("vault_path", ""),
+        title=card.get("name", ""),
+        snippet=summary,
+        score=1.0,
+        tokens=estimate_tokens(summary),
+        source="entity_graph",
+        entity={
+            "id": card.get("id", ""),
+            "name": card.get("name", ""),
+            "type": card.get("type", ""),
+        },
+    )
+
+
+def _maybe_prepend_entity_card(
+    hits: list[SearchHit],
+    query: str,
+    intent_value: str,
+    entity_card: Callable[[str], Any],
+    include_entity_card: bool,
+) -> None:
+    """When the query is ENTITY-intent and a card exists, prepend it to ``hits``."""
+    if not include_entity_card or intent_value != QueryIntent.ENTITY.value:
+        return
+    name = _extract_entity_name(query)
+    if not name:
+        return
+    card = _fetch_entity_card_safe(entity_card, name)
+    if card is None:
+        return
+    hits.insert(0, _entity_card_hit(card))
+
+
+def _search_output_from_pipeline(
+    sr: Any,
+    query: str,
+    hits: list[SearchHit],
+    health: KairixHealth,
+    elapsed_ms: float,
+) -> SearchOutput:
+    """Map the raw ``SearchPipeline`` result onto a ``SearchOutput`` envelope."""
+    return SearchOutput(
+        query=getattr(sr, "query", query),
+        intent=_intent_value(sr),
+        results=hits,
+        bm25_count=int(getattr(sr, "bm25_count", 0) or 0),
+        vec_count=int(getattr(sr, "vec_count", 0) or 0),
+        fused_count=int(getattr(sr, "fused_count", 0) or 0),
+        vec_failed=bool(getattr(sr, "vec_failed", False)),
+        total_tokens=int(getattr(sr, "total_tokens", 0) or 0),
+        latency_ms=float(getattr(sr, "latency_ms", elapsed_ms) or elapsed_ms),
+        health=health,
+        error=str(getattr(sr, "error", "") or ""),
+    )
+
+
 def run_search(
     query: str,
     *,
@@ -267,65 +345,17 @@ def run_search(
     """
     if deps is None:  # pragma: no cover — production lazy default; tests pass deps=SearchDeps(...)
         deps = SearchDeps()
-    search = deps.search_fn
-    entity_card = deps.entity_card_fn
-    classify = deps.classify_fn
-
     health = _tool_health(probe_health(deps.health_deps), tool=_search_next_action)
 
     started = time.monotonic()
     try:
-        effective_budget = _infer_budget(query, budget, classify)
-        sr = search(query=query, agent=agent, scope=scope, budget=effective_budget)
-
-        intent_value = (
-            sr.intent.value if hasattr(getattr(sr, "intent", None), "value") else str(getattr(sr, "intent", ""))
-        )
-
+        effective_budget = _infer_budget(query, budget, deps.classify_fn)
+        sr = deps.search_fn(query=query, agent=agent, scope=scope, budget=effective_budget)
+        intent_value = _intent_value(sr)
         hits: list[SearchHit] = [_budgeted_to_hit(b) for b in getattr(sr, "results", [])[:limit]]
-
-        if include_entity_card and intent_value == QueryIntent.ENTITY.value:
-            name = _extract_entity_name(query)
-            if name:
-                try:
-                    card = entity_card(name)
-                except Exception:
-                    logger.debug("entity card lookup failed", exc_info=True)
-                    card = None
-                if card is not None:
-                    summary = card.get("summary", "")
-                    hits.insert(
-                        0,
-                        SearchHit(
-                            path=card.get("vault_path", ""),
-                            title=card.get("name", ""),
-                            snippet=summary,
-                            score=1.0,
-                            tokens=estimate_tokens(summary),
-                            source="entity_graph",
-                            entity={
-                                "id": card.get("id", ""),
-                                "name": card.get("name", ""),
-                                "type": card.get("type", ""),
-                            },
-                        ),
-                    )
-
+        _maybe_prepend_entity_card(hits, query, intent_value, deps.entity_card_fn, include_entity_card)
         elapsed_ms = (time.monotonic() - started) * 1000
-
-        return SearchOutput(
-            query=getattr(sr, "query", query),
-            intent=intent_value,
-            results=hits,
-            bm25_count=int(getattr(sr, "bm25_count", 0) or 0),
-            vec_count=int(getattr(sr, "vec_count", 0) or 0),
-            fused_count=int(getattr(sr, "fused_count", 0) or 0),
-            vec_failed=bool(getattr(sr, "vec_failed", False)),
-            total_tokens=int(getattr(sr, "total_tokens", 0) or 0),
-            latency_ms=float(getattr(sr, "latency_ms", elapsed_ms) or elapsed_ms),
-            health=health,
-            error=str(getattr(sr, "error", "") or ""),
-        )
+        return _search_output_from_pipeline(sr, query, hits, health, elapsed_ms)
     except Exception as exc:
         logger.warning("run_search failed: %s", exc, exc_info=True)
         return SearchOutput(

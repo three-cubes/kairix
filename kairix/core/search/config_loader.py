@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from kairix.core.search.config import (
     EntityBoostConfig,
@@ -385,6 +386,77 @@ def _parse_rerank(d: dict) -> RerankConfig:
 # ---------------------------------------------------------------------------
 
 
+def _merge_top_level_scalars(base: RetrievalConfig, overrides: dict) -> dict:
+    """Coerce + return the override scalar fields (fusion/rrf_k/limits/skip)."""
+    out: dict = {}
+    for key in ("fusion_strategy", "rrf_k", "bm25_limit", "vec_limit", "skip_vector"):
+        if key in overrides:
+            out[key] = type(getattr(base, key))(overrides[key])
+    # rerank_intents is a tuple[str, ...] — coerce list/None from YAML into
+    # the right shape (per-collection override; closes #74).
+    if "rerank_intents" in overrides:
+        intents = overrides["rerank_intents"] or []
+        out["rerank_intents"] = tuple(str(x) for x in intents)
+    return out
+
+
+def _merge_entity_boost(base: RetrievalConfig, override: dict) -> Any:
+    return _parse_entity(
+        {
+            "enabled": base.entity.enabled,
+            "factor": base.entity.factor,
+            "cap": base.entity.cap,
+            **override,
+        }
+    )
+
+
+def _merge_procedural_boost(base: RetrievalConfig, override: dict) -> Any:
+    return _parse_procedural(
+        {
+            "enabled": base.procedural.enabled,
+            "factor": base.procedural.factor,
+            **override,
+        }
+    )
+
+
+def _merge_temporal_boost(base: RetrievalConfig, override: dict) -> Any:
+    """Deep-merge nested ``date_path_boost`` / ``chunk_date_boost`` blocks.
+
+    ``_parse_temporal`` expects the nested shape, not the flat field names.
+    """
+    base_temporal_dict = {
+        "date_path_boost": {
+            "enabled": base.temporal.date_path_boost_enabled,
+            "factor": base.temporal.date_path_boost_factor,
+            "recency_window_days": base.temporal.date_path_recency_window_days,
+        },
+        "chunk_date_boost": {
+            "enabled": base.temporal.chunk_date_boost_enabled,
+            "decay_halflife_days": base.temporal.chunk_date_decay_halflife_days,
+            "guard_explicit_only": base.temporal.chunk_date_boost_guard_explicit_only,
+        },
+    }
+    user_temporal = override or {}
+    merged: dict[str, Any] = dict(base_temporal_dict)
+    for sub_key in ("date_path_boost", "chunk_date_boost"):
+        if sub_key in user_temporal:
+            merged[sub_key] = {**base_temporal_dict[sub_key], **user_temporal[sub_key]}
+    return _parse_temporal(merged)
+
+
+def _merge_rerank(base: RetrievalConfig, override: dict) -> Any:
+    return _parse_rerank(
+        {
+            "enabled": base.rerank.enabled,
+            "model": base.rerank.model,
+            "candidate_limit": base.rerank.candidate_limit,
+            **override,
+        }
+    )
+
+
 def merge_retrieval_config(base: RetrievalConfig, overrides: dict) -> RetrievalConfig:
     """Apply a partial YAML override dict on top of a base RetrievalConfig.
 
@@ -394,66 +466,19 @@ def merge_retrieval_config(base: RetrievalConfig, overrides: dict) -> RetrievalC
     """
     from dataclasses import replace
 
-    top_fields: dict = {}
-    for key in ("fusion_strategy", "rrf_k", "bm25_limit", "vec_limit", "skip_vector"):
-        if key in overrides:
-            top_fields[key] = type(getattr(base, key))(overrides[key])
-
-    # rerank_intents is a tuple[str, ...] — coerce list/None from YAML into the
-    # right shape. Per-collection override (e.g. reference-library: only
-    # 'conceptual' triggers rerank, not 'multi_hop') closes #74.
-    if "rerank_intents" in overrides:
-        intents = overrides["rerank_intents"] or []
-        top_fields["rerank_intents"] = tuple(str(x) for x in intents)
+    top_fields: dict = _merge_top_level_scalars(base, overrides)
 
     boosts = overrides.get("boosts", {}) or {}
     if "entity" in boosts:
-        merged = {
-            "enabled": base.entity.enabled,
-            "factor": base.entity.factor,
-            "cap": base.entity.cap,
-            **boosts["entity"],
-        }
-        top_fields["entity"] = _parse_entity(merged)
+        top_fields["entity"] = _merge_entity_boost(base, boosts["entity"])
     if "procedural" in boosts:
-        merged = {
-            "enabled": base.procedural.enabled,
-            "factor": base.procedural.factor,
-            **boosts["procedural"],
-        }
-        top_fields["procedural"] = _parse_procedural(merged)
+        top_fields["procedural"] = _merge_procedural_boost(base, boosts["procedural"])
     if "temporal" in boosts:
-        # ``_parse_temporal`` expects the nested ``date_path_boost: {factor, ...}``
-        # shape, not the flat field names — so the base-fallback dict has to
-        # mirror that shape and per-key overrides have to deep-merge on top.
-        base_temporal_dict = {
-            "date_path_boost": {
-                "enabled": base.temporal.date_path_boost_enabled,
-                "factor": base.temporal.date_path_boost_factor,
-                "recency_window_days": base.temporal.date_path_recency_window_days,
-            },
-            "chunk_date_boost": {
-                "enabled": base.temporal.chunk_date_boost_enabled,
-                "decay_halflife_days": base.temporal.chunk_date_decay_halflife_days,
-                "guard_explicit_only": base.temporal.chunk_date_boost_guard_explicit_only,
-            },
-        }
-        user_temporal = boosts["temporal"] or {}
-        merged = dict(base_temporal_dict)
-        for sub_key in ("date_path_boost", "chunk_date_boost"):
-            if sub_key in user_temporal:
-                merged[sub_key] = {**base_temporal_dict[sub_key], **user_temporal[sub_key]}
-        top_fields["temporal"] = _parse_temporal(merged)
+        top_fields["temporal"] = _merge_temporal_boost(base, boosts["temporal"])
 
     rerank = overrides.get("rerank", {})
     if rerank:
-        merged = {
-            "enabled": base.rerank.enabled,
-            "model": base.rerank.model,
-            "candidate_limit": base.rerank.candidate_limit,
-            **rerank,
-        }
-        top_fields["rerank"] = _parse_rerank(merged)
+        top_fields["rerank"] = _merge_rerank(base, rerank)
 
     return replace(base, **top_fields) if top_fields else base
 

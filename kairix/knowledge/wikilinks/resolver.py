@@ -57,9 +57,56 @@ def _make_link(name: str) -> str:
 # Matches table rows like:
 #   | Acme-Corp | `[[Acme-Corp]]` | `02-Areas/Clients/Acme-Corp/` |
 #   | Gamma Systems | `[[Gamma-Systems\|Gamma Systems]]` | `02-Areas/Clients/Gamma-Systems/` |
-_TABLE_ROW_RE = re.compile(
-    r"^\|\s*(?P<entity>[^|]+?)\s*\|\s*`(?P<link>\[\[[^\]]+\]\])`\s*\|\s*`(?P<path>[^`]+)`\s*\|"
-)  # NOSONAR — captures bounded by literal `|`/backtick delimiters; backtracking linear.
+# NOSONAR: each capture is bounded by a distinct literal
+# delimiter (`|` or backtick); no nested quantifiers — backtracking is
+# linear in line length. Input is the bootstrap entity-table markdown file.
+_TABLE_ROW_RE = re.compile(r"^\|\s*(?P<entity>[^|]+?)\s*\|\s*`(?P<link>\[\[[^\]]+\]\])`\s*\|\s*`(?P<path>[^`]+)`\s*\|")
+
+
+_SECTION_TYPE_MAP = {
+    "clients": "organisation",
+    "key organisations": "organisation",
+    "active projects": "project",
+    "frameworks": "framework",
+    "key people": "person",
+    "agent platform": "component",
+}
+
+
+def _update_section_context(line: str, current: str) -> str:
+    """Map a markdown H2 heading line onto its entity_type; otherwise pass-through."""
+    if not line.startswith("## "):
+        return current
+    heading = line[3:].strip().lower()
+    for keyword, etype in _SECTION_TYPE_MAP.items():
+        if keyword in heading:
+            return etype
+    return current
+
+
+def _parse_bootstrap_row(line: str, current_section: str) -> WikiEntity | None:
+    """Parse a single bootstrap markdown table row into a ``WikiEntity`` or None."""
+    m = _TABLE_ROW_RE.match(line)
+    if not m:
+        return None
+    entity_name = m.group("entity").strip()
+    if entity_name.lower() in ("entity", "name"):
+        return None  # header row
+    # Strip trailing parenthetical notes from vault_path.
+    # NOSONAR: non-greedy `.*?` bounded by `)` and end-anchor; operates on
+    # a single short path string (≤ a few hundred chars).
+    vault_path = re.sub(r"\s*\(.*?\)\s*$", "", m.group("path").strip()).strip()
+    if not vault_path or not entity_name:
+        return None
+    # Unescape \| inside wikilinks (markdown table escaping)
+    link = m.group("link").strip().replace("\\|", "|")
+    return WikiEntity(
+        name=entity_name,
+        aliases=_extract_aliases(entity_name, link),
+        vault_path=vault_path,
+        link=link,
+        entity_type=current_section,
+    )
 
 
 def load_entities_from_bootstrap(
@@ -83,65 +130,15 @@ def load_entities_from_bootstrap(
 
     entities: list[WikiEntity] = []
     seen_names: set[str] = set()
-
-    # Determine section context for entity_type
     current_section = "unknown"
-    section_map = {
-        "clients": "organisation",
-        "key organisations": "organisation",
-        "active projects": "project",
-        "frameworks": "framework",
-        "key people": "person",
-        "agent platform": "component",
-    }
 
     for line in content.splitlines():
-        # Update section from H2 headers
-        if line.startswith("## "):
-            heading = line[3:].strip().lower()
-            for keyword, etype in section_map.items():
-                if keyword in heading:
-                    current_section = etype
-                    break
-
-        m = _TABLE_ROW_RE.match(line)
-        if not m:
+        current_section = _update_section_context(line, current_section)
+        entity = _parse_bootstrap_row(line, current_section)
+        if entity is None or entity.name in seen_names:
             continue
-
-        entity_name = m.group("entity").strip()
-        raw_link = m.group("link").strip()
-        vault_path = m.group("path").strip()
-
-        # Skip header rows
-        if entity_name.lower() in ("entity", "name"):
-            continue
-        # Skip vault path annotations like "(general reference)" - keep just path part
-        # Strip trailing parenthetical notes from vault_path
-        vault_path = re.sub(
-            r"\s*\(.*?\)\s*$", "", vault_path
-        ).strip()  # NOSONAR — non-greedy `.*?` bounded by `)` and end-anchor; short path input.
-        if not vault_path or not entity_name:
-            continue
-
-        # Unescape \| inside wikilinks (markdown table escaping)
-        link = raw_link.replace("\\|", "|")
-
-        # Extract aliases from display text in the link [[target|display]]
-        aliases = _extract_aliases(entity_name, link)
-
-        if entity_name in seen_names:
-            continue
-        seen_names.add(entity_name)
-
-        entities.append(
-            WikiEntity(
-                name=entity_name,
-                aliases=aliases,
-                vault_path=vault_path,
-                link=link,
-                entity_type=current_section,
-            )
-        )
+        seen_names.add(entity.name)
+        entities.append(entity)
 
     return entities
 

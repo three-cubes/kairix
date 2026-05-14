@@ -167,6 +167,42 @@ class EmbedRunOutcome:
     recall_passed: bool | None = None
 
 
+def _log_embed_complete(embedded: Any, failed: Any, recall_score: Any) -> None:
+    """Emit the standard 'embed complete' info line with recall as percentage or n/a."""
+    recall_str = f"{recall_score:.0%}" if isinstance(recall_score, float) else "n/a"
+    logger.info("worker: embed complete — embedded=%s failed=%s recall=%s", embedded, failed, recall_str)
+
+
+def _log_embed_warnings(failed: Any, recall_passed: Any, recall_alert: Any, diagnostics: list[Any]) -> None:
+    """Emit failure / recall-gate / diagnostic warnings from an embed result."""
+    if isinstance(failed, int) and failed > 0:
+        logger.warning("worker: %d chunks failed during embed", failed)
+    if recall_passed is False:
+        logger.warning(
+            "worker: recall gate alert — %s",
+            recall_alert or "search quality degraded; see kairix onboard check",
+        )
+    for diag in diagnostics:
+        logger.warning("worker: %s", diag)
+
+
+def _outcome_from_result(result: Any) -> EmbedRunOutcome:
+    """Map an ``EmbedPipelineResult``-shaped object into a typed ``EmbedRunOutcome``."""
+    embedded = getattr(result, "embedded", None)
+    failed = getattr(result, "failed", None)
+    recall_passed = getattr(result, "recall_passed", None)
+    diagnostics = getattr(result, "diagnostics", None) or []
+    _log_embed_complete(embedded, failed, getattr(result, "recall_score", None))
+    _log_embed_warnings(failed, recall_passed, getattr(result, "recall_alert", None), diagnostics)
+    did_work = (isinstance(embedded, int) and embedded > 0) or (isinstance(failed, int) and failed > 0)
+    return EmbedRunOutcome(
+        did_work=did_work,
+        embedded=embedded if isinstance(embedded, int) else 0,
+        failed=failed if isinstance(failed, int) else 0,
+        recall_passed=recall_passed if isinstance(recall_passed, bool) else None,
+    )
+
+
 def run_embed_with_outcome(deps: WorkerDeps | None = None) -> EmbedRunOutcome:
     """Run incremental embed and return a structured outcome.
 
@@ -181,34 +217,7 @@ def run_embed_with_outcome(deps: WorkerDeps | None = None) -> EmbedRunOutcome:
         if result is None:
             logger.info("worker: embed complete")
             return EmbedRunOutcome(did_work=False)
-        embedded = getattr(result, "embedded", None)
-        failed = getattr(result, "failed", None)
-        recall_score = getattr(result, "recall_score", None)
-        recall_passed = getattr(result, "recall_passed", None)
-        recall_alert = getattr(result, "recall_alert", None)
-        diagnostics = getattr(result, "diagnostics", None) or []
-        logger.info(
-            "worker: embed complete — embedded=%s failed=%s recall=%s",
-            embedded,
-            failed,
-            f"{recall_score:.0%}" if isinstance(recall_score, float) else "n/a",
-        )
-        if isinstance(failed, int) and failed > 0:
-            logger.warning("worker: %d chunks failed during embed", failed)
-        if recall_passed is False:
-            logger.warning(
-                "worker: recall gate alert — %s",
-                recall_alert or "search quality degraded; see kairix onboard check",
-            )
-        for diag in diagnostics:
-            logger.warning("worker: %s", diag)
-        did_work = (isinstance(embedded, int) and embedded > 0) or (isinstance(failed, int) and failed > 0)
-        return EmbedRunOutcome(
-            did_work=did_work,
-            embedded=embedded if isinstance(embedded, int) else 0,
-            failed=failed if isinstance(failed, int) else 0,
-            recall_passed=recall_passed if isinstance(recall_passed, bool) else None,
-        )
+        return _outcome_from_result(result)
     except (Exception, SystemExit) as exc:
         logger.warning("worker: embed pipeline raised — %s", exc)
         return EmbedRunOutcome(did_work=False)
@@ -319,6 +328,123 @@ def run_health_check(deps: WorkerDeps | None = None) -> None:
         logger.warning("worker: health check failed — %s", exc)
 
 
+@dataclass
+class _Schedule:
+    """Worker task interval config — bundles the four `int` cadences.
+
+    Scalar config (not a test-injection seam); main() builds this once
+    from kwargs + module defaults so the inner loop helpers can pass a
+    single value around rather than four discrete `_embed_interval` ints.
+    """
+
+    embed: int
+    entity: int
+    health: int
+    wikilinks: int
+
+
+def _resolve_schedule(
+    embed_interval: int | None,
+    entity_seed_interval: int | None,
+    health_check_interval: int | None,
+    wikilinks_interval: int | None,
+) -> _Schedule:
+    """Fold kwargs + module defaults into a single ``_Schedule``."""
+    return _Schedule(
+        embed=embed_interval if embed_interval is not None else EMBED_INTERVAL,
+        entity=entity_seed_interval if entity_seed_interval is not None else ENTITY_SEED_INTERVAL,
+        health=health_check_interval if health_check_interval is not None else HEALTH_CHECK_INTERVAL,
+        wikilinks=wikilinks_interval if wikilinks_interval is not None else WIKILINKS_INTERVAL,
+    )
+
+
+def _boot_state(deps: WorkerDeps) -> WorkerState:
+    """Load prior state from disk (increment restart_count) or start fresh.
+
+    #224 phase 5: if a prior run left a state file, we INCREMENT its
+    ``restart_count`` and reuse historical counters so operators see
+    lifetime totals across restarts.
+    """
+    prior = deps.read_state_fn(deps.state_path)
+    if prior is not None:
+        prior.restart_count += 1
+        logger.info("worker: resumed from prior state — restart_count=%d", prior.restart_count)
+        return prior
+    logger.info("worker: no prior state on disk — starting fresh")
+    return deps.state
+
+
+def _apply_embed_outcome(state: WorkerState, outcome: EmbedRunOutcome, consecutive_noops: int) -> int:
+    """Fold an embed outcome into worker state; return the updated no-op streak."""
+    new_streak = 0 if outcome.did_work else consecutive_noops + 1
+    state.consecutive_embed_noops = new_streak
+    state.embedded_total += outcome.embedded
+    state.failed_chunks_total += outcome.failed
+    state.last_embed_run_at = time.time()
+    state.last_embed_did_work = outcome.did_work
+    if outcome.recall_passed is False:
+        state.recall_alerts_total += 1
+    return new_streak
+
+
+def _check_paused(deps: WorkerDeps, transition: Callable[[WorkerPhase], None], previously_paused: bool) -> bool:
+    """Handle the operator-pause flag. Returns the new ``previously_paused`` value.
+
+    When the flag is present we sleep and return True; otherwise we restore
+    IDLE phase if we were paused and return False.
+    """
+    if deps.pause_flag_path.exists():
+        if not previously_paused:
+            transition(WorkerPhase.PAUSED)
+            logger.info("worker: paused — flag file present at %s", deps.pause_flag_path)
+        deps.sleep(PAUSE_POLL_INTERVAL_S)
+        return True
+    if previously_paused:
+        transition(WorkerPhase.IDLE)
+        logger.info("worker: resumed — flag file removed")
+    return False
+
+
+def _log_maintenance_toggle(maintenance_active: bool, previously_skipping: bool, streak: int) -> bool:
+    """Log skip-enter / skip-exit transitions; return the new ``previously_skipping`` flag."""
+    if not maintenance_active and not previously_skipping:
+        logger.info(
+            "worker: skipping maintenance scans — %d consecutive no-op embeds (threshold %d)",
+            streak,
+            MAINTENANCE_SKIP_NOOP_THRESHOLD,
+        )
+        return True
+    if maintenance_active and previously_skipping:
+        logger.info("worker: maintenance scans resumed — embed found work")
+        return False
+    return previously_skipping
+
+
+def _run_embed_cycle(
+    deps: WorkerDeps,
+    state: WorkerState,
+    transition: Callable[[WorkerPhase], None],
+    streak: int,
+) -> int:
+    """Run one embed pass, persist state, log idle-backoff if applicable. Returns new streak."""
+    transition(WorkerPhase.INGEST)
+    outcome = run_embed_with_outcome(deps)
+    new_streak = _apply_embed_outcome(state, outcome, streak)
+    transition(WorkerPhase.IDLE)
+    return new_streak
+
+
+def _run_maintenance_task(
+    deps: WorkerDeps,
+    transition: Callable[[WorkerPhase], None],
+    task: Callable[[WorkerDeps], None],
+) -> None:
+    """Run one maintenance task with MAINTENANCE→IDLE phase transitions."""
+    transition(WorkerPhase.MAINTENANCE)
+    task(deps)
+    transition(WorkerPhase.IDLE)
+
+
 def main(
     *,
     deps: WorkerDeps | None = None,
@@ -340,37 +466,16 @@ def main(
     )
 
     deps = deps if deps is not None else WorkerDeps()
-
-    _embed_interval = embed_interval if embed_interval is not None else EMBED_INTERVAL
-    _entity_interval = entity_seed_interval if entity_seed_interval is not None else ENTITY_SEED_INTERVAL
-    _health_interval = health_check_interval if health_check_interval is not None else HEALTH_CHECK_INTERVAL
-    _wikilinks_interval = wikilinks_interval if wikilinks_interval is not None else WIKILINKS_INTERVAL
+    schedule = _resolve_schedule(embed_interval, entity_seed_interval, health_check_interval, wikilinks_interval)
 
     logger.info(
         "kairix worker starting — embed every %ds, entity seed every %ds, wikilinks every %ds",
-        _embed_interval,
-        _entity_interval,
-        _wikilinks_interval,
+        schedule.embed,
+        schedule.entity,
+        schedule.wikilinks,
     )
 
-    # #224 phase 5 — boot the persisted state.
-    #
-    # If a prior run left a state file, we INCREMENT its ``restart_count``
-    # and reuse the historical counters (embedded_total, recall_alerts_total
-    # etc.) so operators see lifetime totals across restarts. If no prior
-    # state, we start fresh.
-    #
-    # Try disk first so ``restart_count`` survives container restarts; fall
-    # back to ``deps.state`` (a fresh default WorkerState in production, or a
-    # test-supplied override).
-    prior = deps.read_state_fn(deps.state_path)
-    if prior is not None:
-        state = prior
-        state.restart_count = state.restart_count + 1
-        logger.info("worker: resumed from prior state — restart_count=%d", state.restart_count)
-    else:
-        state = deps.state
-        logger.info("worker: no prior state on disk — starting fresh")
+    state = _boot_state(deps)
     # Persist initial state (STARTING) so ``kairix worker status`` is
     # answerable immediately after boot, before the first embed completes.
     state.current_phase = WorkerPhase.STARTING
@@ -409,106 +514,53 @@ def main(
     signal.signal(signal.SIGINT, _shutdown)
 
     # Run embed immediately on startup
-    _transition(WorkerPhase.INGEST)
-    outcome = run_embed_with_outcome(deps)
-    consecutive_embed_noops = 0 if outcome.did_work else consecutive_embed_noops + 1
-    state.consecutive_embed_noops = consecutive_embed_noops
-    state.embedded_total += outcome.embedded
-    state.failed_chunks_total += outcome.failed
-    state.last_embed_run_at = time.time()
-    state.last_embed_did_work = outcome.did_work
-    if outcome.recall_passed is False:
-        state.recall_alerts_total += 1
+    consecutive_embed_noops = _run_embed_cycle(deps, state, _transition, consecutive_embed_noops)
     last_embed = time.monotonic()
-    _transition(WorkerPhase.IDLE)
 
-    # #224 phase 4: track whether we logged the pause entry already so the
-    # paused message doesn't spam every 5s while the flag is held. Cleared
-    # when the flag is removed so the next pause cycle re-logs.
+    # #224 phase 4: one-shot log on pause/resume so we don't spam every 5s.
     previously_paused = False
-
-    # #224 phase 2: same one-shot-log pattern as ``previously_paused`` —
-    # toggles when we cross MAINTENANCE_SKIP_NOOP_THRESHOLD in either
-    # direction so operators see one entry/exit message per skip episode
-    # rather than a log line on every loop iteration.
+    # #224 phase 2: same one-shot-log pattern for maintenance-skip episodes.
     previously_skipping_maint = False
 
     while running:
-        # #224 phase 4 — operator-controlled pause. Polled at the very top
-        # of each loop iteration. While the flag is present the worker
-        # skips all task work, sleeps for PAUSE_POLL_INTERVAL_S, and rechecks.
-        # No state side-effects, no embed/seed/health calls, no advancing of
-        # backoff streaks — the only thing that happens is the flag re-check.
-        if deps.pause_flag_path.exists():
-            if not previously_paused:
-                _transition(WorkerPhase.PAUSED)
-                logger.info("worker: paused — flag file present at %s", deps.pause_flag_path)
-                previously_paused = True
-            deps.sleep(PAUSE_POLL_INTERVAL_S)
-            continue
+        previously_paused = _check_paused(deps, _transition, previously_paused)
         if previously_paused:
-            _transition(WorkerPhase.IDLE)
-            logger.info("worker: resumed — flag file removed")
-            previously_paused = False
+            continue
 
         now = time.monotonic()
-        effective_embed_interval = compute_embed_interval(_embed_interval, consecutive_embed_noops)
+        effective_embed_interval = compute_embed_interval(schedule.embed, consecutive_embed_noops)
 
         if now - last_embed >= effective_embed_interval:
-            if effective_embed_interval != _embed_interval:
+            if effective_embed_interval != schedule.embed:
                 logger.info(
                     "worker: idle backoff active — embed interval extended to %ds after %d no-op cycle(s)",
                     effective_embed_interval,
                     consecutive_embed_noops,
                 )
-            _transition(WorkerPhase.INGEST)
-            outcome = run_embed_with_outcome(deps)
-            consecutive_embed_noops = 0 if outcome.did_work else consecutive_embed_noops + 1
-            state.consecutive_embed_noops = consecutive_embed_noops
-            state.embedded_total += outcome.embedded
-            state.failed_chunks_total += outcome.failed
-            state.last_embed_run_at = time.time()
-            state.last_embed_did_work = outcome.did_work
-            if outcome.recall_passed is False:
-                state.recall_alerts_total += 1
+            consecutive_embed_noops = _run_embed_cycle(deps, state, _transition, consecutive_embed_noops)
             last_embed = now
-            _transition(WorkerPhase.IDLE)
 
         # #224 phase 2 — skip-on-noop maintenance gating. After
         # MAINTENANCE_SKIP_NOOP_THRESHOLD consecutive no-op embed cycles
-        # the three maintenance scans become pointless work; gate each
-        # block on ``maintenance_active`` so the idle host stays quiet.
-        # Embed continues on its (already exponentially-backed-off)
-        # cadence, so a single fresh document still resumes everything.
+        # the three maintenance scans become pointless work. Embed continues
+        # on its (already exponentially-backed-off) cadence, so a single
+        # fresh document still resumes everything.
         maintenance_active = consecutive_embed_noops < MAINTENANCE_SKIP_NOOP_THRESHOLD
-        if not maintenance_active and not previously_skipping_maint:
-            logger.info(
-                "worker: skipping maintenance scans — %d consecutive no-op embeds (threshold %d)",
-                consecutive_embed_noops,
-                MAINTENANCE_SKIP_NOOP_THRESHOLD,
-            )
-            previously_skipping_maint = True
-        elif maintenance_active and previously_skipping_maint:
-            logger.info("worker: maintenance scans resumed — embed found work")
-            previously_skipping_maint = False
+        previously_skipping_maint = _log_maintenance_toggle(
+            maintenance_active, previously_skipping_maint, consecutive_embed_noops
+        )
 
-        if maintenance_active and now - last_entity >= _entity_interval:
-            _transition(WorkerPhase.MAINTENANCE)
-            run_entity_seed(deps)
+        if maintenance_active and now - last_entity >= schedule.entity:
+            _run_maintenance_task(deps, _transition, run_entity_seed)
             last_entity = now
-            _transition(WorkerPhase.IDLE)
 
-        if maintenance_active and now - last_health >= _health_interval:
-            _transition(WorkerPhase.MAINTENANCE)
-            run_health_check(deps)
+        if maintenance_active and now - last_health >= schedule.health:
+            _run_maintenance_task(deps, _transition, run_health_check)
             last_health = now
-            _transition(WorkerPhase.IDLE)
 
-        if maintenance_active and now - last_wikilinks >= _wikilinks_interval:
-            _transition(WorkerPhase.MAINTENANCE)
-            run_wikilinks_inject(deps)
+        if maintenance_active and now - last_wikilinks >= schedule.wikilinks:
+            _run_maintenance_task(deps, _transition, run_wikilinks_inject)
             last_wikilinks = now
-            _transition(WorkerPhase.IDLE)
 
         # Sleep 60 seconds between checks
         for _ in range(60):

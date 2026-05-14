@@ -65,12 +65,43 @@ class CrawlReport:
 # ---------------------------------------------------------------------------
 
 
+def _canonical_org_note(org_dir: Path) -> Path | None:
+    """Pick the canonical .md file for an org directory.
+
+    Prefers the index file ``{OrgDir}/{OrgDir}.md``; falls back to the
+    first ``*.md`` in the directory; returns None when none exist.
+    """
+    index_md = org_dir / f"{org_dir.name}.md"
+    if index_md.exists():
+        return index_md
+    mds = list(org_dir.glob("*.md"))
+    return mds[0] if mds else None
+
+
+def _build_organisation_node(root: Path, org_dir: Path) -> OrganisationNode:
+    """Read frontmatter from the canonical note and construct an OrganisationNode."""
+    from kairix.knowledge.graph.models import OrganisationNode
+
+    canonical = _canonical_org_note(org_dir)
+    fm: dict[str, Any] = parse_frontmatter(canonical) if canonical else {}
+    vault_path = str(canonical.relative_to(root)) if canonical else str(org_dir.relative_to(root))
+    return OrganisationNode(
+        id=slugify(org_dir.name),
+        name=fm.get("name") or display_name(org_dir.name),
+        tier=str(fm.get("tier", "client")),
+        engagement_status=str(fm.get("engagement_status", "active")),
+        vault_path=vault_path,
+        industry=as_list(fm.get("industry")),
+        geography=as_list(fm.get("geography")),
+        stakeholder_personas=as_list(fm.get("stakeholder_personas")),
+        aliases=as_list(fm.get("aliases")),
+    )
+
+
 def crawl_organisations(
     root: Path, report: CrawlReport, neo4j_client: Any, dry_run: bool
 ) -> dict[str, OrganisationNode]:
     """Discover org dirs under 02-Areas/00-Clients, parse frontmatter, build nodes, upsert."""
-    from kairix.knowledge.graph.models import OrganisationNode
-
     orgs: dict[str, OrganisationNode] = {}
     clients_dir = root / "02-Areas" / "00-Clients"
     if not clients_dir.exists():
@@ -79,45 +110,66 @@ def crawl_organisations(
     for org_dir in sorted(clients_dir.iterdir()):
         if not org_dir.is_dir():
             continue
-        org_id = slugify(org_dir.name)
-        # Canonical note: {OrgDir}/{OrgDir}.md (index file)
-        index_md = org_dir / f"{org_dir.name}.md"
-        canonical: Path | None
-        if index_md.exists():
-            canonical = index_md
-        else:
-            # Fall back to any .md file in the directory
-            mds = list(org_dir.glob("*.md"))
-            canonical = mds[0] if mds else None
-
-        fm: dict[str, Any] = {}
-        if canonical:
-            fm = parse_frontmatter(canonical)
-
-        vault_path = str(canonical.relative_to(root)) if canonical else str(org_dir.relative_to(root))
-        node = OrganisationNode(
-            id=org_id,
-            name=fm.get("name") or display_name(org_dir.name),
-            tier=str(fm.get("tier", "client")),
-            engagement_status=str(fm.get("engagement_status", "active")),
-            vault_path=vault_path,
-            industry=as_list(fm.get("industry")),
-            geography=as_list(fm.get("geography")),
-            stakeholder_personas=as_list(fm.get("stakeholder_personas")),
-            aliases=as_list(fm.get("aliases")),
-        )
+        node = _build_organisation_node(root, org_dir)
         orgs[org_dir.name.lower()] = node
-        orgs[org_id] = node
+        orgs[node.id] = node
         report.organisations_found += 1
-        logger.debug("org: %s (%s)", node.name, vault_path)
-
+        logger.debug("org: %s (%s)", node.name, node.vault_path)
         if not dry_run:
             if neo4j_client.upsert_organisation(node):
                 report.organisations_upserted += 1
             else:
-                report.errors.append(f"Failed to upsert org: {org_id}")
+                report.errors.append(f"Failed to upsert org: {node.id}")
 
     return orgs
+
+
+def _build_person_node(root: Path, md_file: Path, orgs: dict[str, OrganisationNode]) -> PersonNode:
+    """Parse a person .md, resolve its org, and construct a PersonNode."""
+    from kairix.knowledge.graph.models import PersonNode
+
+    fm = parse_frontmatter(md_file)
+    org_raw = str(fm.get("org") or fm.get("organisation") or "")
+    org_id = _resolve_org_id(org_raw, orgs) if org_raw else ""
+    return PersonNode(
+        id=slugify(md_file.stem),
+        name=fm.get("name") or display_name(md_file.stem),
+        org=org_id,
+        role=str(fm.get("role") or ""),
+        relationship_type=str(fm.get("relationship_type") or "network"),
+        last_interaction=str(fm.get("last_interaction") or ""),
+        vault_path=str(md_file.relative_to(root)),
+        interests=as_list(fm.get("interests")),
+        aliases=as_list(fm.get("aliases")),
+    )
+
+
+def _upsert_works_at_edge(
+    person_id: str,
+    org_id: str,
+    report: CrawlReport,
+    neo4j_client: Any,
+    dry_run: bool,
+) -> None:
+    """Create the Person->Organisation WORKS_AT edge when both ends are known."""
+    if not org_id:
+        return
+    from kairix.knowledge.graph.models import EdgeKind, GraphEdge
+
+    edge = GraphEdge(
+        from_id=person_id,
+        from_label="Person",
+        to_id=org_id,
+        to_label="Organisation",
+        kind=EdgeKind.WORKS_AT,
+    )
+    report.edges_found += 1
+    if dry_run:
+        return
+    if neo4j_client.upsert_edge(edge):
+        report.edges_upserted += 1
+    else:
+        report.errors.append(f"Failed to upsert WORKS_AT edge: {person_id}→{org_id}")
 
 
 def crawl_persons(
@@ -128,56 +180,19 @@ def crawl_persons(
     dry_run: bool,
 ) -> dict[str, PersonNode]:
     """Discover person files, resolve orgs, build nodes, create WORKS_AT edges."""
-    from kairix.knowledge.graph.models import EdgeKind, GraphEdge, PersonNode
-
     persons: dict[str, PersonNode] = {}
     for people_dir in _find_people_dirs(root):
         for md_file in sorted(people_dir.glob("*.md")):
-            person_id = slugify(md_file.stem)
-            fm = parse_frontmatter(md_file)
-            vault_path = str(md_file.relative_to(root))
-
-            # Resolve org by name lookup in discovered orgs
-            org_raw = str(fm.get("org") or fm.get("organisation") or "")
-            org_id = _resolve_org_id(org_raw, orgs) if org_raw else ""
-
-            person_node = PersonNode(
-                id=person_id,
-                name=fm.get("name") or display_name(md_file.stem),
-                org=org_id,
-                role=str(fm.get("role") or ""),
-                relationship_type=str(fm.get("relationship_type") or "network"),
-                last_interaction=str(fm.get("last_interaction") or ""),
-                vault_path=vault_path,
-                interests=as_list(fm.get("interests")),
-                aliases=as_list(fm.get("aliases")),
-            )
-            persons[person_id] = person_node
+            person_node = _build_person_node(root, md_file, orgs)
+            persons[person_node.id] = person_node
             report.persons_found += 1
-            logger.debug("person: %s (%s)", person_node.name, vault_path)
-
+            logger.debug("person: %s (%s)", person_node.name, person_node.vault_path)
             if not dry_run:
                 if neo4j_client.upsert_person(person_node):
                     report.persons_upserted += 1
                 else:
-                    report.errors.append(f"Failed to upsert person: {person_id}")
-
-            # WORKS_AT edge when org is known
-            if org_id:
-                edge = GraphEdge(
-                    from_id=person_id,
-                    from_label="Person",
-                    to_id=org_id,
-                    to_label="Organisation",
-                    kind=EdgeKind.WORKS_AT,
-                )
-                report.edges_found += 1
-                if not dry_run:
-                    if neo4j_client.upsert_edge(edge):
-                        report.edges_upserted += 1
-                    else:
-                        report.errors.append(f"Failed to upsert WORKS_AT edge: {person_id}→{org_id}")
-
+                    report.errors.append(f"Failed to upsert person: {person_node.id}")
+            _upsert_works_at_edge(person_node.id, person_node.org, report, neo4j_client, dry_run)
     return persons
 
 
@@ -210,6 +225,51 @@ def crawl_outcomes(root: Path, report: CrawlReport, neo4j_client: Any, dry_run: 
                 report.errors.append(f"Failed to upsert outcome: {outcome_id}")
 
 
+def _resolve_link_target(
+    target_slug: str,
+    orgs: dict[str, OrganisationNode],
+    persons: dict[str, PersonNode],
+) -> tuple[str, str] | None:
+    """Map a wikilink target slug onto (to_label, to_id) for orgs/persons, or None."""
+    if target_slug in orgs:
+        return "Organisation", orgs[target_slug].id
+    if target_slug in persons:
+        return "Person", persons[target_slug].id
+    return None
+
+
+def _emit_mentions_edges(
+    md_file: Path,
+    text: str,
+    source_path: str,
+    orgs: dict[str, OrganisationNode],
+    persons: dict[str, PersonNode],
+    report: CrawlReport,
+    neo4j_client: Any,
+    dry_run: bool,
+) -> None:
+    """Scan one file's text for wikilinks and emit MENTIONS edges."""
+    from kairix.knowledge.graph.models import EdgeKind, GraphEdge
+
+    for link_target in _WIKILINK_PATTERN.findall(text):
+        target_slug = slugify(link_target.split("/")[-1])
+        resolved = _resolve_link_target(target_slug, orgs, persons)
+        if resolved is None:
+            continue
+        to_label, to_id = resolved
+        edge = GraphEdge(
+            from_id=slugify(md_file.stem),
+            from_label="Document",
+            to_id=to_id,
+            to_label=to_label,
+            kind=EdgeKind.MENTIONS,
+            props={"source_path": source_path},
+        )
+        report.edges_found += 1
+        if not dry_run and neo4j_client.upsert_edge(edge):
+            report.edges_upserted += 1
+
+
 def crawl_wikilink_edges(
     root: Path,
     orgs: dict[str, OrganisationNode],
@@ -219,38 +279,13 @@ def crawl_wikilink_edges(
     dry_run: bool,
 ) -> None:
     """Extract wikilinks from all .md files and create MENTIONS edges."""
-    from kairix.knowledge.graph.models import EdgeKind, GraphEdge
-
-    all_known = set(orgs.keys()) | set(persons.keys())
     for md_file in root.rglob("*.md"):
         try:
             text = md_file.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-
         source_path = str(md_file.relative_to(root))
-        for link_target in _WIKILINK_PATTERN.findall(text):
-            target_slug = slugify(link_target.split("/")[-1])
-            if target_slug not in all_known:
-                continue
-            # Determine label of target
-            if target_slug in orgs:
-                to_label, to_id = "Organisation", orgs[target_slug].id
-            else:
-                to_label, to_id = "Person", persons[target_slug].id
-
-            edge = GraphEdge(
-                from_id=slugify(md_file.stem),
-                from_label="Document",
-                to_id=to_id,
-                to_label=to_label,
-                kind=EdgeKind.MENTIONS,
-                props={"source_path": source_path},
-            )
-            report.edges_found += 1
-            if not dry_run:
-                if neo4j_client.upsert_edge(edge):
-                    report.edges_upserted += 1
+        _emit_mentions_edges(md_file, text, source_path, orgs, persons, report, neo4j_client, dry_run)
 
 
 # ---------------------------------------------------------------------------

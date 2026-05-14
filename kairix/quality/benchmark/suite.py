@@ -146,13 +146,8 @@ def load_yaml_file(path: Path) -> dict:
     return raw
 
 
-def validate_meta_and_cases_structure(raw: dict, _path: str) -> tuple[dict, list[dict], list[str]]:
-    """Validate root dict has valid meta and cases. Returns (meta, raw_cases, errors).
-
-    ``_path`` is accepted for caller symmetry (the loader passes it for
-    error-message context elsewhere in the validation chain) but isn't
-    needed here — the structural check is purely shape-based.
-    """
+def validate_meta_and_cases_structure(raw: dict, path: str) -> tuple[dict, list[dict], list[str]]:
+    """Validate root dict has valid meta and cases. Returns (meta, raw_cases, errors)."""
     meta = raw.get("meta", {})
     if not isinstance(meta, dict):
         raise ValueError("'meta' must be a mapping")
@@ -384,6 +379,48 @@ def load_suite(path: str) -> BenchmarkSuite:
 # ---------------------------------------------------------------------------
 
 
+def _check_duplicate_gold_paths(path_based_recall: list[tuple[str, str]]) -> list[str]:
+    """Emit one error per duplicate (case-insensitive) gold_path."""
+    errors: list[str] = []
+    seen_gold: dict[str, str] = {}
+    for case_id, gp in path_based_recall:
+        gp_lower = gp.lower()
+        if gp_lower in seen_gold:
+            errors.append(f"Duplicate gold_path: {gp!r} used by both {seen_gold[gp_lower]!r} and {case_id!r}")
+        else:
+            seen_gold[gp_lower] = case_id
+    return errors
+
+
+def _check_gold_paths_in_index(
+    path_based_recall: list[tuple[str, str]],
+    db: sqlite3.Connection,
+) -> list[str]:
+    """Emit one error per recall case whose ``gold_path`` is missing from the index."""
+    return [
+        f"Case {case_id!r}: gold_path {gp!r} not found in kairix index"
+        for case_id, gp in path_based_recall
+        if not _gold_path_in_index(db, gp)
+    ]
+
+
+def _check_duplicate_gold_titles(suite: BenchmarkSuite) -> list[str]:
+    """Emit one error per duplicate ``gold_title`` across recall cases."""
+    errors: list[str] = []
+    seen_titles: dict[str, str] = {}
+    for case in suite.cases:
+        if not (case.gold_title and case.category == "recall"):
+            continue
+        title_lower = case.gold_title.lower()
+        if title_lower in seen_titles:
+            errors.append(
+                f"Duplicate gold_title: {case.gold_title!r} used by both {seen_titles[title_lower]!r} and {case.id!r}"
+            )
+        else:
+            seen_titles[title_lower] = case.id
+    return errors
+
+
 def validate_suite(
     suite: BenchmarkSuite,
     db: sqlite3.Connection,
@@ -399,53 +436,21 @@ def validate_suite(
     Args:
         suite:  The BenchmarkSuite to validate.
         db:     Open sqlite3.Connection to the kairix index.
-        strict: Accepted for CLI symmetry (the bench CLI passes both
-                ``strict=False`` during pre-flight and ``strict=True``
-                during canonical validation). Today the checks always
-                emit errors; a future warning tier would consult this
-                flag to soften missing-gold-path messages.
+        strict: If True, missing gold paths are errors. If False, they are warnings.
 
     Returns:
         List of error strings. Empty list means all checks passed.
     """
-    _ = strict  # explicit drop documents intent
-    errors: list[str] = []
-
-    # Collect gold paths from recall cases that use path-based identity
     path_based_recall: list[tuple[str, str]] = [
         (case.id, case.gold_path)
         for case in suite.cases
         if case.gold_path and case.category == "recall" and not case.gold_title and not case.gold_titles
     ]
 
-    # Check for duplicate gold paths (path-based recall only)
-    seen_gold: dict[str, str] = {}
-    for case_id, gp in path_based_recall:
-        gp_lower = gp.lower()
-        if gp_lower in seen_gold:
-            errors.append(f"Duplicate gold_path: {gp!r} used by both {seen_gold[gp_lower]!r} and {case_id!r}")
-        else:
-            seen_gold[gp_lower] = case_id
-
-    # Check gold paths exist in the kairix index (path-based only; title-based is path-agnostic)
-    for case_id, gp in path_based_recall:
-        if not _gold_path_in_index(db, gp):
-            msg = f"Case {case_id!r}: gold_path {gp!r} not found in kairix index"
-            errors.append(msg)
-
-    # Check for duplicate gold_title values across recall cases
-    seen_titles: dict[str, str] = {}
-    for case in suite.cases:
-        if case.gold_title and case.category == "recall":
-            title_lower = case.gold_title.lower()
-            if title_lower in seen_titles:
-                errors.append(
-                    f"Duplicate gold_title: {case.gold_title!r} used by both "
-                    f"{seen_titles[title_lower]!r} and {case.id!r}"
-                )
-            else:
-                seen_titles[title_lower] = case.id
-
+    errors: list[str] = []
+    errors.extend(_check_duplicate_gold_paths(path_based_recall))
+    errors.extend(_check_gold_paths_in_index(path_based_recall, db))
+    errors.extend(_check_duplicate_gold_titles(suite))
     return errors
 
 
