@@ -1,0 +1,161 @@
+# Kairix — Docker Compose example with bounded resources for shared hosts
+#
+# Companion to docker-compose.yml. This example uses the modern
+# `deploy.resources` syntax (Compose Spec) instead of the legacy top-level
+# `mem_limit` / `cpus` keys so the same file works under `docker compose up`
+# AND `docker stack deploy`. Both syntaxes are equivalent at the cgroup level
+# when Docker Compose drives the runtime; the `deploy.resources` form is
+# preferred for new deployments because it nests reservations + limits in one
+# block per service and matches Swarm/Kubernetes vocabulary.
+#
+# When to use this file
+# ---------------------
+# Use this example when kairix shares a host with other latency-sensitive
+# services (chat agents, ingest pipelines, a graph database, etc.) — see
+# docs/operations/SHARED-HOSTS.md for the full guidance. On a dedicated host
+# you can keep docker-compose.yml's looser caps.
+#
+# How to use this file
+# --------------------
+#   # Override the default compose file:
+#   docker compose -f docker-compose.example.yml up -d
+#
+#   # Or layer it on top of docker-compose.yml so you only override the
+#   # services you want bounded (recommended for production):
+#   docker compose -f docker-compose.yml -f docker-compose.example.yml up -d
+#
+# Tuning notes
+# ------------
+# The numbers below are starting points sized for a 4 vCPU / 8 GiB shared
+# VM running kairix + neo4j + one or two co-located agents. Watch
+# `docker stats` for a week and tighten or loosen from there. Don't lower
+# reservations below the steady-state RSS reported by `docker stats` — the
+# scheduler will swap or OOM-kill instead of throttling.
+#
+# Failure modes you'll see if these caps are too tight:
+#   - kairix:        503s from /mcp during rerank-model load; OOMKilled on
+#                    cold start with a small embedding cache.
+#   - kairix-worker: scan takes longer per cycle (acceptable) or gets
+#                    OOMKilled mid-embed (raise mem limit).
+#   - neo4j:         page-cache thrash, slow Cypher; raise mem limit before
+#                    raising heap.
+
+services:
+  kairix:
+    image: ghcr.io/three-cubes/kairix:latest
+    ports:
+      - "127.0.0.1:8080:8080"  # localhost-only; kairix has no built-in auth.
+    volumes:
+      - ./documents:/data/documents
+      - kairix-data:/data/kairix
+      # - ./kairix.config.yaml:/opt/kairix/kairix.config.yaml:ro
+    env_file:
+      - .env
+    environment:
+      - KAIRIX_NEO4J_URI=bolt://neo4j:7687
+      - KAIRIX_NEO4J_USER=neo4j
+      - KAIRIX_NEO4J_PASSWORD=${KAIRIX_NEO4J_PASSWORD}
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "kairix", "onboard", "check"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 30s
+    # API / MCP service. Steady-state RSS is ~1.2 GiB after rerank-model
+    # load; cold-start spikes briefly higher. Reservation guarantees the
+    # scheduler hands kairix enough memory to come up cleanly. Limit caps
+    # how much it can grow before Docker OOM-kills the container.
+    #
+    # Bump cpu.limit if /mcp shows queueing under concurrent tool calls
+    # (async-tool refactor in v2026.5.10.5 — see #177 — gives concurrent
+    # tool calls real parallelism). Bump memory.limit if you see OOMKilled
+    # events in `docker events` during rerank load.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1Gi
+        reservations:
+          cpus: "0.5"
+          memory: 512Mi
+
+  kairix-worker:
+    image: ghcr.io/three-cubes/kairix:latest
+    command: ["worker"]
+    volumes:
+      - ./documents:/data/documents
+      - kairix-data:/data/kairix
+      # - ./kairix.config.yaml:/opt/kairix/kairix.config.yaml:ro
+    env_file:
+      - .env
+    environment:
+      - KAIRIX_NEO4J_URI=bolt://neo4j:7687
+      - KAIRIX_NEO4J_USER=neo4j
+      - KAIRIX_NEO4J_PASSWORD=${KAIRIX_NEO4J_PASSWORD}
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    # The worker is the noisy neighbour. Idle worker should sit at ~0 CPU
+    # after #224 phase 1 (idle backoff). When it scans / embeds it bursts.
+    # Reservation is low so the scheduler doesn't strand CPU during idle.
+    # Limit is high so legitimate embed bursts don't take an hour. If you
+    # see request timeouts on co-located services during a worker burst,
+    # tighten cpus.limit toward 0.5 — embed cycles will get longer but
+    # the host stops choking. If you see worker OOMKilled during a large
+    # backfill, raise memory.limit (large vector index loads dominate RSS).
+    #
+    # Switching to `restart: on-failure` (instead of `unless-stopped`)
+    # prevents a restart storm if the worker fails after start — see
+    # docs/operations/SHARED-HOSTS.md "Restart-storm anti-pattern".
+    restart: on-failure:5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1Gi
+        reservations:
+          cpus: "0.25"
+          memory: 256Mi
+
+  neo4j:
+    image: neo4j:5-community
+    # Pin for production: neo4j:5.24.0-community
+    environment:
+      NEO4J_AUTH: neo4j/${KAIRIX_NEO4J_PASSWORD}
+      NEO4J_PLUGINS: '[]'
+      # Heap and page-cache sizing must fit inside the container memory
+      # limit below. Rule of thumb: heap_max + pagecache <= memory.limit
+      # minus ~512Mi for the JVM and OS. Defaults are conservative; tune
+      # via NEO4J_server_memory_heap_max_size and
+      # NEO4J_server_memory_pagecache_size if your graph grows.
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${KAIRIX_NEO4J_PASSWORD} 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    # Neo4j on a shared host. The community edition's defaults are tuned
+    # for a dedicated machine and will gladly take everything you give it;
+    # explicit caps stop a runaway query from OOMing the host. Reservation
+    # guarantees enough headroom for the page cache to be useful even when
+    # other tenants are busy. If you raise heap_max, raise memory.limit
+    # in step — Neo4j will swap silently long before it errors.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2Gi
+        reservations:
+          cpus: "0.5"
+          memory: 512Mi
+
+volumes:
+  kairix-data:
+  neo4j-data:
