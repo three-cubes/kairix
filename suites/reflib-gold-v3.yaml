@@ -2,6 +2,9 @@ meta:
   version: '1.0'
   generated_by: kairix eval generate
   n_cases: 200
+  name: reflib
+  description: Reference library retrieval gold suite (200 cases across 6 categories)
+  default_collection: reference-library  # in_default: false in stock config; CLI auto-scopes
   categories:
   - recall
   - temporal

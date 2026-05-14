@@ -27,7 +27,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/quanyeomans/kairix
+  # Repo is at three-cubes/kairix; GITHUB_TOKEN can only push to the repo's own org.
+  # Old images at ghcr.io/quanyeomans/kairix remain in place but are no longer the publish target.
+  IMAGE: ghcr.io/three-cubes/kairix
 
 jobs:
   build-and-push:
