@@ -23,6 +23,7 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -143,6 +144,111 @@ def _bm25_search_config(
         return []
 
 
+def _load_ndcg_cases(suite_path: Path) -> list[dict[str, Any]]:
+    """Load suite YAML and return ndcg-scored cases that have gold labels.
+
+    Returns ``[]`` (with a logged error) on empty suite or no eligible
+    cases. ``gold_titles`` is preferred over ``gold_paths`` per the
+    suite-format conventions.
+    """
+    with open(suite_path) as f:
+        suite_data = yaml.safe_load(f)
+    cases = suite_data.get("cases", [])
+    if not cases:
+        logger.error("sweep: no cases in suite %s", suite_path)
+        return []
+    ndcg_cases = [c for c in cases if c.get("score_method") == "ndcg" and (c.get("gold_titles") or c.get("gold_paths"))]
+    if not ndcg_cases:
+        logger.error("sweep: no ndcg-scored cases with gold_titles or gold_paths in suite")
+    return ndcg_cases
+
+
+def _evaluate_config(
+    db: sqlite3.Connection,
+    weights: tuple[float, float, float],
+    style: str,
+    ndcg_cases: list[dict[str, Any]],
+) -> SweepResult:
+    """Run one (weights, style) configuration over all cases and return a SweepResult."""
+    t_start = time.monotonic()
+    ndcg_scores: list[float] = []
+    hit_scores: list[bool] = []
+    mrr_scores: list[float] = []
+    category_ndcg: dict[str, list[float]] = {}
+
+    for case in ndcg_cases:
+        query = case["query"]
+        gold = case.get("gold_titles") or case.get("gold_paths", [])
+        raw_category = case.get("category", "recall")
+        category = _CATEGORY_ALIASES.get(raw_category, raw_category)
+
+        paths = _bm25_search_config(db, query, weights, style, limit=20)
+
+        ndcg_scores.append(_compute_ndcg(paths, gold))
+        hit_scores.append(_compute_hit_at_k(paths, gold))
+        mrr_scores.append(_compute_mrr(paths, gold))
+        category_ndcg.setdefault(category, []).append(ndcg_scores[-1])
+
+    cat_scores = {cat: sum(scores) / len(scores) if scores else 0.0 for cat, scores in category_ndcg.items()}
+    weighted_total = sum(cat_scores.get(cat, 0.0) * weight for cat, weight in _CATEGORY_WEIGHTS.items())
+
+    return SweepResult(
+        weights=weights,
+        query_style=style,
+        weighted_total=weighted_total,
+        ndcg_at_10=sum(ndcg_scores) / len(ndcg_scores) if ndcg_scores else 0.0,
+        hit_at_5=sum(hit_scores) / len(hit_scores) if hit_scores else 0.0,
+        mrr_at_10=sum(mrr_scores) / len(mrr_scores) if mrr_scores else 0.0,
+        category_scores=cat_scores,
+        n_cases=len(ndcg_cases),
+        duration_s=time.monotonic() - t_start,
+    )
+
+
+def _resolve_db_path(db_path: Path | None) -> Path:
+    """Return an explicit db_path or resolve from the env via ``get_db_path``."""
+    if db_path is not None:
+        return Path(db_path)
+    from kairix.core.db import get_db_path
+
+    return Path(get_db_path())
+
+
+def _write_sweep_csv(output_path: Path, report: SweepReport) -> None:
+    """Serialise a SweepReport to CSV with category columns in stable order."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cats = sorted(_CATEGORY_WEIGHTS.keys())
+    with open(output_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "fp_weight",
+                "title_weight",
+                "doc_weight",
+                "query_style",
+                "weighted_total",
+                "ndcg_at_10",
+                "hit_at_5",
+                "mrr_at_10",
+                *cats,
+            ]
+        )
+        for r in report.results:
+            writer.writerow(
+                [
+                    r.weights[0],
+                    r.weights[1],
+                    r.weights[2],
+                    r.query_style,
+                    f"{r.weighted_total:.4f}",
+                    f"{r.ndcg_at_10:.4f}",
+                    f"{r.hit_at_5:.4f}",
+                    f"{r.mrr_at_10:.4f}",
+                    *[f"{r.category_scores.get(cat, 0):.4f}" for cat in cats],
+                ]
+            )
+
+
 def sweep_bm25_params(
     suite_path: Path,
     output_path: Path | None = None,
@@ -150,11 +256,10 @@ def sweep_bm25_params(
     query_styles: list[str] | None = None,
     db_path: Path | None = None,
 ) -> SweepReport:
-    """
-    Grid search over BM25 column weights and query styles.
+    """Grid search over BM25 column weights and query styles.
 
-    For each configuration, runs all suite queries via direct FTS5 and computes
-    NDCG@10 against the suite's gold_titles.
+    For each (weights, style) configuration, runs all suite queries via direct
+    FTS5 and computes NDCG@10 against the suite's gold_titles.
 
     Args:
         suite_path:      Path to benchmark suite YAML.
@@ -168,30 +273,15 @@ def sweep_bm25_params(
     Returns:
         SweepReport with results sorted by weighted_total descending.
     """
-    if weight_configs is None:
-        weight_configs = DEFAULT_WEIGHT_CONFIGS
-    if query_styles is None:
-        query_styles = DEFAULT_QUERY_STYLES
+    weight_configs = weight_configs or DEFAULT_WEIGHT_CONFIGS
+    query_styles = query_styles or DEFAULT_QUERY_STYLES
 
-    # Validate every weight tuple before opening the DB or scanning the suite,
-    # so non-finite/non-positive inputs surface as ValueError up front rather
-    # than silently corrupting ORDER BY ordering inside the inner loop.
+    # Fail-fast on bad weights before we open the DB or scan the suite.
     for cfg in weight_configs:
         _validate_weights(cfg)
 
-    # Load suite
-    with open(suite_path) as f:
-        suite_data = yaml.safe_load(f)
-
-    cases = suite_data.get("cases", [])
-    if not cases:
-        logger.error("sweep: no cases in suite %s", suite_path)
-        return SweepReport()
-
-    # Filter to ndcg-scored cases with gold (either gold_titles or gold_paths)
-    ndcg_cases = [c for c in cases if c.get("score_method") == "ndcg" and (c.get("gold_titles") or c.get("gold_paths"))]
+    ndcg_cases = _load_ndcg_cases(suite_path)
     if not ndcg_cases:
-        logger.error("sweep: no ndcg-scored cases with gold_titles or gold_paths in suite")
         return SweepReport()
 
     logger.info(
@@ -201,118 +291,38 @@ def sweep_bm25_params(
         len(weight_configs) * len(query_styles) * len(ndcg_cases),
     )
 
-    # Open DB once for all configs
     from kairix.core.db import open_db
 
-    if db_path is None:
-        from kairix.core.db import get_db_path
-
-        db_path = Path(get_db_path())
-    db = open_db(Path(db_path))
+    db = open_db(_resolve_db_path(db_path))
     db.row_factory = sqlite3.Row
 
     report = SweepReport()
     report.total_configs = len(weight_configs) * len(query_styles)
-
     t_total_start = time.monotonic()
 
-    for weights in weight_configs:
-        for style in query_styles:
-            t_start = time.monotonic()
+    try:
+        for weights in weight_configs:
+            for style in query_styles:
+                result = _evaluate_config(db, weights, style, ndcg_cases)
+                report.results.append(result)
+                logger.info(
+                    "sweep: weights=(%s,%s,%s) style=%-7s → weighted=%.4f NDCG=%.4f Hit@5=%.3f (%ds)",
+                    *weights,
+                    style,
+                    result.weighted_total,
+                    result.ndcg_at_10,
+                    result.hit_at_5,
+                    int(result.duration_s),
+                )
+    finally:
+        db.close()
 
-            ndcg_scores: list[float] = []
-            hit_scores: list[bool] = []
-            mrr_scores: list[float] = []
-            category_ndcg: dict[str, list[float]] = {}
-
-            for case in ndcg_cases:
-                query = case["query"]
-                gold = case.get("gold_titles") or case.get("gold_paths", [])
-                raw_category = case.get("category", "recall")
-                category = _CATEGORY_ALIASES.get(raw_category, raw_category)
-
-                paths = _bm25_search_config(db, query, weights, style, limit=20)
-
-                ndcg = _compute_ndcg(paths, gold)
-                hit = _compute_hit_at_k(paths, gold)
-                mrr = _compute_mrr(paths, gold)
-
-                ndcg_scores.append(ndcg)
-                hit_scores.append(hit)
-                mrr_scores.append(mrr)
-
-                if category not in category_ndcg:
-                    category_ndcg[category] = []
-                category_ndcg[category].append(ndcg)
-
-            # Compute category means
-            cat_scores = {cat: sum(scores) / len(scores) if scores else 0.0 for cat, scores in category_ndcg.items()}
-
-            # Weighted total
-            weighted_total = sum(cat_scores.get(cat, 0.0) * weight for cat, weight in _CATEGORY_WEIGHTS.items())
-
-            result = SweepResult(
-                weights=weights,
-                query_style=style,
-                weighted_total=weighted_total,
-                ndcg_at_10=sum(ndcg_scores) / len(ndcg_scores) if ndcg_scores else 0.0,
-                hit_at_5=sum(hit_scores) / len(hit_scores) if hit_scores else 0.0,
-                mrr_at_10=sum(mrr_scores) / len(mrr_scores) if mrr_scores else 0.0,
-                category_scores=cat_scores,
-                n_cases=len(ndcg_cases),
-                duration_s=time.monotonic() - t_start,
-            )
-            report.results.append(result)
-
-            logger.info(
-                "sweep: weights=(%s,%s,%s) style=%-7s → weighted=%.4f NDCG=%.4f Hit@5=%.3f (%ds)",
-                *weights,
-                style,
-                weighted_total,
-                result.ndcg_at_10,
-                result.hit_at_5,
-                int(result.duration_s),
-            )
-
-    db.close()
-
-    # Sort by weighted total
     report.results.sort(key=lambda r: r.weighted_total, reverse=True)
     report.best = report.results[0] if report.results else None
     report.total_duration_s = time.monotonic() - t_total_start
 
-    # Write CSV if output path specified
     if output_path and report.results:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "fp_weight",
-                    "title_weight",
-                    "doc_weight",
-                    "query_style",
-                    "weighted_total",
-                    "ndcg_at_10",
-                    "hit_at_5",
-                    "mrr_at_10",
-                    *sorted(_CATEGORY_WEIGHTS.keys()),
-                ]
-            )
-            for r in report.results:
-                writer.writerow(
-                    [
-                        r.weights[0],
-                        r.weights[1],
-                        r.weights[2],
-                        r.query_style,
-                        f"{r.weighted_total:.4f}",
-                        f"{r.ndcg_at_10:.4f}",
-                        f"{r.hit_at_5:.4f}",
-                        f"{r.mrr_at_10:.4f}",
-                        *[f"{r.category_scores.get(cat, 0):.4f}" for cat in sorted(_CATEGORY_WEIGHTS.keys())],
-                    ]
-                )
+        _write_sweep_csv(output_path, report)
 
     if report.best:
         logger.info(
