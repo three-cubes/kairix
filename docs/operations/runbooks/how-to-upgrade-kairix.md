@@ -122,7 +122,7 @@ git commit -m "chore: pin kairix to v<NEW_VERSION> (benchmark passed)"
 
 ```bash
 # Rollback to previous tagged release
-pip install git+https://github.com/quanyeomans/kairix@<PREVIOUS_TAG>
+pip install git+https://github.com/three-cubes/kairix@<PREVIOUS_TAG>
 
 # Re-run onboard check and benchmark to confirm baseline restored
 kairix onboard check

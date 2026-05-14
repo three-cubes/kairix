@@ -157,13 +157,23 @@ fully enforced; new violations anywhere in the codebase block.
 | F4 | No `os.environ.get("KAIRIX_*")` outside `paths.py`/`secrets.py` | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | `env-reads-in-paths-files.txt` |
 | F5 | No internal-name imports in tests | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-internal-test-imports-files.txt` |
 | F6 | No `*_fn=None` test-only kwargs in production | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-test-only-kwargs-files.txt` |
-| F7 | Per-file coverage floor at 85% (unit) | coverage report | Python + Cobertura XML | CI unit-and-type | `per-file-coverage-floor-files.txt` |
+| F7 | Per-file coverage floor at 90% (unit) | coverage report | Python + Cobertura XML | CI unit-and-type | `per-file-coverage-floor-files.txt` |
 | F8 | Every `test_*` function carries a category marker | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
-| F9 | Per-file 85% floor on union (unit ∪ integration) coverage | coverage report | Python + `coverage combine` + Cobertura XML | CI Stage 5 (after unit + integration) | `per-file-coverage-floor-union-files.txt` |
+| F9 | Per-file 90% floor on union (unit ∪ integration) coverage | coverage report | Python + `coverage combine` + Cobertura XML | CI Stage 5 (after unit + integration) | `per-file-coverage-floor-union-files.txt` |
 | F10 | CI workflow silencers require rationale | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
 | F11 | Test skip mechanisms require rationale | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
 | F12 | Every BDD feature has at least one happy-path scenario | structural | Python (Gherkin parser) | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
 | F13 | BDD scenarios reject implementation symbols | line pattern | Python (regex) | pre-commit, safe-commit, CI Stage 0 | `bdd-no-implementation-leaks-files.txt` |
+| F14 | `sonar.issue.ignore` entries in `sonar-project.properties` require rationale comment | line pattern | Python (regex) | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
+| F15 | No logging of secret-named variables in plaintext | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-logging-secrets-files.txt` (empty — clean) |
+| F16 | Cognitive complexity ≤ 15 per function | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `cognitive-complexity-files.txt` |
+| F17 | No string literal ≥10 chars duplicated ≥3 times in a module | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-duplicate-string-files.txt` |
+| F18 | No commented-out code | line pattern + Python parse | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-commented-out-code-files.txt` (empty — clean) |
+| F19 | Unused function parameters must be `_`-prefixed | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `unused-params-named-files.txt` |
+| F20 | Empty function bodies require docstring or intent comment | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `empty-body-intent-files.txt` |
+| F21 | Check-script failure output must carry an action marker (`fix:`, `next:`, `run:`) | structural | Python AST + shell regex | pre-commit, safe-commit, CI Stage 0 | `actionable-feedback-files.txt` |
+| F22 | Repo paths follow per-tree naming conventions | structural | Python (regex per tree) | pre-commit, safe-commit, CI Stage 0 | `path-naming-files.txt` (empty — clean) |
+| F23 | Every top-level directory has a `README.md` | structural | Python (filesystem walk) | pre-commit, safe-commit, CI Stage 0 | `readme-coverage-files.txt` |
 
 ---
 
@@ -1193,6 +1203,485 @@ human-review concerns; see the aspirational practices issue.
 
   - Dan North, "Introducing BDD" (2006) — outcomes vs implementation.
   - Liz Keogh on BDD test-infection.
+
+---
+
+### F16 — Cognitive complexity ≤ 15 per function
+
+#### Statement
+
+No function in `kairix/**` may exceed a cognitive-complexity score of
+**15** (SonarSource S3776 default).
+
+#### Why
+
+Cognitive complexity (Campbell, 2018) measures how hard the code is to
+*read*, not how hard it is to test. The score climbs with each branch
+and is amplified by nesting depth — a triple-nested `if` is harder to
+follow than three sequential `if` statements. Sonar's PR #247 burndown
+surfaced 46 files above the ceiling; F16 prevents regression and gives
+the agent a single canonical refactor pattern (extract helper / early
+return / dispatch dict).
+
+#### Detection
+
+`scripts/checks/check_cognitive_complexity.py`. AST walks each
+`FunctionDef` / `AsyncFunctionDef` and applies the SonarSource scoring
+rules: +1 per `if`/`elif`/`else`/`for`/`while`/`try`/`except`/ternary,
++1 per boolean operator in conditions, plus nesting amplifier.
+
+#### Examples
+
+Rejected (score 12+ for a single function — too tall to follow):
+
+```python
+def dispatch(cmd, args):
+    if cmd == 'search':
+        if not args:
+            for item in default_items():
+                if item.starred:
+                    if item.is_remote and item.is_local:
+                        ...
+    elif cmd == 'index':
+        ...
+```
+
+Allowed (dispatch dict + helpers — every branch reads in isolation):
+
+```python
+_HANDLERS = {'search': _handle_search, 'index': _handle_index}
+
+def dispatch(cmd, args):
+    return _HANDLERS.get(cmd, _default_handler)(args)
+```
+
+See `kairix/worker.py::WorkerDeps` for the dataclass-extraction pattern
+that flattens orchestrator complexity by moving collaborators onto a
+single `Deps` object.
+
+---
+
+### F17 — No string literal ≥10 chars duplicated ≥3 times in a module
+
+#### Statement
+
+No string literal of at least 10 characters may appear 3+ times in the
+same `kairix/**` module without being extracted to a module-level
+constant.
+
+#### Why
+
+Sonar S1192: a duplicated string literal is a refactor smell — the
+reader can't tell whether the three sites are *coupled* (they all
+reference the same conceptual thing and should change together) or
+*coincidentally identical* (renaming one shouldn't affect the others).
+Extracting to an UPPER_SNAKE constant makes the coupling explicit and
+gives renaming a single edit site.
+
+#### Detection
+
+`scripts/checks/check_no_duplicate_string.py`. AST walks
+`ast.Constant`-of-str nodes per file, skipping docstrings and
+whitespace-only values, and counts occurrences.
+
+#### Examples
+
+Rejected:
+
+```python
+def search(q):
+    if not q: raise ValueError("search query must be a non-empty string")
+def reindex(q):
+    if not q: raise ValueError("search query must be a non-empty string")
+def validate(q):
+    if not q: raise ValueError("search query must be a non-empty string")
+```
+
+Allowed:
+
+```python
+_ERROR_BAD_QUERY = "search query must be a non-empty string"
+
+def search(q):
+    if not q: raise ValueError(_ERROR_BAD_QUERY)
+def reindex(q):
+    if not q: raise ValueError(_ERROR_BAD_QUERY)
+```
+
+---
+
+### F18 — No commented-out code
+
+#### Statement
+
+A run of 3+ consecutive `#`-prefixed lines in `kairix/**` whose stripped
+content lexes as valid Python is a violation.
+
+#### Why
+
+Sonar S125: git history is the archive. Commented-out code accumulates
+confusion — is this still relevant? was it disabled in a hurry? is this
+the intended replacement for the line below? `git log -p <file>`
+recovers any prior state if anyone needs it.
+
+#### Detection
+
+`scripts/checks/check_no_commented_out_code.py`. Line-by-line scan
+identifies contiguous `#`-prefixed runs (skipping shebangs, directives
+like `# type:`, `# pyright:`, `# noqa`, and docstring lines). Each run
+is dedented and passed to `ast.parse`; if it parses AND contains a
+syntactic anchor (assignment, call, `def`, `if`, etc.) it's flagged.
+
+#### Examples
+
+Rejected:
+
+```python
+# old_path = path.replace('/old/', '/new/')
+# if old_path.startswith('/data'):
+#     old_path = old_path[6:]
+# return old_path
+def new_function():
+    return new_path()
+```
+
+Allowed (real prose):
+
+```python
+# Strip leading slash so we can join cleanly with PathLib.
+path = path.lstrip('/')
+```
+
+If the dead code might come back, reference a ticket instead:
+`# TODO #251 — re-enable after refactor`.
+
+---
+
+### F19 — Unused function parameters must be `_`-prefixed
+
+#### Statement
+
+Any non-`_`-prefixed parameter that is never read in the function body
+is a violation, unless the function is abstract, an `@overload` stub, a
+property setter (`value`), or the parameter is `self`/`cls`/`*args`/
+`**kwargs`.
+
+#### Why
+
+Sonar S1172. The fix is one of:
+
+  - **Delete** the parameter if no Protocol/abstract base requires it.
+  - **Rename to `_unused`** if the position is required by a Protocol
+    that the implementation doesn't need.
+
+The `_`-prefix is the explicit signal that the unused parameter is
+load-bearing for the contract, not just leftover code.
+
+#### Detection
+
+`scripts/checks/check_unused_params_named.py`. AST walks each
+`FunctionDef` / `AsyncFunctionDef`, collects parameter names, and
+checks each against names referenced (Load context) in the body.
+
+#### Examples
+
+Rejected:
+
+```python
+def handle(event: Event, context: Context) -> Result:
+    return Result(event.id)  # context never used
+```
+
+Allowed (Protocol requires both; this impl only uses `event`):
+
+```python
+def handle(event: Event, _context: Context) -> Result:
+    return Result(event.id)
+```
+
+Allowed (no Protocol requires `context` — delete it):
+
+```python
+def handle(event: Event) -> Result:
+    return Result(event.id)
+```
+
+---
+
+### F20 — Empty function bodies require docstring or intent comment
+
+#### Statement
+
+Any `FunctionDef` / `AsyncFunctionDef` whose body is exactly `pass`,
+`...`, or `docstring-only + pass/...` must carry either a docstring OR
+an `# Intentionally empty — <reason>` comment in the function span (or
+on the line above `def`).
+
+Abstract methods (`@abstractmethod`), `@overload` stubs, and bodies
+that are `raise NotImplementedError` are exempt.
+
+#### Why
+
+Sonar S1186. An empty body without explanation is indistinguishable
+from a truncated/forgotten implementation. The docstring or intent
+comment is the receipt that the emptiness is deliberate.
+
+#### Detection
+
+`scripts/checks/check_empty_body_intent.py`. AST walks each function,
+detects empty-body shapes, and checks for a leading docstring or an
+`Intentionally empty` comment in the function's source span.
+
+#### Examples
+
+Rejected:
+
+```python
+class Handler:
+    def on_event(self, event):
+        pass
+
+    def shutdown(self): ...
+```
+
+Allowed:
+
+```python
+class Handler:
+    def on_event(self, event):
+        """No-op default; concrete strategies override this."""
+
+    def shutdown(self):
+        # Intentionally empty — Protocol-required method that some
+        # adapters genuinely don't need.
+        pass
+```
+
+---
+
+### F21 — Check-script failure output must carry an action marker
+
+#### Statement
+
+Every fitness-function check under `scripts/checks/` MUST emit failure
+text (REMEDIATION constant, error-list append, shell `echo`/here-doc)
+that contains at least one of the three lowercase action markers:
+
+- `fix:` — a sentence describing how to correct the violation.
+- `next:` — what to do after the fix (re-run, re-check, etc.).
+- `run:` — an exact command to copy-paste.
+
+Allow-listed: `_arch_lib.py`, `_lib.sh`, `run-all.sh`,
+`audit_baselines.py`, `merge_coverage_xml.py` — shared helpers and the
+harness/orchestrator (no per-rule remediation of their own).
+
+#### Why
+
+Convergence with tc-agent-zone (issue #258). A check that fails with
+"AssertionError" or a REMEDIATION that only describes the offence
+wastes one full agent loop while the cure is re-derived. The markers
+turn the failure into an actionable instruction. The verbose
+"Refactor to YYY to pass. Pass example: ... Forbidden example: ..."
+shape used by F15 / F16 / F20 is an acceptable *extension* — F21 only
+requires the minimum: one marker.
+
+#### Detection
+
+`scripts/checks/check_actionable_feedback.py`. AST-based for Python
+check scripts (module-level `REMEDIATION = "..."` and
+`errors.append(...)` / `violations.append(...)` literals) plus
+regex-based for shell scripts (`REMEDIATION="..."` blocks and bare
+`echo`/here-doc text). A file with NO detectable remediation text is
+also treated as a violation, so silent check scripts can't bypass the
+rule. The detector deliberately scans itself — F21's own REMEDIATION
+must satisfy F21 (dogfood).
+
+#### Examples
+
+Rejected:
+
+```python
+REMEDIATION = "Some files violate the rule. Please update them."
+```
+
+Allowed (minimum — one marker):
+
+```python
+REMEDIATION = "fix: rewrite the affected REMEDIATION to include an action."
+```
+
+Allowed (richer extension — preferred for new checks; matches F15/F20):
+
+```python
+REMEDIATION = """Refactor to constructor-injected fakes to pass.
+
+fix: take the dependency as a kwarg of the unit under test and pass a
+Fake* from tests/fakes.py.
+next: re-run pytest tests/<dir>/ to confirm green.
+run: bash scripts/safe-commit.sh "test(<area>): inject fake instead of patch"
+
+Pass example:
+  pipeline = SearchPipeline(retriever=FakeRetriever(hits=[...]))
+
+Forbidden example:
+  @patch("kairix.core.search.bm25.bm25_search")
+  def test_search_returns_hits(mock): ...
+"""
+```
+
+#### Fix pattern
+
+Open the failing check script, locate the REMEDIATION constant (or
+the appended error string), and prepend `fix: <one-line action>` plus
+optionally `next: <follow-up>` and `run: <exact command>`. Re-run
+`python3 scripts/checks/check_actionable_feedback.py` to confirm.
+
+The pre-existing kairix check scripts use the "Refactor to … to pass."
+phrasing, which is descriptive but doesn't carry a literal marker —
+they are grandfathered in
+`.architecture/baseline/actionable-feedback-files.txt` until each one
+is rewritten in a baseline-burndown follow-up.
+
+### F22 — Repo paths follow per-tree naming conventions
+
+#### Statement
+
+Every tracked file under a registered tree-prefix MUST satisfy the
+naming regex for that tree. The trees and their rules (first match
+wins):
+
+| Tree prefix | Trigger | Allowed basenames |
+|-------------|---------|-------------------|
+| `kairix/` | `*.py` | `__init__.py`, `conftest.py`, `fakes.py`, or `_?snake_case.py` (leading `_` permitted for private modules) |
+| `tests/bdd/features/` | `*.feature` | `snake_case.feature` |
+| `tests/bdd/steps/` | `*.py` | `__init__.py`, `conftest.py`, `fakes.py`, or `_?snake_case.py` |
+| `tests/` (excl. `tests/bdd/`) | `*.py` | `test_<thing>.py`, `conftest.py`, `fakes.py`, `__init__.py`, or `_?snake_case.py` helpers |
+| `scripts/checks/` | `*.py` | `check_<rule>.py`, `_arch_lib.py`, `audit_baselines.py`, `merge_coverage_xml.py` |
+| `scripts/checks/` | `*.sh` | `check-<rule>.sh`, `check_<rule>.sh`, `_lib.sh`, `run-all.sh` |
+| `docs/operations/runbooks/` | `*.md` | `INDEX.md` or `kebab-case.md` |
+| `docs/runbooks/` | `*.md` | `INDEX.md` or `kebab-case.md` |
+| `.architecture/baseline/` | `*.txt` | `<rule-name>-files.txt` |
+
+Files outside every registered tree (top-level config, `.github/`,
+`docker/`, `reference-library/`, etc.) are not constrained by F22.
+Convergence with tc-agent-zone's `path_naming.py` (issue #258);
+kairix uses its own repo layout.
+
+#### Why
+
+Agents and humans cross-reference paths constantly — in CLAUDE.md, in
+runbooks, in error messages, in commit bodies. A consistent shape per
+tree means a path mentioned in one place is greppable everywhere.
+Mixed shapes (`Search-Pipeline.py` next to `pipeline.py`,
+`PipelineTest.py` next to `test_pipeline.py`) force the reader to
+guess which convention applies — and pytest collection silently drops
+the non-conforming one.
+
+#### Detection
+
+`scripts/checks/check_path_naming.py`. Walks `git ls-files`; for each
+tracked path, picks the first tree-rule whose prefix and suffix
+trigger both match; checks the basename against that rule's regex
+tuple. Out-of-scope paths pass silently.
+
+#### Examples
+
+Rejected:
+
+```
+kairix/core/Search-Pipeline.py            # PascalCase + dashes
+tests/search/PipelineTest.py              # not test_<thing>.py
+tests/bdd/features/SearchReturnsHits.feature
+scripts/checks/CheckPathNaming.py         # not check_<rule>.py
+docs/runbooks/my_runbook.md               # snake_case, want kebab
+```
+
+Allowed:
+
+```
+kairix/core/search/pipeline.py
+kairix/_azure.py                          # leading-underscore private
+tests/search/test_pipeline.py
+tests/bdd/features/search_returns_hits.feature
+scripts/checks/check_path_naming.py
+docs/operations/runbooks/how-to-debug-search-ranking.md
+.architecture/baseline/path-naming-files.txt
+```
+
+#### Fix pattern
+
+Rename the file to fit its tree (use `git mv` so history follows),
+update every import / reference that points at the old name, re-run
+`python3 scripts/checks/check_path_naming.py`. If the file is in an
+unfamiliar tree, check the rule table at the top of the check script
+— that's the source of truth.
+
+### F23 — Every top-level directory has a `README.md`
+
+#### Statement
+
+Every top-level directory under the repo root MUST contain a
+`README.md` orientation file, unless it's allow-listed. The
+allow-list (intentionally narrow) covers `.git`, `.github`,
+`.pytest_cache`, `.ruff_cache`, `.architecture`, `.claude`, `.idea`,
+`.vscode`, `.venv`, `__pycache__`, `htmlcov`, `logs`, `node_modules`,
+`coverage`, `dist`, `build`, and any directory whose name starts
+with `.` (dotfile config trees in general).
+
+Convergence with tc-agent-zone's `repo_ia.py` IA1 check (issue #258).
+
+#### Why
+
+Every directory mention in CLAUDE.md, docs/, or an error message
+becomes a click. Landing in a bare directory wastes the click and
+makes the reader spelunk for context. The resolver-README pattern
+(every top-level dir has one) means every path mention lands
+somewhere oriented — what belongs here, what doesn't, where the
+canonical docs live.
+
+#### Detection
+
+`scripts/checks/check_readme_coverage.py`. Walks `REPO_ROOT.iterdir()`
+for directories; subtracts the allow-list; flags any remaining
+directory whose `<dir>/README.md` is not a regular file. The baseline
+records the *missing* README paths (i.e. the files that should exist
+but don't), so a baseline burndown is "write the README and remove
+the line."
+
+#### Examples
+
+Rejected:
+
+```
+benchmark-results/                        # no README.md
+docs/                                     # no README.md (yes, really)
+kairix/                                   # no README.md — the package!
+```
+
+Allowed:
+
+```
+docker/README.md                          # exists
+reference-library/README.md               # exists
+```
+
+Allow-listed (no README required):
+
+```
+.git/, .github/, .architecture/, __pycache__/, htmlcov/, ...
+```
+
+#### Fix pattern
+
+Write a one-screen `<dir>/README.md` with three sections:
+
+1. **What this directory holds** — one sentence.
+2. **What does not belong here** — one or two anti-patterns.
+3. **Where the canonical docs live** — link to `docs/...`.
+
+Then delete the corresponding line from
+`.architecture/baseline/readme-coverage-files.txt`. The baseline is
+expected to shrink monotonically.
 
 ---
 

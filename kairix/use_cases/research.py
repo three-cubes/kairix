@@ -18,13 +18,18 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from kairix.use_cases import _research_defaults as _defaults
-
 logger = logging.getLogger(__name__)
 
 
 _MAX_TURNS_FLOOR = 1
 _MAX_TURNS_CEILING = 10
+
+
+def _default_research(**kwargs: Any) -> dict[str, Any]:
+    """Lazy-load the LangGraph research orchestrator."""
+    from kairix.agents.research.graph import run_research
+
+    return run_research(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -53,9 +58,16 @@ class ResearchOutput:
 
 @dataclass(frozen=True)
 class ResearchDeps:
-    """Injectable dependencies for ``run_research_use_case``."""
+    """Injectable dependencies for ``run_research_use_case``.
 
-    research_fn: Callable[..., dict[str, Any]] | None = None
+    Non-Optional field wired to the production orchestrator via
+    ``default_factory`` — eliminates the ``Optional[Callable]`` mypy
+    regression class flagged in #204. Tests construct
+    ``ResearchDeps(research_fn=fake)`` with explicit overrides;
+    ``ResearchDeps()`` with no kwargs resolves to ``_default_research``.
+    """
+
+    research_fn: Callable[..., dict[str, Any]] = field(default_factory=lambda: _default_research)
 
 
 def run_research_use_case(
@@ -77,7 +89,7 @@ def run_research_use_case(
     """
     clamped = min(max(_MAX_TURNS_FLOOR, max_turns), _MAX_TURNS_CEILING)
     d = deps or ResearchDeps()
-    research = d.research_fn or _defaults.default_research
+    research = d.research_fn
 
     try:
         result = research(query=query, max_turns=clamped)

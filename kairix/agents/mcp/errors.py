@@ -65,7 +65,7 @@ def wrap_tool_errors(handler: _F) -> _F:
             )
             return {"error": f"{type(exc).__name__}: {exc}"}
 
-    return _wrapped  # type: ignore[return-value]
+    return _wrapped  # type: ignore[return-value]  # mypy can't reason about the decorator's preserved signature
 
 
 def async_tool_handler(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -36,28 +36,24 @@ def _make_mock_spacy(entities: list[tuple[str, str]]):
 
 @pytest.mark.unit
 def test_suggest_entities_new_entity():
-    """Entities not in Neo4j should be marked as new."""
+    """Entities not in Neo4j should be marked as new.
+
+    F1-clean: pass nlp= directly through the existing constructor seam
+    instead of @patch'ing _load_model + spacy + sys.modules. The previous
+    triple-patch was a smell that obscured what the test actually proved.
+    """
     neo4j = FakeNeo4jClient(entities=[])  # empty graph
     mock_nlp = _make_mock_spacy([("AcmeCorp", "ORG")])
 
-    with (
-        patch("kairix.knowledge.entities.suggest._load_model", return_value=mock_nlp),
-        patch("kairix.knowledge.entities.suggest.spacy", create=True),
-    ):
-        # Patch the import inside suggest_entities
-        import kairix.knowledge.entities.suggest as suggest_mod
+    result = suggest_entities("AcmeCorp is a new company.", neo4j, nlp=mock_nlp)
 
-        _ = suggest_mod._load_model  # kept to verify attribute exists
-
-        with patch.object(suggest_mod, "_load_model", return_value=mock_nlp):
-            # We need to patch out the spacy import too
-            fake_spacy = MagicMock()
-            with patch.dict("sys.modules", {"spacy": fake_spacy}):
-                fake_spacy.load.return_value = mock_nlp
-                suggest_entities("AcmeCorp is a new company.", neo4j)
-
-    # Smoke: the call completed without raising, mocking bypasses import guard
-    assert True, "smoke: suggest_entities ran without error under mock"
+    # Sabotage-prove: assert the new entity is flagged as new, not just
+    # that the call returned. With FakeNeo4jClient.entities=[] any
+    # extracted entity must be is_new=True.
+    new_acme = [s for s in result if s.text == "AcmeCorp"]
+    assert new_acme, f"expected AcmeCorp in suggestions; got {[s.text for s in result]}"
+    assert new_acme[0].is_new is True
+    assert new_acme[0].existing_id is None
 
 
 @pytest.mark.unit
@@ -80,7 +76,7 @@ def test_suggest_graceful_import_error():
     # Remove spacy from sys.modules to simulate it not being installed
     sys_modules_backup = sys.modules.copy()
     sys.modules.pop("spacy", None)
-    sys.modules["spacy"] = None  # type: ignore
+    sys.modules["spacy"] = None  # type: ignore  # simulating uninstalled package; None forces ImportError
 
     try:
         with pytest.raises(ImportError, match="pip install"):
@@ -158,3 +154,210 @@ def test_suggested_entity_is_new_flag():
     )
     assert new_entity.is_new is True
     assert existing_entity.is_new is False
+
+
+@pytest.mark.unit
+def test_suggest_entities_existing_entity_marked_not_new():
+    """Entities found in Neo4j surface with is_new=False and the existing id/name."""
+    # FakeNeo4jClient.find_by_name returns matching entity by name
+    neo4j = FakeNeo4jClient(entities=[{"id": "openclaw-id", "name": "OpenClaw"}])
+    mock_nlp = _make_mock_spacy([("OpenClaw", "ORG")])
+
+    result = suggest_entities("OpenClaw is an AI platform.", neo4j, nlp=mock_nlp)
+
+    matches = [s for s in result if s.text == "OpenClaw"]
+    assert matches, f"expected OpenClaw in suggestions; got {[s.text for s in result]}"
+    assert matches[0].is_new is False
+    assert matches[0].existing_id == "openclaw-id"
+    assert matches[0].existing_name == "OpenClaw"
+
+
+@pytest.mark.unit
+def test_suggest_entities_handles_nlp_processing_failure():
+    """When nlp(text) raises, suggest_entities logs a warning and returns []."""
+
+    class _ExplodingNLP:
+        def __call__(self, text):
+            raise RuntimeError("nlp pipeline crashed")
+
+    neo4j = FakeNeo4jClient(entities=[])
+    result = suggest_entities("any text", neo4j, nlp=_ExplodingNLP())
+    assert result == []
+
+
+@pytest.mark.unit
+def test_suggest_entities_handles_neo4j_lookup_failure():
+    """Neo4j lookup failures are logged and the entity surfaces as new."""
+
+    class _FailingNeo4j:
+        available = True
+
+        def find_by_name(self, name):
+            raise RuntimeError("graph unreachable")
+
+    mock_nlp = _make_mock_spacy([("Acme", "ORG")])
+    result = suggest_entities("Acme is a company.", _FailingNeo4j(), nlp=mock_nlp)
+    matches = [s for s in result if s.text == "Acme"]
+    assert matches
+    assert matches[0].is_new is True
+    assert matches[0].existing_id is None
+
+
+@pytest.mark.unit
+def test_suggest_entities_drops_empty_surface_form():
+    """Filter chain entries with empty 'text' are skipped (line 116)."""
+
+    class _ChainEmittingEmpty:
+        def apply(self, suggestions, context):
+            return [{"text": "", "label": "ORG"}, {"text": "RealCorp", "label": "ORG"}]
+
+    neo4j = FakeNeo4jClient(entities=[])
+    mock_nlp = _make_mock_spacy([("AcmeCorp", "ORG")])
+    result = suggest_entities("test", neo4j, filter_chain=_ChainEmittingEmpty(), nlp=mock_nlp)
+
+    surface_forms = {s.text for s in result}
+    assert "" not in surface_forms
+    assert "RealCorp" in surface_forms
+
+
+@pytest.mark.unit
+def test_phantom_existing_entity_not_surfaced_when_not_in_input():
+    """#249: phantom-hit defence — a stored entity must not surface when its
+    canonical name is not actually in the input.
+
+    Repro mirrors the dogfood report. ``Neo4jClient.find_by_name`` does a
+    ``CONTAINS`` substring match, so a stub returning ``Brown Corp`` for
+    the surface form ``"brown"`` simulates the production behaviour.
+    Pre-fix: the row carried through and the suggestion surfaced with
+    ``is_new=False`` even though ``"Brown Corp"`` is nowhere in the
+    input. Post-fix: ``_filter_phantom_rows`` drops it.
+
+    Sabotage-prove: remove the ``_filter_phantom_rows`` call from
+    ``suggest_entities`` (or have it return ``rows`` unchanged) and the
+    final assertion that ``matches[0].is_new is True`` fails.
+    """
+
+    class _FuzzyNeo4j:
+        """Production-like CONTAINS substring match."""
+
+        available = True
+
+        def find_by_name(self, name):
+            n = name.lower()
+            rows = [{"id": "brown-corp", "name": "Brown Corp", "label": "Organisation"}]
+            return [r for r in rows if n in r["name"].lower() or r["name"].lower() in n]
+
+    # NER picks up "Brown" (capitalised, e.g. a person's surname). The stored
+    # entity "Brown Corp" must NOT surface because its canonical name is
+    # not present as a phrase in the input.
+    mock_nlp = _make_mock_spacy([("Brown", "PERSON")])
+    result = suggest_entities("the quick Brown fox jumped", _FuzzyNeo4j(), nlp=mock_nlp)
+
+    matches = [s for s in result if s.text == "Brown"]
+    assert matches, f"expected 'Brown' in suggestions; got {[s.text for s in result]}"
+    assert matches[0].is_new is True, (
+        f"expected phantom Brown Corp to be filtered (is_new=True); got is_new={matches[0].is_new}, "
+        f"existing_name={matches[0].existing_name!r}"
+    )
+    assert matches[0].existing_id is None
+    assert matches[0].existing_name is None
+
+
+@pytest.mark.unit
+def test_existing_entity_surfaced_when_referenced_in_input():
+    """#249: post-filter must preserve legitimate existing-entity hits.
+
+    Counter to the phantom-hit test: when the stored entity's name is
+    actually present in the input, the lookup succeeds and the result
+    surfaces with ``is_new=False`` and the canonical id/name. Pins
+    against an over-tight phantom filter that would also reject the
+    valid case.
+
+    Sabotage-prove: change ``_filter_phantom_rows`` to ``return []`` and
+    this test fails (existing_id becomes None).
+    """
+
+    class _FuzzyNeo4j:
+        available = True
+
+        def find_by_name(self, name):
+            n = name.lower()
+            rows = [{"id": "brown-corp", "name": "Brown Corp", "label": "Organisation"}]
+            return [r for r in rows if n in r["name"].lower() or r["name"].lower() in n]
+
+    mock_nlp = _make_mock_spacy([("Brown Corp", "ORG")])
+    result = suggest_entities("Brown Corp announced a new partnership", _FuzzyNeo4j(), nlp=mock_nlp)
+
+    matches = [s for s in result if s.text == "Brown Corp"]
+    assert matches, f"expected Brown Corp in suggestions; got {[s.text for s in result]}"
+    assert matches[0].is_new is False
+    assert matches[0].existing_id == "brown-corp"
+    assert matches[0].existing_name == "Brown Corp"
+
+
+@pytest.mark.unit
+def test_existing_entity_surfaced_when_name_appears_at_word_boundary_even_if_surface_differs():
+    """A surface form that's a substring of a stored entity name still
+    surfaces the entity when the full name appears elsewhere in the
+    input.
+
+    Use case: NER picks ``"Brown"`` from the input as a surface form,
+    but the input also contains ``"Brown Corp"`` further along. The
+    fuzzy match returns ``Brown Corp`` for the surface form ``"Brown"``,
+    and because the full name is present as a token, the post-filter
+    keeps the row.
+    """
+
+    class _FuzzyNeo4j:
+        available = True
+
+        def find_by_name(self, name):
+            n = name.lower()
+            rows = [{"id": "brown-corp", "name": "Brown Corp", "label": "Organisation"}]
+            return [r for r in rows if n in r["name"].lower() or r["name"].lower() in n]
+
+    mock_nlp = _make_mock_spacy([("Brown", "PERSON")])
+    text = "Brown joined Brown Corp last quarter"
+    result = suggest_entities(text, _FuzzyNeo4j(), nlp=mock_nlp)
+
+    matches = [s for s in result if s.text == "Brown"]
+    assert matches
+    assert matches[0].is_new is False
+    assert matches[0].existing_name == "Brown Corp"
+
+
+@pytest.mark.unit
+def test_suggest_entities_load_model_failure_returns_empty():
+    """When spaCy is importable but _load_model fails, suggest_entities returns []
+    (covers the `except Exception` branch around _load_model and the _load_model
+    body itself).
+
+    We install a fake `spacy` module whose `load` raises OSError. The kairix
+    code path catches that as 'spaCy load failed' and short-circuits with [].
+    No @patch on kairix internals — we only place a fake module into sys.modules,
+    same pattern used by test_suggest_graceful_import_error above.
+    """
+    import sys
+    import types
+
+    fake_spacy = types.ModuleType("spacy")
+
+    def _raise_oserror(name):
+        raise OSError("model not found")
+
+    fake_spacy.load = _raise_oserror  # type: ignore[attr-defined]  # injecting load attr on fake spacy module
+
+    sys_modules_backup = sys.modules.get("spacy")
+    sys.modules["spacy"] = fake_spacy
+
+    try:
+        neo4j = FakeNeo4jClient(entities=[])
+        result = suggest_entities("Acme is a company.", neo4j)
+        # _load_model raised RuntimeError (wrapped from OSError); kairix logged
+        # and returned [].
+        assert result == []
+    finally:
+        if sys_modules_backup is not None:
+            sys.modules["spacy"] = sys_modules_backup
+        else:
+            sys.modules.pop("spacy", None)

@@ -963,7 +963,7 @@ def test_run_benchmark_warns_when_some_recall_cases_have_no_gold(
         ],
     )
 
-    def _retrieve(**kwargs):  # type: ignore[no-untyped-def]
+    def _retrieve(**kwargs):  # type: ignore[no-untyped-def]  # local test stub; kwargs unused
         return ([], [], {"intent": "semantic"})
 
     with caplog.at_level(logging.WARNING):
@@ -986,7 +986,7 @@ def test_run_benchmark_raises_value_error_when_all_recall_cases_have_no_gold() -
         ],
     )
 
-    def _retrieve(**kwargs):  # type: ignore[no-untyped-def]
+    def _retrieve(**kwargs):  # type: ignore[no-untyped-def]  # local test stub; signature intentionally permissive
         # If validation didn't fire, the retrieve callable would be called; the test
         # would then surface the failure as "retrieve was called" rather than ValueError.
         raise AssertionError("deps.retrieve must not run when validation fails")

@@ -61,7 +61,7 @@ def load_entity_nodes(neo4j_client: object) -> list[EntityNode]:
     """Load all entity nodes from Neo4j."""
     labels = ("Organisation", "Person", "Outcome", "Concept", "Project")
     label_filter = "['" + "','".join(labels) + "']"
-    rows = neo4j_client.cypher(  # type: ignore[attr-defined]
+    rows = neo4j_client.cypher(  # type: ignore[attr-defined] — neo4j_client typed `object` to keep script decoupled; .cypher() exists on real client
         f"MATCH (n) WHERE labels(n)[0] IN {label_filter} "
         "RETURN n.id AS id, n.name AS name, labels(n)[0] AS label, "
         "n.vault_path AS vault_path, n.summary AS summary"
@@ -143,7 +143,7 @@ def execute_pruning(
             print(f"  SKIP (no id): {entity.name!r} — {reason}")
             continue
         try:
-            neo4j_client.cypher(  # type: ignore[attr-defined]
+            neo4j_client.cypher(  # type: ignore[attr-defined] — neo4j_client typed `object` to keep script decoupled; .cypher() exists on real client
                 "MATCH (n {id: $id}) DETACH DELETE n",
                 {"id": entity.id},
             )

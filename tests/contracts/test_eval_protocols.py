@@ -53,15 +53,22 @@ class TestChatBackendContract:
         with pytest.raises(ValueError, match="No API credentials"):
             backend.complete("p", api_key="k", endpoint="e", deployment="d")
 
-    def test_azure_chat_backend_satisfies_protocol(self) -> None:
-        """The production ``AzureChatBackend`` adapter satisfies the protocol.
+    def test_production_chat_backend_satisfies_protocol(self) -> None:
+        """The production chat-backend factory returns a ``ChatBackend``.
 
-        Phase 2a adds the adapter class so production callers can inject a
+        Phase 2a adds the adapter so production callers can inject a
         ``ChatBackend`` rather than calling ``chat_completion`` directly.
-        """
-        from kairix._azure import AzureChatBackend
 
-        assert isinstance(AzureChatBackend(), ChatBackend)
+        F5-clean: drive through the public ``default_chat_backend()``
+        factory rather than importing the concrete adapter class from the
+        private ``kairix._azure`` module. The concrete class is an
+        implementation detail; what callers depend on is the protocol
+        surface.
+        """
+        from kairix.quality.eval.generate import default_chat_backend
+
+        backend = default_chat_backend()
+        assert isinstance(backend, ChatBackend)
 
 
 @pytest.mark.contract

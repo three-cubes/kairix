@@ -27,7 +27,7 @@ _MODAL_WORDS = re.compile(
 
 # Tokens we treat as "entity-shaped" — capitalised words longer than 2 chars
 # (skipping the common sentence-initial article).
-_PROPER_NOUN = re.compile(r"\b[A-Z][A-Za-z][A-Za-z0-9]{1,}\b")
+_PROPER_NOUN = re.compile(r"\b[A-Z][A-Za-z][A-Za-z0-9]+\b")
 
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
 

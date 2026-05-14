@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
@@ -154,6 +155,59 @@ def _secret_file_dirs() -> list[str]:
     return dirs
 
 
+def _read_secret_from_env(env_var: str | None) -> str | None:
+    """Step 1 resolver: direct environment variable lookup."""
+    if not env_var:
+        return None
+    value = os.environ.get(env_var)
+    return value or None
+
+
+def _read_secret_from_bundle(env_var: str | None) -> str | None:
+    """Step 3 resolver: legacy bundle file (vault-agent sidecar pattern)."""
+    if not env_var:
+        return None
+    secrets_dir = os.environ.get("KAIRIX_SECRETS_DIR", _DEFAULT_SECRETS_DIR)
+    secrets_file = Path(secrets_dir) / "kairix.env"
+    if not secrets_file.exists():
+        return None
+    return load_secrets_file(secrets_file).get(env_var) or None
+
+
+def _read_secret_from_keyvault(name: str) -> str | None:
+    """Step 4 resolver: Azure Key Vault CLI fallback (requires KAIRIX_KV_NAME)."""
+    kv_name = os.environ.get("KAIRIX_KV_NAME", "")
+    if not kv_name:
+        return None
+    try:
+        result = subprocess.run(  # noqa: S603 — az keyvault is a trusted CLI binary
+            [  # noqa: S607
+                "az",
+                "keyvault",
+                "secret",
+                "show",
+                "--vault-name",
+                kv_name,
+                "--name",
+                name,
+                "--query",
+                "value",
+                "-o",
+                "tsv",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError, ValueError):
+        logger.warning("get_secret: KV fetch error for requested key")
+        return None
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()  # nosec: returns secret value to caller (intended)
+    logger.warning("get_secret: KV fetch failed for requested key")
+    return None
+
+
 def get_secret(name: str, required: bool = True) -> str | None:
     """
     Resolve a secret by name. Returns value or None (raises if required).
@@ -176,62 +230,61 @@ def get_secret(name: str, required: bool = True) -> str | None:
     """
     env_var = _SECRET_ENV_MAP.get(name)
 
-    # Step 1: direct environment variable
-    if env_var:
-        value = os.environ.get(env_var)
+    resolvers: tuple[Callable[[], str | None], ...] = (
+        lambda: _read_secret_from_env(env_var),
+        lambda: _read_secret_file(name),
+        lambda: _read_secret_from_bundle(env_var),
+        lambda: _read_secret_from_keyvault(name),
+    )
+    for resolver in resolvers:
+        value = resolver()
         if value:
             return value
 
-    # Step 2: per-file secret (Docker secrets / XDG config)
-    value = _read_secret_file(name)
-    if value:
-        return value
-
-    # Step 3: legacy bundle file (vault-agent sidecar)
-    secrets_dir = os.environ.get("KAIRIX_SECRETS_DIR", _DEFAULT_SECRETS_DIR)
-    secrets_file = Path(secrets_dir) / "kairix.env"
-    if secrets_file.exists():
-        file_secrets = load_secrets_file(secrets_file)
-        if env_var and env_var in file_secrets:
-            value = file_secrets[env_var]
-            if value:
-                return value
-
-    # Step 4: Azure Key Vault CLI fallback
-    kv_name = os.environ.get("KAIRIX_KV_NAME", "")
-    if kv_name:
-        try:
-            result = subprocess.run(  # noqa: S603 — az keyvault is a trusted CLI binary
-                [  # noqa: S607
-                    "az",
-                    "keyvault",
-                    "secret",
-                    "show",
-                    "--vault-name",
-                    kv_name,
-                    "--name",
-                    name,
-                    "--query",
-                    "value",
-                    "-o",
-                    "tsv",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()  # nosec: returns secret value to caller (intended)
-            else:
-                logger.warning("get_secret: KV fetch failed for requested key")
-        except (subprocess.SubprocessError, OSError, ValueError):
-            logger.warning("get_secret: KV fetch error for requested key")
-
-    # Not found
     if required:
         logger.error("get_secret: required secret not found")
         raise OSError("Required secret not available. Check environment, secrets file, or Key Vault configuration.")
     return None
+
+
+def neo4j_uri(default: str = "bolt://localhost:7687") -> str:
+    """Resolve the Neo4j bolt URI.
+
+    Reads ``KAIRIX_NEO4J_URI``; falls back to localhost. Centralised here
+    so F4's "env reads stay in paths/secrets" gate covers both the URI
+    and password reads from a single boundary.
+    """
+    return os.environ.get("KAIRIX_NEO4J_URI", default)
+
+
+def neo4j_user(default: str = "neo4j") -> str:
+    """Resolve the Neo4j username from ``KAIRIX_NEO4J_USER``."""
+    return os.environ.get("KAIRIX_NEO4J_USER", default)
+
+
+def neo4j_password() -> str:
+    """Resolve the Neo4j password from ``KAIRIX_NEO4J_PASSWORD``.
+
+    Returns the empty string when unset — callers test ``if password``
+    to decide whether the graph layer is available.
+    """
+    return os.environ.get("KAIRIX_NEO4J_PASSWORD", "")
+
+
+def set_llm_endpoint(value: str) -> None:
+    """Set ``KAIRIX_LLM_ENDPOINT`` so subsequent ``get_credentials("llm")``
+    calls resolve the operator-supplied value.
+
+    Lives here (not in ``paths.py``) because the LLM endpoint is a
+    secret-adjacent credential. The setup wizard uses it to validate
+    a fresh deployment before persisting the config file.
+    """
+    os.environ["KAIRIX_LLM_ENDPOINT"] = value
+
+
+def set_llm_api_key(value: str) -> None:
+    """Set ``KAIRIX_LLM_API_KEY`` for credential validation in the setup wizard."""
+    os.environ["KAIRIX_LLM_API_KEY"] = value
 
 
 def refresh_secrets(path: str | Path | None = None) -> int:

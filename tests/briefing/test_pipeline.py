@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 
 from kairix.agents.briefing.pipeline import (
-    _TOTAL_CONTEXT_CAP,
+    TOTAL_CONTEXT_CAP,
     BriefingDeps,
     BriefingPipeline,
-    _trim_context,
     generate_briefing,
+    trim_context,
 )
 from kairix.text import estimate_tokens
 
@@ -51,7 +51,7 @@ class TestTrimContext:
     @pytest.mark.unit
     def test_no_trim_when_under_cap(self):
         context = {"memory_logs": "short content", "entity_stub": "also short"}
-        result = _trim_context(context)
+        result = trim_context(context)
         assert result == context
 
     @pytest.mark.unit
@@ -62,9 +62,9 @@ class TestTrimContext:
             "hybrid_search": long_text,
             "memory_logs": long_text,
         }
-        result = _trim_context(context)
+        result = trim_context(context)
         total = sum(estimate_tokens(v) for v in result.values())
-        assert total <= _TOTAL_CONTEXT_CAP * 2  # some tolerance
+        assert total <= TOTAL_CONTEXT_CAP * 2  # some tolerance
 
     @pytest.mark.unit
     def test_truncates_lowest_priority_first(self):
@@ -75,7 +75,7 @@ class TestTrimContext:
             "hybrid_search": long_text,
             "memory_logs": "short note here",
         }
-        result = _trim_context(context)
+        result = trim_context(context)
         # hybrid_search should be shorter than original since total is over cap
         assert len(result.get("hybrid_search", "")) <= len(long_text)
 

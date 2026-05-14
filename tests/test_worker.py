@@ -14,7 +14,9 @@ Covers:
 from __future__ import annotations
 
 import signal
+import typing
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +32,7 @@ from kairix.worker import (
     run_health_check,
     run_wikilinks_inject,
 )
+from kairix.worker_state import WorkerPhase, WorkerState, write_state
 
 pytestmark = pytest.mark.unit
 
@@ -215,12 +218,19 @@ def test_run_health_check_counts_results() -> None:
 
 
 def test_worker_has_required_imports() -> None:
-    """Worker module should have os and Path available (regression test)."""
+    """Worker module should have Path and document_root available
+    (regression test).
+
+    ``os`` was removed when the ``KAIRIX_DOCUMENT_ROOT`` env read moved
+    into ``kairix.paths.document_root`` (F4). The replacement assertion
+    pins that the helper is reachable from the worker namespace so the
+    seed-crawl branch keeps working.
+    """
     from kairix import worker
 
     # These are imported at module level — verify they exist
-    assert hasattr(worker, "os")
     assert hasattr(worker, "Path")
+    assert hasattr(worker, "document_root")
 
 
 def test_worker_constants() -> None:
@@ -249,7 +259,7 @@ def test_worker_deps_default_factory_binds_callable_for_every_field() -> None:
     violate F5 (no internal-name imports in tests).
     """
     deps = WorkerDeps()
-    for name in ("embed", "entity_seed", "health_check", "wikilinks", "sleep"):
+    for name in ("embed", "entity_seed", "health_check", "wikilinks", "sleep", "write_state_fn", "read_state_fn"):
         value = getattr(deps, name)
         assert callable(value), (
             f"default_factory for WorkerDeps.{name} must bind a callable; "
@@ -283,7 +293,7 @@ def test_worker_deps_partial_override_preserves_other_defaults() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_shutdown_handler_sets_running_false() -> None:
+def test_shutdown_handler_sets_running_false(tmp_path: Path) -> None:
     """The _shutdown signal handler should set running=False via nonlocal."""
     import os
 
@@ -293,10 +303,9 @@ def test_shutdown_handler_sets_running_false() -> None:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # NOSONAR: test sends a real SIGTERM to itself to
-            # exercise the worker's shutdown handler. Self-targeted; no
-            # external reach.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(
+                os.getpid(), signal.SIGTERM
+            )  # NOSONAR — self-signal SIGTERM to exercise shutdown handler; no external reach.
 
     main(
         deps=WorkerDeps(
@@ -304,6 +313,8 @@ def test_shutdown_handler_sets_running_false() -> None:
             entity_seed=lambda: None,
             health_check=lambda: [],
             sleep=lambda _s: None,
+            state_path=tmp_path / "worker-state.json",
+            write_state_fn=lambda *_: None,
         ),
         embed_interval=999999,
         entity_seed_interval=999999,
@@ -313,7 +324,7 @@ def test_shutdown_handler_sets_running_false() -> None:
     assert call_count >= 1, "embed was never called"
 
 
-def test_main_loop_runs_embed_on_interval() -> None:
+def test_main_loop_runs_embed_on_interval(tmp_path: Path) -> None:
     """Main loop should run embed when interval has elapsed."""
     import os
 
@@ -325,8 +336,7 @@ def test_main_loop_runs_embed_on_interval() -> None:
         nonlocal call_count
         call_count += 1
         if call_count >= 2:
-            # NOSONAR: self-signal to drive worker shutdown loop.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal to drive worker shutdown loop.
 
     def entity_then_noop() -> None:
         nonlocal entity_called
@@ -343,6 +353,8 @@ def test_main_loop_runs_embed_on_interval() -> None:
             entity_seed=entity_then_noop,
             health_check=health_then_noop,
             sleep=lambda _s: None,
+            state_path=tmp_path / "worker-state.json",
+            write_state_fn=lambda *_: None,
         ),
         # Set all intervals to 0 so every task fires on every loop iteration
         embed_interval=0,
@@ -356,7 +368,7 @@ def test_main_loop_runs_embed_on_interval() -> None:
     assert health_called, "health check should have been called"
 
 
-def test_shutdown_handler_via_sigint() -> None:
+def test_shutdown_handler_via_sigint(tmp_path: Path) -> None:
     """SIGINT should also trigger graceful shutdown."""
     import os
 
@@ -366,8 +378,7 @@ def test_shutdown_handler_via_sigint() -> None:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # NOSONAR: self-signal to drive Ctrl-C path on the worker.
-            os.kill(os.getpid(), signal.SIGINT)
+            os.kill(os.getpid(), signal.SIGINT)  # NOSONAR — self-signal to drive Ctrl-C path on the worker.
 
     main(
         deps=WorkerDeps(
@@ -375,6 +386,8 @@ def test_shutdown_handler_via_sigint() -> None:
             entity_seed=lambda: None,
             health_check=lambda: [],
             sleep=lambda _s: None,
+            state_path=tmp_path / "worker-state.json",
+            write_state_fn=lambda *_: None,
         ),
         embed_interval=999999,
         entity_seed_interval=999999,
@@ -418,7 +431,7 @@ def test_run_wikilinks_inject_survives_systemexit() -> None:
     run_wikilinks_inject(deps=WorkerDeps(wikilinks=_exits))  # must not propagate
 
 
-def test_main_loop_calls_wikilinks_at_interval() -> None:
+def test_main_loop_calls_wikilinks_at_interval(tmp_path: Path) -> None:
     """When the wikilinks interval has elapsed, main() invokes it once per cycle."""
     call_counts = {"embed": 0, "wikilinks": 0}
 
@@ -427,8 +440,9 @@ def test_main_loop_calls_wikilinks_at_interval() -> None:
         if call_counts["embed"] >= 2:
             import os
 
-            # NOSONAR: self-signal so the loop exits after we observe wikilinks running.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(
+                os.getpid(), signal.SIGTERM
+            )  # NOSONAR — self-signal so the loop exits after we observe wikilinks running.
 
     def _wikilinks() -> None:
         call_counts["wikilinks"] += 1
@@ -440,6 +454,8 @@ def test_main_loop_calls_wikilinks_at_interval() -> None:
             health_check=lambda: [],
             wikilinks=_wikilinks,
             sleep=lambda _s: None,
+            state_path=tmp_path / "worker-state.json",
+            write_state_fn=lambda *_: None,
         ),
         embed_interval=0,
         entity_seed_interval=999999,
@@ -454,3 +470,845 @@ def test_main_loop_calls_wikilinks_at_interval() -> None:
 def test_wikilinks_interval_constant_matches_embed() -> None:
     """Per #100 the inject runs on the same hourly cadence as embed."""
     assert WIKILINKS_INTERVAL == EMBED_INTERVAL
+
+
+# ---------------------------------------------------------------------------
+# #224 idle backoff — compute_embed_interval + run_embed return semantics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def testcompute_embed_interval_no_backoff_below_threshold() -> None:
+    """First N consecutive no-ops keep the base interval — no churn on a
+    just-quiet vault."""
+    from kairix.worker import EMBED_BACKOFF_NOOP_THRESHOLD, compute_embed_interval
+
+    base = 3600
+    for streak in range(EMBED_BACKOFF_NOOP_THRESHOLD + 1):
+        assert compute_embed_interval(base, streak) == base
+
+
+@pytest.mark.unit
+def testcompute_embed_interval_doubles_after_threshold() -> None:
+    """First backoff hop is 2x base; second is 4x; growth is exponential.
+    Verifies the exponential math up to the point where the 4-hour cap kicks
+    in (a separate test covers the cap)."""
+    from kairix.worker import EMBED_BACKOFF_NOOP_THRESHOLD, compute_embed_interval
+
+    # Use a small base so we can demonstrate 2x and 4x growth without
+    # hitting the 4-hour cap mid-test.
+    base = 60
+    assert compute_embed_interval(base, EMBED_BACKOFF_NOOP_THRESHOLD + 1) == base * 2
+    assert compute_embed_interval(base, EMBED_BACKOFF_NOOP_THRESHOLD + 2) == base * 4
+    assert compute_embed_interval(base, EMBED_BACKOFF_NOOP_THRESHOLD + 3) == base * 8
+
+
+@pytest.mark.unit
+def testcompute_embed_interval_caps_at_max() -> None:
+    """Backoff caps at EMBED_BACKOFF_MAX_INTERVAL so a long-idle vault still
+    runs embed every 4 hours minimum — keeps recall canaries fresh."""
+    from kairix.worker import EMBED_BACKOFF_MAX_INTERVAL, compute_embed_interval
+
+    # A huge streak must clamp to the max, not overflow.
+    assert compute_embed_interval(3600, 100) == EMBED_BACKOFF_MAX_INTERVAL
+
+
+@pytest.mark.unit
+def test_run_embed_returns_true_on_real_work(caplog: pytest.LogCaptureFixture) -> None:
+    """run_embed signals 'did real work' when the pipeline embedded chunks.
+    Used by the main loop to reset the no-op streak."""
+
+    class _Result:
+        embedded = 7
+        failed = 0
+        recall_passed = True
+        recall_alert = None
+        diagnostics: typing.ClassVar[list[str]] = []
+        recall_score = 0.95
+
+    deps = WorkerDeps(embed=lambda: _Result(), entity_seed=lambda: None, health_check=lambda: [])
+    assert run_embed(deps) is True
+
+
+@pytest.mark.unit
+def test_run_embed_returns_false_on_noop() -> None:
+    """Sabotage-prove: zero embedded AND zero failed means no real work —
+    return False so the main loop can advance the backoff streak."""
+
+    class _Result:
+        embedded = 0
+        failed = 0
+        recall_passed = True
+        recall_alert = None
+        diagnostics: typing.ClassVar[list[str]] = []
+        recall_score = 0.95
+
+    deps = WorkerDeps(embed=lambda: _Result(), entity_seed=lambda: None, health_check=lambda: [])
+    assert run_embed(deps) is False
+
+
+@pytest.mark.unit
+def test_run_embed_returns_false_on_exception() -> None:
+    """An exception in the embed step counts as no-op — broken pipelines
+    don't deserve faster retries; backoff applies."""
+
+    def _broken() -> None:
+        raise RuntimeError("simulated embed failure")
+
+    deps = WorkerDeps(embed=_broken, entity_seed=lambda: None, health_check=lambda: [])
+    assert run_embed(deps) is False
+
+
+@pytest.mark.unit
+def test_run_embed_returns_false_on_legacy_none_result() -> None:
+    """Legacy stubs returning None must be treated as no-op (back-compat)."""
+    deps = WorkerDeps(embed=lambda: None, entity_seed=lambda: None, health_check=lambda: [])
+    assert run_embed(deps) is False
+
+
+# ---------------------------------------------------------------------------
+# #224 phase 5 — observable phase transitions persisted to JSON
+# ---------------------------------------------------------------------------
+
+
+def _shutdown_after_first_embed() -> typing.Callable[[], None]:
+    """Build an embed callable that signals shutdown after one call.
+
+    Used by main-loop tests to bound execution to one cycle so they
+    don't run the worker forever.
+    """
+    call_count = {"n": 0}
+
+    def _embed() -> None:
+        call_count["n"] += 1
+        if call_count["n"] >= 1:
+            import os
+
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal so the worker loop exits after one cycle.
+
+    return _embed
+
+
+@pytest.mark.unit
+def test_main_loop_writes_state_on_phase_transition(tmp_path: Path) -> None:
+    """Every phase change calls ``deps.write_state_fn`` with the current state.
+
+    Sabotage proof: if the main loop forgot to ``write_state_fn`` at any
+    transition, the captured phase list would miss STARTING / INGEST /
+    IDLE and the assertion would fail. We exercise startup +
+    one in-loop cycle and assert all three phases appear in order.
+    """
+    state_path = tmp_path / "worker-state.json"
+    captured_phases: list[WorkerPhase] = []
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        captured_phases.append(state.current_phase)
+        # Also persist so the next reader sees the file — keeps the
+        # boot/resume path exercise-able if needed.
+        write_state(state, path)
+
+    deps = WorkerDeps(
+        embed=_shutdown_after_first_embed(),
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    # Boot writes STARTING, then INGEST (before embed), then IDLE (after embed).
+    assert WorkerPhase.STARTING in captured_phases, f"missing STARTING in {captured_phases}"
+    assert WorkerPhase.INGEST in captured_phases, f"missing INGEST in {captured_phases}"
+    assert WorkerPhase.IDLE in captured_phases, f"missing IDLE in {captured_phases}"
+    # Ordering: STARTING precedes the first INGEST.
+    assert captured_phases.index(WorkerPhase.STARTING) < captured_phases.index(WorkerPhase.INGEST)
+
+
+@pytest.mark.unit
+def test_main_loop_writes_state_on_maintenance_transition(tmp_path: Path) -> None:
+    """Entity-seed / health-check / wikilinks paths transition into
+    MAINTENANCE and back to IDLE.
+
+    Sabotage proof: if a maintenance task ran without ``_transition``
+    bracketing, ``MAINTENANCE`` would never appear in the captured list.
+    """
+    state_path = tmp_path / "worker-state.json"
+    captured_phases: list[WorkerPhase] = []
+
+    call_counter = {"embed": 0}
+
+    def _embed() -> None:
+        call_counter["embed"] += 1
+        if call_counter["embed"] >= 2:
+            import os
+
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal to exit the loop after observing maintenance.
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        captured_phases.append(state.current_phase)
+
+    deps = WorkerDeps(
+        embed=_embed,
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,
+        entity_seed_interval=0,
+        health_check_interval=0,
+        wikilinks_interval=0,
+    )
+
+    assert WorkerPhase.MAINTENANCE in captured_phases, f"maintenance phase never written; got {captured_phases}"
+
+
+@pytest.mark.unit
+def test_main_loop_increments_restart_count_on_reboot(tmp_path: Path) -> None:
+    """A pre-existing state file's ``restart_count`` is incremented on boot.
+
+    Sabotage proof: if the boot path forgot to call ``read_state_fn`` /
+    increment, every state write would carry restart_count=0 and this
+    test would fail when asserting it's ≥ 6.
+    """
+    state_path = tmp_path / "worker-state.json"
+    seed = WorkerState(restart_count=5, embedded_total=100)
+    write_state(seed, state_path)
+
+    captured_restart_counts: list[int] = []
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        captured_restart_counts.append(state.restart_count)
+        write_state(state, path)
+
+    deps = WorkerDeps(
+        embed=_shutdown_after_first_embed(),
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    # Every write after boot should carry restart_count=6 (was 5 on disk).
+    assert captured_restart_counts, "no state writes captured"
+    assert captured_restart_counts[0] == 6, (
+        f"first post-boot write should bump restart_count 5→6; got {captured_restart_counts[0]}"
+    )
+
+
+@pytest.mark.unit
+def test_main_loop_starts_fresh_when_no_prior_state(tmp_path: Path) -> None:
+    """No prior state file → restart_count stays 0; embedded_total starts at 0.
+
+    Pairs with ``test_main_loop_increments_restart_count_on_reboot`` so
+    both branches of the boot-read path are covered.
+    """
+    state_path = tmp_path / "worker-state.json"
+    assert not state_path.exists()
+
+    captured: list[WorkerState] = []
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        # Snapshot a copy of the mutable state at each write.
+        captured.append(
+            WorkerState(
+                current_phase=state.current_phase,
+                restart_count=state.restart_count,
+                embedded_total=state.embedded_total,
+            )
+        )
+
+    deps = WorkerDeps(
+        embed=_shutdown_after_first_embed(),
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    assert captured, "no state writes captured"
+    assert captured[0].restart_count == 0, "fresh boot should start at restart_count=0"
+
+
+@pytest.mark.unit
+def test_main_loop_increments_counters_from_embed_outcome(tmp_path: Path) -> None:
+    """``embedded`` and ``failed`` counters on the embed result accumulate
+    into the persisted ``WorkerState``.
+
+    Sabotage proof: if main() forgot to fold ``outcome.embedded`` into
+    ``state.embedded_total`` the asserted final value would still be 0.
+    """
+    state_path = tmp_path / "worker-state.json"
+
+    class _Result:
+        embedded = 4
+        failed = 2
+        recall_passed = True
+        recall_alert = None
+        diagnostics: typing.ClassVar[list[str]] = []
+        recall_score = 0.9
+
+    embed_call_count = {"n": 0}
+
+    def _embed() -> _Result:
+        embed_call_count["n"] += 1
+        if embed_call_count["n"] >= 1:
+            import os
+
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — end the loop after one embed cycle.
+        return _Result()
+
+    final_states: list[WorkerState] = []
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        final_states.append(
+            WorkerState(
+                current_phase=state.current_phase,
+                embedded_total=state.embedded_total,
+                failed_chunks_total=state.failed_chunks_total,
+            )
+        )
+
+    deps = WorkerDeps(
+        embed=_embed,
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    last = final_states[-1]
+    assert last.embedded_total == 4, f"expected 4 embedded, got {last.embedded_total}"
+    assert last.failed_chunks_total == 2, f"expected 2 failed, got {last.failed_chunks_total}"
+
+
+@pytest.mark.unit
+def test_main_loop_increments_recall_alerts_when_gate_fails(tmp_path: Path) -> None:
+    """``recall_passed=False`` from the embed outcome bumps
+    ``recall_alerts_total``.
+
+    Sabotage proof: drop the ``if outcome.recall_passed is False``
+    branch in main() and this asserts 0 == 1.
+    """
+    state_path = tmp_path / "worker-state.json"
+
+    class _Result:
+        embedded = 1
+        failed = 0
+        recall_passed = False
+        recall_alert = "degraded"
+        diagnostics: typing.ClassVar[list[str]] = []
+        recall_score = 0.1
+
+    embed_count = {"n": 0}
+
+    def _embed() -> _Result:
+        embed_count["n"] += 1
+        if embed_count["n"] >= 1:
+            import os
+
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — end loop after one embed.
+        return _Result()
+
+    captured: list[int] = []
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        captured.append(state.recall_alerts_total)
+
+    deps = WorkerDeps(
+        embed=_embed,
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    assert captured[-1] == 1, f"expected one recall alert, got {captured[-1]}"
+
+
+@pytest.mark.unit
+def test_worker_deps_default_factory_binds_state_and_pause_flag_path() -> None:
+    """``WorkerDeps()`` with no overrides binds a fresh WorkerState, a Path for
+    state_path, a write_state_fn callable, and a Path for pause_flag_path.
+
+    Sabotage proof: if any of these regressed to ``None``, this would fail
+    immediately. F6 explicitly rejects the ``Optional[Callable] = None``
+    pattern; this test makes that regression visible.
+    """
+    deps = WorkerDeps()
+    assert isinstance(deps.state, WorkerState), "state must be a WorkerState dataclass instance"
+    assert isinstance(deps.state_path, Path), "state_path must be a Path"
+    assert callable(deps.write_state_fn), "write_state_fn must be callable"
+    assert isinstance(deps.pause_flag_path, Path), "pause_flag_path must be a Path"
+
+
+@pytest.mark.unit
+def test_main_loop_enters_paused_phase_when_flag_present(tmp_path: Path) -> None:
+    """Pre-touch the pause flag; run main() with a sleep stub that signals
+    SIGTERM on its second call. Assert state.current_phase ends up PAUSED.
+
+    Sabotage proof: removing the ``_transition(deps, WorkerPhase.PAUSED)``
+    call from worker.py leaves the state in STARTING and this fails.
+    """
+    import os
+
+    flag = tmp_path / ".worker-paused"
+    flag.touch()
+    state_path = tmp_path / "worker-state.json"
+
+    sleep_calls: list[float] = []
+
+    def _sleep_then_shutdown(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 2:
+            os.kill(
+                os.getpid(), signal.SIGTERM
+            )  # NOSONAR — self-signal SIGTERM to drive shutdown handler; no external reach.
+
+    state = WorkerState()
+    deps = WorkerDeps(
+        embed=lambda: None,
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=_sleep_then_shutdown,
+        state=state,
+        state_path=state_path,
+        pause_flag_path=flag,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    assert state.current_phase is WorkerPhase.PAUSED, (
+        f"expected PAUSED after pause-flagged loop; got {state.current_phase}"
+    )
+    # The persisted state file must reflect the same phase.
+    persisted = state_path.read_text(encoding="utf-8")
+    assert WorkerPhase.PAUSED.value in persisted, "PAUSED phase must be persisted to state file"
+
+
+@pytest.mark.unit
+def test_main_loop_resumes_to_idle_when_flag_removed(tmp_path: Path) -> None:
+    """Pre-touch the pause flag, then in the sleep callback remove it after
+    one iteration and signal shutdown on the next iteration's task work.
+
+    Sabotage proof: dropping the resume-side ``_transition(deps, IDLE)``
+    branch leaves the state in PAUSED forever; this test fails.
+    """
+    import os
+
+    flag = tmp_path / ".worker-paused"
+    flag.touch()
+    state_path = tmp_path / "worker-state.json"
+
+    sleep_count = 0
+
+    def _remove_flag_after_one_pause_iter(_seconds: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count == 1:
+            # First pause-poll: remove the flag. Next iter the worker
+            # transitions back to IDLE and tries to run tasks.
+            flag.unlink(missing_ok=True)
+
+    embed_calls = 0
+
+    def _embed_then_shutdown() -> None:
+        nonlocal embed_calls
+        embed_calls += 1
+        # The startup embed runs before the loop even sees the flag, so
+        # we only count post-resume embed calls by requiring the second
+        # one (which only happens after the flag is removed).
+        if embed_calls >= 2:
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal to drive worker shutdown.
+
+    state = WorkerState()
+    deps = WorkerDeps(
+        embed=_embed_then_shutdown,
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=_remove_flag_after_one_pause_iter,
+        state=state,
+        state_path=state_path,
+        pause_flag_path=flag,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,  # post-resume embed fires immediately
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    assert state.current_phase is WorkerPhase.IDLE, f"expected IDLE after flag removal; got {state.current_phase}"
+    # Confirm we actually went through PAUSED and back — the flag-removal
+    # logic only fired on the first sleep, which means the loop saw the
+    # flag, entered PAUSED, then resumed.
+    assert sleep_count >= 1, "expected at least one paused-loop iteration before resume"
+
+
+@pytest.mark.unit
+def test_main_loop_does_not_run_embed_while_paused(tmp_path: Path) -> None:
+    """While the flag is present, embed/seed/health/wikilinks must NOT be
+    called inside the main loop. The startup embed (run once before the
+    loop) is the only embed call we expect.
+
+    Sabotage proof: removing the ``continue`` from the paused branch lets
+    the rest of the loop body run and embed is called extra times.
+    """
+    import os
+
+    flag = tmp_path / ".worker-paused"
+    flag.touch()
+    state_path = tmp_path / "worker-state.json"
+
+    sleep_count = 0
+
+    def _sleep_then_shutdown(_seconds: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count >= 3:
+            os.kill(
+                os.getpid(), signal.SIGTERM
+            )  # NOSONAR — self-signal to terminate the loop after we've observed multiple pause iterations.
+
+    embed_calls = 0
+    seed_calls = 0
+    health_calls = 0
+    wikilinks_calls = 0
+
+    def _embed() -> None:
+        nonlocal embed_calls
+        embed_calls += 1
+
+    def _seed() -> None:
+        nonlocal seed_calls
+        seed_calls += 1
+
+    def _health() -> list:
+        nonlocal health_calls
+        health_calls += 1
+        return []
+
+    def _wikilinks() -> None:
+        nonlocal wikilinks_calls
+        wikilinks_calls += 1
+
+    deps = WorkerDeps(
+        embed=_embed,
+        entity_seed=_seed,
+        health_check=_health,
+        wikilinks=_wikilinks,
+        sleep=_sleep_then_shutdown,
+        state=WorkerState(),
+        state_path=state_path,
+        pause_flag_path=flag,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,
+        entity_seed_interval=0,
+        health_check_interval=0,
+        wikilinks_interval=0,
+    )
+
+    # Startup embed runs once before the loop; loop-internal embeds must NOT.
+    assert embed_calls == 1, f"expected exactly 1 startup embed while paused; got {embed_calls}"
+    assert seed_calls == 0, f"entity seed must not run while paused; got {seed_calls} calls"
+    assert health_calls == 0, f"health check must not run while paused; got {health_calls} calls"
+    assert wikilinks_calls == 0, f"wikilinks must not run while paused; got {wikilinks_calls} calls"
+    assert sleep_count >= 1, "loop must have entered the pause poll at least once"
+
+
+# ---------------------------------------------------------------------------
+# #224 phase 2 — skip-on-noop maintenance gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_main_skips_maintenance_when_noop_streak_above_threshold(tmp_path: Path) -> None:
+    """When the no-op streak is at/above MAINTENANCE_SKIP_NOOP_THRESHOLD,
+    none of entity_seed / health_check / wikilinks_inject should fire from
+    the main loop.
+
+    Sabotage proof: removed the ``maintenance_active and`` guard from the
+    three maintenance ``if`` blocks in ``main()`` and the test fails
+    because each fake gets called once per loop iteration. Restored the
+    guards and the test passes again.
+    """
+    import os
+
+    from kairix.worker import MAINTENANCE_SKIP_NOOP_THRESHOLD
+
+    state_path = tmp_path / "worker-state.json"
+
+    embed_calls = {"n": 0}
+    seed_calls = {"n": 0}
+    health_calls = {"n": 0}
+    wikilinks_calls = {"n": 0}
+
+    def _embed_noop_then_shutdown() -> None:
+        embed_calls["n"] += 1
+        # Two iterations: startup embed (call 1) doesn't signal so the
+        # while loop body still runs; the in-loop embed (call 2) fires
+        # SIGTERM after the maintenance branches have had their chance.
+        # If we shut down on call 1 the loop never executes — the
+        # gate would look like it worked even if the gate code was deleted.
+        if embed_calls["n"] >= 2:
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal so the worker loop exits.
+        # Returns None — counts as a no-op, so streak increments rather
+        # than resetting.
+
+    def _seed() -> None:
+        seed_calls["n"] += 1
+
+    def _health() -> list:
+        health_calls["n"] += 1
+        return []
+
+    def _wikilinks() -> None:
+        wikilinks_calls["n"] += 1
+
+    # Pre-set the streak above the threshold. The startup embed is a
+    # no-op so the streak bumps by 1 — still well above the threshold.
+    seed_streak = MAINTENANCE_SKIP_NOOP_THRESHOLD + 1
+    deps = WorkerDeps(
+        embed=_embed_noop_then_shutdown,
+        entity_seed=_seed,
+        health_check=_health,
+        wikilinks=_wikilinks,
+        sleep=lambda _s: None,
+        state=WorkerState(consecutive_embed_noops=seed_streak),
+        state_path=state_path,
+        write_state_fn=lambda *_: None,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,
+        entity_seed_interval=0,
+        health_check_interval=0,
+        wikilinks_interval=0,
+    )
+
+    assert seed_calls["n"] == 0, (
+        f"entity_seed must not run when streak ({seed_streak}+) >= threshold ({MAINTENANCE_SKIP_NOOP_THRESHOLD}); "
+        f"got {seed_calls['n']} call(s)"
+    )
+    assert health_calls["n"] == 0, f"health_check must not run above threshold; got {health_calls['n']} call(s)"
+    assert wikilinks_calls["n"] == 0, (
+        f"wikilinks_inject must not run above threshold; got {wikilinks_calls['n']} call(s)"
+    )
+
+
+@pytest.mark.unit
+def test_main_runs_maintenance_when_noop_streak_below_threshold(tmp_path: Path) -> None:
+    """When the no-op streak is below the threshold, all three
+    maintenance scans fire on their normal schedule.
+
+    Sabotage proof: forced ``maintenance_active = False`` unconditionally
+    in main() and the assertion that all three fakes were called fired,
+    confirming the maintenance branches really do gate on the flag.
+    """
+    import os
+
+    state_path = tmp_path / "worker-state.json"
+
+    embed_calls = {"n": 0}
+    seed_calls = {"n": 0}
+    health_calls = {"n": 0}
+    wikilinks_calls = {"n": 0}
+
+    def _embed_then_shutdown() -> None:
+        embed_calls["n"] += 1
+        # Two iterations: startup embed + one in-loop embed, then exit.
+        # That gives the maintenance branches one chance to fire.
+        if embed_calls["n"] >= 2:
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal so the worker loop exits.
+
+    def _seed() -> None:
+        seed_calls["n"] += 1
+
+    def _health() -> list:
+        health_calls["n"] += 1
+        return []
+
+    def _wikilinks() -> None:
+        wikilinks_calls["n"] += 1
+
+    deps = WorkerDeps(
+        embed=_embed_then_shutdown,
+        entity_seed=_seed,
+        health_check=_health,
+        wikilinks=_wikilinks,
+        sleep=lambda _s: None,
+        state=WorkerState(consecutive_embed_noops=0),
+        state_path=state_path,
+        write_state_fn=lambda *_: None,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,
+        entity_seed_interval=0,
+        health_check_interval=0,
+        wikilinks_interval=0,
+    )
+
+    assert seed_calls["n"] >= 1, "entity_seed should run when streak is below threshold"
+    assert health_calls["n"] >= 1, "health_check should run when streak is below threshold"
+    assert wikilinks_calls["n"] >= 1, "wikilinks_inject should run when streak is below threshold"
+
+
+@pytest.mark.unit
+def test_maintenance_resumes_after_embed_finds_work(tmp_path: Path) -> None:
+    """Start above the threshold; the very next embed call returns a
+    result with embedded>0 so the streak resets to 0 and maintenance
+    resumes on the same iteration.
+
+    Sabotage proof: replaced the ``maintenance_active and`` guard on the
+    three maintenance blocks with plain ``True`` and the test still
+    passed (because work-finding embed reset the streak). Then forced
+    ``maintenance_active = False`` unconditionally and the resume
+    assertions failed — confirming the streak-reset path really does
+    re-arm the gate. Restored both and the test passes for the right
+    reason.
+    """
+    import os
+
+    from kairix.worker import MAINTENANCE_SKIP_NOOP_THRESHOLD
+
+    state_path = tmp_path / "worker-state.json"
+
+    embed_calls = {"n": 0}
+    seed_calls = {"n": 0}
+    health_calls = {"n": 0}
+    wikilinks_calls = {"n": 0}
+
+    class _DidWorkResult:
+        """An embed result that reports real work done — drives
+        ``EmbedRunOutcome.did_work=True`` so the loop resets the streak.
+        """
+
+        embedded = 3
+        failed = 0
+        recall_passed = True
+        recall_alert = None
+        diagnostics: typing.ClassVar[list[str]] = []
+        recall_score = 0.95
+
+    def _embed_returns_work_then_shutdown() -> object:
+        embed_calls["n"] += 1
+        if embed_calls["n"] >= 2:
+            os.kill(
+                os.getpid(), signal.SIGTERM
+            )  # NOSONAR — self-signal so worker loop exits after streak-reset embed runs maintenance.
+        # Every call returns a "real work" result. Startup embed bumps
+        # the streak from 11 down to 0 (because did_work=True). The
+        # second in-loop embed keeps it at 0 — maintenance fires.
+        return _DidWorkResult()
+
+    def _seed() -> None:
+        seed_calls["n"] += 1
+
+    def _health() -> list:
+        health_calls["n"] += 1
+        return []
+
+    def _wikilinks() -> None:
+        wikilinks_calls["n"] += 1
+
+    seed_streak = MAINTENANCE_SKIP_NOOP_THRESHOLD + 1
+    deps = WorkerDeps(
+        embed=_embed_returns_work_then_shutdown,
+        entity_seed=_seed,
+        health_check=_health,
+        wikilinks=_wikilinks,
+        sleep=lambda _s: None,
+        state=WorkerState(consecutive_embed_noops=seed_streak),
+        state_path=state_path,
+        write_state_fn=lambda *_: None,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,
+        entity_seed_interval=0,
+        health_check_interval=0,
+        wikilinks_interval=0,
+    )
+
+    # Streak resets on the very first (startup) embed because did_work=True.
+    # The in-loop iteration then sees streak=0 < threshold → maintenance fires.
+    assert seed_calls["n"] >= 1, (
+        f"entity_seed should resume after embed reset the streak; got {seed_calls['n']} call(s)"
+    )
+    assert health_calls["n"] >= 1, (
+        f"health_check should resume after embed reset the streak; got {health_calls['n']} call(s)"
+    )
+    assert wikilinks_calls["n"] >= 1, (
+        f"wikilinks_inject should resume after embed reset the streak; got {wikilinks_calls['n']} call(s)"
+    )

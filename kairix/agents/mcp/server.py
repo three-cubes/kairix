@@ -1,7 +1,8 @@
 """
 kairix.agents.mcp.server — MCP server exposing kairix tools to MCP-compatible agents.
 
-Provides six tools:
+Provides the following tools:
+  bootstrap    Agent orientation envelope: role, board, recent memory, goals, health
   search       Search your knowledge store — finds the best answers to any question
   entity       Entity lookup from Neo4j
   prep         Context preparation: tiered L0/L1 summary generation
@@ -43,6 +44,62 @@ DEFAULT_SCOPE: Scope = Scope.SHARED_AGENT
 # ---------------------------------------------------------------------------
 
 
+def _build_entity_summary(row: dict[str, Any]) -> str:
+    """Build human-readable summary line from type-specific Neo4j entity fields.
+
+    Each branch appends 0 or 1 phrase; ``industry`` may be a list (joined).
+    """
+    parts: list[str] = []
+    if row.get("role"):
+        parts.append(row["role"])
+    if row.get("org"):
+        parts.append(f"at {row['org']}")
+    if row.get("tier"):
+        parts.append(f"Tier {row['tier']}")
+    if row.get("engagement_status"):
+        parts.append(f"({row['engagement_status']})")
+    industry = row.get("industry")
+    if industry:
+        parts.append(", ".join(industry) if isinstance(industry, list) else industry)
+    if row.get("domain"):
+        parts.append(row["domain"])
+    if row.get("category"):
+        parts.append(row["category"])
+    return " — ".join(parts) if parts else ""
+
+
+def _resolve_neo4j_client(neo4j_client: Any | None) -> Any:
+    """Return the supplied client, or fall back to the production client."""
+    if neo4j_client is not None:
+        return neo4j_client
+    from kairix.knowledge.graph.client import get_client
+
+    return get_client()
+
+
+def _entity_card_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Map a Neo4j row into the entity-card dict shape."""
+    return {
+        "id": row.get("id", ""),
+        "name": row.get("name", ""),
+        "type": row.get("type", ""),
+        "summary": _build_entity_summary(row),
+        "vault_path": row.get("vault_path") or "",
+    }
+
+
+_ENTITY_CARD_CYPHER = (
+    "MATCH (n) WHERE n.id = $id OR toLower(n.name) = toLower($name) "
+    "RETURN labels(n)[0] AS type, n.id AS id, n.name AS name, "
+    "n.vault_path AS vault_path, "
+    "n.role AS role, n.org AS org, "
+    "n.tier AS tier, n.engagement_status AS engagement_status, "
+    "n.domain AS domain, n.industry AS industry, "
+    "n.category AS category "
+    "LIMIT 1"
+)
+
+
 def _fetch_entity_card(name: str, *, neo4j_client: Any | None = None) -> dict[str, Any] | None:
     """Fetch entity card directly from Neo4j, bypassing MCP tool layer.
 
@@ -56,57 +113,16 @@ def _fetch_entity_card(name: str, *, neo4j_client: Any | None = None) -> dict[st
     try:
         from kairix.utils import slugify as _slugify
 
-        if neo4j_client is not None:
-            neo4j = neo4j_client
-        else:
-            from kairix.knowledge.graph.client import get_client
-
-            neo4j = get_client()
+        neo4j = _resolve_neo4j_client(neo4j_client)
         if not neo4j.available:
             return None
-
-        slug = _slugify(name)
-        rows = neo4j.cypher(
-            "MATCH (n) WHERE n.id = $id OR toLower(n.name) = toLower($name) "
-            "RETURN labels(n)[0] AS type, n.id AS id, n.name AS name, "
-            "n.vault_path AS vault_path, "
-            "n.role AS role, n.org AS org, "
-            "n.tier AS tier, n.engagement_status AS engagement_status, "
-            "n.domain AS domain, n.industry AS industry, "
-            "n.category AS category "
-            "LIMIT 1",
-            {"id": slug, "name": name},
-        )
-        if rows:
-            r = rows[0]
-            # Build summary from type-specific fields
-            summary_parts: list[str] = []
-            if r.get("role"):
-                summary_parts.append(r["role"])
-            if r.get("org"):
-                summary_parts.append(f"at {r['org']}")
-            if r.get("tier"):
-                summary_parts.append(f"Tier {r['tier']}")
-            if r.get("engagement_status"):
-                summary_parts.append(f"({r['engagement_status']})")
-            if r.get("industry"):
-                val = r["industry"]
-                summary_parts.append(", ".join(val) if isinstance(val, list) else val)
-            if r.get("domain"):
-                summary_parts.append(r["domain"])
-            if r.get("category"):
-                summary_parts.append(r["category"])
-            return {
-                "id": r.get("id", ""),
-                "name": r.get("name", ""),
-                "type": r.get("type", ""),
-                "summary": " — ".join(summary_parts) if summary_parts else "",
-                "vault_path": r.get("vault_path") or "",
-            }
+        rows = neo4j.cypher(_ENTITY_CARD_CYPHER, {"id": _slugify(name), "name": name})
+        if not rows:
+            return None
+        return _entity_card_from_row(rows[0])
     except (ImportError, RuntimeError, OSError, KeyError) as exc:
         logger.warning("_fetch_entity_card failed: %s", exc, exc_info=True)
-
-    return None
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +282,15 @@ def tool_research(
 
     The optional ``deps`` parameter forwards a ``ResearchDeps`` directly
     to the use case — production callers leave it None.
+
+    ``agent`` is accepted for signature parity with the other tools and
+    logged for traceability; the research use case is agent-agnostic
+    today (no per-agent scope/tier filtering), so it isn't threaded
+    further.
     """
     from kairix.use_cases.research import research_output_to_envelope, run_research_use_case
 
+    logger.info("mcp.research: agent=%r turns<=%d", agent, max_turns)
     out = run_research_use_case(query, max_turns=max_turns, deps=deps)
     return research_output_to_envelope(out)
 
@@ -386,6 +408,30 @@ def tool_brief(
     return brief_output_to_envelope(out)
 
 
+def tool_bootstrap(
+    agent: str,
+    max_memory_days: int = 3,
+    *,
+    deps: Any = None,
+) -> dict[str, Any]:
+    """Return the agent orientation envelope (#246 W1).
+
+    Thin adapter around ``kairix.use_cases.bootstrap.run_bootstrap``.
+    Returns the agent's role, current ``Board.md``, recent memory
+    entries, active goals, and a structured health snapshot — the
+    single call an agent makes at session start (or topic switch) to
+    absorb its current state. Never raises; degradation is surfaced via
+    the ``health`` field with a prescriptive ``next_action``.
+
+    The optional ``deps`` parameter forwards a ``BootstrapDeps`` directly
+    to the use case — production callers leave it None.
+    """
+    from kairix.use_cases.bootstrap import bootstrap_output_to_envelope, run_bootstrap
+
+    out = run_bootstrap(agent, deps=deps, max_memory_days=max_memory_days)
+    return bootstrap_output_to_envelope(out)
+
+
 # ---------------------------------------------------------------------------
 # FastMCP server — only constructed when mcp package is available
 # ---------------------------------------------------------------------------
@@ -406,14 +452,20 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         from mcp.server.fastmcp import FastMCP
     # The ImportError branch is reachable only when the optional ``mcp`` extra
     # is not installed; the test suite always installs it via ``kairix[agents]``.
-    except ImportError as exc:  # pragma: no cover
+    except ImportError as exc:  # pragma: no cover — optional 'mcp' extra; tests always install kairix[agents]
         raise ImportError(
             "The 'mcp' package is required to run the MCP server. Install it with: pip install 'kairix[agents]'"
         ) from exc
 
     server = FastMCP("kairix", host=host, port=port)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Call before answering any factual question about prior work, decisions, or context — "
+            "kairix indexes the team's knowledge store and finds relevant prior material. "
+            "Use this proactively at session start and whenever a question touches the team's history."
+        )
+    )
     @async_tool_handler
     def search(
         query: str,
@@ -425,7 +477,12 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         """Search your knowledge store — finds the best answers to any question."""
         return tool_search(query=query, agent=agent, scope=scope, budget=budget, limit=limit)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Call when you need facts about a specific named entity (person, company, project) — "
+            "direct knowledge-graph lookup, faster than search."
+        )
+    )
     @async_tool_handler
     def entity(name: str) -> dict[str, Any]:
         """Entity lookup from Neo4j."""
@@ -490,11 +547,30 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         """Return the kairix agent usage guide. Call this when unsure how to use kairix."""
         return tool_usage_guide(topic=topic)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Call when you want a synthesised view of a topic — kairix runs a small research loop "
+            "across the knowledge store and returns a structured briefing. "
+            "Use it when you'd otherwise be tempted to summarise from memory."
+        )
+    )
     @async_tool_handler
     def brief(agent: str) -> dict[str, Any]:
         """Generate a session briefing for an agent. Returns content + on-disk path."""
         return tool_brief(agent=agent)
+
+    @server.tool(
+        description=(
+            "Call at session start or whenever you switch topics. "
+            "Returns your agent role, current board, recent memory, and active goals — "
+            "orients you in the team's current state. "
+            "If health.vector_search != 'ok', surface that to your human."
+        )
+    )
+    @async_tool_handler
+    def bootstrap(agent: str, max_memory_days: int = 3) -> dict[str, Any]:
+        """Return the agent orientation envelope: role, board, recent memory, goals, health."""
+        return tool_bootstrap(agent=agent, max_memory_days=max_memory_days)
 
     @server.tool()
     @async_tool_handler

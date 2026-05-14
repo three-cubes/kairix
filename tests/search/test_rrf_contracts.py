@@ -139,7 +139,7 @@ def test_rrf_never_raises_on_malformed_input() -> None:
     """Per docstring: "Never raises". A malformed input dict (missing keys)
     must surface as an empty result, not a KeyError.
     """
-    malformed = [{"not_file": "weird"}]  # type: ignore[list-item]
+    malformed = [{"not_file": "weird"}]  # type: ignore[list-item]  # deliberate malformed shape to exercise never-raises contract
     result = rrf(malformed, [])
     assert result == []
 
@@ -728,7 +728,7 @@ def test_bm25_primary_fuse_dedupes_case_insensitively() -> None:
 @pytest.mark.unit
 def test_bm25_primary_fuse_never_raises_on_malformed_input() -> None:
     """Per docstring: 'Never raises'."""
-    malformed = [{"not_file": "weird"}]  # type: ignore[list-item]
+    malformed = [{"not_file": "weird"}]  # type: ignore[list-item]  # deliberate malformed shape to exercise never-raises contract
     result = bm25_primary_fuse(malformed, [])
     assert result == []
 

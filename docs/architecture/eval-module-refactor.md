@@ -113,7 +113,7 @@ Module-level free functions stay as deprecated wrappers for one release window s
 ## Out of scope
 
 - **Modifying retrieval / scoring algorithms.** This is a structural refactor; behaviour must not change. The reference-library benchmark validation is the safety net.
-- **Removing `monkeypatch.setenv("KAIRIX_*")` from `tests/eval/`** — belongs to the paths-DI initiative ([#139](https://github.com/quanyeomans/kairix/issues/139)). This initiative removes only the eval-specific `*_fn=None` substitution kwargs and the `_call_llm` private-symbol import.
+- **Removing `monkeypatch.setenv("KAIRIX_*")` from `tests/eval/`** — belongs to the paths-DI initiative ([#139](https://github.com/three-cubes/kairix/issues/139)). This initiative removes only the eval-specific `*_fn=None` substitution kwargs and the `_call_llm` private-symbol import.
 - **Refactoring `kairix/quality/benchmark/`.** Adjacent module, separate concern.
 
 ## CI
@@ -122,4 +122,4 @@ A grep gate counts `*_fn=None` substitution kwargs and `_call_llm` private impor
 
 ## Tracking
 
-Umbrella issue: [#143](https://github.com/quanyeomans/kairix/issues/143).
+Umbrella issue: [#143](https://github.com/three-cubes/kairix/issues/143).

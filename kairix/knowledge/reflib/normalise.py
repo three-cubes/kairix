@@ -66,7 +66,7 @@ class NormaliseReport:
     collections: dict[str, int] = field(default_factory=dict)
 
 
-def _discover_sources(input_dir: Path) -> list[tuple[str, str, Path]]:
+def discover_sources(input_dir: Path) -> list[tuple[str, str, Path]]:
     """Walk input_dir and yield (collection, dir_name, source_path) triples."""
     results: list[tuple[str, str, Path]] = []
     for collection_dir in sorted(input_dir.iterdir()):
@@ -90,12 +90,12 @@ def _discover_sources(input_dir: Path) -> list[tuple[str, str, Path]]:
     return results
 
 
-def _collect_markdown_files(source_path: Path) -> list[Path]:
+def collect_markdown_files(source_path: Path) -> list[Path]:
     """Find all markdown files in a source directory."""
     return sorted(source_path.rglob("*.md"))
 
 
-def _is_gutenberg_text(source: SourceDef) -> bool:
+def is_gutenberg_text(source: SourceDef) -> bool:
     """Check if a source contains Project Gutenberg texts."""
     return source.format == "text" and "gutenberg" in source.source_url.lower()
 
@@ -103,15 +103,93 @@ def _is_gutenberg_text(source: SourceDef) -> bool:
 def collect_and_filter_source_files(
     source_path: Path,
     source: SourceDef,
-    config: NormaliseConfig,
+    _config: NormaliseConfig,
     report: NormaliseReport,
 ) -> list[Path]:
     """Read and filter .md files for a source, updating the report."""
-    md_files = _collect_markdown_files(source_path)
+    md_files = collect_markdown_files(source_path)
     report.total_input += len(md_files)
     filtered = filter_collection(md_files, source)
     report.filtered_boilerplate += len(md_files) - len(filtered)
     return filtered
+
+
+def _read_and_clean_file(file_path: Path, is_gutenberg: bool, report: NormaliseReport) -> str | None:
+    """Read a markdown file and run the markdown cleaner; return None on OSError."""
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        logger.warning("Cannot read: %s", file_path)
+        return None
+    original_len = len(text)
+    text = clean_markdown(text, is_gutenberg=is_gutenberg)
+    if len(text) != original_len:
+        report.html_cleaned += 1
+    return text
+
+
+def _kebab_path_parts(rel: Path) -> list[str]:
+    """Convert a relative path into kebab-case parts, ensuring ``.md`` on the leaf."""
+    parts = [to_kebab_case(str(p)) if p.suffix else p.name.lower() for p in [Path(seg) for seg in rel.parts]]
+    if parts and not parts[-1].endswith(".md"):
+        parts[-1] = parts[-1] + ".md"
+    return parts
+
+
+def _emit_chunks(
+    text: str,
+    parts: list[str],
+    collection: str,
+    dir_name: str,
+    config: NormaliseConfig,
+    report: NormaliseReport,
+    output_files: dict[Path, str],
+) -> None:
+    """Split a too-large file at headings and write chunks into ``output_files``."""
+    stem = Path(parts[-1]).stem
+    parent_parts = parts[:-1]
+    chunks = split_at_headings(text, stem, config.max_file_size)
+    report.split_count += len(chunks) - 1
+    for chunk_stem, chunk_text in chunks:
+        out_path = config.output_dir / collection / dir_name / "/".join(parent_parts) / f"{chunk_stem}.md"
+        output_files[out_path] = chunk_text
+
+
+def _process_single_file(
+    file_path: Path,
+    source_path: Path,
+    collection: str,
+    dir_name: str,
+    config: NormaliseConfig,
+    source: SourceDef,
+    is_gutenberg: bool,
+    report: NormaliseReport,
+    output_files: dict[Path, str],
+) -> None:
+    """Read, clean, gate, inject FM, then write a single file (or its chunks)."""
+    text = _read_and_clean_file(file_path, is_gutenberg, report)
+    if text is None:
+        return
+
+    # README/index files are curated lists worth keeping below the size threshold.
+    is_readme = file_path.name.lower() in ("readme.md", "index.md")
+    if not is_readme and is_too_small(text, config.min_file_size):
+        report.filtered_too_small += 1
+        return
+
+    text = inject_frontmatter(text, build_frontmatter(file_path, source, text))
+    report.frontmatter_added += 1
+
+    rel = file_path.relative_to(source_path)
+    parts = _kebab_path_parts(rel)
+    if str(rel) != "/".join(parts):
+        report.renamed += 1
+
+    if needs_split(text, config.max_file_size):
+        _emit_chunks(text, parts, collection, dir_name, config, report, output_files)
+    else:
+        out_path = config.output_dir / collection / dir_name / "/".join(parts)
+        output_files[out_path] = text
 
 
 def process_source_collection(
@@ -127,57 +205,11 @@ def process_source_collection(
 
     Returns a mapping of output path to content for this source.
     """
-    filtered = collect_and_filter_source_files(source_path, source, config, report)
     output_files: dict[Path, str] = {}
-
-    for file_path in filtered:
-        try:
-            text = file_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            logger.warning("Cannot read: %s", file_path)
-            continue
-
-        # Clean markdown
-        original_len = len(text)
-        text = clean_markdown(text, is_gutenberg=is_gutenberg)
-        if len(text) != original_len:
-            report.html_cleaned += 1
-
-        # Check minimum size (skip for README files — curated lists are valuable)
-        is_readme = file_path.name.lower() in ("readme.md", "index.md")
-        if not is_readme and is_too_small(text, config.min_file_size):
-            report.filtered_too_small += 1
-            continue
-
-        # Build frontmatter
-        fm = build_frontmatter(file_path, source, text)
-        text = inject_frontmatter(text, fm)
-        report.frontmatter_added += 1
-
-        # Compute relative output path
-        rel = file_path.relative_to(source_path)
-        parts = [to_kebab_case(str(p)) if p.suffix else p.name.lower() for p in [Path(seg) for seg in rel.parts]]
-        if parts and not parts[-1].endswith(".md"):
-            parts[-1] = parts[-1] + ".md"
-
-        if str(rel) != "/".join(parts):
-            report.renamed += 1
-
-        # Handle splitting
-        if needs_split(text, config.max_file_size):
-            stem = Path(parts[-1]).stem
-            parent_parts = parts[:-1]
-            chunks = split_at_headings(text, stem, config.max_file_size)
-            report.split_count += len(chunks) - 1
-
-            for chunk_stem, chunk_text in chunks:
-                chunk_filename = f"{chunk_stem}.md"
-                out_path = config.output_dir / collection / dir_name / "/".join(parent_parts) / chunk_filename
-                output_files[out_path] = chunk_text
-        else:
-            out_path = config.output_dir / collection / dir_name / "/".join(parts)
-            output_files[out_path] = text
-
+    for file_path in collect_and_filter_source_files(source_path, source, config, report):
+        _process_single_file(
+            file_path, source_path, collection, dir_name, config, source, is_gutenberg, report, output_files
+        )
     return output_files
 
 
@@ -220,7 +252,7 @@ def write_output_files(
 
 def build_catalogue_entry(
     collection: str,
-    dir_name: str,
+    _dir_name: str,
     source: SourceDef,
     count: int,
     size: int,
@@ -260,7 +292,7 @@ def normalise(config: NormaliseConfig) -> NormaliseReport:
     all_hashed: list[tuple[Path, str]] = []
     output_files: dict[Path, str] = {}
 
-    sources = _discover_sources(config.input_dir)
+    sources = discover_sources(config.input_dir)
     today = date.today().isoformat()
 
     for collection, dir_name, source_path in sources:
@@ -285,7 +317,7 @@ def normalise(config: NormaliseConfig) -> NormaliseReport:
             )
             continue
 
-        is_gutenberg = _is_gutenberg_text(source)
+        is_gutenberg = is_gutenberg_text(source)
         source_files = process_source_collection(
             collection,
             dir_name,

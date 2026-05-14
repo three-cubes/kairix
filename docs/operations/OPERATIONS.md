@@ -21,6 +21,7 @@ Not all environment variables are secrets. Configuration values belong in `servi
 | `KAIRIX_DOCUMENT_ROOT` | Path to document store | `~/kairix-vault` |
 | `KAIRIX_DB_PATH` | SQLite database path | `~/.cache/kairix/index.sqlite` |
 | `KAIRIX_KV_NAME` | Azure Key Vault name (for secret resolution) | — |
+| `KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD` | Consecutive worker embed no-ops before maintenance (entity_seed/health_check/wikilinks) is skipped | `10` |
 
 **Secrets (Key Vault / /run/secrets/ / env var override):**
 
@@ -160,7 +161,7 @@ Neo4j Community Edition is licensed under **GPL v3**. Kairix communicates via th
 
 ```bash
 # Install script (Docker default; --apt option also available)
-bash <(curl -fsSL https://raw.githubusercontent.com/quanyeomans/kairix/main/scripts/install-neo4j.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/three-cubes/kairix/main/scripts/install-neo4j.sh)
 
 # Or quick Docker start (no install script):
 docker run -d --name neo4j -p 7687:7687 \
@@ -213,7 +214,7 @@ Docker Compose is the primary deployment method. It bundles kairix, Neo4j, and t
 
 ```bash
 # Clone and start
-git clone https://github.com/quanyeomans/kairix.git
+git clone https://github.com/three-cubes/kairix.git
 cd kairix/docker
 cp .env.example .env
 # Edit .env with your values (Key Vault name, vault path, etc.)
@@ -259,7 +260,7 @@ For environments where Docker is unavailable, kairix can be installed as a pip p
 
 ```bash
 # One-line deploy (downloads and runs install.sh from the public repo)
-bash <(curl -fsSL https://raw.githubusercontent.com/quanyeomans/kairix/main/scripts/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/three-cubes/kairix/main/scripts/install.sh)
 ```
 
 This creates `/opt/kairix/.venv/` (legacy pip path), installs kairix into it, installs the wrapper script, and creates the `/usr/local/bin/kairix` symlink. After this, `kairix --help` works from any shell.
@@ -300,7 +301,7 @@ For production deployments: operator config (service.env, private benchmark suit
 ### Upgrading
 
 ```bash
-/opt/kairix/.venv/bin/pip install --upgrade git+https://github.com/quanyeomans/kairix
+/opt/kairix/.venv/bin/pip install --upgrade git+https://github.com/three-cubes/kairix
 kairix onboard check   # verify after upgrade
 ```
 
@@ -465,6 +466,38 @@ See [Cron Scheduling](#cron-scheduling) below.
 
 ---
 
+## Operating the worker
+
+The kairix worker (introduced in #224) is the background process that runs `kairix embed` on a loop and performs maintenance (`entity_seed`, `health_check`, `wikilinks`) between cycles. It persists state to `${KAIRIX_DATA_DIR}/worker-state.json` via atomic temp+rename writes.
+
+### Pause / resume
+
+`kairix worker pause` and `kairix worker resume` toggle a touch-file in `${KAIRIX_DATA_DIR}`. The running worker enters `PAUSED` at the next loop iteration (within 5 s) and stops task work until the flag is removed. Decoupled from the worker process — a stuck worker can still be paused, and the pause survives restarts.
+
+```bash
+kairix worker pause     # set the pause flag; worker stops at next iteration
+kairix worker resume    # clear the flag; worker resumes within 5 s
+```
+
+### Status
+
+`kairix worker status` reads the persisted `WorkerState` JSON and prints phase, embedded total, failed chunks, recall alerts, restart count, uptime. Exit code is the authoritative "worker alive AND has run" signal: `0` if state file present, `1` if missing.
+
+```bash
+kairix worker status
+# phase: RUNNING     embedded: 4203    failed: 0    recall_alerts: 0    restarts: 1    uptime: 4d 7h
+```
+
+### Skip-on-idle maintenance
+
+After `KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD` consecutive embed no-op cycles (default `10`), the worker stops running `entity_seed` / `health_check` / `wikilinks` until an embed cycle does work again. Lowers CPU/IO on shared hosts during quiet periods. Tune the env var down for noisier vaults, up for quieter ones; set to `0` to disable.
+
+### Shared hosts
+
+`docker-compose.example.yml` ships with resource caps (`cpus`, `mem_limit`) suited for a co-located host. The accompanying `SHARED-HOSTS.md` guide covers how `KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD` plus the caps lets kairix share a VM with openclaw and other tooling without stepping on neighbours.
+
+---
+
 ## Cron Scheduling
 
 Two recurring jobs are required for a production deployment.
@@ -589,11 +622,15 @@ This is required for `kairix entity suggest` to work, including inside Docker co
 
 ## Running the Benchmark
 
-For local / non-production hosts:
+Bundled suites resolve by name — no file path needed:
 
 ```bash
-kairix benchmark run --suite suites/example.yaml
+kairix benchmark list                # enumerate bundled suites with default collection + description
+kairix benchmark run reflib          # bundled name; reads default_collection from suite metadata
+kairix benchmark run --suite suites/example.yaml    # custom suite at a path
 ```
+
+A pass means every gate in `[tool.kairix.benchmark.gates]` (in `pyproject.toml`) is met. Sensible defaults shipped with kairix: overall **≥ 0.78**, temporal **≥ 0.55**, entity **≥ 0.80**, contextual_prep **≥ 0.60**. Run the same suites in CI via the `Reference library benchmark gate` workflow.
 
 For shared production VMs, run inside the **sandboxed eval container** (closes #88) so eval workloads can't starve agent traffic:
 

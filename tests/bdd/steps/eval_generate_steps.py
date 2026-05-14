@@ -225,7 +225,7 @@ def judge_calibration_raises() -> None:
 @when("the operator generates a suite with calibration enabled")
 def operator_generates_suite_with_calibration() -> None:
     output_path = _state["tmp_path"] / "suite.yaml"
-    suite_gen = SuiteGenerator(llm_judge=_state["llm_judge"])  # type: ignore[arg-type]
+    suite_gen = SuiteGenerator(llm_judge=_state["llm_judge"])  # type: ignore[arg-type]  # test double satisfies Judge protocol structurally
     _state["result"] = suite_gen.generate_suite(
         db_path=str(_state["tmp_path"] / "noop.sqlite"),
         output_path=str(output_path),

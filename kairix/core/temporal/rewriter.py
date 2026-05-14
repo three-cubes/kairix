@@ -62,7 +62,7 @@ _ON_DATE_RE = re.compile(
 
 # "in March 2026" or "in March" (without year)
 _IN_MONTH_YEAR_RE = re.compile(
-    r"\bin\s+(?P<month>" + "|".join(_MONTH_NAMES.keys()) + r")" r"(?:\s+(?P<year>\d{4}))?\b",
+    r"\bin\s+(?P<month>" + "|".join(_MONTH_NAMES.keys()) + r")(?:\s+(?P<year>\d{4}))?\b",
     re.IGNORECASE,
 )
 

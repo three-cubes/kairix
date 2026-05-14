@@ -146,7 +146,7 @@ def validate_and_build_node(
 
 def validate_and_build_edge(
     entry: dict[str, Any],
-    i: int,
+    _i: int,
     report: LoadReport,
 ) -> GraphEdge | None:
     """Call _build_edge, catch errors, return edge or None."""

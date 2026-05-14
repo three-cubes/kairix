@@ -317,9 +317,9 @@ class LLMJudge:
         indexed = list(enumerate(candidates))  # (original_index, (stem, snippet))
 
         if shuffle:
-            # NOSONAR: non-security shuffle to prevent positional
-            # bias in LLM judge prompts; deterministic via random.seed() in tests.
-            random.shuffle(indexed)
+            random.shuffle(
+                indexed
+            )  # NOSONAR — non-security shuffle to break LLM judge positional bias; seeded in tests.
 
         shuffle_order = tuple(candidates[i][0] for i, _ in indexed)
         labels = _LABELS[: len(indexed)]
@@ -339,7 +339,7 @@ class LLMJudge:
         except Exception as e:
             logger.warning("LLMJudge.grade: API error for query %r — %s", query[:60], e)
 
-        grades: dict[str, int] = {stem: 0 for stem in stems}
+        grades: dict[str, int] = dict.fromkeys(stems, 0)
         for label, (_orig_idx, (stem, _)) in zip(labels, indexed, strict=False):
             grades[stem] = label_grades.get(label, 0)
 

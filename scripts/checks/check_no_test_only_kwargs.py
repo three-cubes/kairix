@@ -29,15 +29,45 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _arch_lib import REPO_ROOT, gate, python_files, repo_relative
 
-REMEDIATION = """Refactor:
-  - If the function has multiple stateful collaborators, extract a class and
-    take them as constructor kwargs (same shape as GoldBuilder's
-    llm_judge=, retriever=, db_path=).
-  - If the function is a Protocol Adapter, declare the dependency at the
-    Protocol level and inject the implementation at the boundary (factory).
-  - If the parameter exists ONLY for test substitution, delete it and
-    refactor the test to drive through the public surface that constructs
-    the right collaborator."""
+REMEDIATION = """Refactor to a dataclass with ``field(default_factory=...)``
+on a Deps class — the canonical shape is ``kairix/worker.py::WorkerDeps``
+— to pass.
+
+fix: delete the ``*_fn=None`` parameter and move the collaborator onto
+a ``@dataclass`` Deps class with ``field(default_factory=...)``; tests
+construct an overridden Deps and pass it as a single argument. See
+``kairix/worker.py::WorkerDeps`` for the canonical shape.
+next: re-run ``python3 scripts/checks/check_no_test_only_kwargs.py``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh "refactor(<area>): replace *_fn kwargs with Deps class"
+
+The legitimate seam is **constructor injection on a Deps class**, NOT a
+per-helper ``_fn=None`` parameter on free functions. Tests pass an
+overridden Deps; production gets the default factory.
+
+Pass example:
+  # kairix/worker.py
+  @dataclass
+  class WorkerDeps:
+      embed: Callable[[], Any] = field(default_factory=lambda: _default_embed)
+      sleep: Callable[[float], None] = field(default_factory=lambda: time.sleep)
+
+  def run_worker(deps: WorkerDeps = None) -> None:
+      deps = deps or WorkerDeps()
+      deps.embed()
+
+  # in a test
+  fake = WorkerDeps(embed=lambda: 'fake-embed', sleep=lambda _: None)
+  run_worker(deps=fake)
+
+Forbidden example:
+  def run_worker(embed_fn=None, sleep_fn=None) -> None:
+      embed_fn = embed_fn or _default_embed
+      ...
+
+If the parameter exists ONLY for test substitution, delete it and
+refactor the test to drive through the public surface that constructs
+the right collaborator."""
 
 
 _ALLOW_FILE = REPO_ROOT / ".architecture" / "baseline" / "test-only-kwargs-allow.txt"
@@ -63,9 +93,52 @@ def _module_path(path: Path) -> str:
     return str(rel.with_suffix("")).replace("/", ".")
 
 
+def _function_has_test_only_kwarg(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    module_path: str,
+    allow: set[str],
+) -> bool:
+    """True if the function declares any ``*_fn`` arg defaulting to ``None``."""
+    args = node.args
+    positional = args.args
+    defaults = args.defaults
+    positional_with_default = list(zip(positional[len(positional) - len(defaults) :], defaults, strict=True))
+    kw_only = list(zip(args.kwonlyargs, args.kw_defaults, strict=True))
+    for arg, default in positional_with_default + kw_only:
+        param_name = arg.arg
+        if not param_name.endswith("_fn") or not _is_none_constant(default):
+            continue
+        if _qualified_param(module_path, node.name, param_name) not in allow:
+            return True
+    return False
+
+
+def _class_has_test_only_field(node: ast.ClassDef, module_path: str, allow: set[str]) -> bool:
+    """True if the class declares an annotated ``*_fn: ... = None`` field."""
+    for item in node.body:
+        if not isinstance(item, ast.AnnAssign) or not isinstance(item.target, ast.Name):
+            continue
+        field_name = item.target.id
+        if not field_name.endswith("_fn") or not _is_none_constant(item.value):
+            continue
+        if _qualified_param(module_path, node.name, field_name) not in allow:
+            return True
+    return False
+
+
 def file_has_violation(path: Path, allow: set[str]) -> bool:
-    """True if ``path`` declares any function with a ``*_fn=None`` kwarg
-    not in the allow-list.
+    """True if ``path`` declares any function param OR dataclass field
+    matching the ``*_fn=None`` shape, not on the allow-list.
+
+    Walks two AST shapes:
+      1. ``FunctionDef`` / ``AsyncFunctionDef`` — positional and keyword-only
+         args whose default is the ``None`` constant.
+      2. ``ClassDef`` body ``AnnAssign`` — annotated dataclass fields whose
+         value is the ``None`` constant (e.g.
+         ``x_fn: Callable | None = None`` inside a ``@dataclass`` class).
+         This catches the F6-pattern that the v1 detector missed because
+         dataclasses moved the per-param default off the function signature
+         and onto class fields.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -73,33 +146,12 @@ def file_has_violation(path: Path, allow: set[str]) -> bool:
         return False
 
     module_path = _module_path(path)
-
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-
-        # Check positional-or-keyword args + keyword-only args
-        args = node.args
-        # Pair each arg with its default. Defaults align to the *tail* of args.
-        positional = args.args
-        defaults = args.defaults
-        positional_with_default = list(zip(positional[len(positional) - len(defaults) :], defaults, strict=True))
-
-        kw_only = list(zip(args.kwonlyargs, args.kw_defaults, strict=True))
-
-        all_with_default = positional_with_default + kw_only
-
-        for arg, default in all_with_default:
-            param_name = arg.arg
-            if not param_name.endswith("_fn"):
-                continue
-            if not _is_none_constant(default):
-                continue
-            qualified = _qualified_param(module_path, node.name, param_name)
-            if qualified in allow:
-                continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if _function_has_test_only_kwarg(node, module_path, allow):
+                return True
+        elif isinstance(node, ast.ClassDef) and _class_has_test_only_field(node, module_path, allow):
             return True
-
     return False
 
 

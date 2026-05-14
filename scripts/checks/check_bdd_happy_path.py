@@ -33,27 +33,46 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _arch_lib import REPO_ROOT, gate, repo_relative
 
-REMEDIATION = """Every feature file must declare at least one happy-path
-scenario — a scenario that demonstrates what success looks like for
-the capability the feature describes. A feature whose scenarios are
-all @error / @negative / @failure is an error catalogue, not a
-specification of stakeholder value.
+REMEDIATION = """Refactor to add at least one happy-path scenario per
+feature file (a scenario WITHOUT any of the negative tags @error /
+@negative / @failure / @unhappy / @error-path) to pass.
 
-Add a positive scenario:
+fix: add a happy-path Scenario to each listed *.feature file — one
+positive scenario that demonstrates the capability's intended outcome,
+not just failure modes.
+next: re-run ``python3 scripts/checks/check_bdd_happy_path.py`` to
+confirm the gate goes green.
+run: bash scripts/safe-commit.sh "test(bdd): add happy-path scenario for <feature>"
 
+Pass example:
   Feature: Benchmark suite execution
     Scenario: Operator runs a suite and sees scores
       Given a valid benchmark suite
       When the operator runs the benchmark
       Then the result shows category scores
 
-References:
-  - Gojko Adzic, "Specification by Example" — features describe
-    capabilities, not exception cases.
-  - Matt Wynne, "The Cucumber Book" — every feature has a
-    must-work golden path.
-  - Liz Keogh on BDD test-infection: scenarios that only test
-    failures have lost the user-value framing."""
+    @error
+    Scenario: Suite fails when config is invalid
+      Given an invalid benchmark suite
+      When the operator runs the benchmark
+      Then an error is reported
+
+Forbidden example:
+  Feature: Benchmark suite execution
+    @error
+    Scenario: Suite fails when config is invalid
+      ...
+    @negative
+    Scenario: Suite fails when target unreachable
+      ...
+  # — every scenario tagged negative → no happy-path → fails F12
+
+A feature whose scenarios are all @error / @negative / @failure is an
+error catalogue, not a specification of stakeholder value. Per Adzic
+(Specification by Example), Wynne (The Cucumber Book), and Liz Keogh
+on BDD test-infection — every feature exists to document a capability;
+the capability needs a positive scenario showing what success looks like
+before failure modes are enumerated."""
 
 
 _NEGATIVE_TAGS = frozenset({"@error", "@negative", "@failure", "@unhappy", "@error-path"})

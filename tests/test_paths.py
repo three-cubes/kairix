@@ -7,13 +7,19 @@ import pytest
 
 from kairix.paths import (
     KairixPaths,
-    _default_cache_dir,
-    _default_data_dir,
-    _is_docker,
-    _is_service_install,
-    _load_paths_from_config,
+    bundled_suites_root,
     clear_cache,
+    default_cache_dir,
+    default_data_dir,
+    default_document_root,
+    default_workspace_root,
     document_root,
+    is_docker_runtime_check,
+    is_service_install,
+    load_paths_from_config,
+    log_dir,
+    maintenance_skip_noop_threshold,
+    reference_library_root,
 )
 
 
@@ -113,7 +119,7 @@ class TestDocumentRootEnvVar:
 
 
 # ---------------------------------------------------------------------------
-# _is_docker() tests
+# is_docker_runtime_check() tests
 # ---------------------------------------------------------------------------
 
 
@@ -125,14 +131,14 @@ class TestIsDocker:
         monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
         monkeypatch.delenv("container", raising=False)
         with patch("os.path.exists", return_value=True):
-            assert _is_docker() is True
+            assert is_docker_runtime_check() is True
 
     @pytest.mark.unit
     def test_kairix_docker_env_var(self, monkeypatch) -> None:
         """KAIRIX_DOCKER=1 should trigger docker detection."""
         monkeypatch.setenv("KAIRIX_DOCKER", "1")
         with patch("os.path.exists", return_value=False):
-            assert _is_docker() is True
+            assert is_docker_runtime_check() is True
 
     @pytest.mark.unit
     def test_container_env_var(self, monkeypatch) -> None:
@@ -140,7 +146,7 @@ class TestIsDocker:
         monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
         monkeypatch.setenv("container", "podman")
         with patch("os.path.exists", return_value=False):
-            assert _is_docker() is True
+            assert is_docker_runtime_check() is True
 
     @pytest.mark.unit
     def test_not_docker_when_nothing_set(self, monkeypatch) -> None:
@@ -148,11 +154,11 @@ class TestIsDocker:
         monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
         monkeypatch.delenv("container", raising=False)
         with patch("os.path.exists", return_value=False):
-            assert _is_docker() is False
+            assert is_docker_runtime_check() is False
 
 
 # ---------------------------------------------------------------------------
-# _is_service_install() tests
+# is_service_install() tests
 # ---------------------------------------------------------------------------
 
 
@@ -161,16 +167,16 @@ class TestIsServiceInstall:
     @pytest.mark.unit
     def test_service_install_when_venv_exists(self) -> None:
         with patch.object(Path, "exists", return_value=True):
-            assert _is_service_install() is True
+            assert is_service_install() is True
 
     @pytest.mark.unit
     def test_not_service_install_when_no_venv(self) -> None:
         with patch.object(Path, "exists", return_value=False):
-            assert _is_service_install() is False
+            assert is_service_install() is False
 
 
 # ---------------------------------------------------------------------------
-# _default_data_dir() tests
+# default_data_dir() tests
 # ---------------------------------------------------------------------------
 
 
@@ -180,7 +186,7 @@ class TestDefaultDataDir:
     def test_docker_returns_data_kairix(self, monkeypatch) -> None:
         monkeypatch.setenv("KAIRIX_DOCKER", "1")
         monkeypatch.delenv("container", raising=False)
-        result = _default_data_dir()
+        result = default_data_dir()
         assert result == Path("/data/kairix")
 
     @pytest.mark.unit
@@ -190,7 +196,7 @@ class TestDefaultDataDir:
         monkeypatch.setenv("XDG_DATA_HOME", "/custom/data")
         with patch("os.path.exists", return_value=False):
             with patch.object(Path, "exists", return_value=False):
-                result = _default_data_dir()
+                result = default_data_dir()
         assert result == Path("/custom/data/kairix")
 
     @pytest.mark.unit
@@ -202,10 +208,8 @@ class TestDefaultDataDir:
         with (
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=False),
-            patch("kairix.paths.sys") as mock_sys,
         ):
-            mock_sys.platform = "win32"
-            result = _default_data_dir()
+            result = default_data_dir(platform="win32")
         assert result == Path("C:\\Users\\test\\AppData\\Local") / "kairix"
 
     @pytest.mark.unit
@@ -218,12 +222,12 @@ class TestDefaultDataDir:
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=False),
         ):
-            result = _default_data_dir()
+            result = default_data_dir()
         assert result == Path.home() / ".local" / "share" / "kairix"
 
 
 # ---------------------------------------------------------------------------
-# _default_cache_dir() tests
+# default_cache_dir() tests
 # ---------------------------------------------------------------------------
 
 
@@ -233,7 +237,7 @@ class TestDefaultCacheDir:
     def test_docker_returns_data_kairix(self, monkeypatch) -> None:
         monkeypatch.setenv("KAIRIX_DOCKER", "1")
         monkeypatch.delenv("container", raising=False)
-        result = _default_cache_dir()
+        result = default_cache_dir()
         assert result == Path("/data/kairix")
 
     @pytest.mark.unit
@@ -245,7 +249,7 @@ class TestDefaultCacheDir:
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=False),
         ):
-            result = _default_cache_dir()
+            result = default_cache_dir()
         assert result == Path("/custom/cache/kairix")
 
     @pytest.mark.unit
@@ -257,10 +261,8 @@ class TestDefaultCacheDir:
         with (
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=False),
-            patch("kairix.paths.sys") as mock_sys,
         ):
-            mock_sys.platform = "win32"
-            result = _default_cache_dir()
+            result = default_cache_dir(platform="win32")
         assert result == Path("C:\\Users\\test\\AppData\\Local") / "kairix" / "cache"
 
     @pytest.mark.unit
@@ -273,12 +275,12 @@ class TestDefaultCacheDir:
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=False),
         ):
-            result = _default_cache_dir()
+            result = default_cache_dir()
         assert result == Path.home() / ".cache" / "kairix"
 
 
 # ---------------------------------------------------------------------------
-# _load_paths_from_config() tests
+# load_paths_from_config() tests
 # ---------------------------------------------------------------------------
 
 
@@ -287,7 +289,7 @@ class TestLoadPathsFromConfig:
     @pytest.mark.unit
     def test_returns_empty_when_no_config(self, monkeypatch, tmp_path) -> None:
         monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(tmp_path / "nonexistent.yaml"))
-        result = _load_paths_from_config()
+        result = load_paths_from_config()
         assert result == {}
 
     @pytest.mark.integration
@@ -295,7 +297,7 @@ class TestLoadPathsFromConfig:
         config_file = tmp_path / "kairix.config.yaml"
         config_file.write_text("paths:\n  document_root: /from/config\n  db_path: /from/config/db.sqlite\n")
         monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(config_file))
-        result = _load_paths_from_config()
+        result = load_paths_from_config()
         assert result.get("document_root") == "/from/config"
         assert result.get("db_path") == "/from/config/db.sqlite"
 
@@ -304,7 +306,7 @@ class TestLoadPathsFromConfig:
         config_file = tmp_path / "bad.yaml"
         config_file.write_text("not: [valid: yaml: {{")
         monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(config_file))
-        result = _load_paths_from_config()
+        result = load_paths_from_config()
         # Should return {} rather than raising
         assert isinstance(result, dict)
 
@@ -313,7 +315,7 @@ class TestLoadPathsFromConfig:
         config_file = tmp_path / "kairix.config.yaml"
         config_file.write_text("logging:\n  level: DEBUG\n")
         monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(config_file))
-        result = _load_paths_from_config()
+        result = load_paths_from_config()
         assert result == {}
 
 
@@ -334,3 +336,187 @@ class TestClearCache:
         p2 = KairixPaths.resolve()
         assert p1.document_root == Path("/alpha")
         assert p2.document_root == Path("/beta")
+
+
+# ---------------------------------------------------------------------------
+# Service-install branches — default_document_root / default_data_dir /
+# default_cache_dir / default_workspace_root all check
+# Path("/opt/kairix/.venv").exists() (via is_service_install) and return
+# admin-configured paths when True. These four branches are uncovered
+# because the local dev environment never has /opt/kairix/.venv.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestServiceInstallDefaults:
+    @pytest.mark.unit
+    def test_service_install_document_root(self, monkeypatch) -> None:
+        """When /opt/kairix/.venv exists and Docker is not, doc root is /var/lib/kairix/documents."""
+        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
+        monkeypatch.delenv("container", raising=False)
+        with (
+            patch("os.path.exists", return_value=False),  # not Docker
+            patch.object(Path, "exists", return_value=True),  # /opt/kairix/.venv present
+        ):
+            assert default_document_root() == Path("/var/lib/kairix/documents")
+
+    @pytest.mark.unit
+    def test_service_install_data_dir(self, monkeypatch) -> None:
+        """Service install → data dir is /var/lib/kairix."""
+        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
+        monkeypatch.delenv("container", raising=False)
+        with (
+            patch("os.path.exists", return_value=False),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            assert default_data_dir() == Path("/var/lib/kairix")
+
+    @pytest.mark.unit
+    def test_service_install_cache_dir(self, monkeypatch) -> None:
+        """Service install → cache dir is /var/cache/kairix (NOT /var/lib/kairix)."""
+        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
+        monkeypatch.delenv("container", raising=False)
+        with (
+            patch("os.path.exists", return_value=False),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            assert default_cache_dir() == Path("/var/cache/kairix")
+
+    @pytest.mark.unit
+    def test_service_install_workspace_root(self, monkeypatch) -> None:
+        """Service install → workspaces under /data/workspaces (same as Docker)."""
+        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
+        monkeypatch.delenv("container", raising=False)
+        with (
+            patch("os.path.exists", return_value=False),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            assert default_workspace_root() == Path("/data/workspaces")
+
+    @pytest.mark.unit
+    def test_workspace_root_user_default(self, monkeypatch) -> None:
+        """Neither Docker nor service install → workspaces under ~/.kairix/workspaces."""
+        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
+        monkeypatch.delenv("container", raising=False)
+        with (
+            patch("os.path.exists", return_value=False),
+            patch.object(Path, "exists", return_value=False),
+        ):
+            assert default_workspace_root() == Path.home() / ".kairix" / "workspaces"
+
+
+# ---------------------------------------------------------------------------
+# reference_library_root / bundled_suites_root — env-var-driven shipping
+# locations (uncovered because no test currently calls them).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestShippedAssetPaths:
+    @pytest.mark.unit
+    def test_reference_library_root_default(self, monkeypatch) -> None:
+        """Without KAIRIX_REFLIB_ROOT set, returns the in-container default."""
+        monkeypatch.delenv("KAIRIX_REFLIB_ROOT", raising=False)
+        assert reference_library_root() == Path("reference-library")
+
+    @pytest.mark.unit
+    def test_reference_library_root_env_override(self, monkeypatch) -> None:
+        """KAIRIX_REFLIB_ROOT overrides the default."""
+        monkeypatch.setenv("KAIRIX_REFLIB_ROOT", "/custom/reflib")
+        assert reference_library_root() == Path("/custom/reflib")
+
+    @pytest.mark.unit
+    def test_bundled_suites_root_default(self, monkeypatch) -> None:
+        """Without KAIRIX_SUITES_ROOT set, returns the in-container default."""
+        monkeypatch.delenv("KAIRIX_SUITES_ROOT", raising=False)
+        assert bundled_suites_root() == Path("suites")
+
+    @pytest.mark.unit
+    def test_bundled_suites_root_env_override(self, monkeypatch) -> None:
+        """KAIRIX_SUITES_ROOT overrides the default."""
+        monkeypatch.setenv("KAIRIX_SUITES_ROOT", "/custom/suites")
+        assert bundled_suites_root() == Path("/custom/suites")
+
+
+# ---------------------------------------------------------------------------
+# log_dir() convenience wrapper — uncovered because tests above call
+# KairixPaths.resolve() directly. Exercise the function itself.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLogDirWrapper:
+    @pytest.mark.unit
+    def test_log_dir_from_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("KAIRIX_LOG_DIR", "/custom/logs")
+        assert log_dir() == Path("/custom/logs")
+
+
+# ---------------------------------------------------------------------------
+# maintenance_skip_noop_threshold — three branches: unset (default 10),
+# valid int, invalid string (logs warning + falls back to 10).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestMaintenanceSkipNoopThreshold:
+    @pytest.mark.unit
+    def test_unset_returns_default_10(self, monkeypatch) -> None:
+        """Without the env var, threshold falls back to 10."""
+        monkeypatch.delenv("KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD", raising=False)
+        assert maintenance_skip_noop_threshold() == 10
+
+    @pytest.mark.unit
+    def test_valid_int_override(self, monkeypatch) -> None:
+        """A valid integer string is parsed and returned."""
+        monkeypatch.setenv("KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD", "42")
+        assert maintenance_skip_noop_threshold() == 42
+
+    @pytest.mark.unit
+    def test_invalid_falls_back_to_10_and_warns(self, monkeypatch, caplog) -> None:
+        """An unparseable value logs a warning and falls back to 10."""
+        import logging
+
+        monkeypatch.setenv("KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD", "not-an-int")
+        with caplog.at_level(logging.WARNING, logger="kairix.paths"):
+            assert maintenance_skip_noop_threshold() == 10
+        assert any("not an int" in rec.message for rec in caplog.records), (
+            "expected a warning about the invalid int value"
+        )
+
+
+# ---------------------------------------------------------------------------
+# entity_overrides_path — #166: vault-driven entity-overrides file location.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestEntityOverridesPath:
+    @pytest.mark.unit
+    def test_explicit_env_override_wins(self, monkeypatch, tmp_path) -> None:
+        """``KAIRIX_ENTITY_OVERRIDES_PATH`` takes precedence over the default."""
+        from kairix.paths import entity_overrides_path
+
+        custom = tmp_path / "custom-overrides.md"
+        monkeypatch.setenv("KAIRIX_ENTITY_OVERRIDES_PATH", str(custom))
+        assert entity_overrides_path() == custom
+
+    @pytest.mark.unit
+    def test_default_lives_under_document_root(self, monkeypatch, tmp_path) -> None:
+        """Without the override env var, the path sits under
+        ``{document_root}/04-Agent-Knowledge/_entity-overrides.md``."""
+        from kairix.paths import entity_overrides_path
+
+        monkeypatch.delenv("KAIRIX_ENTITY_OVERRIDES_PATH", raising=False)
+        monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", str(tmp_path))
+        assert entity_overrides_path() == tmp_path / "04-Agent-Knowledge" / "_entity-overrides.md"
+
+    @pytest.mark.unit
+    def test_explicit_env_expands_user(self, monkeypatch) -> None:
+        """A ``~``-prefixed override path is expanded to the home directory."""
+        from kairix.paths import entity_overrides_path
+
+        monkeypatch.setenv("KAIRIX_ENTITY_OVERRIDES_PATH", "~/overrides.md")
+        result = entity_overrides_path()
+        assert "~" not in str(result)
+        assert str(result).endswith("overrides.md")

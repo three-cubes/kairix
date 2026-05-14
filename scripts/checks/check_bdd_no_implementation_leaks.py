@@ -34,22 +34,33 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _arch_lib import REPO_ROOT, gate, repo_relative
 
-REMEDIATION = """A BDD scenario should describe what a stakeholder sees, not
-how the code is implemented. Forbidden tokens detected (Mock / MagicMock /
-monkeypatch / pytest. / unittest. / kairix.<pkg>.<symbol>) are
-implementation symbols.
+REMEDIATION = """Refactor to stakeholder language (no Mock / MagicMock /
+monkeypatch / pytest. / unittest. / ``kairix.<pkg>.<symbol>`` tokens
+in feature steps) to pass.
 
-Rewrite in stakeholder language:
-  Bad:  Then a Mock is returned
-  Good: Then the operator sees the cached suite
+fix: rewrite the offending Scenario in stakeholder terms ("the operator
+sees X" / "the system rejects Y") and remove any reference to
+implementation symbols. If the test is genuinely about internals, move
+it out of tests/bdd/features/ to a unit test.
+next: re-run ``python3 scripts/checks/check_bdd_no_implementation_leaks.py``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh "test(bdd): rewrite <feature> in stakeholder language"
 
-  Bad:  When kairix.core.search.bm25.bm25_search runs
-  Good: When the operator runs a search
+Pass example:
+  Scenario: Operator runs a search and sees results
+    Given an indexed knowledge store
+    When the operator runs a search for "deploy"
+    Then the operator sees the cached suite
+
+Forbidden example:
+  Scenario: bm25 search returns hits
+    When kairix.core.search.bm25.bm25_search runs
+    Then a Mock is returned
 
 If the test is genuinely about internals, it does not belong in
-tests/bdd/features/ — move it to a unit test. See Dan North on BDD
-scenarios as living documentation, and Liz Keogh on "test infection
-of BDD"."""
+tests/bdd/features/ — move it to a unit test. Per Dan North (BDD),
+Adzic (Specification by Example), and Liz Keogh (test infection of
+BDD), scenarios describe stakeholder outcomes, not implementation."""
 
 
 # File-extension allowlist: ``kairix.X.yaml`` is a config-file name,

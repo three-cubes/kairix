@@ -273,9 +273,12 @@ def test_failed_chunks_make_success_false_but_not_an_exception() -> None:
 
 
 def test_pipeline_deps_default_constructs_with_no_arguments() -> None:
-    """``PipelineDeps()`` succeeds — every field has a None default the use case fills in."""
+    """``PipelineDeps()`` succeeds — every field has a ``default_factory``
+    that wires the real production callable (F6: no ``Optional[Callable]``).
+    """
     deps = PipelineDeps()
-    # Every callable slot is None until injected; production defaults wire on use.
-    assert deps.db_path_fn is None
-    assert deps.run_embed_fn is None
-    assert deps.run_recall_gate_fn is None
+    # Every callable slot is wired to a production default callable;
+    # tests inject stand-ins by passing the kwarg explicitly.
+    assert callable(deps.db_path_fn)
+    assert callable(deps.run_embed_fn)
+    assert callable(deps.run_recall_gate_fn)

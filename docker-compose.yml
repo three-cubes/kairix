@@ -1,8 +1,8 @@
 # Kairix — Docker Compose stack
 #
 # Quick start (no clone needed):
-#   1. Download this file: curl -O https://raw.githubusercontent.com/quanyeomans/kairix/main/docker-compose.yml
-#   2. Download .env example: curl -O https://raw.githubusercontent.com/quanyeomans/kairix/main/.env.example
+#   1. Download this file: curl -O https://raw.githubusercontent.com/three-cubes/kairix/main/docker-compose.yml
+#   2. Download .env example: curl -O https://raw.githubusercontent.com/three-cubes/kairix/main/.env.example
 #   3. cp .env.example .env && edit .env (add your LLM API key)
 #   4. ln -s /path/to/your/documents ./documents
 #   5. docker compose up -d
@@ -16,7 +16,7 @@
 
 services:
   kairix:
-    image: ghcr.io/quanyeomans/kairix:latest
+    image: ghcr.io/three-cubes/kairix:latest
     # To build from source instead: comment out 'image' above and uncomment:
     # build: .
     ports:
@@ -52,7 +52,7 @@ services:
     cpus: 4.0
 
   kairix-worker:
-    image: ghcr.io/quanyeomans/kairix:latest
+    image: ghcr.io/three-cubes/kairix:latest
     # To build from source instead: comment out 'image' above and uncomment:
     # build: .
     command: ["worker"]

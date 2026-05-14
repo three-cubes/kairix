@@ -77,7 +77,7 @@ def test_gold_builder_grade_majority_vote_across_alternating_runs() -> None:
     candidates = [
         PooledCandidate(path="/path/doc1.md", title="Doc 1", snippet="text", collection="eng"),
     ]
-    result = GoldBuilder(llm_judge=_AlternatingJudge()).grade(  # type: ignore[arg-type]
+    result = GoldBuilder(llm_judge=_AlternatingJudge()).grade(  # type: ignore[arg-type]  # local test double satisfies Judge protocol structurally
         "q",
         candidates,
         runs=3,
@@ -498,7 +498,7 @@ def test_pool_with_vector_system_and_raising_retriever_returns_no_candidates() -
         def retrieve(self, query: str, *, collections: Any = None, cfg: Any = None) -> Any:
             raise RuntimeError("retrieval failed")
 
-    builder = GoldBuilder(retriever=_RaisingRetriever())  # type: ignore[arg-type]
+    builder = GoldBuilder(retriever=_RaisingRetriever())  # type: ignore[arg-type]  # local test double satisfies Retriever protocol structurally
     # vector is the only requested system, and it raises → no candidates pooled.
     candidates = builder.pool("any query", systems=["vector"], limit_per_system=5)
     assert candidates == []

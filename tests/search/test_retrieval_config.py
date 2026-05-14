@@ -91,7 +91,7 @@ class TestRetrievalConfigFactories:
     def test_configs_are_frozen(self):
         cfg = RetrievalConfig.defaults()
         with pytest.raises((AttributeError, TypeError)):
-            cfg.entity = EntityBoostConfig(enabled=False)  # type: ignore[misc]
+            cfg.entity = EntityBoostConfig(enabled=False)  # type: ignore[misc]  # asserting frozen dataclass rejects mutation
 
 
 # --- EntityBoostConfig integration ---

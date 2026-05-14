@@ -91,117 +91,38 @@ class SearchPipeline:
         t_start = time.monotonic()
 
         # 1. Classify intent
-        try:
-            intent = self.classifier.classify(query)  # type: ignore[union-attr]
-        except Exception as e:
-            _logger.warning("pipeline: classify failed — %s", e)
-            intent = QueryIntent.SEMANTIC
+        intent = self._classify(query)
 
         # 2. Entity intent requires graph
         if intent == QueryIntent.ENTITY and not self.graph.available:
-            return SearchResult(
-                query=query,
-                intent=intent,
-                error=(
-                    "Entity queries require Neo4j but the graph is unavailable. "
-                    "Check KAIRIX_NEO4J_URI, KAIRIX_NEO4J_USER, KAIRIX_NEO4J_PASSWORD "
-                    "and run `kairix onboard check` for diagnostics."
-                ),
-            )
+            return SearchResult(query=query, intent=intent, error=_ENTITY_GRAPH_UNAVAILABLE)
 
-        # 3. Resolve collections via the injected CollectionResolver if not
-        # explicitly provided. Callers passing collections=None (the default)
-        # get scope-aware filtering; callers passing an explicit list override.
-        if collections is None and self.resolver is not None:
-            try:
-                collections = self.resolver.resolve(agent, scope)
-            except NotImplementedError as e:
-                # Operator misconfiguration (scope=all-agents without registry).
-                # Surface as a structured search error rather than crashing.
-                return SearchResult(
-                    query=query,
-                    intent=intent,
-                    error=str(e),
-                )
+        # 3. Resolve collections via the injected CollectionResolver
+        collections, resolve_error = self._resolve_collections(collections, agent, scope)
+        if resolve_error is not None:
+            return SearchResult(query=query, intent=intent, error=resolve_error)
 
         # 4. Dispatch BM25 + vector search
-        cfg = self.config
-        bm25_results: list[dict] = []
-        vec_results: list[dict] = []
-        vec_failed = False
+        bm25_results, vec_results, vec_failed = self._dispatch_backends(query, collections)
 
-        try:
-            bm25_results = self.bm25.search(
-                query,
-                collections=collections,
-                limit=cfg.bm25_limit,
-            )
-        except Exception as e:
-            _logger.warning("pipeline: BM25 search failed — %s", e)
+        # 5. Fuse
+        fused = self._fuse(bm25_results, vec_results)
 
-        if not cfg.skip_vector:
-            try:
-                vec_results = self.vector.search(
-                    query,
-                    collections=collections,
-                    limit=cfg.vec_limit,
-                )
-            except Exception as e:
-                _logger.warning("pipeline: vector search failed — %s", e)
-                vec_failed = True
-            # An empty result list is a successful no-match, not a failure.
-            # ``vec_failed`` reflects backend failure only — operators consume
-            # this field to triage real outages (e.g. via ``kairix search``'s
-            # ``vec_failed=True`` print, or monitor.py's vec_failed_count).
-            # Conflating empty-and-failed produced false-positive alerts.
-
-        # 4. Fuse — wrap in try/except per the "Never raises" docstring guarantee.
-        try:
-            fused = self.fusion.fuse(bm25_results, vec_results)
-        except Exception as e:
-            _logger.warning("pipeline: fusion failed — %s — falling back to empty fused list", e)
-            fused = []
-
-        # 4b. Enrich each fused result with chunk_date metadata so the boost
+        # 5b. Enrich each fused result with chunk_date metadata so the boost
         # chain (specifically ChunkDateBoost) can score by recency. Source
         # of truth is DocumentRepository.get_chunk_dates, exposed here via
         # the BM25 backend — boost adapters never reach into the repo.
-        if fused:
-            try:
-                paths = [getattr(r, "path", "") for r in fused]
-                chunk_dates = self.bm25.get_chunk_dates(paths)
-                for r in fused:
-                    cd = chunk_dates.get(getattr(r, "path", ""))
-                    if cd and not getattr(r, "chunk_date", ""):
-                        r.chunk_date = cd
-            except Exception as e:
-                _logger.warning("pipeline: chunk_date enrichment failed — %s", e)
+        self._enrich_chunk_dates(fused)
 
-        # 5. Boost chain.
-        # Extract any explicit ISO/year-month date in the query so
-        # ChunkDateBoost can reorder by chunk_date proximity. Done at
-        # the boundary, not inside boosts, so every boost sees the same
-        # parsed date and pipeline-level errors are caught here.
-        query_date = _extract_query_date(query)
-        context = {
-            "intent": intent,
-            "query": query,
-            "graph": self.graph,
-            "query_date": query_date,
-        }
-        for boost in self.boosts:
-            try:
-                fused = boost.boost(fused, query, context)
-            except Exception as e:
-                _logger.warning("pipeline: boost %s failed — %s", type(boost).__name__, e)
+        # 6. Boost chain
+        fused = self._apply_boosts(fused, query, intent)
 
-        # 6. Budget
+        # 7. Budget
         budgeted = apply_budget(fused, budget=budget)
         total_tokens = sum(getattr(r, "token_estimate", 0) for r in budgeted)
         tiers_used = sorted({getattr(r, "tier", "L2") for r in budgeted})
 
-        t_end = time.monotonic()
-        latency_ms = (t_end - t_start) * 1000.0
+        latency_ms = (time.monotonic() - t_start) * 1000.0
 
         result = SearchResult(
             query=query,
@@ -218,32 +139,147 @@ class SearchPipeline:
             fallback_used=not bm25_results and bool(vec_results),
         )
 
-        # 7. Log
-        if self.logger:
-            query_hash = hashlib.sha256(query.encode()).hexdigest()[:12]
-            try:
-                self.logger.log_search(
-                    {
-                        "query_hash": query_hash,
-                        "intent": intent.value,
-                        "agent": agent,
-                        # scope is a Scope enum (str subclass); .value for stable serialisation
-                        "scope": scope.value if hasattr(scope, "value") else str(scope),
-                        "collections_searched": collections or [],
-                        "bm25_count": len(bm25_results),
-                        "vec_count": len(vec_results),
-                        "fused_count": len(fused),
-                        "total_tokens": total_tokens,
-                        "latency_ms": round(latency_ms, 1),
-                        "vec_failed": vec_failed,
-                        "fallback_used": not bm25_results and bool(vec_results),
-                        "ts": int(time.time()),
-                    }
-                )
-            except Exception as e:
-                _logger.warning("pipeline: log_search failed — %s", e)
+        # 8. Log
+        self._log_search(query, intent, agent, scope, collections, result)
 
         return result
+
+    def _classify(self, query: str) -> QueryIntent:
+        """Classify intent; fall back to SEMANTIC on any classifier failure."""
+        try:
+            return self.classifier.classify(query)  # type: ignore[union-attr] — classifier may be None when graph backend unavailable; guarded by try
+        except Exception as e:
+            _logger.warning("pipeline: classify failed — %s", e)
+            return QueryIntent.SEMANTIC
+
+    def _resolve_collections(
+        self,
+        collections: list[str] | None,
+        agent: str | None,
+        scope: Scope,
+    ) -> tuple[list[str] | None, str | None]:
+        """Resolve collections via the injected resolver when not pre-supplied."""
+        if collections is not None or self.resolver is None:
+            return collections, None
+        try:
+            return self.resolver.resolve(agent, scope), None
+        except NotImplementedError as e:
+            # Operator misconfiguration (scope=all-agents without registry).
+            return None, str(e)
+
+    def _dispatch_backends(
+        self,
+        query: str,
+        collections: list[str] | None,
+    ) -> tuple[list[dict], list[dict], bool]:
+        """Run BM25 + vector search; isolate each failure so one can't break the other."""
+        cfg = self.config
+        bm25_results: list[dict] = []
+        try:
+            bm25_results = self.bm25.search(query, collections=collections, limit=cfg.bm25_limit)
+        except Exception as e:
+            _logger.warning("pipeline: BM25 search failed — %s", e)
+
+        vec_results, vec_failed = self._dispatch_vector(query, collections)
+        return bm25_results, vec_results, vec_failed
+
+    def _dispatch_vector(
+        self,
+        query: str,
+        collections: list[str] | None,
+    ) -> tuple[list[dict], bool]:
+        """Vector backend dispatch with skip-flag and failure-vs-empty distinction.
+
+        ``vec_failed`` reflects backend failure only — operators consume
+        this field to triage real outages. Empty-and-failed conflation
+        produced false-positive alerts.
+        """
+        if self.config.skip_vector:
+            return [], False
+        try:
+            return self.vector.search(query, collections=collections, limit=self.config.vec_limit), False
+        except Exception as e:
+            _logger.warning("pipeline: vector search failed — %s", e)
+            return [], True
+
+    def _fuse(self, bm25_results: list[dict], vec_results: list[dict]) -> list:
+        """Fuse BM25 + vector results; on fusion failure return empty list."""
+        try:
+            return self.fusion.fuse(bm25_results, vec_results)
+        except Exception as e:
+            _logger.warning("pipeline: fusion failed — %s — falling back to empty fused list", e)
+            return []
+
+    def _enrich_chunk_dates(self, fused: list) -> None:
+        """Fill in ``chunk_date`` on each fused result so date-aware boosts see it."""
+        if not fused:
+            return
+        try:
+            paths = [getattr(r, "path", "") for r in fused]
+            chunk_dates = self.bm25.get_chunk_dates(paths)
+            for r in fused:
+                cd = chunk_dates.get(getattr(r, "path", ""))
+                if cd and not getattr(r, "chunk_date", ""):
+                    r.chunk_date = cd
+        except Exception as e:
+            _logger.warning("pipeline: chunk_date enrichment failed — %s", e)
+
+    def _apply_boosts(self, fused: list, query: str, intent: QueryIntent) -> list:
+        """Apply each boost in order; per-boost failures are logged and skipped."""
+        context = {
+            "intent": intent,
+            "query": query,
+            "graph": self.graph,
+            "query_date": _extract_query_date(query),
+        }
+        for boost in self.boosts:
+            try:
+                fused = boost.boost(fused, query, context)
+            except Exception as e:
+                _logger.warning("pipeline: boost %s failed — %s", type(boost).__name__, e)
+        return fused
+
+    def _log_search(
+        self,
+        query: str,
+        intent: QueryIntent,
+        agent: str | None,
+        scope: Scope,
+        collections: list[str] | None,
+        result: SearchResult,
+    ) -> None:
+        """Emit a search log entry; never raises."""
+        if not self.logger:
+            return
+        query_hash = hashlib.sha256(query.encode()).hexdigest()[:12]
+        try:
+            self.logger.log_search(
+                {
+                    "query_hash": query_hash,
+                    "intent": intent.value,
+                    "agent": agent,
+                    # scope is a Scope enum (str subclass); .value for stable serialisation
+                    "scope": scope.value if hasattr(scope, "value") else str(scope),
+                    "collections_searched": collections or [],
+                    "bm25_count": result.bm25_count,
+                    "vec_count": result.vec_count,
+                    "fused_count": result.fused_count,
+                    "total_tokens": result.total_tokens,
+                    "latency_ms": round(result.latency_ms, 1),
+                    "vec_failed": result.vec_failed,
+                    "fallback_used": result.fallback_used,
+                    "ts": int(time.time()),
+                }
+            )
+        except Exception as e:
+            _logger.warning("pipeline: log_search failed — %s", e)
+
+
+_ENTITY_GRAPH_UNAVAILABLE = (
+    "Entity queries require Neo4j but the graph is unavailable. "
+    "Check KAIRIX_NEO4J_URI, KAIRIX_NEO4J_USER, KAIRIX_NEO4J_PASSWORD "
+    "and run `kairix onboard check` for diagnostics."
+)
 
 
 _logger = logging.getLogger(__name__)

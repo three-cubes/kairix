@@ -23,12 +23,49 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from kairix.core.health import (
+    HealthDeps,
+    KairixHealth,
+    health_to_envelope,
+    probe_health,
+    search_next_action,
+)
 from kairix.core.search.intent import QueryIntent
 from kairix.core.search.scope import Scope
 from kairix.text import estimate_tokens
-from kairix.use_cases import _search_defaults as _defaults
 
 logger = logging.getLogger(__name__)
+
+
+def _default_search(
+    query: str,
+    budget: int,
+    scope: Scope,
+    agent: str | None,
+) -> Any:
+    """Lazy-load the production search pipeline.
+
+    Kept inside the use-case module (rather than a shim) so the file
+    owns its own production wiring — eliminates the ``_search_defaults``
+    indirection layer that the F7 coverage baseline had to grandfather.
+    """
+    from kairix.core.factory import build_search_pipeline
+    from kairix.core.search.config_loader import load_config
+
+    pipeline = build_search_pipeline(config=load_config())
+    return pipeline.search(query=query, budget=budget, scope=scope, agent=agent)
+
+
+def _default_entity_card(name: str) -> dict[str, Any] | None:
+    from kairix.agents.mcp.server import _fetch_entity_card
+
+    return _fetch_entity_card(name)
+
+
+def _default_classify(query: str) -> QueryIntent:
+    from kairix.core.search.intent import classify
+
+    return classify(query)
 
 
 @dataclass(frozen=True)
@@ -82,16 +119,25 @@ class SearchOutput:
     vec_failed: bool = False
     total_tokens: int = 0
     latency_ms: float = 0.0
+    health: KairixHealth = field(default_factory=KairixHealth)
     error: str = ""
 
 
 @dataclass(frozen=True)
 class SearchDeps:
-    """Injectable dependencies for ``run_search``."""
+    """Injectable dependencies for ``run_search``.
 
-    search_fn: Callable[..., Any] | None = None
-    entity_card_fn: Callable[[str], dict[str, Any] | None] | None = None
-    classify_fn: Callable[[str], QueryIntent] | None = None
+    Non-Optional fields wired to production defaults via ``default_factory``
+    — eliminates the ``Optional[Callable]`` mypy regression class flagged
+    in #204. Tests construct ``SearchDeps(search_fn=fake, ...)`` with
+    explicit overrides; ``SearchDeps()`` with no kwargs resolves to the
+    module-level ``_default_*`` callables.
+    """
+
+    search_fn: Callable[..., Any] = field(default_factory=lambda: _default_search)
+    entity_card_fn: Callable[[str], dict[str, Any] | None] = field(default_factory=lambda: _default_entity_card)
+    classify_fn: Callable[[str], QueryIntent] = field(default_factory=lambda: _default_classify)
+    health_deps: HealthDeps = field(default_factory=HealthDeps)
 
 
 _RESEARCH_WORDS_DEFAULT_BUDGET = 5000
@@ -186,8 +232,87 @@ def search_output_to_envelope(out: SearchOutput) -> dict[str, Any]:
         "vec_failed": out.vec_failed,
         "total_tokens": out.total_tokens,
         "latency_ms": out.latency_ms,
+        "health": dict(health_to_envelope(out.health)),
         "error": out.error,
     }
+
+
+def _intent_value(sr: Any) -> str:
+    """Coerce ``sr.intent`` (possibly an Enum or string) into a plain value string."""
+    intent = getattr(sr, "intent", None)
+    value = getattr(intent, "value", None)
+    if value is not None:
+        return str(value)
+    return str(intent or "")
+
+
+def _fetch_entity_card_safe(entity_card: Callable[[str], Any], name: str) -> Any:
+    """Call the entity-card lookup; swallow exceptions and return None."""
+    try:
+        return entity_card(name)
+    except Exception:
+        logger.debug("entity card lookup failed", exc_info=True)
+        return None
+
+
+def _entity_card_hit(card: dict[str, Any]) -> SearchHit:
+    """Build the entity-graph SearchHit prepended to ENTITY-intent results."""
+    summary = card.get("summary", "")
+    return SearchHit(
+        path=card.get("vault_path", ""),
+        title=card.get("name", ""),
+        snippet=summary,
+        score=1.0,
+        tokens=estimate_tokens(summary),
+        source="entity_graph",
+        entity={
+            "id": card.get("id", ""),
+            "name": card.get("name", ""),
+            "type": card.get("type", ""),
+        },
+    )
+
+
+def _maybe_prepend_entity_card(
+    hits: list[SearchHit],
+    query: str,
+    intent_value: str,
+    entity_card: Callable[[str], Any],
+    include_entity_card: bool,
+) -> None:
+    """When the query is ENTITY-intent and a card exists, prepend it to ``hits``."""
+    if not include_entity_card or intent_value != QueryIntent.ENTITY.value:
+        return
+    name = _extract_entity_name(query)
+    if not name:
+        return
+    card = _fetch_entity_card_safe(entity_card, name)
+    if card is None:
+        return
+    hits.insert(0, _entity_card_hit(card))
+
+
+def _search_output_from_pipeline(
+    sr: Any,
+    query: str,
+    hits: list[SearchHit],
+    health: KairixHealth,
+    elapsed_ms: float,
+) -> SearchOutput:
+    """Map the raw ``SearchPipeline`` result onto a ``SearchOutput`` envelope."""
+    return SearchOutput(
+        query=getattr(sr, "query", query),
+        intent=_intent_value(sr),
+        results=hits,
+        bm25_count=int(getattr(sr, "bm25_count", 0) or 0),
+        vec_count=int(getattr(sr, "vec_count", 0) or 0),
+        fused_count=int(getattr(sr, "fused_count", 0) or 0),
+        vec_failed=bool(getattr(sr, "vec_failed", False)),
+        total_tokens=int(getattr(sr, "total_tokens", 0) or 0),
+        latency_ms=float(getattr(sr, "latency_ms", elapsed_ms) or elapsed_ms),
+        health=health,
+        error=str(getattr(sr, "error", "") or ""),
+    )
 
 
 def run_search(
@@ -218,68 +343,51 @@ def run_search(
             who only want flat results pass False.
         deps: Injectable dependencies; production callers leave None.
     """
-    d = deps or SearchDeps()
-    search = d.search_fn or _defaults.default_search
-    entity_card = d.entity_card_fn or _defaults.default_entity_card
-    classify = d.classify_fn or _defaults.default_classify
+    if deps is None:  # pragma: no cover — production lazy default; tests pass deps=SearchDeps(...)
+        deps = SearchDeps()
+    health = _tool_health(probe_health(deps.health_deps), tool=_search_next_action)
 
     started = time.monotonic()
     try:
-        effective_budget = _infer_budget(query, budget, classify)
-        sr = search(query=query, agent=agent, scope=scope, budget=effective_budget)
-
-        intent_value = (
-            sr.intent.value if hasattr(getattr(sr, "intent", None), "value") else str(getattr(sr, "intent", ""))
-        )
-
+        effective_budget = _infer_budget(query, budget, deps.classify_fn)
+        sr = deps.search_fn(query=query, agent=agent, scope=scope, budget=effective_budget)
+        intent_value = _intent_value(sr)
         hits: list[SearchHit] = [_budgeted_to_hit(b) for b in getattr(sr, "results", [])[:limit]]
-
-        if include_entity_card and intent_value == QueryIntent.ENTITY.value:
-            name = _extract_entity_name(query)
-            if name:
-                try:
-                    card = entity_card(name)
-                except Exception:
-                    logger.debug("entity card lookup failed", exc_info=True)
-                    card = None
-                if card is not None:
-                    summary = card.get("summary", "")
-                    hits.insert(
-                        0,
-                        SearchHit(
-                            path=card.get("vault_path", ""),
-                            title=card.get("name", ""),
-                            snippet=summary,
-                            score=1.0,
-                            tokens=estimate_tokens(summary),
-                            source="entity_graph",
-                            entity={
-                                "id": card.get("id", ""),
-                                "name": card.get("name", ""),
-                                "type": card.get("type", ""),
-                            },
-                        ),
-                    )
-
+        _maybe_prepend_entity_card(hits, query, intent_value, deps.entity_card_fn, include_entity_card)
         elapsed_ms = (time.monotonic() - started) * 1000
-
-        return SearchOutput(
-            query=getattr(sr, "query", query),
-            intent=intent_value,
-            results=hits,
-            bm25_count=int(getattr(sr, "bm25_count", 0) or 0),
-            vec_count=int(getattr(sr, "vec_count", 0) or 0),
-            fused_count=int(getattr(sr, "fused_count", 0) or 0),
-            vec_failed=bool(getattr(sr, "vec_failed", False)),
-            total_tokens=int(getattr(sr, "total_tokens", 0) or 0),
-            latency_ms=float(getattr(sr, "latency_ms", elapsed_ms) or elapsed_ms),
-            error=str(getattr(sr, "error", "") or ""),
-        )
+        return _search_output_from_pipeline(sr, query, hits, health, elapsed_ms)
     except Exception as exc:
         logger.warning("run_search failed: %s", exc, exc_info=True)
         return SearchOutput(
             query=query,
             intent="",
             results=[],
+            health=health,
             error=f"{type(exc).__name__}: {exc}",
         )
+
+
+def _search_next_action(health: KairixHealth) -> str:
+    """Wrapper so ``_tool_health`` keeps a stable callable shape."""
+    return search_next_action(health)
+
+
+def _tool_health(base: KairixHealth, *, tool: Callable[[KairixHealth], str]) -> KairixHealth:
+    """Replace the shared ``next_action`` with the tool-specific directive.
+
+    Returns the snapshot unchanged when ``tool`` returns the empty string
+    (fully healthy or the tool is happy with the shared directive).
+    Reasons remain whatever the probe set them to; only the directive
+    changes so the agent reads "what to do **for this tool**" right now.
+    """
+    directive = tool(base)
+    if not directive:
+        return base
+    return KairixHealth(
+        vector_search=base.vector_search,
+        bm25=base.bm25,
+        chat=base.chat,
+        secrets_loaded=base.secrets_loaded,
+        degraded_reason=base.degraded_reason,
+        next_action=directive,
+    )

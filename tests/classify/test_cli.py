@@ -100,3 +100,168 @@ class TestClassifyCLIOutput:
         parsed = json.loads(stdout.strip())
         assert parsed["type"] == "semantic-decision"
         assert "shape" in parsed["target_path"]
+
+
+@pytest.mark.unit
+class TestClassifyCLIStdinAndArgv:
+    @pytest.mark.unit
+    def test_reads_content_from_stdin(self, monkeypatch):
+        """When no content arg and stdin not a tty, content is read from stdin."""
+        import io
+
+        from kairix.core.classify.cli import main
+
+        monkeypatch.setattr("sys.stdin", io.StringIO("## 09:00\nFixed a bug today\n"))
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
+        # Stub isatty since StringIO inherits but doesn't override predictably
+        fake_stdin = io.StringIO("## 09:00\nFixed a bug today\n")
+        fake_stdin.isatty = lambda: False  # type: ignore[method-assign]  # stubbing StringIO.isatty for the CLI to treat stdin as a pipe
+        monkeypatch.setattr("sys.stdin", fake_stdin)
+
+        stdout_capture = io.StringIO()
+        with redirect_stdout(stdout_capture):
+            main(["--no-llm"])
+        parsed = json.loads(stdout_capture.getvalue().strip())
+        assert "type" in parsed
+
+    @pytest.mark.unit
+    def test_exits_when_no_content_and_tty(self, monkeypatch):
+        """If no content and stdin is a tty, prints error and exits 1."""
+        import io
+
+        from kairix.core.classify.cli import main
+
+        fake_stdin = io.StringIO("")
+        fake_stdin.isatty = lambda: True  # type: ignore[method-assign]  # stubbing StringIO.isatty so the CLI treats stdin as a TTY
+        monkeypatch.setattr("sys.stdin", fake_stdin)
+
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+        with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+            with pytest.raises(SystemExit) as exc:
+                main(["--no-llm"])
+        assert exc.value.code == 1
+        assert "no content provided" in stderr_capture.getvalue()
+
+    @pytest.mark.unit
+    def test_main_default_argv_strips_subcommand(self, monkeypatch):
+        """When args=None, main reads sys.argv[2:] (strips 'kairix classify')."""
+        import io
+
+        from kairix.core.classify.cli import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["kairix", "classify", "Never write credentials to disk.", "--no-llm"],
+        )
+        stdout_capture = io.StringIO()
+        with redirect_stdout(stdout_capture):
+            main()  # args=None -> reads sys.argv[2:]
+        parsed = json.loads(stdout_capture.getvalue().strip())
+        assert parsed["type"] == "procedural-rule"
+
+
+@pytest.mark.unit
+class TestClassifyCLIErrors:
+    @pytest.mark.unit
+    def test_value_error_exits_one(self, monkeypatch):
+        """ValueError raised by classify_content surfaces as exit 1 with JSON error."""
+        import io
+
+        from kairix.core.classify import cli as cli_mod
+
+        def _raise_value_error(content, agent):
+            raise ValueError("bad agent state")
+
+        # Substitute classify_content used by the CLI's local import.
+        # Module is imported inside main(), so we monkeypatch the rules module.
+        monkeypatch.setattr(
+            "kairix.core.classify.rules.classify_content",
+            _raise_value_error,
+        )
+
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+        with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+            with pytest.raises(SystemExit) as exc:
+                cli_mod.main(["test content", "--no-llm"])
+        assert exc.value.code == 1
+        err_json = json.loads(stderr_capture.getvalue().strip())
+        assert "error" in err_json
+
+    @pytest.mark.unit
+    def test_unexpected_exception_exits_one(self, monkeypatch):
+        """Generic Exception surfaces as exit 1 with masked error."""
+        import io
+
+        from kairix.core.classify import cli as cli_mod
+
+        def _raise_runtime(content, agent):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(
+            "kairix.core.classify.rules.classify_content",
+            _raise_runtime,
+        )
+
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+        with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+            with pytest.raises(SystemExit) as exc:
+                cli_mod.main(["test content", "--no-llm"])
+        assert exc.value.code == 1
+        err_json = json.loads(stderr_capture.getvalue().strip())
+        assert "error" in err_json
+        # Error message should not leak internal details
+        assert "boom" not in err_json["error"]
+
+    @pytest.mark.unit
+    def test_llm_fallback_when_rule_unknown(self, monkeypatch):
+        """When rule classification returns 'unknown' and --no-llm not set,
+        the LLM judge is invoked."""
+        import io
+        from dataclasses import dataclass
+
+        from kairix.core.classify import cli as cli_mod
+
+        @dataclass
+        class _FakeResult:
+            type: str
+            target_path: str
+            confidence: float
+            reason: str
+            needs_confirmation: bool = False
+
+        def _fake_llm(content, agent):
+            return _FakeResult(
+                type="semantic-decision",
+                target_path=f"04-Agent-Knowledge/{agent}/decisions.md",
+                confidence=0.78,
+                reason="llm fallback hit",
+            )
+
+        # Force rule result to 'unknown'
+        def _rule_unknown(content, agent):
+            return _FakeResult(
+                type="unknown",
+                target_path="",
+                confidence=0.0,
+                reason="no rule",
+                needs_confirmation=True,
+            )
+
+        monkeypatch.setattr(
+            "kairix.core.classify.rules.classify_content",
+            _rule_unknown,
+        )
+        monkeypatch.setattr(
+            "kairix.core.classify.judge.classify_with_llm",
+            _fake_llm,
+        )
+
+        stdout_capture = io.StringIO()
+        with redirect_stdout(stdout_capture):
+            cli_mod.main(["arbitrary content"])
+        parsed = json.loads(stdout_capture.getvalue().strip())
+        assert parsed["type"] == "semantic-decision"
+        assert parsed["reason"] == "llm fallback hit"

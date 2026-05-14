@@ -11,6 +11,11 @@ run_all_checks() returns the full list. Checks are ordered from most-fundamental
 (PATH, secrets) to most-dependent (vector search, entity graph) so failures are
 diagnosed from the bottom up.
 
+run_onboard_check() wraps run_all_checks() and returns a structured
+OnboardResult — the canonical surface for ``kairix onboard check --json``
+and for any caller (CI, docker-compose healthcheck, MCP probe) that needs
+to act on individual failures programmatically.
+
 Failure modes:
   - Checks never raise; exceptions are caught and surfaced as failed CheckResult.
   - Checks that require live external services (Neo4j, Azure KV) degrade gracefully.
@@ -27,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kairix.paths import mcp_port as _mcp_port
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,9 +47,126 @@ class CheckResult:
     fix: str | None = field(default=None)
 
 
+@dataclass(frozen=True)
+class CheckFailure:
+    """Single failed check, structured for machine consumption.
+
+    Every failure carries:
+      check       — short ID matching the underlying CheckResult.name
+      detail      — one-line explanation of what's wrong
+      remediation — exact operator-actionable command/check the operator
+                    should run NOW (never empty)
+
+    Design principle: the remediation string must hand the operator their
+    next concrete step. "Run `<command>`" or "Check `<path>` exists" — not
+    a description of the failure state.
+    """
+
+    check: str
+    detail: str
+    remediation: str
+
+
+@dataclass(frozen=True)
+class OnboardResult:
+    """Structured result of a full onboard check run.
+
+    Fields:
+      passed       — number of checks that returned ok=True
+      total        — total number of checks executed
+      failures     — list of CheckFailure, one per failed check, in
+                     dependency order (most fundamental first)
+      fully_passed — True iff passed == total (derived)
+
+    The CLI's ``--json`` flag emits this directly; the human-readable
+    output renders the same data with icons + indented remediations.
+
+    Exit-code semantics: 0 when fully_passed is True, 1 otherwise.
+    """
+
+    passed: int
+    total: int
+    failures: list[CheckFailure]
+    fully_passed: bool
+
+
+# ---------------------------------------------------------------------------
+# Canonical remediations
+# ---------------------------------------------------------------------------
+# Each check has a canonical operator-actionable remediation string. When a
+# check returns a CheckResult with fix=None (or a structurally empty fix),
+# the canonical remediation is substituted so every CheckFailure surfaces a
+# concrete next step. The per-check CheckResult.fix strings remain the
+# detailed multi-line guidance for human readers; CheckFailure.remediation
+# is the one-line "run this now" command an agent or healthcheck can act on.
+
+_CANONICAL_REMEDIATIONS: dict[str, str] = {
+    "kairix_on_path": (
+        "Run `bash scripts/deploy-vm.sh` on the host to install the wrapper + symlink; "
+        "or manually export `PATH=/opt/openclaw/bin:$PATH`."
+    ),
+    "wrapper_installed": (
+        "Run `bash scripts/deploy-vm.sh` to install /opt/kairix/bin/kairix-wrapper.sh "
+        "and repoint /usr/local/bin/kairix at it."
+    ),
+    "secrets_loaded": (
+        "Run `sudo systemctl enable --now kairix-fetch-secrets.service` on the host; "
+        "if that fails, confirm `/run/secrets/kairix.env` exists and contains "
+        "`KAIRIX_LLM_API_KEY=...` and `KAIRIX_LLM_ENDPOINT=...`."
+    ),
+    "document_root_configured": (
+        "Set `KAIRIX_DOCUMENT_ROOT=/your/docs/path` in /opt/kairix/service.env and ensure the directory exists."
+    ),
+    "vector_search_working": (
+        "Run `docker logs kairix-worker-1` for embed-pipeline errors; confirm "
+        "`kairix onboard check secrets_loaded` passes; then run `kairix embed --limit 20` "
+        "to test the embed pipeline."
+    ),
+    "neo4j_reachable": (
+        "Run `bash scripts/install-neo4j.sh` to install Neo4j, then set "
+        "`KAIRIX_NEO4J_URI=bolt://localhost:7687` in /opt/kairix/service.env. "
+        "Neo4j is optional — entity boost degrades gracefully when offline."
+    ),
+    "agent_knowledge_populated": (
+        "Run `kairix embed` to populate the agent knowledge store from the document root, "
+        "or create at least one memory file at "
+        "$KAIRIX_DOCUMENT_ROOT/04-Agent-Knowledge/<agent>/memory/YYYY-MM-DD.md."
+    ),
+    "chunk_date_populated": (
+        "Run `kairix embed --rebuild-canaries` to refresh the chunk_date index. "
+        "If chunk_date is missing entirely, run `kairix embed` to trigger the migration."
+    ),
+    "mcp_service": (
+        "Register kairix with at least one MCP consumer harness: "
+        '`openclaw mcp set mcp-kairix \'{"type":"stdio","command":"/path/to/kairix-start.sh"}\'`, '
+        "add to ~/Library/Application Support/Claude/claude_desktop_config.json, or run "
+        "`sudo systemctl enable --now kairix-mcp.service`."
+    ),
+}
+
+_UNKNOWN_CHECK_REMEDIATION = (
+    "Report this failure as a bug in kairix.platform.onboard.check — the check has no canonical remediation registered."
+)
+
+
+def _remediation_for(check_name: str, fix: str | None) -> str:
+    """Return the canonical remediation for *check_name*.
+
+    Falls back to the per-check ``fix`` string only when the check name has
+    no canonical entry (which should never happen for production checks —
+    the dict above is the source of truth). Never returns empty.
+    """
+    canonical = _CANONICAL_REMEDIATIONS.get(check_name)
+    if canonical:
+        return canonical
+    if fix and fix.strip():
+        return fix.strip()
+    return _UNKNOWN_CHECK_REMEDIATION
+
+
 def _default_is_docker() -> bool:
-    """Production ``is_docker`` — defers to ``kairix.paths._is_docker``."""
-    from kairix.paths import _is_docker as _impl
+    """Production ``is_docker`` — defers to ``kairix.paths.is_docker_runtime_check``."""
+    from kairix.paths import is_docker_runtime_check as _impl
 
     return _impl()
 
@@ -93,7 +217,7 @@ def check_wrapper_installed(deps: OnboardChecksDeps | None = None) -> CheckResul
     """The kairix symlink points to a shell wrapper, not the raw Python binary.
 
     ``deps.is_docker`` and ``deps.which`` are the DI seams; production
-    callers leave ``deps=None`` and defaults wire to ``kairix.paths._is_docker``
+    callers leave ``deps=None`` and defaults wire to ``kairix.paths.is_docker_runtime_check``
     and ``shutil.which``.
     """
     d = deps if deps is not None else OnboardChecksDeps()
@@ -288,13 +412,19 @@ def check_document_root_configured(env: Mapping[str, str] | None = None) -> Chec
 # Backwards-compat alias
 
 
-def check_vector_search_working() -> CheckResult:
-    """Vector search returns results with vec_count > 0 (not BM25-only fallback)."""
-    try:
-        from kairix.core.factory import build_search_pipeline
+def check_vector_search_working(pipeline: Any | None = None) -> CheckResult:
+    """Vector search returns results with vec_count > 0 (not BM25-only fallback).
 
-        _pipeline = build_search_pipeline()
-        result = _pipeline.search(query="knowledge management", budget=500)
+    Args:
+        pipeline: Injectable search pipeline for testing. Defaults to the
+                  production ``build_search_pipeline()``.
+    """
+    try:
+        if pipeline is None:
+            from kairix.core.factory import build_search_pipeline
+
+            pipeline = build_search_pipeline()
+        result = pipeline.search(query="knowledge management", budget=500)
 
         vec_count = getattr(result, "vec_count", None)
         bm25_count = getattr(result, "bm25_count", None)
@@ -418,11 +548,19 @@ def check_neo4j_reachable(neo4j_client: Any | None = None) -> CheckResult:
         )
 
 
-def check_agent_knowledge_populated() -> CheckResult:
-    """At least one agent has memory logs (required for briefing pipeline)."""
-    from kairix.paths import document_root
+def check_agent_knowledge_populated(document_root_path: Path | None = None) -> CheckResult:
+    """At least one agent has memory logs (required for briefing pipeline).
 
-    agent_knowledge = document_root() / "04-Agent-Knowledge"
+    Args:
+        document_root_path: Override for the document root. Defaults to
+                            ``kairix.paths.document_root()``.
+    """
+    if document_root_path is None:
+        from kairix.paths import document_root
+
+        document_root_path = document_root()
+
+    agent_knowledge = document_root_path / "04-Agent-Knowledge"
     if not agent_knowledge.exists():
         return CheckResult(
             name="agent_knowledge_populated",
@@ -456,15 +594,22 @@ def check_agent_knowledge_populated() -> CheckResult:
     )
 
 
-def check_chunk_date_populated() -> CheckResult:
-    """chunk_date is populated in content_vectors (required for TMP-7B temporal boost)."""
+def check_chunk_date_populated(db_path: Path | None = None) -> CheckResult:
+    """chunk_date is populated in content_vectors (required for TMP-7B temporal boost).
+
+    Args:
+        db_path: Override for the SQLite DB path. Defaults to
+                 ``kairix.core.db.get_db_path()``.
+    """
     try:
-        from kairix.core.db import get_db_path, open_db
+        from kairix.core.db import open_db
 
-        db_path = get_db_path()
-        from pathlib import Path
+        if db_path is None:
+            from kairix.core.db import get_db_path
 
-        db = open_db(Path(db_path))
+            db_path = Path(get_db_path())
+
+        db = open_db(db_path)
         try:
             # Check if the column exists first
             cols = {row[1] for row in db.execute("PRAGMA table_info(content_vectors)")}
@@ -566,7 +711,8 @@ _CLAUDE_DESKTOP_CONFIG_PATHS = (
 )
 
 # ── SSE / HTTP ────────────────────────────────────────────────────────────────
-_MCP_SSE_PORT = int(os.environ.get("KAIRIX_MCP_PORT", "8080"))
+# Env read lives in kairix.paths.mcp_port (F4 — env reads stay in paths/secrets).
+_MCP_SSE_PORT = _mcp_port()
 
 
 def _probe_openclaw_harness() -> tuple[bool, str]:
@@ -775,3 +921,36 @@ def run_all_checks() -> list[CheckResult]:
                 )
             )
     return results
+
+
+def run_onboard_check() -> OnboardResult:
+    """Run all deployment checks and return a structured OnboardResult.
+
+    Canonical surface for:
+      - ``kairix onboard check --json`` CLI output
+      - docker-compose healthcheck (exit code is derived from .fully_passed)
+      - any caller that needs to act on individual failures programmatically
+
+    Each failed check produces a CheckFailure with a populated, non-empty
+    ``remediation`` string sourced from _CANONICAL_REMEDIATIONS. The set of
+    checks (and their order) is identical to run_all_checks() — this
+    function only restructures the output.
+    """
+    results = run_all_checks()
+    failures = [
+        CheckFailure(
+            check=r.name,
+            detail=r.detail,
+            remediation=_remediation_for(r.name, r.fix),
+        )
+        for r in results
+        if not r.ok
+    ]
+    passed = sum(1 for r in results if r.ok)
+    total = len(results)
+    return OnboardResult(
+        passed=passed,
+        total=total,
+        failures=failures,
+        fully_passed=(passed == total),
+    )

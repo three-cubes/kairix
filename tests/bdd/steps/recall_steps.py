@@ -20,8 +20,8 @@ from pytest_bdd import given, parsers, then, when
 from kairix.core.embed.recall_check import (
     DEFAULT_RECALL_QUERIES,
     RecallChecker,
-    _build_adaptive_queries,
-    _get_recall_queries,
+    build_adaptive_queries,
+    get_recall_queries,
     run_recall_gate,
 )
 
@@ -59,8 +59,8 @@ def index_with_titled_documents() -> None:
 
 
 @when("the recall check builds adaptive queries")
-def build_adaptive_queries() -> None:
-    _state["queries"] = _build_adaptive_queries(_state["db"])
+def step_build_adaptive_queries() -> None:
+    _state["queries"] = build_adaptive_queries(_state["db"])
 
 
 @then("at least 3 recall queries are generated")
@@ -95,7 +95,7 @@ def build_queries() -> None:
     # exercises the build path each run (otherwise the first scenario
     # populates ~/.cache/kairix/recall-canaries.json and subsequent
     # scenarios load from that cache).
-    _state["queries"] = _get_recall_queries(_state["db"], cache_path=None)
+    _state["queries"] = get_recall_queries(_state["db"], cache_path=None)
 
 
 @then("the default recall queries are used")

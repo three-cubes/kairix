@@ -73,8 +73,8 @@ dev = [
 kairix = "kairix.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/quanyeomans/kairix"
-Issues = "https://github.com/quanyeomans/kairix/issues"
+Homepage = "https://github.com/three-cubes/kairix"
+Issues = "https://github.com/three-cubes/kairix/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -107,16 +107,16 @@ omit = [
     # Each will move out of this list when tests land.
     "kairix/knowledge/contradict/cli.py",
     "kairix/knowledge/reflib/cli.py",
-    "kairix/platform/onboard/cli.py",
-    "kairix/quality/benchmark/cli.py",
-    # Wikilinks audit reporter — 0% coverage today, no public callers in
-    # tests; flagged for backfill or removal.
-    "kairix/knowledge/wikilinks/audit.py",
+    # NOTE: benchmark/cli.py and wikilinks/audit.py removed from omit
+    # after PR #247 — tests now exist (tests/benchmark/test_cli_helpers.py
+    # and tests/wikilinks/test_audit_unit.py — 63 sabotage-proven tests).
 ]
 
 [tool.coverage.report]
-# Engineering hub: ≥80% overall; per-module targets in PRD.md §6
-fail_under = 80
+# Engineering hub: per-file floor at 90% (F7/F9). Overall fail_under
+# tracks the current achievable floor while the per-file baseline burns
+# down; raise toward 90 as the 34 grandfathered low-coverage files lift.
+fail_under = 88
 show_missing = true
 exclude_lines = [
     "pragma: no cover",
@@ -212,6 +212,31 @@ skips = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["kairix*"]
+
+# Data files shipped inside Python packages.
+#
+# ``kairix.plugins.openclaw`` ships an openclaw plugin under
+# ``memory-prompt/`` (#246 W5). The directory name is hyphenated because
+# openclaw's plugin loader discovers plugins by directory slug, and
+# ``kairix-memory-prompt`` is the slug admins put in ``plugins.allow``.
+# Python cannot import hyphenated module names, so the directory is
+# *data* inside the ``kairix.plugins.openclaw`` Python package rather
+# than a sub-package of its own — package-data is the canonical way to
+# ship arbitrary files alongside Python source.
+#
+# The glob below ensures ``plugin.py`` (the entry openclaw loads),
+# ``plugin.json`` (the manifest openclaw parses) and ``README.md`` (the
+# operator-facing config snippet) all land at
+# ``<site-packages>/kairix/plugins/openclaw/memory-prompt/`` after
+# ``pip install kairix``. The Dockerfile then exposes them at
+# ``/opt/kairix/plugins/openclaw/memory-prompt/`` via a symlink so
+# admins point openclaw at a stable path.
+[tool.setuptools.package-data]
+"kairix.plugins.openclaw" = [
+    "memory-prompt/plugin.py",
+    "memory-prompt/plugin.json",
+    "memory-prompt/README.md",
+]
 
 # Benchmark gates — kairix benchmark run exits non-zero if any gate fails.
 # E2E test gate: set KAIRIX_E2E=1 to enable live Azure API tests.

@@ -52,7 +52,7 @@ The workflow:
 
 ```bash
 # Pull image on the VM
-ssh threecubes 'docker pull ghcr.io/quanyeomans/kairix:vYYYY.M.D'
+ssh threecubes 'docker pull ghcr.io/three-cubes/kairix:vYYYY.M.D'
 
 # Restart the kairix container (preserves /data/kairix mounts)
 ssh threecubes 'cd /opt/kairix && docker compose pull && docker compose up -d'

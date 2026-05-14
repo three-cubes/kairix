@@ -23,7 +23,7 @@ arch_gate() {
     current=$(sort -u)  # consume stdin
 
     local baseline
-    if [ -f "$baseline_file" ]; then
+    if [[ -f "$baseline_file" ]]; then
         baseline=$(sort -u <"$baseline_file")
     else
         baseline=""
@@ -32,7 +32,7 @@ arch_gate() {
     local new_files
     new_files=$(comm -23 <(echo "$current") <(echo "$baseline") | sed '/^$/d')
 
-    if [ -n "$new_files" ]; then
+    if [[ -n "$new_files" ]]; then
         printf '\033[0;31mFAIL [arch:%s]\033[0m — new violation(s) introduced:\n' "$name"
         echo "$new_files" | sed 's/^/  /'
         printf '\n%s\n' "$remediation"
@@ -44,12 +44,12 @@ arch_gate() {
 
     # Informational: how many grandfathered files remain.
     local remaining
-    if [ -n "$baseline" ]; then
+    if [[ -n "$baseline" ]]; then
         remaining=$(echo "$baseline" | wc -l | tr -d ' ')
     else
         remaining=0
     fi
-    if [ "$remaining" -gt 0 ]; then
+    if [[ "$remaining" -gt 0 ]]; then
         printf '\033[0;33mok [arch:%s]\033[0m — %d grandfathered file(s) still present in baseline.\n' "$name" "$remaining"
     else
         printf '\033[0;32mok [arch:%s]\033[0m — clean.\n' "$name"

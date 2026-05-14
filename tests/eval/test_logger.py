@@ -1,6 +1,7 @@
 """Unit tests for kairix.quality.eval.logger.QueryLogger."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -55,7 +56,8 @@ def test_logger_appends(tmp_path):
 @pytest.mark.unit
 def test_logger_never_raises_on_bad_path():
     """Logger must not raise even if the path is unwritable."""
-    ql = QueryLogger(log_path="/nonexistent/deep/path/test.jsonl")
+    bad_path = "/nonexistent/deep/path/test.jsonl"
+    ql = QueryLogger(log_path=bad_path)
     entry = QueryLogEntry(
         ts="2026-04-16T10:00:00Z",
         agent="shape",
@@ -67,7 +69,10 @@ def test_logger_never_raises_on_bad_path():
         latency_ms=0.0,
     )
     ql.log(entry)  # should not raise
-    assert True, "smoke: unwritable path did not raise"
+    # Pin the contract: a failed write produces no file (the parent.mkdir
+    # itself failed, so nothing was ever written). Replaces a tautological
+    # ``assert True`` (S5914).
+    assert not Path(bad_path).exists()
 
 
 @pytest.mark.unit

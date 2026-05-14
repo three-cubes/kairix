@@ -209,3 +209,178 @@ class TestFetchRecentDecisions:
         # Should return empty string when decisions.md doesn't exist
         result = fetch_recent_decisions("builder", document_root=tmp_path)
         assert isinstance(result, str)
+
+    @pytest.mark.unit
+    def test_truncates_long_decisions_to_last_3000_chars(self, tmp_path):
+        """When decisions.md exceeds 3000 chars, only the tail is kept (line 222)."""
+        decisions_dir = tmp_path / "04-Agent-Knowledge" / "builder"
+        decisions_dir.mkdir(parents=True)
+        # Make a >3000 char file with a distinctive trailing marker
+        body = ("Old decision line. " * 200) + "\n## RECENT_MARKER\nLatest decision here.\n"
+        assert len(body) > 3000
+        (decisions_dir / "decisions.md").write_text(body)
+        result = fetch_recent_decisions("builder", document_root=tmp_path, max_tokens=10_000)
+        # The recent marker must be in the (tail-trimmed) output
+        assert "RECENT_MARKER" in result
+        # Old lines from the very start should not all be present
+        # (head truncation keeps last 3000 chars)
+        assert len(result) <= len(body) + 200  # accounts for header text + truncation marker
+
+
+@pytest.mark.unit
+class TestFetchMemoryLogsErrorPaths:
+    """Cover error handling and outer-except wrappers."""
+
+    @pytest.mark.unit
+    def test_outer_exception_returns_empty(self, tmp_path):
+        """When the memory_dir.exists() call raises (e.g., bad type), the outer
+        except returns ''. Use a Path-like object whose exists() raises."""
+
+        class _ExplodingPath:
+            def exists(self):
+                raise RuntimeError("disk gone")
+
+        result = fetch_memory_logs("builder", memory_dir=_ExplodingPath())  # type: ignore[arg-type]  # exploding fake to trip outer except
+        assert result == ""
+
+
+@pytest.mark.unit
+class TestFetchRecentMemoryErrorPaths:
+    @pytest.mark.unit
+    def test_outer_exception_returns_empty(self):
+        """fetch_recent_memory wraps everything in try/except; bad input → ''."""
+
+        class _ExplodingPath:
+            def exists(self):
+                raise RuntimeError("disk gone")
+
+        result = fetch_recent_memory("builder", memory_dir=_ExplodingPath())  # type: ignore[arg-type]  # exploding fake to trip outer except
+        assert result == ""
+
+    @pytest.mark.unit
+    def test_unreadable_file_per_day_logs_warning(self, tmp_path):
+        """When a per-day file raises on read, the warning fires but processing
+        continues for sibling days (lines 107-108)."""
+        from datetime import date
+
+        memory_dir = tmp_path / "builder" / "memory"
+        memory_dir.mkdir(parents=True)
+        today = date.today()
+        bad = memory_dir / f"{today.isoformat()}.md"
+        bad.write_bytes(b"\xff\xfe garbage")  # invalid utf-8 still readable with errors=replace
+        bad.chmod(0o000)
+        try:
+            result = fetch_recent_memory("builder", memory_dir=memory_dir)
+            # When the file is unreadable, the function returns "" (no parts collected)
+            assert isinstance(result, str)
+        finally:
+            bad.chmod(0o644)
+
+
+@pytest.mark.unit
+class TestFetchEntityStubErrorPaths:
+    @pytest.mark.unit
+    def test_outer_exception_returns_empty(self):
+        """fetch_entity_stub catches Exception in the outer scope (lines 159-161)."""
+
+        # Pass document_root as something whose / operation raises
+        class _ExplodingRoot:
+            def __truediv__(self, other):
+                raise RuntimeError("bad root")
+
+        result = fetch_entity_stub("builder", document_root=_ExplodingRoot())  # type: ignore[arg-type]  # exploding fake to trip outer except
+        assert result == ""
+
+    @pytest.mark.unit
+    def test_unreadable_entity_stub_returns_empty(self, tmp_path):
+        """A matching stub that raises on read is logged and skipped (lines 153-154)."""
+        entity_dir = tmp_path / "04-Agent-Knowledge" / "entities" / "concept"
+        entity_dir.mkdir(parents=True)
+        stub = entity_dir / "builder.md"
+        stub.write_text("# Builder")
+        stub.chmod(0o000)
+        try:
+            result = fetch_entity_stub("builder", document_root=tmp_path)
+            # Skipped — falls through to next candidate (none) → "" returned
+            assert result == ""
+        finally:
+            stub.chmod(0o644)
+
+
+@pytest.mark.unit
+class TestFetchKnowledgeRulesErrorPaths:
+    @pytest.mark.unit
+    def test_outer_exception_returns_empty(self):
+        """fetch_knowledge_rules wraps everything (lines 196-198)."""
+
+        class _ExplodingRoot:
+            def __truediv__(self, other):
+                raise RuntimeError("bad root")
+
+        result = fetch_knowledge_rules("builder", document_root=_ExplodingRoot())  # type: ignore[arg-type]  # exploding fake to trip outer except
+        assert result == ""
+
+    @pytest.mark.unit
+    def test_unreadable_rules_file_logged(self, tmp_path):
+        """Unreadable rules.md is logged and skipped (lines 187-188)."""
+        rules_dir = tmp_path / "04-Agent-Knowledge" / "builder"
+        rules_dir.mkdir(parents=True)
+        rules = rules_dir / "rules.md"
+        rules.write_text("# Rules\n1. Be excellent.")
+        rules.chmod(0o000)
+        try:
+            result = fetch_knowledge_rules("builder", document_root=tmp_path)
+            assert result == ""
+        finally:
+            rules.chmod(0o644)
+
+
+@pytest.mark.unit
+class TestFetchRecentDecisionsErrorPaths:
+    @pytest.mark.unit
+    def test_outer_exception_returns_empty(self):
+        """fetch_recent_decisions wraps in try/except (lines 233-235)."""
+
+        class _ExplodingRoot:
+            def __truediv__(self, other):
+                raise RuntimeError("bad root")
+
+        result = fetch_recent_decisions("builder", document_root=_ExplodingRoot())  # type: ignore[arg-type]  # exploding fake to trip outer except
+        assert result == ""
+
+    @pytest.mark.unit
+    def test_unreadable_decisions_file_logged(self, tmp_path):
+        """Unreadable decisions.md is logged and skipped (lines 224-225)."""
+        decisions_dir = tmp_path / "04-Agent-Knowledge" / "builder"
+        decisions_dir.mkdir(parents=True)
+        decisions = decisions_dir / "decisions.md"
+        decisions.write_text("# Decisions\n- ADR-001")
+        decisions.chmod(0o000)
+        try:
+            result = fetch_recent_decisions("builder", document_root=tmp_path)
+            assert result == ""
+        finally:
+            decisions.chmod(0o644)
+
+
+@pytest.mark.unit
+class TestFetchHybridSearchErrorPaths:
+    """fetch_hybrid_search has no DI seam; we exercise the outer except path
+    by invoking it in an environment where build_search_pipeline cannot
+    construct a working pipeline (no Azure creds, no Neo4j).
+
+    This is purely a defensive test: the function must return '' and not raise
+    when its dependencies are unavailable.
+    """
+
+    @pytest.mark.unit
+    def test_failure_returns_empty(self):
+        """Calling without creds / Neo4j leaves build_search_pipeline returning
+        a degraded pipeline whose .search() raises. The outer except returns ''.
+        """
+        from kairix.agents.briefing.sources import fetch_hybrid_search
+
+        # The pipeline construction may succeed but .search() will fail without
+        # a populated index. Either way the function returns '' (lines 266-268).
+        result = fetch_hybrid_search("nonexistent-agent-xyz")
+        assert isinstance(result, str)

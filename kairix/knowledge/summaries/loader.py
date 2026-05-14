@@ -59,7 +59,7 @@ def load_tiered_content(
     path: str,
     db: sqlite3.Connection,
     budget_tokens: int = 500,
-    tier_preference: str = "l0",  # "l0" | "l1" | "full"
+    _tier_preference: str = "l0",  # "l0" | "l1" | "full" — reserved for future explicit tier pinning
 ) -> tuple[str, str]:
     """
     Return (content, tier_used) based on budget and available summaries.

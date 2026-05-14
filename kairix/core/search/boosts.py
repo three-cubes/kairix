@@ -33,7 +33,13 @@ class EntityBoost:
         self._graph = graph
         self._config = config
 
-    def boost(self, results: list, query: str, context: dict) -> list:
+    def boost(self, results: list, _query: str, context: dict) -> list:
+        """Apply entity in-degree boost when context.intent == ENTITY.
+
+        ``_query`` is part of the ``BoostStrategy`` Protocol signature but
+        unused by this strategy — the boost is purely structural (Neo4j
+        graph in-degree), not query-text dependent.
+        """
         if context.get("intent") != QueryIntent.ENTITY:
             return results
         from kairix.core.search.rrf import entity_boost_neo4j
@@ -52,7 +58,13 @@ class ProceduralBoost:
     def __init__(self, config: ProceduralBoostConfig | None = None) -> None:
         self._config = config
 
-    def boost(self, results: list, query: str, context: dict) -> list:
+    def boost(self, results: list, _query: str, context: dict) -> list:
+        """Boost procedural-shaped paths when context.intent == PROCEDURAL.
+
+        ``_query`` is part of the ``BoostStrategy`` Protocol signature but
+        unused — the procedural boost is path-pattern based, not query-text
+        dependent.
+        """
         if context.get("intent") != QueryIntent.PROCEDURAL:
             return results
         from kairix.core.search.rrf import procedural_boost
@@ -90,7 +102,13 @@ class ChunkDateBoost:
     def __init__(self, config: TemporalBoostConfig | None = None) -> None:
         self._config = config
 
-    def boost(self, results: list, query: str, context: dict) -> list:
+    def boost(self, results: list, _query: str, context: dict) -> list:
+        """Apply chunk_date proximity boost when intent == TEMPORAL.
+
+        ``_query`` is part of the ``BoostStrategy`` Protocol signature; the
+        actual proximity input is ``context["query_date"]``, not the raw
+        query string.
+        """
         if context.get("intent") != QueryIntent.TEMPORAL:
             return results
         from kairix.core.search.rrf import chunk_date_boost

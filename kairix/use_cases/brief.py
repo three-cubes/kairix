@@ -12,15 +12,33 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from kairix.use_cases import _brief_defaults as _defaults
+from kairix.core.health import (
+    HealthDeps,
+    KairixHealth,
+    brief_next_action,
+    health_to_envelope,
+    probe_health,
+)
 
 logger = logging.getLogger(__name__)
 
 _VALID_AGENTS = {"builder", "shape", "growth", "consultant"}
+
+
+def _default_generate(agent: str, **kwargs: Any) -> str:
+    from kairix.agents.briefing.pipeline import generate_briefing
+
+    return generate_briefing(agent, **kwargs)
+
+
+def _default_briefing_dir() -> Path:
+    from kairix.agents.briefing.writer import BRIEFING_DIR
+
+    return BRIEFING_DIR
 
 
 @dataclass(frozen=True)
@@ -45,15 +63,24 @@ class BriefOutput:
     content: str = ""
     path: str = ""
     preview: str = ""
+    health: KairixHealth = field(default_factory=KairixHealth)
     error: str = ""
 
 
 @dataclass(frozen=True)
 class BriefDeps:
-    """Injectable dependencies for ``run_brief``."""
+    """Injectable dependencies for ``run_brief``.
 
-    generate_fn: Callable[..., str] | None = None
-    briefing_dir_fn: Callable[[], Path] | None = None
+    Mirrors ``WorkerDeps`` (kairix/worker.py): each callable is
+    non-Optional with a ``default_factory`` returning the production
+    helper. Tests construct ``BriefDeps(generate_fn=fake, ...)``;
+    production callers leave ``deps=None`` and the run_brief default
+    factory wires the real helpers.
+    """
+
+    generate_fn: Callable[..., str] = field(default_factory=lambda: _default_generate)
+    briefing_dir_fn: Callable[[], Path] = field(default_factory=lambda: _default_briefing_dir)
+    health_deps: HealthDeps = field(default_factory=HealthDeps)
 
 
 def run_brief(
@@ -69,20 +96,30 @@ def run_brief(
         agent: Agent name (builder / shape / growth / consultant).
         deps: Injectable dependencies; production callers leave None.
     """
+    d = deps or BriefDeps()
+    health = _brief_health(probe_health(d.health_deps))
+
     normalised = (agent or "").lower().strip()
     if normalised not in _VALID_AGENTS:
         return BriefOutput(
             agent=agent,
+            health=health,
             error=f"InvalidAgent: {agent!r}. Must be one of: {sorted(_VALID_AGENTS)}",
         )
 
-    d = deps or BriefDeps()
-    generate = d.generate_fn or _defaults.default_generate
-    briefing_dir = d.briefing_dir_fn or _defaults.default_briefing_dir
+    # When chat synthesis is offline the envelope returns an empty
+    # content body — generate_fn would crash on a real call without an
+    # LLM credential. The envelope still tells the agent what to do next
+    # via ``health.next_action`` (fall back to tool_search). #246 W3.
+    if health.chat != "ok":
+        return BriefOutput(
+            agent=normalised,
+            health=health,
+        )
 
     try:
-        content = generate(normalised)
-        out_dir = briefing_dir()
+        content = d.generate_fn(normalised)
+        out_dir = d.briefing_dir_fn()
         path = str(out_dir / f"{normalised}-latest.md") if out_dir else ""
         preview = "\n".join(content.splitlines()[:30])
         return BriefOutput(
@@ -90,13 +127,30 @@ def run_brief(
             content=content,
             path=path,
             preview=preview,
+            health=health,
         )
     except Exception as exc:
         logger.warning("run_brief failed: %s", exc, exc_info=True)
         return BriefOutput(
             agent=normalised,
+            health=health,
             error=f"{type(exc).__name__}: {exc}",
         )
+
+
+def _brief_health(base: KairixHealth) -> KairixHealth:
+    """Overlay the brief-specific ``next_action`` onto the shared snapshot."""
+    directive = brief_next_action(base)
+    if not directive:
+        return base
+    return KairixHealth(
+        vector_search=base.vector_search,
+        bm25=base.bm25,
+        chat=base.chat,
+        secrets_loaded=base.secrets_loaded,
+        degraded_reason=base.degraded_reason,
+        next_action=directive,
+    )
 
 
 def brief_output_to_envelope(out: BriefOutput) -> dict[str, Any]:
@@ -106,5 +160,6 @@ def brief_output_to_envelope(out: BriefOutput) -> dict[str, Any]:
         "content": out.content,
         "path": out.path,
         "preview": out.preview,
+        "health": dict(health_to_envelope(out.health)),
         "error": out.error,
     }

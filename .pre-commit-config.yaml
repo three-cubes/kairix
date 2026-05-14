@@ -114,3 +114,73 @@ repos:
         language: system
         pass_filenames: false
         files: ^tests/bdd/features/.*\.feature$
+
+      - id: arch-sonar-ignore-rationale
+        name: "arch F14: sonar.issue.ignore entries require rationale"
+        entry: python3 scripts/checks/check_sonar_ignore_rationale.py
+        language: system
+        pass_filenames: false
+        files: ^sonar-project\.properties$
+
+      - id: arch-no-logging-secrets
+        name: "arch F15: no logging secret-named variables in plaintext"
+        entry: python3 scripts/checks/check_no_logging_secrets.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-cognitive-complexity
+        name: "arch F16: cognitive complexity <= 15 per function"
+        entry: python3 scripts/checks/check_cognitive_complexity.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-no-duplicate-string
+        name: "arch F17: no duplicated string literal (>=10 chars, >=3 occurrences)"
+        entry: python3 scripts/checks/check_no_duplicate_string.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-no-commented-out-code
+        name: "arch F18: no commented-out code"
+        entry: python3 scripts/checks/check_no_commented_out_code.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-unused-params-named
+        name: "arch F19: unused parameter requires _ prefix"
+        entry: python3 scripts/checks/check_unused_params_named.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-empty-body-intent
+        name: "arch F20: empty function body requires docstring or intent comment"
+        entry: python3 scripts/checks/check_empty_body_intent.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-actionable-feedback
+        name: "arch F21: check-script failure output must be agent-actionable"
+        entry: python3 scripts/checks/check_actionable_feedback.py
+        language: system
+        pass_filenames: false
+        files: ^scripts/checks/.*$
+
+      - id: arch-path-naming
+        name: "arch F22: repo path naming conventions per tree"
+        entry: python3 scripts/checks/check_path_naming.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: arch-readme-coverage
+        name: "arch F23: every top-level directory has a README.md"
+        entry: python3 scripts/checks/check_readme_coverage.py
+        language: system
+        pass_filenames: false
+        always_run: true

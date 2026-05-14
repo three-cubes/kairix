@@ -16,9 +16,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from kairix.knowledge.wikilinks.resolver import (  # noqa: F401 — imported to confirm it exists for monkeypatching
+from kairix.knowledge.wikilinks.resolver import (
     WikiEntity,
-    _neo4j_get_client,
     get_entities,
     load_entities_from_bootstrap,
     load_entities_from_neo4j,
@@ -198,22 +197,20 @@ def test_bootstrap_no_header_rows(bootstrap_file: str) -> None:
 
 
 @pytest.mark.unit
-def test_neo4j_load_returns_entities(monkeypatch: pytest.MonkeyPatch) -> None:
-    """load_entities_from_neo4j() returns WikiEntity objects from Neo4j rows.
+def test_neo4j_load_returns_entities() -> None:
+    """load_entities_from_neo4j(client=fake) returns WikiEntity objects from Neo4j rows.
 
     The loader calls cypher() twice (once per label — Organisation, Person),
-    so we use side_effect to give each call distinct rows.
+    so we use side_effect to give each call distinct rows. F5-clean: pass
+    client= directly, no monkeypatch of the private lookup.
     """
-    import kairix.knowledge.wikilinks.resolver as resolver_mod
-
     org_rows = _NEO4J_ROWS[:4]  # organisations
     person_rows = _NEO4J_ROWS[4:]  # people/projects
     client = MagicMock()
     client.available = True
     client.cypher.side_effect = [org_rows, person_rows]
-    monkeypatch.setattr(resolver_mod, "_neo4j_get_client", lambda: client)
 
-    entities = load_entities_from_neo4j()
+    entities = load_entities_from_neo4j(client=client)
     assert len(entities) == len(_NEO4J_ROWS)
     names = [e.name for e in entities]
     assert "Acme Corp" in names
@@ -221,25 +218,18 @@ def test_neo4j_load_returns_entities(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.unit
-def test_neo4j_load_returns_empty_when_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """load_entities_from_neo4j() returns [] when Neo4j is unavailable."""
-    import kairix.knowledge.wikilinks.resolver as resolver_mod
-
+def test_neo4j_load_returns_empty_when_unavailable() -> None:
+    """load_entities_from_neo4j returns [] when the injected client is unavailable."""
     client = MagicMock()
     client.available = False
-    monkeypatch.setattr(resolver_mod, "_neo4j_get_client", lambda: client)
 
-    entities = load_entities_from_neo4j()
+    entities = load_entities_from_neo4j(client=client)
     assert entities == []
 
 
 @pytest.mark.unit
-def test_neo4j_load_merges_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_neo4j_load_merges_aliases() -> None:
     """Aliases list from Neo4j row is included in all_triggers()."""
-    import kairix.knowledge.wikilinks.resolver as resolver_mod
-
     row = {
         "id": "acme",
         "name": "Acme Corp",
@@ -250,9 +240,8 @@ def test_neo4j_load_merges_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
     client = MagicMock()
     client.available = True
     client.cypher.side_effect = [[row], []]
-    monkeypatch.setattr(resolver_mod, "_neo4j_get_client", lambda: client)
 
-    entities = load_entities_from_neo4j()
+    entities = load_entities_from_neo4j(client=client)
     assert len(entities) == 1
     triggers = entities[0].all_triggers()
     assert "Acme" in triggers
@@ -260,18 +249,13 @@ def test_neo4j_load_merges_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.unit
-def test_neo4j_load_returns_empty_on_cypher_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """load_entities_from_neo4j() returns [] on any cypher exception."""
-    import kairix.knowledge.wikilinks.resolver as resolver_mod
-
+def test_neo4j_load_returns_empty_on_cypher_error() -> None:
+    """load_entities_from_neo4j returns [] on any cypher exception."""
     client = MagicMock()
     client.available = True
     client.cypher.side_effect = RuntimeError("connection error")
-    monkeypatch.setattr(resolver_mod, "_neo4j_get_client", lambda: client)
 
-    entities = load_entities_from_neo4j()
+    entities = load_entities_from_neo4j(client=client)
     assert entities == []
 
 
@@ -291,7 +275,7 @@ def test_get_entities_uses_neo4j_when_sufficient(
     monkeypatch.setattr(
         resolver_mod,
         "load_entities_from_neo4j",
-        lambda: [
+        lambda client=None: [
             WikiEntity(
                 name=r["name"],
                 aliases=r["aliases"],
@@ -340,7 +324,7 @@ def test_get_entities_falls_back_to_bootstrap_when_neo4j_sparse(
             entity_type="organisation",
         ),
     ]
-    monkeypatch.setattr(resolver_mod, "load_entities_from_neo4j", lambda: sparse_rows)
+    monkeypatch.setattr(resolver_mod, "load_entities_from_neo4j", lambda client=None: sparse_rows)
     monkeypatch.setattr(
         resolver_mod,
         "load_entities_from_bootstrap",
@@ -360,7 +344,7 @@ def test_get_entities_falls_back_to_bootstrap_when_neo4j_unavailable(
     """get_entities() falls back to bootstrap when Neo4j is completely unavailable."""
     import kairix.knowledge.wikilinks.resolver as resolver_mod
 
-    monkeypatch.setattr(resolver_mod, "load_entities_from_neo4j", lambda: [])
+    monkeypatch.setattr(resolver_mod, "load_entities_from_neo4j", lambda client=None: [])
     monkeypatch.setattr(
         resolver_mod,
         "load_entities_from_bootstrap",

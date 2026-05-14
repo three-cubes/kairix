@@ -21,10 +21,10 @@ from kairix.quality.eval.generate import (
     GenerationResult,
     QueryGenerator,
     SuiteGenerator,
-    _default_chat_backend,
-    _empty_generation_result,
     build_case,
     build_generation_prompt,
+    default_chat_backend,
+    empty_generation_result,
     enrich_suite,
     filter_and_process_sampled_rows,
     generate_queries,
@@ -451,7 +451,7 @@ def test_suite_generator_generate_suite_returns_error_on_credential_failure(tmp_
     suite_gen = SuiteGenerator()
     # api_key=None and endpoint=None forces resolve_credentials. The test env has no
     # secrets configured, so resolve_credentials raises — we expect generate_suite
-    # to capture it via _empty_generation_result rather than raising.
+    # to capture it via empty_generation_result rather than raising.
     result = suite_gen.generate_suite(
         output_path=str(output),
         n_cases=1,
@@ -477,7 +477,7 @@ def test_suite_generator_generate_suite_returns_error_on_calibration_failure(tmp
             raise JudgeCalibrationError("calibration failed for the test")
 
     output = tmp_path / "out.yaml"
-    suite_gen = SuiteGenerator(llm_judge=_FailingJudge())  # type: ignore[arg-type]
+    suite_gen = SuiteGenerator(llm_judge=_FailingJudge())  # type: ignore[arg-type]  # test double satisfies Judge protocol structurally
     result = suite_gen.generate_suite(
         output_path=str(output),
         n_cases=1,
@@ -1075,7 +1075,7 @@ def test_build_generation_prompt_strips_newlines_in_caller_supplied_content() ->
 
 
 # ---------------------------------------------------------------------------
-# _empty_generation_result — early-exit helper
+# empty_generation_result — early-exit helper
 # ---------------------------------------------------------------------------
 
 
@@ -1084,7 +1084,7 @@ def test_empty_generation_result_returns_zero_counts() -> None:
     """The early-exit helper returns a GenerationResult with all-zero counts."""
     # Opaque path label — never opened. Avoid /tmp to satisfy "publicly
     # writable directory" hotspot rule even though no file is ever written.
-    result = _empty_generation_result("fixtures/x.yaml", calibration_passed=False, errors=["e"])
+    result = empty_generation_result("fixtures/x.yaml", calibration_passed=False, errors=["e"])
     assert result.n_generated == 0
     assert result.n_accepted == 0
     assert result.n_rejected == 0
@@ -1094,17 +1094,21 @@ def test_empty_generation_result_returns_zero_counts() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _default_chat_backend
+# default_chat_backend
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_default_chat_backend_returns_azure_adapter() -> None:
-    """Production fallback constructs an AzureChatBackend."""
-    from kairix._azure import AzureChatBackend
+def test_default_chat_backend_returns_protocol_compliant_object() -> None:
+    """Production fallback returns an object satisfying the ChatBackend
+    protocol (has a ``complete`` callable).
 
-    backend = _default_chat_backend()
-    assert isinstance(backend, AzureChatBackend)
+    F5-clean: assert protocol shape rather than importing from the private
+    ``kairix._azure`` module. The concrete class is an implementation
+    detail; what callers depend on is the protocol surface.
+    """
+    backend = default_chat_backend()
+    assert callable(getattr(backend, "complete", None))
 
 
 # ---------------------------------------------------------------------------

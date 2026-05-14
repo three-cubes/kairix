@@ -40,18 +40,20 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
 # ---------------------------------------------------------------------------
 
 # YAML frontmatter block — \A anchor ensures match only at string start
-# NOSONAR: non-greedy `.*?` bounded by literal `\n---\s*\n`
-# terminator; input is markdown frontmatter (file-bounded, not user request).
-_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+_FRONTMATTER_RE = re.compile(
+    r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL
+)  # NOSONAR — non-greedy `.*?` bounded by `\n---\s*\n`; file-bounded frontmatter input.
 
 # Same pattern without capture group, for strip_frontmatter
-# NOSONAR: same rationale as _FRONTMATTER_RE — bounded input.
-_FRONTMATTER_STRIP_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
+_FRONTMATTER_STRIP_RE = re.compile(
+    r"\A---\s*\n.*?\n---\s*\n", re.DOTALL
+)  # NOSONAR — same rationale as _FRONTMATTER_RE: bounded input.
 
 # First markdown heading — `(.+)` is anchored to a single line via re.MULTILINE
 # so backtracking is bounded by line length.
-# NOSONAR: single-line input via re.MULTILINE — no polynomial blowup.
-_FIRST_HEADING_RE = re.compile(r"^#{1,3}\s+(.+)$", re.MULTILINE)
+_FIRST_HEADING_RE = re.compile(
+    r"^#{1,3}\s+(.+)$", re.MULTILINE
+)  # NOSONAR — single-line input via re.MULTILINE; no polynomial blowup.
 
 
 def strip_frontmatter(text: str) -> str:
@@ -60,6 +62,28 @@ def strip_frontmatter(text: str) -> str:
     Uses \\A anchor to match only at string start (not mid-string with DOTALL).
     """
     return _FRONTMATTER_STRIP_RE.sub("", text, count=1)
+
+
+def _title_from_frontmatter(fm_block: str) -> str | None:
+    """Extract the ``title:`` value from a YAML frontmatter block, or None."""
+    for line in fm_block.split("\n"):
+        line = line.strip()
+        if line.lower().startswith("title:") and ":" in line:
+            _, _, value = line.partition(":")
+            value = value.strip().strip("'\"")
+            if value:
+                return value
+    return None
+
+
+def _title_from_first_heading(body: str) -> str | None:
+    """Find the first markdown ``#`` heading in body; strip markdown links."""
+    heading_match = _FIRST_HEADING_RE.search(body)
+    if not heading_match:
+        return None
+    title = heading_match.group(1).strip()
+    title = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", title)
+    return title if title and len(title) < 200 else None
 
 
 def extract_title(text: str, path: Path) -> str:
@@ -74,27 +98,17 @@ def extract_title(text: str, path: Path) -> str:
     # Priority 1: existing frontmatter title
     fm_match = _FRONTMATTER_RE.match(text)
     if fm_match:
-        fm_block = fm_match.group(1)
-        for line in fm_block.split("\n"):
-            line = line.strip()
-            if line.lower().startswith("title:") and ":" in line:
-                _, _, value = line.partition(":")
-                value = value.strip().strip("'\"")
-                if value:
-                    return value
+        fm_title = _title_from_frontmatter(fm_match.group(1))
+        if fm_title:
+            return fm_title
         body = text[fm_match.end() :]
     else:
         body = text
 
     # Priority 2: first heading in body
-    heading_match = _FIRST_HEADING_RE.search(body)
-    if heading_match:
-        title = heading_match.group(1).strip()
-        # Strip markdown links from heading
-        title = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", title)
-        if title and len(title) < 200:
-            return title
+    heading_title = _title_from_first_heading(body)
+    if heading_title:
+        return heading_title
 
-    # Priority 3: filename stem → title case
-    title = display_name(path.stem)
-    return title if title else "Untitled"
+    # Priority 3: filename stem -> title case
+    return display_name(path.stem) or "Untitled"

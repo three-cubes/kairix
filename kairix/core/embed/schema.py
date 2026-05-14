@@ -124,7 +124,7 @@ def save_run_log(entry: dict[str, Any], log_path: Path | None = None) -> None:
     the default. Production callers leave it as ``None`` to write to
     ``~/.cache/kairix/embed-runs.json``.
     """
-    if log_path is None:  # pragma: no cover
+    if log_path is None:  # pragma: no cover — production home-cache default; tests inject explicit path
         # Production-only fallback to the home-cache default. Tests inject an
         # explicit path; the home() resolution is exercised end-to-end in
         # production via ``kairix embed``.

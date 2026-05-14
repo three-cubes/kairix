@@ -31,9 +31,7 @@ from typing import Any
 
 _ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
-# NOSONAR: line-anchored via re.MULTILINE; capture is bounded
-# by literal `"` and `\n` terminators; field name is a fixed alternation.
-_FRONTMATTER_FIELD_RE = re.compile(
+_FRONTMATTER_FIELD_RE = re.compile(  # NOSONAR — line-anchored MULTILINE; capture bounded; fixed alternation.
     r'^(?:date|created|updated|created_at)\s*:\s*"?([^"\n]+)"?\s*$',
     re.MULTILINE | re.IGNORECASE,
 )

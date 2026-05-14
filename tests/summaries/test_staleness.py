@@ -167,3 +167,46 @@ def test_get_stale_paths_returns_missing(db: sqlite3.Connection, tmp_path: Path)
     stale = get_stale_paths([p1, p2], db)
     assert p2 in stale
     assert p1 not in stale
+
+
+# ---------------------------------------------------------------------------
+# is_stale — source file gone (FileNotFoundError path)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_is_stale_true_when_source_file_deleted(db: sqlite3.Connection, sample_file: Path):
+    """is_stale() returns True when the source file is gone (deleted between summary write and stale check)."""
+    path = str(sample_file)
+    write_summary(_make_result(path), db)
+    # Confirm baseline: summary is fresh while the file exists.
+    assert is_stale(path, db) is False
+    # Now delete the source — is_stale should report True (stale, treat as needs-regen).
+    sample_file.unlink()
+    assert is_stale(path, db) is True
+
+
+# ---------------------------------------------------------------------------
+# write_summary — source file gone (FileNotFoundError path)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_write_summary_stores_zero_mtime_when_source_missing(db: sqlite3.Connection, tmp_path: Path):
+    """write_summary() falls back to source_mtime=0.0 when the source file does not exist.
+
+    This is the defensive branch in staleness.write_summary that lets the
+    summariser persist a result for a path whose source has been removed
+    between fetch and write — instead of raising FileNotFoundError out to
+    the caller, the row is stored with source_mtime=0.0 so any future
+    is_stale() check returns True.
+    """
+    missing_path = str(tmp_path / "never-existed.md")
+    write_summary(_make_result(missing_path), db)
+
+    row = db.execute("SELECT source_mtime FROM summaries WHERE path = ?", (missing_path,)).fetchone()
+    assert row is not None, "summary row should be persisted even when source is missing"
+    # source_mtime=0.0 is the documented sentinel; use approx so a later
+    # implementation tweak that produces 1e-12 doesn't silently regress on
+    # platforms with subtly different float representations (S1244).
+    assert row[0] == pytest.approx(0.0), f"expected source_mtime=0.0 fallback for missing source, got {row[0]!r}"

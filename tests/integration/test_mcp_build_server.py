@@ -35,6 +35,7 @@ _EXPECTED_TOOLS = {
     "brief",
     "entity_suggest",
     "entity_validate",
+    "bootstrap",
 }
 
 

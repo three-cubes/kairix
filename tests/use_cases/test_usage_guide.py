@@ -143,3 +143,37 @@ def test_envelope_includes_all_fields() -> None:
     out = UsageGuideOutput(topic="t", content="c")
     env = usage_guide_output_to_envelope(out)
     assert env == {"topic": "t", "content": "c", "error": ""}
+
+
+# ---------------------------------------------------------------------------
+# Default resolver — production wiring exercised through the public field
+# ---------------------------------------------------------------------------
+
+
+def test_default_deps_resolve_passthrough_for_explicit_path(tmp_path: Path) -> None:
+    """``UsageGuideDeps()`` binds the production resolver as a callable; given
+    an explicit guide_path, the resolver returns it unchanged (no FS probing).
+
+    Sabotage proof: if the resolver regressed to discard ``guide_path`` and
+    fall through to the production location chain, this assertion would fail
+    — the returned path is what we passed in, not a docs-tree default.
+    """
+    explicit = tmp_path / "explicit.md"
+    deps = UsageGuideDeps()
+    assert callable(deps.resolve_guide_fn), "default_factory must bind a callable"
+    assert deps.resolve_guide_fn(explicit) == explicit
+
+
+def test_default_deps_resolve_falls_back_to_package_when_no_path(tmp_path: Path) -> None:
+    """When ``guide_path`` is None and no server-relative candidate exists,
+    the resolver falls through to the package-relative location.
+
+    Drives the second branch of the production fallback chain; the
+    returned path may or may not exist on this machine — what we pin is
+    that the resolver names a deterministic file under the package tree.
+    """
+    deps = UsageGuideDeps()
+    resolved = deps.resolve_guide_fn(None)
+    # The resolver always returns a path ending in agent-usage-guide.md,
+    # whether it picked the server-relative or package-relative candidate.
+    assert resolved.name == "agent-usage-guide.md"

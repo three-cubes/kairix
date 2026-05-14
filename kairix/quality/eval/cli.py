@@ -143,9 +143,10 @@ def _cmd_report(args: argparse.Namespace) -> int:
         # CLI trust boundary: --output is user-supplied. The kairix CLI runs
         # with the calling user's filesystem permissions and operates inside
         # the local-process trust model; the user can already write anywhere
-        # their account permits via shell redirection. NOSONAR markers cover
-        # both the path resolution and the write where S2083 fires.
-        output_path = Path(args.output).expanduser().resolve()  # NOSONAR
+        # their account permits via shell redirection. The trailing
+        # suppressions below cover the path resolution and the write where
+        # S2083 fires.
+        output_path = Path(args.output).expanduser().resolve()  # NOSONAR — CLI trust boundary; see comment above
         if not output_path.parent.exists():
             print(
                 f"Error: parent directory {output_path.parent} does not exist",
@@ -610,12 +611,11 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
 
-    # Resolve default log path for report
+    # Resolve default log path for report — env read lives in kairix.paths (F4).
     if args.subcommand in ("monitor", "report") and args.log is None:
-        import os
-        from pathlib import Path
+        from kairix.paths import monitor_log_path
 
-        args.log = os.environ.get("KAIRIX_MONITOR_LOG", str(Path.home() / ".cache/kairix/monitor.jsonl"))
+        args.log = str(monitor_log_path())
 
     dispatch = {
         "generate": _cmd_generate,

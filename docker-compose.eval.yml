@@ -46,7 +46,7 @@
 services:
   kairix-eval:
     profiles: ["eval"]
-    image: ghcr.io/quanyeomans/kairix:latest
+    image: ghcr.io/three-cubes/kairix:latest
     # Same image as production; commands are passed at `run` time.
     # The default ('--help') is overridden by anything passed to
     # `docker compose run`. The entrypoint auto-prepends `kairix`.

@@ -9,9 +9,10 @@ unrelated query sets.
 
 These tests pin the contract by exercising the **public** API
 (``RecallChecker.check`` + ``load_canary_cache`` / ``save_canary_cache``)
-and observing the cache file as a side effect. We do not import the
-private ``_get_recall_queries`` helper — that's an F5 violation and
-also means we'd be testing the wrong surface.
+and observing the cache file as a side effect. We deliberately do not
+reach for ``get_recall_queries`` directly — driving the canary-cache
+behaviour through ``RecallChecker.check`` exercises the same surface
+production callers hit.
 
 Pinned behaviour:
 

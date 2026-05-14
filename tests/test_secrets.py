@@ -346,3 +346,206 @@ def test_refresh_secrets_returns_zero_when_no_file(tmp_path: Path) -> None:
 
     result = refresh_secrets(str(tmp_path / "nonexistent.env"))
     assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# load_secrets: empty key lines are skipped (line 88)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_secrets_skips_empty_key_lines(tmp_path: Path) -> None:
+    """Lines like '=value' (no key) are ignored — line 88."""
+    p = tmp_path / "kairix.env"
+    p.write_text("=novalue\nREAL_VAR_X=ok\n", encoding="utf-8")
+    count = load_secrets(str(p))
+    assert count == 1
+    assert os.environ.get("REAL_VAR_X") == "ok"
+    del os.environ["REAL_VAR_X"]
+
+
+# ---------------------------------------------------------------------------
+# load_secrets_file: invalid lines and OSError handling (lines 113, 118-119)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_secrets_file_skips_no_equals_lines(tmp_path: Path) -> None:
+    """Lines without '=' are silently skipped in load_secrets_file (line 113)."""
+    from kairix.secrets import load_secrets_file
+
+    p = tmp_path / "kairix.env"
+    p.write_text("# header\nNOEQUALS\nKEY1=value1\n", encoding="utf-8")
+    load_secrets_file.cache_clear()
+    result = load_secrets_file(p)
+    assert result == {"KEY1": "value1"}
+
+
+@pytest.mark.unit
+def test_load_secrets_file_returns_empty_on_oserror(tmp_path: Path) -> None:
+    """OSError on read returns {} and logs a warning — lines 118-119."""
+    from kairix.secrets import load_secrets_file
+
+    missing = tmp_path / "does-not-exist.env"
+    load_secrets_file.cache_clear()
+    result = load_secrets_file(missing)
+    assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# _read_secret_file: per-file secret pattern (Docker secrets) (lines 133-138)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_get_secret_reads_per_file_secret(tmp_path: Path, monkeypatch) -> None:
+    """Step 2 resolves secrets from per-file paths (Docker secrets pattern).
+
+    Writes ``<dir>/kairix-llm-api-key`` and points KAIRIX_SECRETS_DIR at it.
+    """
+    monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
+
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "kairix-llm-api-key").write_text("file-secret-value\n", encoding="utf-8")
+    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(secrets_dir))
+
+    value = get_secret("kairix-llm-api-key")
+    assert value == "file-secret-value"
+
+
+@pytest.mark.unit
+def test_get_secret_per_file_secret_handles_oserror(tmp_path: Path, monkeypatch) -> None:
+    """Unreadable per-file secret falls through to the next resolution step.
+
+    Lines 137-138 catch OSError on read_text and continue.
+    """
+    monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
+
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    secret_file = secrets_dir / "kairix-llm-api-key"
+    secret_file.write_text("permission-locked-secret\n", encoding="utf-8")
+    secret_file.chmod(0o000)
+    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(secrets_dir))
+
+    try:
+        # Required=False so missing secret returns None without raising
+        value = get_secret("kairix-llm-api-key", required=False)
+        assert value is None
+    finally:
+        secret_file.chmod(0o644)
+
+
+@pytest.mark.unit
+def test_get_secret_per_file_skips_empty_file(tmp_path: Path, monkeypatch) -> None:
+    """An empty per-file secret is skipped (value-stripped check, line 135)."""
+    monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
+
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "kairix-llm-api-key").write_text("   \n", encoding="utf-8")  # whitespace only
+    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(secrets_dir))
+
+    value = get_secret("kairix-llm-api-key", required=False)
+    assert value is None
+
+
+# ---------------------------------------------------------------------------
+# load_secrets_file: returning empty value from bundle (line 188)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_get_secret_bundle_file_empty_value_returns_none(tmp_path: Path, monkeypatch) -> None:
+    """Bundle file entry with empty value falls through (line 197 inside loop).
+
+    The bundle parser strips the key but keeps the value as-is. When the
+    parsed value is empty, the resolver moves on (no return). Line 188 is the
+    second-step return for a non-empty file value.
+    """
+    monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
+
+    # Set up a kairix.env bundle file but with a different secret
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "kairix.env").write_text("KAIRIX_LLM_API_KEY=bundle-key\n", encoding="utf-8")
+    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(secrets_dir))
+
+    # Make sure file-based per-secret (Step 2) does not exist for this key
+    # so we fall through to Step 3 (bundle)
+    from kairix.secrets import load_secrets_file
+
+    load_secrets_file.cache_clear()
+    value = get_secret("kairix-llm-api-key")
+    # Should resolve from Step 3 bundle file (line 198 return)
+    assert value == "bundle-key"
+
+
+# ---------------------------------------------------------------------------
+# Azure Key Vault CLI fallback (lines 203-228)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_get_secret_kv_fallback_success(tmp_path: Path, monkeypatch) -> None:
+    """When KAIRIX_KV_NAME is set, the resolver runs `az keyvault secret show`
+    and returns the trimmed stdout."""
+    monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(tmp_path / "no-such-dir"))
+    monkeypatch.setenv("KAIRIX_KV_NAME", "test-vault")
+
+    import subprocess as real_subprocess
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "kv-fetched-secret\n"
+
+    def _fake_run(*args, **kwargs):
+        return _FakeCompleted()
+
+    monkeypatch.setattr(real_subprocess, "run", _fake_run)
+
+    value = get_secret("kairix-llm-api-key")
+    assert value == "kv-fetched-secret"
+
+
+@pytest.mark.unit
+def test_get_secret_kv_fallback_failed_returncode(tmp_path: Path, monkeypatch) -> None:
+    """KV fetch returning non-zero rc logs a warning and falls through (line 226)."""
+    monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(tmp_path / "no-such-dir"))
+    monkeypatch.setenv("KAIRIX_KV_NAME", "test-vault")
+
+    import subprocess as real_subprocess
+
+    class _FakeCompleted:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(real_subprocess, "run", lambda *_a, **_k: _FakeCompleted())
+
+    value = get_secret("kairix-llm-api-key", required=False)
+    assert value is None
+
+
+@pytest.mark.unit
+def test_get_secret_kv_fallback_subprocess_error(tmp_path: Path, monkeypatch) -> None:
+    """SubprocessError or OSError on KV call logs a warning and falls through (228)."""
+    monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(tmp_path / "no-such-dir"))
+    monkeypatch.setenv("KAIRIX_KV_NAME", "test-vault")
+
+    import subprocess as real_subprocess
+
+    def _raise_oserror(*args, **kwargs):
+        raise OSError("az CLI not found")
+
+    monkeypatch.setattr(real_subprocess, "run", _raise_oserror)
+
+    value = get_secret("kairix-llm-api-key", required=False)
+    assert value is None

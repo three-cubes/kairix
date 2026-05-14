@@ -73,11 +73,11 @@ def _builder_spy() -> tuple[Any, list[RetrievalConfig]]:
 @pytest.fixture(autouse=True)
 def _isolated_cache_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Each probe gets a fresh load-cache and a clean cwd."""
-    config_loader._load_cached.cache_clear()
+    config_loader.load_cached.cache_clear()
     monkeypatch.delenv("KAIRIX_CONFIG_PATH", raising=False)
     monkeypatch.chdir(tmp_path)
     yield
-    config_loader._load_cached.cache_clear()
+    config_loader.load_cached.cache_clear()
 
 
 def _write_yaml(path: Path, body: str) -> Path:

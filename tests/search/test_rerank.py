@@ -397,7 +397,8 @@ def test_rerank_falls_back_to_lazy_loader_when_encoder_is_none(
     out = fresh_rerank_module.rerank("query", results)
     assert out == results
     # Sabotage-prove: scores are NOT touched (no rerank happened).
-    assert all(r.rerank_score == 0.0 for r in out)
+    # Use approx — float equality on the default sentinel still triggers S1244.
+    assert all(r.rerank_score == pytest.approx(0.0) for r in out)
 
 
 @pytest.mark.unit
@@ -461,4 +462,5 @@ def test_rerank_handles_encoder_returning_fewer_scores_than_candidates() -> None
     # behaviour; the test pins it so a future refactor that pads/raises
     # is a deliberate decision rather than a silent regression.
     by_path = {r.path: r for r in out}
-    assert by_path["c.md"].rerank_score == 0.0
+    # approx 0.0 matches both the bare default and any tiny-epsilon variant (S1244).
+    assert by_path["c.md"].rerank_score == pytest.approx(0.0)

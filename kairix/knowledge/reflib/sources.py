@@ -37,6 +37,11 @@ _COL_FAMILY_AND_EDUCATION = "family-and-education"
 _COL_INDUSTRY_STANDARDS = "industry-standards"
 _COL_FOUNDATIONS = "foundations"
 
+# ---------------------------------------------------------------------------
+# Common source URLs (repeated across multiple SourceDef entries)
+# ---------------------------------------------------------------------------
+_URL_GUTENBERG = "https://www.gutenberg.org"
+
 
 @dataclass(frozen=True)
 class SourceDef:
@@ -582,7 +587,7 @@ _SOURCES: list[SourceDef] = [
         dir_name="classical-eastern",
         licence=_LIC_PUBLIC_DOMAIN,
         licence_tier=1,
-        source_url="https://www.gutenberg.org",
+        source_url=_URL_GUTENBERG,
         format="text",
     ),
     SourceDef(
@@ -591,7 +596,7 @@ _SOURCES: list[SourceDef] = [
         dir_name="classical-western",
         licence=_LIC_PUBLIC_DOMAIN,
         licence_tier=1,
-        source_url="https://www.gutenberg.org",
+        source_url=_URL_GUTENBERG,
         format="text",
     ),
     SourceDef(
@@ -600,7 +605,7 @@ _SOURCES: list[SourceDef] = [
         dir_name="indian-philosophy",
         licence=_LIC_PUBLIC_DOMAIN,
         licence_tier=1,
-        source_url="https://www.gutenberg.org",
+        source_url=_URL_GUTENBERG,
         format="text",
     ),
     SourceDef(
@@ -609,7 +614,7 @@ _SOURCES: list[SourceDef] = [
         dir_name="martial-arts-philosophy",
         licence=_LIC_PUBLIC_DOMAIN,
         licence_tier=1,
-        source_url="https://www.gutenberg.org",
+        source_url=_URL_GUTENBERG,
         format="text",
     ),
     # ── family-and-education ───────────────────────────────────────────────

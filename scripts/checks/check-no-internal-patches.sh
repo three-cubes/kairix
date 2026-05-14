@@ -12,12 +12,33 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "${SCRIPT_DIR}/../.." || exit 2
 
-REMEDIATION="Refactor: tests should construct the unit under test with explicit
-fakes from tests/fakes.py, not patch kairix internals. If the
-production class lacks a constructor seam, add one (same shape as
-GoldBuilder(llm_judge=, retriever=))."
+REMEDIATION="Refactor to constructor injection with a fake from tests/fakes.py
+(no @patch / with patch on kairix.* targets) to pass.
 
-# Match both double-quoted "kairix..." and single-quoted 'kairix...' forms.
-# (`grep -E` doesn't have non-capturing groups but `(["'])` is fine.)
-grep -rEl "(@patch|with patch)\\([\"']kairix\\." tests/ --include='*.py' 2>/dev/null \
+fix: rewrite the test to construct the unit under test with a Fake*
+from tests/fakes.py (e.g. ``SearchPipeline(retriever=FakeRetriever(...))``)
+instead of patching the internal symbol. If the production class
+lacks a constructor seam, add one — same shape as
+GoldBuilder(llm_judge=, retriever=, db_path=).
+next: re-run ``bash scripts/checks/check-no-internal-patches.sh`` to
+confirm the gate goes green.
+run: bash scripts/safe-commit.sh \"test(<area>): inject fake instead of patching internals\"
+
+If the production class lacks a constructor seam, add one — same shape as
+GoldBuilder(llm_judge=, retriever=, db_path=). Then construct it in the
+test with a Fake* from tests/fakes.py.
+
+Pass example:
+  pipeline = SearchPipeline(retriever=FakeRetriever(hits=[...]))
+  assert pipeline.run(query='x') == ...
+
+Forbidden example:
+  @patch('kairix.core.search.bm25.bm25_search')
+  def test_search_returns_hits(mock_search): ...
+
+Stdlib boundaries (os.*, builtins.*) and external SDK boundaries
+(openai.*, httpx.*) remain allowed — F1 only blocks kairix.* targets."
+
+# Delegate to AST-based detector (resolves #214 — grep missed multi-line patch()).
+python3 "${SCRIPT_DIR}/check_no_internal_patches.py" \
     | arch_gate "no-internal-patches" "$REMEDIATION"

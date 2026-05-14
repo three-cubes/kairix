@@ -22,13 +22,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kairix.paths import monitor_log_path as _monitor_log_path
 from kairix.quality.eval.constants import CATEGORY_WEIGHTS
 
 if TYPE_CHECKING:
@@ -43,8 +43,7 @@ BenchmarkRunnerFn = Callable[..., "BenchmarkResult"]
 
 logger = logging.getLogger(__name__)
 
-# Default log path (override with KAIRIX_MONITOR_LOG env var)
-_DEFAULT_LOG_PATH: str = str(Path.home() / ".cache/kairix/monitor.jsonl")
+# Default log path resolution lives in kairix.paths.monitor_log_path (F4).
 
 # Maximum log entries to retain (rolling window)
 _MAX_LOG_ENTRIES: int = 90
@@ -91,7 +90,7 @@ def _load_log(log_path: str) -> list[dict[str, Any]]:
     # denied, transient I/O failure). The two test-reachable failure modes —
     # missing file and corrupt JSON — are handled above; this catch-all
     # only fires under the OS-level failures we can't induce in unit tests.
-    except Exception as e:  # pragma: no cover
+    except Exception as e:  # pragma: no cover — OS-level read failures not inducible in unit tests
         logger.warning("monitor: failed to load log %r — %s", log_path, e)
     return entries
 
@@ -110,7 +109,7 @@ def _append_log(log_path: str, entry: dict[str, Any], max_entries: int = _MAX_LO
     # Defensive guard for write-time OS errors (read-only fs, disk full,
     # permission denied). These can't be induced in unit tests; the
     # happy path is exercised by every run_monitor test that writes a log.
-    except Exception as e:  # pragma: no cover
+    except Exception as e:  # pragma: no cover — OS-level write failures not inducible in unit tests
         logger.warning("monitor: failed to append log entry — %s", e)
 
 
@@ -186,17 +185,17 @@ def run_monitor(
     """
     # Lazy production defaults — kept inside the function to avoid a circular
     # import (runner → eval.constants → eval.__init__ → monitor → runner).
-    if suite_loader is None:  # pragma: no cover
+    if suite_loader is None:  # pragma: no cover — production-only lazy default; tests inject a suite_loader callable
         from kairix.quality.benchmark.suite import load_suite
 
         suite_loader = load_suite
-    if benchmark_runner is None:  # pragma: no cover
+    if benchmark_runner is None:  # pragma: no cover — prod-only lazy default; tests inject benchmark_runner
         from kairix.quality.benchmark.runner import run_benchmark
 
         benchmark_runner = run_benchmark
 
     if log_path is None:
-        log_path = os.environ.get("KAIRIX_MONITOR_LOG", _DEFAULT_LOG_PATH)
+        log_path = str(_monitor_log_path())
 
     ts = datetime.now(tz=timezone.utc).isoformat()
 

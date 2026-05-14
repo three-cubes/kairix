@@ -75,12 +75,20 @@ from tests.fixtures.neo4j_mock import FakeNeo4jClient  # noqa: E402
 def no_azure_calls(monkeypatch, request):
     """Block accidental Azure API calls in all tests except those marked e2e.
 
-    Sets KAIRIX_EMBED_BACKEND=fake so any code that reads this env var
-    will use the fake backend. Tests marked @pytest.mark.e2e must set
-    KAIRIX_E2E=1 in the environment to confirm intent.
+    The ``delenv`` calls are the load-bearing protection — they remove
+    real operator credentials (``KAIRIX_AZURE_API_KEY`` /
+    ``KAIRIX_LLM_API_KEY``) from the per-test env so a test that hits a
+    code path through ``kairix.secrets`` doesn't accidentally use the
+    developer's Azure account. Tests marked ``@pytest.mark.e2e``
+    bypass this and must set ``KAIRIX_E2E=1`` to confirm intent.
+
+    This fixture is the reason ``tests/conftest.py`` stays baselined for
+    F2 — the ``delenv`` operation is a deliberate safety net at the env
+    boundary, not a test-shaping hack. F2 stays baselined here on
+    purpose; promoting the fixture out of monkeypatch would lose the
+    per-test isolation that prevents env leak between tests.
     """
     if "e2e" not in request.keywords:
-        monkeypatch.setenv("KAIRIX_EMBED_BACKEND", "fake")
         monkeypatch.delenv("KAIRIX_AZURE_API_KEY", raising=False)
         monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
 
@@ -100,6 +108,7 @@ def neo4j_client_empty():
 @pytest.fixture
 def fake_llm_backend():
     """Fake LLMBackend satisfying the Protocol. No Azure calls."""
+    import hashlib
     import struct
 
     class FakeLLM:
@@ -107,7 +116,10 @@ def fake_llm_backend():
             return "fake response"
 
         def embed(self, text: str) -> list[float]:
-            return fake_embedding(seed=hash(text) % 1000)
+            # SHA-256 truncated to 32 bits — deterministic across runs (PYTHONHASHSEED
+            # randomises hash()) and the 2^32 seed space makes collisions vanish (#240).
+            seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:4], "big")
+            return fake_embedding(seed=seed)
 
         def embed_as_bytes(self, text: str) -> bytes | None:
             vec = self.embed(text)

@@ -306,8 +306,8 @@ def _open_usearch_index() -> Any:  # pragma: no cover  # prod lazy default; deps
         idx = VectorIndex(index_path=index_path, meta_path=meta_path, db_path=db_p)
         idx.load()  # auto-deletes if dims mismatch
         return idx
-    except Exception as e:
-        logger.error("usearch index open failed: %s", e)
+    except Exception:
+        logger.exception("usearch index open failed")
         return None
 
 
@@ -398,11 +398,10 @@ def _embed_and_store_batch(
 
     try:
         vectors = embed_batch_fn(texts, api_key, endpoint, deployment, dims)
-    except (RuntimeError, KeyError, ValueError, OSError) as e:
-        logger.error(
-            "Batch %d failed: %s — logging %d chunks as failed",
+    except (RuntimeError, KeyError, ValueError, OSError):
+        logger.exception(
+            "Batch %d failed — logging %d chunks as failed",
             batch_idx,
-            e,
             len(batch),
         )
         return 0, list(batch)
@@ -442,11 +441,11 @@ def _embed_and_store_batch(
                 vec_index.add_vectors(batch_hash_seqs, vectors)
                 if (batch_idx + 1) % save_interval == 0:
                     vec_index.save()
-            except Exception as e:
-                logger.error("usearch batch %d failed: %s", batch_idx, e)
+            except Exception:
+                logger.exception("usearch batch %d failed", batch_idx)
         return len(matched), unaccounted
-    except sqlite3.Error as e:
-        logger.error("DB write for batch %d failed: %s", batch_idx, e)
+    except sqlite3.Error:
+        logger.exception("DB write for batch %d failed", batch_idx)
         return 0, list(batch)
 
 
@@ -458,7 +457,7 @@ def _save_index_checkpoint(vec_index: Any) -> None:
         vec_index.save()
         logger.info("usearch: saved index with %d vectors", len(vec_index))
     except Exception as e:
-        logger.error("usearch final save failed: %s", e)
+        logger.exception("usearch final save failed: %s", e)
 
 
 # ── Main embed runner ─────────────────────────────────────────────────────────

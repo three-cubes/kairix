@@ -102,6 +102,7 @@ def retrieve(
     Raises:
         ValueError: Unknown system name.
     """
+    _ = db_path  # caller-symmetry param; resolved via kairix.paths internally
     deps = deps if deps is not None else RetrievalDeps()
     if system == "hybrid":
         return _retrieve_hybrid(

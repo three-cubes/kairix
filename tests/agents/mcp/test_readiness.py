@@ -69,6 +69,6 @@ def test_in_test_fake_satisfies_protocol() -> None:
             return True
 
         def mark_ready(self) -> None:
-            pass
+            """Test stub — satisfies ReadinessGate Protocol; structural check only."""
 
     assert isinstance(_FakeGate(), ReadinessGate)

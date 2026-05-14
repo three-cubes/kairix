@@ -17,7 +17,6 @@ are logged as warnings and are expected to be retried on the next crawl.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from kairix.knowledge.graph.models import (
@@ -31,6 +30,7 @@ from kairix.knowledge.graph.models import (
     TechnologyNode,
 )
 from kairix.secrets import load_secrets as _load_secrets
+from kairix.secrets import neo4j_password, neo4j_uri, neo4j_user
 
 # Load vault-agent sidecar secrets before env-var reads.
 # No-op when /run/secrets/kairix.env is absent (local dev, CI).
@@ -52,12 +52,8 @@ def _get_neo4j_defaults() -> tuple[str, str, str]:
             return creds.uri, creds.user, creds.password
     except Exception:  # noqa: S110 — fallback to env vars below
         pass
-    # Fallback to env vars for backwards compatibility
-    return (
-        os.environ.get("KAIRIX_NEO4J_URI", "bolt://localhost:7687"),
-        os.environ.get("KAIRIX_NEO4J_USER", "neo4j"),
-        os.environ.get("KAIRIX_NEO4J_PASSWORD", ""),
-    )
+    # Fallback to env vars for backwards compatibility (env reads live in kairix.secrets)
+    return (neo4j_uri(), neo4j_user(), neo4j_password())
 
 
 # Constraints ensure idempotent upserts via MERGE on id property
@@ -80,6 +76,16 @@ def _try_import_neo4j() -> Any:
         return GraphDatabase
     except ImportError:
         return None
+
+
+# Sentinel for the Neo4jClient.__init__ ``driver_cls`` kwarg. Distinguishes
+# "caller didn't pass driver_cls — use _try_import_neo4j()" (default) from
+# "caller explicitly passed driver_cls=None — disable the driver" (test).
+class _DriverClsSentinel:
+    """Singleton marker — never instantiated by callers."""
+
+
+_USE_DEFAULT_DRIVER = _DriverClsSentinel()
 
 
 def _redact_uri(uri: str) -> str:
@@ -115,6 +121,8 @@ class Neo4jClient:
         uri: str | None = None,
         user: str | None = None,
         password: str | None = None,
+        *,
+        driver_cls: Any = _USE_DEFAULT_DRIVER,
     ) -> None:
         if uri is None or user is None or password is None:
             _uri, _user, _password = _get_neo4j_defaults()
@@ -125,11 +133,19 @@ class Neo4jClient:
         self._user = user
         self._password = password
         self._driver: Any = None
+        # F1-clean test seam (#201): tests inject a mock driver class
+        # (or explicit None to simulate 'neo4j not installed') instead of
+        # @patch'ing _try_import_neo4j. The sentinel default keeps production
+        # callers on the live driver-import path.
+        self._driver_cls_arg: Any = driver_cls
         self.available = False
         self._connect()
 
     def _connect(self) -> None:
-        driver_cls = _try_import_neo4j()
+        if isinstance(self._driver_cls_arg, _DriverClsSentinel):
+            driver_cls = _try_import_neo4j()
+        else:
+            driver_cls = self._driver_cls_arg
         if driver_cls is None:
             logger.warning("Neo4jClient: neo4j driver not installed — graph layer unavailable")
             return
@@ -372,8 +388,8 @@ class Neo4jClient:
             logger.info("Neo4j password rotated successfully")
             self._password = new_password
             return True
-        except Exception as e:
-            logger.error("rotate_password failed: %s", e)
+        except Exception:
+            logger.exception("rotate_password failed")
             return False
 
 

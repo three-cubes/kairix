@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-if [ $# -lt 1 ]; then
+if [[ $# -lt 1 ]]; then
     echo "Usage: bash scripts/safe-commit.sh \"commit message\""
     exit 1
 fi

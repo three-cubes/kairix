@@ -32,7 +32,7 @@ import urllib.parse
 import urllib.request
 
 SONAR_BASE = "https://sonarcloud.io"
-PROJECT_KEY = "quanyeomans_kairix"
+PROJECT_KEY = "three-cubes_kairix"
 
 
 # Triage decisions. Keyed by ``(rule_key, file_path)``; the value is the
@@ -81,7 +81,9 @@ HOTSPOT_RATIONALES: dict[tuple[str, str], str] = {
     ("python:S5852", "kairix/knowledge/wikilinks/resolver.py"): (
         "Bounded input — wikilinks resolver operates on agent-authored markdown "
         "from the document store. Path strings are normalised at the boundary. "
-        "Reviewed and accepted."
+        "The non-greedy `.*?` bounded by `)` and end-anchor operates on a single "
+        "short path string (≤ a few hundred chars); no catastrophic-backtracking "
+        "shape. Reviewed and accepted."
     ),
     ("python:S5852", "kairix/text.py"): (
         "Bounded input — frontmatter/whitespace utility regexes operate on "
@@ -92,6 +94,30 @@ HOTSPOT_RATIONALES: dict[tuple[str, str], str] = {
     ("python:S5852", "scripts/audit-date-formats.py"): (
         "Bounded input — operator-only script for one-off auditing of corpus "
         "date formats. Not on any production code path; not user-facing. "
+        "Reviewed and accepted."
+    ),
+    ("python:S5852", "kairix/knowledge/entities/overrides.py"): (
+        "Bounded input — admin-controlled entity override file at "
+        "${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md. "
+        "Lines are short markdown list entries (a quoted term + label + "
+        "optional flags); the file is operator-authored, not user-submitted. "
+        'Each regex quantifier is non-nested ([^"]+, [A-Z_]+, .* anchored to '
+        "$). No catastrophic-backtracking shape (no (.+)+/(\\w+)+ nesting). "
+        "Reviewed and accepted."
+    ),
+    # ── Cleartext HTTP URLs in test fixtures (S5332) ──────────────────────────
+    # All flagged "http://" strings appear inside test-fixture dataclasses or
+    # assertion bodies — they're string literals checked into version control,
+    # never fetched at runtime. The rule stays active for production code,
+    # where any http:// usage would be a real concern.
+    ("python:S5332", "tests/knowledge/entities/test_cli.py"): (
+        "Test fixture — 'http://wiki/Q1' is a literal in an EntityValidateMatch "
+        "dataclass used to exercise the format_validate_table renderer; the "
+        "URL is never fetched. Reviewed and accepted."
+    ),
+    ("python:S5332", "tests/use_cases/test_entity.py"): (
+        "Test fixture — http:// URL is a literal in an entity-card dataclass "
+        "used as test input to run_entity_get; the URL is never fetched. "
         "Reviewed and accepted."
     ),
     # ── Pseudorandom number generators (S2245) ───────────────────────────────

@@ -236,8 +236,8 @@ def _parse_segments(content: str) -> list[tuple[str, str]]:
         # Find closing ---
         end = content.find("\n---", 3)
         if end != -1:
-            # Include the closing --- and trailing newline
-            fm_end = end + 4  # len("\n---") = 4
+            # Include the closing --- and trailing newline (the four chars of "\n---")
+            fm_end = end + 4
             if fm_end < n and content[fm_end] == "\n":
                 fm_end += 1
             segments.append(("frontmatter", content[pos:fm_end]))

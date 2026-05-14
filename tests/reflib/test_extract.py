@@ -9,11 +9,11 @@ import pytest
 from kairix.knowledge.reflib.extract import (
     RawEntity,
     RawRelationship,
-    _domain_from_path,
-    _extract_from_frontmatter,
-    _extract_from_headings,
-    _extract_seed_entities,
-    _is_stop_heading,
+    domain_from_path,
+    extract_from_frontmatter,
+    extract_from_headings,
+    extract_seed_entities,
+    is_stop_heading,
     scan_reference_library,
 )
 
@@ -41,35 +41,35 @@ def _make_md(title: str, source: str, domain: str, subdomain: str, body: str) ->
 class TestDomainFromPath:
     @pytest.mark.unit
     def test_engineering_collection(self):
-        assert _domain_from_path("engineering/foo/bar.md") == "software-engineering"
+        assert domain_from_path("engineering/foo/bar.md") == "software-engineering"
 
     @pytest.mark.unit
     def test_philosophy_collection(self):
-        assert _domain_from_path("philosophy/classical/text.md") == "philosophy"
+        assert domain_from_path("philosophy/classical/text.md") == "philosophy"
 
     @pytest.mark.unit
     def test_unknown_collection(self):
-        assert _domain_from_path("unknown-col/x.md") == "unknown-col"
+        assert domain_from_path("unknown-col/x.md") == "unknown-col"
 
 
 class TestStopHeading:
     @pytest.mark.unit
     def test_generic_headings_are_stopped(self):
-        assert _is_stop_heading("Overview") is True
-        assert _is_stop_heading("Introduction") is True
-        assert _is_stop_heading("Getting Started") is True
+        assert is_stop_heading("Overview") is True
+        assert is_stop_heading("Introduction") is True
+        assert is_stop_heading("Getting Started") is True
 
     @pytest.mark.unit
     def test_short_headings_stopped(self):
-        assert _is_stop_heading("AB") is True
+        assert is_stop_heading("AB") is True
 
     @pytest.mark.unit
     def test_valid_heading_passes(self):
-        assert _is_stop_heading("Twelve-Factor Application Design") is False
+        assert is_stop_heading("Twelve-Factor Application Design") is False
 
     @pytest.mark.unit
     def test_lowercase_heading_stopped(self):
-        assert _is_stop_heading("some lowercase heading") is True
+        assert is_stop_heading("some lowercase heading") is True
 
 
 class TestFrontmatterExtraction:
@@ -82,7 +82,7 @@ class TestFrontmatterExtraction:
         }
         entities: list[RawEntity] = []
         rels: list[RawRelationship] = []
-        _extract_from_frontmatter(fm, "engineering/otel/basics.md", "software-engineering", entities, rels)
+        extract_from_frontmatter(fm, "engineering/otel/basics.md", "software-engineering", entities, rels)
 
         types = [e.entity_type for e in entities]
         assert "Document" in types
@@ -93,7 +93,7 @@ class TestFrontmatterExtraction:
         fm = {"title": "My Doc", "source": "Google"}
         entities: list[RawEntity] = []
         rels: list[RawRelationship] = []
-        _extract_from_frontmatter(fm, "eng/x.md", "software-engineering", entities, rels)
+        extract_from_frontmatter(fm, "eng/x.md", "software-engineering", entities, rels)
 
         authored = [r for r in rels if r.kind == "AUTHORED_BY"]
         assert len(authored) == 1
@@ -104,7 +104,7 @@ class TestFrontmatterExtraction:
         fm = {"title": "Service Design Framework", "source": "X"}
         entities: list[RawEntity] = []
         rels: list[RawRelationship] = []
-        _extract_from_frontmatter(fm, "eng/x.md", "software-engineering", entities, rels)
+        extract_from_frontmatter(fm, "eng/x.md", "software-engineering", entities, rels)
 
         frameworks = [e for e in entities if e.entity_type == "Framework"]
         assert len(frameworks) == 1
@@ -117,7 +117,7 @@ class TestHeadingExtraction:
         body = "# Introduction\n\n## Agile Delivery Framework\n\nSome text."
         entities: list[RawEntity] = []
         rels: list[RawRelationship] = []
-        _extract_from_headings(body, "eng/x.md", "software-engineering", "My Doc", entities, rels)
+        extract_from_headings(body, "eng/x.md", "software-engineering", "My Doc", entities, rels)
 
         frameworks = [e for e in entities if e.entity_type == "Framework"]
         assert any("Agile Delivery Framework" in e.name for e in frameworks)
@@ -127,7 +127,7 @@ class TestHeadingExtraction:
         body = "# Main\n\n## Sub Topic Here\n\nContent."
         entities: list[RawEntity] = []
         rels: list[RawRelationship] = []
-        _extract_from_headings(body, "eng/x.md", "software-engineering", "My Doc", entities, rels)
+        extract_from_headings(body, "eng/x.md", "software-engineering", "My Doc", entities, rels)
 
         teaches = [r for r in rels if r.kind == "TEACHES"]
         assert len(teaches) >= 1
@@ -140,7 +140,7 @@ class TestSeedEntities:
         text = "The writings of Marcus Aurelius influenced Stoic philosophy."
         entities: list[RawEntity] = []
         rels: list[RawRelationship] = []
-        _extract_seed_entities(text, "philosophy/x.md", "philosophy", entities, rels)
+        extract_seed_entities(text, "philosophy/x.md", "philosophy", entities, rels)
 
         people = [e for e in entities if e.entity_type == "Person"]
         assert any(e.name == "Marcus Aurelius" for e in people)
@@ -150,7 +150,7 @@ class TestSeedEntities:
         text = "OWASP provides security guidance for web applications."
         entities: list[RawEntity] = []
         rels: list[RawRelationship] = []
-        _extract_seed_entities(text, "security/x.md", "cybersecurity", entities, rels)
+        extract_seed_entities(text, "security/x.md", "cybersecurity", entities, rels)
 
         orgs = [e for e in entities if e.entity_type == "Organisation"]
         assert any(e.name == "OWASP" for e in orgs)
@@ -160,7 +160,7 @@ class TestSeedEntities:
         text = "The Art of War describes military strategy."
         entities: list[RawEntity] = []
         rels: list[RawRelationship] = []
-        _extract_seed_entities(text, "philosophy/x.md", "philosophy", entities, rels)
+        extract_seed_entities(text, "philosophy/x.md", "philosophy", entities, rels)
 
         pubs = [e for e in entities if e.entity_type == "Publication"]
         assert any(e.name == "Art of War" for e in pubs)

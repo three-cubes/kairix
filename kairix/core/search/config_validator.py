@@ -51,105 +51,151 @@ def validate_config(data: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _validate_collection_overrides(prefix: str, name: str, overrides: Any) -> list[str]:
+    """Validate a single collection's optional ``retrieval`` override block."""
+    if overrides is None:
+        return []
+    if not isinstance(overrides, dict):
+        return [f"{prefix} ({name}): 'retrieval' must be a mapping"]
+    bad = set(overrides.keys()) - _VALID_OVERRIDE_KEYS
+    if bad:
+        return [
+            f"{prefix} ({name}): unknown retrieval override key(s) {sorted(bad)} "
+            f"— valid: {sorted(_VALID_OVERRIDE_KEYS)}"
+        ]
+    return []
+
+
+def _validate_shared_collection_item(prefix: str, item: Any, seen_names: set[str]) -> list[str]:
+    """Validate a single entry in ``collections.shared`` and update ``seen_names``."""
+    if not isinstance(item, dict):
+        return [f"{prefix}: must be a mapping with name + path"]
+    name = item.get("name")
+    if not name:
+        return [f"{prefix}: missing required 'name'"]
+    errs: list[str] = []
+    if name in seen_names:
+        errs.append(f"{prefix}: duplicate collection name {name!r}")
+    seen_names.add(name)
+    if not item.get("path"):
+        errs.append(f"{prefix} ({name}): missing required 'path'")
+    errs.extend(_validate_collection_overrides(prefix, name, item.get("retrieval")))
+    return errs
+
+
+def _validate_agent_pattern(pattern: Any) -> list[str]:
+    """Validate the optional ``collections.agent_pattern`` template string."""
+    if pattern is None:
+        return []
+    if not isinstance(pattern, str):
+        return ["collections.agent_pattern: must be a string template"]
+    if "{agent}" not in pattern:
+        return ["collections.agent_pattern: must contain '{agent}' placeholder"]
+    return []
+
+
 def _validate_collections(collections: Any) -> list[str]:
-    errors: list[str] = []
     if collections is None:
-        return errors  # absence is valid (search-everything fallback)
+        return []  # absence is valid (search-everything fallback)
     if not isinstance(collections, dict):
         return ["collections: must be a mapping"]
 
     shared = collections.get("shared", [])
     if not isinstance(shared, list):
-        errors.append("collections.shared: must be a list")
-        return errors
+        return ["collections.shared: must be a list"]
 
+    errors: list[str] = []
     seen_names: set[str] = set()
     for i, item in enumerate(shared):
-        prefix = f"collections.shared[{i}]"
-        if not isinstance(item, dict):
-            errors.append(f"{prefix}: must be a mapping with name + path")
+        errors.extend(_validate_shared_collection_item(f"collections.shared[{i}]", item, seen_names))
+    errors.extend(_validate_agent_pattern(collections.get("agent_pattern")))
+    return errors
+
+
+def _resolve_agent_pattern(collections: Any) -> str:
+    """Return the agent-collection pattern, defaulting to ``{agent}-memory``."""
+    default = "{agent}-memory"
+    if not isinstance(collections, dict):
+        return default
+    custom = collections.get("agent_pattern")
+    return custom if isinstance(custom, str) else default
+
+
+def _check_write_path_overlap(
+    prefix: str,
+    name: str,
+    write_path: str,
+    write_paths: list[tuple[str, str]],
+) -> list[str]:
+    """Return error strings for any duplicate or prefix-overlapping write_paths."""
+    errors: list[str] = []
+    for other_name, other_path in write_paths:
+        if write_path == other_path:
+            errors.append(f"{prefix} ({name}): write_path {write_path!r} duplicates agent {other_name!r}")
             continue
-        name = item.get("name")
-        if not name:
-            errors.append(f"{prefix}: missing required 'name'")
-            continue
-        if name in seen_names:
-            errors.append(f"{prefix}: duplicate collection name {name!r}")
-        seen_names.add(name)
-        if not item.get("path"):
-            errors.append(f"{prefix} ({name}): missing required 'path'")
+        if other_path and (
+            write_path.startswith(other_path.rstrip("/") + "/") or other_path.startswith(write_path.rstrip("/") + "/")
+        ):
+            errors.append(
+                f"{prefix} ({name}): write_path {write_path!r} overlaps with "
+                f"agent {other_name!r} write_path {other_path!r}"
+            )
+    return errors
 
-        overrides = item.get("retrieval")
-        if overrides is not None:
-            if not isinstance(overrides, dict):
-                errors.append(f"{prefix} ({name}): 'retrieval' must be a mapping")
-            else:
-                bad = set(overrides.keys()) - _VALID_OVERRIDE_KEYS
-                if bad:
-                    errors.append(
-                        f"{prefix} ({name}): unknown retrieval override key(s) {sorted(bad)} "
-                        f"— valid: {sorted(_VALID_OVERRIDE_KEYS)}"
-                    )
 
-    pattern = collections.get("agent_pattern")
-    if pattern is not None and not isinstance(pattern, str):
-        errors.append("collections.agent_pattern: must be a string template")
-    if pattern is not None and isinstance(pattern, str) and "{agent}" not in pattern:
-        errors.append("collections.agent_pattern: must contain '{agent}' placeholder")
+def _validate_agent_write_path(
+    prefix: str,
+    name: str,
+    write_path: Any,
+    write_paths: list[tuple[str, str]],
+) -> list[str]:
+    """Validate an agent's optional ``write_path`` field and update ``write_paths``."""
+    if not write_path:
+        return []
+    if not isinstance(write_path, str):
+        return [f"{prefix} ({name}): write_path must be a string"]
+    errors = _check_write_path_overlap(prefix, name, write_path, write_paths)
+    write_paths.append((str(name), write_path))
+    return errors
 
+
+def _validate_agent_item(
+    prefix: str,
+    item: Any,
+    pattern: str,
+    seen_names: set[str],
+    write_paths: list[tuple[str, str]],
+) -> list[str]:
+    """Validate one entry in the ``agents`` list."""
+    if not isinstance(item, dict):
+        return [f"{prefix}: must be a mapping"]
+    name = item.get("name")
+    if not name:
+        return [f"{prefix}: missing required 'name'"]
+    errors: list[str] = []
+    if name in seen_names:
+        errors.append(f"{prefix}: duplicate agent name {name!r}")
+    seen_names.add(name)
+    collection = item.get("collection") or pattern.format(agent=name)
+    if not isinstance(collection, str):
+        errors.append(f"{prefix} ({name}): collection must be a string")
+    errors.extend(_validate_agent_write_path(prefix, name, item.get("write_path", ""), write_paths))
     return errors
 
 
 def _validate_agents(agents: Any, collections: Any) -> list[str]:
-    errors: list[str] = []
     if agents is None:
-        return errors  # absence is valid (no all-agents support)
+        return []  # absence is valid (no all-agents support)
     if not isinstance(agents, list):
         return ["agents: must be a list"]
 
+    errors: list[str] = []
     seen_names: set[str] = set()
     write_paths: list[tuple[str, str]] = []  # (agent_name, path)
-    pattern = "{agent}-memory"
-    if isinstance(collections, dict):
-        custom = collections.get("agent_pattern")
-        if isinstance(custom, str):
-            pattern = custom
+    pattern = _resolve_agent_pattern(collections)
 
     for i, item in enumerate(agents):
-        prefix = f"agents[{i}]"
-        if not isinstance(item, dict):
-            errors.append(f"{prefix}: must be a mapping")
-            continue
-        name = item.get("name")
-        if not name:
-            errors.append(f"{prefix}: missing required 'name'")
-            continue
-        if name in seen_names:
-            errors.append(f"{prefix}: duplicate agent name {name!r}")
-        seen_names.add(name)
-
-        collection = item.get("collection") or pattern.format(agent=name)
-        if not isinstance(collection, str):
-            errors.append(f"{prefix} ({name}): collection must be a string")
-
-        write_path = item.get("write_path", "")
-        if write_path:
-            if not isinstance(write_path, str):
-                errors.append(f"{prefix} ({name}): write_path must be a string")
-            else:
-                # Detect overlapping write_paths — one being a prefix of another.
-                for other_name, other_path in write_paths:
-                    if write_path == other_path:
-                        errors.append(f"{prefix} ({name}): write_path {write_path!r} duplicates agent {other_name!r}")
-                    elif other_path and (
-                        write_path.startswith(other_path.rstrip("/") + "/")
-                        or other_path.startswith(write_path.rstrip("/") + "/")
-                    ):
-                        errors.append(
-                            f"{prefix} ({name}): write_path {write_path!r} overlaps with "
-                            f"agent {other_name!r} write_path {other_path!r}"
-                        )
-                write_paths.append((str(name), write_path))
+        errors.extend(_validate_agent_item(f"agents[{i}]", item, pattern, seen_names, write_paths))
 
     return errors
 
@@ -177,9 +223,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.path:
         config_path = Path(args.path)
     else:
-        from kairix.core.search.config_loader import _resolve_config_path
+        from kairix.core.search.config_loader import resolve_config_path
 
-        resolved = _resolve_config_path()
+        resolved = resolve_config_path()
         if resolved is None:
             print("No config file found. Set KAIRIX_CONFIG_PATH or place kairix.config.yaml in the cwd.")
             return 1

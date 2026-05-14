@@ -129,7 +129,7 @@ def validate_entity(
     # Look up entity in Neo4j
     neo4j_id = None
     try:
-        rows = neo4j_client.find_by_name(name)  # type: ignore[attr-defined]
+        rows = neo4j_client.find_by_name(name)  # type: ignore[attr-defined]  # neo4j_client typed as object; duck-typed and exception-guarded
         if rows:
             neo4j_id = str(rows[0].get("id", ""))
     except Exception as exc:
@@ -143,7 +143,7 @@ def validate_entity(
         best = matches[0]
         if best.confidence in ("high", "medium"):
             try:
-                neo4j_client.cypher(  # type: ignore[attr-defined]
+                neo4j_client.cypher(  # type: ignore[attr-defined]  # neo4j_client typed as object; duck-typed and exception-guarded
                     "MATCH (n {id: $id}) SET n.wikidata_qid = $qid",
                     {"id": neo4j_id, "qid": best.qid},
                 )

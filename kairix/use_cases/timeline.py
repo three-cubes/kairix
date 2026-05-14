@@ -27,9 +27,58 @@ from datetime import date
 from typing import Any
 
 from kairix.core.search.scope import Scope
-from kairix.use_cases import _timeline_defaults as _defaults
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Production defaults — lazy-import wrappers so the use case stays
+# import-light (no temporal.index / core.factory loads on module load) and
+# unit tests that inject deps never touch this wiring.
+# ---------------------------------------------------------------------------
+
+
+def _default_extract_window(query: str, reference_date: date | None) -> tuple[date | None, date | None]:
+    from kairix.core.temporal.rewriter import extract_time_window
+
+    return extract_time_window(query=query, reference_date=reference_date)
+
+
+def _default_rewrite_query(query: str, reference_date: date | None) -> str:
+    from kairix.core.temporal.rewriter import rewrite_temporal_query
+
+    rewritten = rewrite_temporal_query(query=query, reference_date=reference_date)
+    return rewritten if rewritten is not None else query
+
+
+def _default_query_chunks(
+    topic: str,
+    start: date | None,
+    end: date | None,
+    chunk_types: list[str] | None,
+    limit: int,
+) -> list[Any]:
+    from kairix.core.temporal.index import query_temporal_chunks
+
+    return query_temporal_chunks(
+        topic=topic,
+        start=start,
+        end=end,
+        chunk_types=chunk_types,
+        limit=limit,
+    )
+
+
+def _default_search(
+    query: str,
+    budget: int,
+    agent: str | None,
+    scope: Scope,
+) -> Any:
+    from kairix.core.factory import build_search_pipeline
+
+    pipeline = build_search_pipeline()
+    return pipeline.search(query=query, budget=budget, agent=agent, scope=scope)
 
 
 @dataclass(frozen=True)
@@ -81,17 +130,25 @@ class TimelineResult:
 class TimelineDeps:
     """Injectable dependencies for ``run_timeline``.
 
-    Production callers leave every field None and the use case fills in
-    real implementations on first access (see ``_timeline_defaults``).
-    Tests construct a ``TimelineDeps(...)`` with light-weight stand-ins
-    to drive the orchestration end-to-end without touching the real
-    document store, search pipeline, or query rewriter.
+    Production callers leave every field unset and the dataclass'
+    ``default_factory`` wires the real implementations. Tests construct
+    a ``TimelineDeps(...)`` with light-weight stand-ins to drive the
+    orchestration end-to-end without touching the real document store,
+    search pipeline, or query rewriter.
+
+    All callable fields use ``field(default_factory=lambda: _default_X)``
+    rather than ``Callable[...] | None = None`` (per CLAUDE.md F6
+    guidance: avoid the ``Optional[Callable] + post-init`` pattern) so
+    mypy sees the production callable directly and ``run_timeline``
+    invokes ``d.x_fn(...)`` without a None-fallback ladder.
     """
 
-    extract_window_fn: Callable[[str, date | None], tuple[date | None, date | None]] | None = None
-    rewrite_query_fn: Callable[[str, date | None], str] | None = None
-    query_chunks_fn: Callable[..., list[Any]] | None = None
-    search_fn: Callable[..., Any] | None = None
+    extract_window_fn: Callable[[str, date | None], tuple[date | None, date | None]] = field(
+        default_factory=lambda: _default_extract_window
+    )
+    rewrite_query_fn: Callable[[str, date | None], str] = field(default_factory=lambda: _default_rewrite_query)
+    query_chunks_fn: Callable[..., list[Any]] = field(default_factory=lambda: _default_query_chunks)
+    search_fn: Callable[..., Any] = field(default_factory=lambda: _default_search)
 
 
 def _format_window(start: date | None, end: date | None) -> dict[str, str]:
@@ -170,10 +227,10 @@ def run_timeline(
         deps: Injectable dependencies; production callers leave None.
     """
     d = deps or TimelineDeps()
-    extract = d.extract_window_fn or _defaults.default_extract_window
-    rewrite = d.rewrite_query_fn or _defaults.default_rewrite_query
-    query_chunks = d.query_chunks_fn or _defaults.default_query_chunks
-    search = d.search_fn or _defaults.default_search
+    extract = d.extract_window_fn
+    rewrite = d.rewrite_query_fn
+    query_chunks = d.query_chunks_fn
+    search = d.search_fn
 
     try:
         # 1. Resolve time window — explicit args win; otherwise extract from query.

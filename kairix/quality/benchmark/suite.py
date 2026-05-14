@@ -48,6 +48,87 @@ class BenchmarkSuite:
 # ---------------------------------------------------------------------------
 
 
+def resolve_suite_path(suite_arg: str, root: Path | None = None) -> Path:
+    """Resolve a `--suite` argument to a concrete YAML path.
+
+    ``suite_arg`` may be:
+      - An explicit filesystem path (used directly when it exists).
+      - A bundle name (e.g. ``reflib``) — searches ``root`` for the
+        highest gold version matching ``<name>-gold-v*.yaml``, then
+        falls back to ``<name>.yaml``.
+
+    ``root`` defaults to ``kairix.paths.bundled_suites_root()`` for
+    production callers; tests pass an explicit ``tmp_path`` to avoid
+    env-var monkeypatching (F2).
+
+    The bundle-name shortcut is the user-facing UX from #222 — running
+    ``kairix benchmark run reflib`` no longer requires hunting for the
+    in-image suite path.
+    """
+    p = Path(suite_arg)
+    if p.exists():
+        return p
+
+    if root is None:
+        from kairix.paths import bundled_suites_root
+
+        root = bundled_suites_root()
+
+    if root.is_dir():
+        gold = sorted(
+            root.glob(f"{suite_arg}-gold-v*.yaml"),
+            key=lambda x: x.name,
+            reverse=True,
+        )
+        if gold:
+            return gold[0]
+
+        fallback = root / f"{suite_arg}.yaml"
+        if fallback.exists():
+            return fallback
+
+    raise FileNotFoundError(
+        f"Suite '{suite_arg}' not found. Tried path lookup and bundled "
+        f"resolution in {root}. Run 'kairix benchmark list' to see available bundled suites."
+    )
+
+
+def list_bundled_suites(root: Path | None = None) -> list[dict]:
+    """Return metadata for each bundled suite for the ``list`` subcommand.
+
+    Returns: list of dicts with keys ``name``, ``path``, ``default_collection``,
+    ``n_cases``, ``description``. Missing fields are ``None``.
+
+    ``root`` defaults to ``kairix.paths.bundled_suites_root()``; tests
+    pass an explicit path for hermetic resolution.
+    """
+    if root is None:
+        from kairix.paths import bundled_suites_root
+
+        root = bundled_suites_root()
+
+    if not root.is_dir():
+        return []
+
+    out: list[dict] = []
+    for yaml_path in sorted(root.glob("*.yaml")):
+        try:
+            raw = load_yaml_file(yaml_path)
+        except (FileNotFoundError, ValueError):
+            continue
+        meta = raw.get("meta", {}) if isinstance(raw, dict) else {}
+        out.append(
+            {
+                "name": meta.get("name") or yaml_path.stem,
+                "path": str(yaml_path),
+                "default_collection": meta.get("default_collection"),
+                "n_cases": len(raw.get("cases", [])) if isinstance(raw, dict) else 0,
+                "description": meta.get("description"),
+            }
+        )
+    return out
+
+
 def load_yaml_file(path: Path) -> dict:
     """Read a YAML file, raise on parse error or unexpected type."""
     if not path.exists():
@@ -298,6 +379,48 @@ def load_suite(path: str) -> BenchmarkSuite:
 # ---------------------------------------------------------------------------
 
 
+def _check_duplicate_gold_paths(path_based_recall: list[tuple[str, str]]) -> list[str]:
+    """Emit one error per duplicate (case-insensitive) gold_path."""
+    errors: list[str] = []
+    seen_gold: dict[str, str] = {}
+    for case_id, gp in path_based_recall:
+        gp_lower = gp.lower()
+        if gp_lower in seen_gold:
+            errors.append(f"Duplicate gold_path: {gp!r} used by both {seen_gold[gp_lower]!r} and {case_id!r}")
+        else:
+            seen_gold[gp_lower] = case_id
+    return errors
+
+
+def _check_gold_paths_in_index(
+    path_based_recall: list[tuple[str, str]],
+    db: sqlite3.Connection,
+) -> list[str]:
+    """Emit one error per recall case whose ``gold_path`` is missing from the index."""
+    return [
+        f"Case {case_id!r}: gold_path {gp!r} not found in kairix index"
+        for case_id, gp in path_based_recall
+        if not _gold_path_in_index(db, gp)
+    ]
+
+
+def _check_duplicate_gold_titles(suite: BenchmarkSuite) -> list[str]:
+    """Emit one error per duplicate ``gold_title`` across recall cases."""
+    errors: list[str] = []
+    seen_titles: dict[str, str] = {}
+    for case in suite.cases:
+        if not (case.gold_title and case.category == "recall"):
+            continue
+        title_lower = case.gold_title.lower()
+        if title_lower in seen_titles:
+            errors.append(
+                f"Duplicate gold_title: {case.gold_title!r} used by both {seen_titles[title_lower]!r} and {case.id!r}"
+            )
+        else:
+            seen_titles[title_lower] = case.id
+    return errors
+
+
 def validate_suite(
     suite: BenchmarkSuite,
     db: sqlite3.Connection,
@@ -318,43 +441,16 @@ def validate_suite(
     Returns:
         List of error strings. Empty list means all checks passed.
     """
-    errors: list[str] = []
-
-    # Collect gold paths from recall cases that use path-based identity
     path_based_recall: list[tuple[str, str]] = [
         (case.id, case.gold_path)
         for case in suite.cases
         if case.gold_path and case.category == "recall" and not case.gold_title and not case.gold_titles
     ]
 
-    # Check for duplicate gold paths (path-based recall only)
-    seen_gold: dict[str, str] = {}
-    for case_id, gp in path_based_recall:
-        gp_lower = gp.lower()
-        if gp_lower in seen_gold:
-            errors.append(f"Duplicate gold_path: {gp!r} used by both {seen_gold[gp_lower]!r} and {case_id!r}")
-        else:
-            seen_gold[gp_lower] = case_id
-
-    # Check gold paths exist in the kairix index (path-based only; title-based is path-agnostic)
-    for case_id, gp in path_based_recall:
-        if not _gold_path_in_index(db, gp):
-            msg = f"Case {case_id!r}: gold_path {gp!r} not found in kairix index"
-            errors.append(msg)
-
-    # Check for duplicate gold_title values across recall cases
-    seen_titles: dict[str, str] = {}
-    for case in suite.cases:
-        if case.gold_title and case.category == "recall":
-            title_lower = case.gold_title.lower()
-            if title_lower in seen_titles:
-                errors.append(
-                    f"Duplicate gold_title: {case.gold_title!r} used by both "
-                    f"{seen_titles[title_lower]!r} and {case.id!r}"
-                )
-            else:
-                seen_titles[title_lower] = case.id
-
+    errors: list[str] = []
+    errors.extend(_check_duplicate_gold_paths(path_based_recall))
+    errors.extend(_check_gold_paths_in_index(path_based_recall, db))
+    errors.extend(_check_duplicate_gold_titles(suite))
     return errors
 
 

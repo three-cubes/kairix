@@ -14,14 +14,16 @@ Embed credentials fall back to LLM credentials when not set separately.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any
+
+from kairix.paths import azure_api_version as _azure_api_version
 
 logger = logging.getLogger(__name__)
 
 
-AZURE_API_VERSION = os.environ.get("KAIRIX_AZURE_API_VERSION", "2024-12-01-preview")
+# Env read lives in kairix.paths.azure_api_version (F4 — env reads stay in paths/secrets).
+AZURE_API_VERSION = _azure_api_version()
 
 
 @dataclass(frozen=True)
@@ -137,10 +139,10 @@ def _resolve_embed() -> Credentials:
 
 
 def _resolve_graph() -> GraphCredentials | None:
-    from kairix.secrets import get_secret
+    from kairix.secrets import get_secret, neo4j_uri, neo4j_user
 
-    uri = os.environ.get("KAIRIX_NEO4J_URI", "bolt://localhost:7687")
-    user = os.environ.get("KAIRIX_NEO4J_USER", "neo4j")
+    uri = neo4j_uri()
+    user = neo4j_user()
     password = get_secret("kairix-neo4j-password", required=False)
     if not password:
         return None

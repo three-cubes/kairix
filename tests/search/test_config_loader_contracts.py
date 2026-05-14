@@ -44,11 +44,11 @@ def _isolated_cache_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     a stray ``kairix.config.yaml``. KAIRIX_CONFIG_PATH is unset so each test
     must opt into env-var-driven behaviour explicitly.
     """
-    config_loader._load_cached.cache_clear()
+    config_loader.load_cached.cache_clear()
     monkeypatch.delenv("KAIRIX_CONFIG_PATH", raising=False)
     monkeypatch.chdir(tmp_path)
     yield
-    config_loader._load_cached.cache_clear()
+    config_loader.load_cached.cache_clear()
 
 
 def _write_yaml(path: Path, body: str) -> Path:
@@ -141,7 +141,7 @@ class TestLoadConfigContract:
         assert result.rrf_k == 77
 
     def test_partial_config_fills_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Claim: ``_parse_config`` returns defaults for any missing/invalid
+        """Claim: ``parse_config`` returns defaults for any missing/invalid
         section. Documented behaviour: a partial YAML must keep all unspecified
         fields at their default values.
         """
@@ -704,7 +704,7 @@ class TestConfigValidationErrorContract:
             load_config()
 
     def test_multiple_validation_errors_listed_together(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Claim: ``_validate_config`` collects ``errors: list[str]`` and
+        """Claim: ``validate_config`` collects ``errors: list[str]`` and
         joins them — multiple bad fields appear in a single error message.
         """
         cfg_file = _write_yaml(

@@ -22,9 +22,20 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from kairix.core.search.scope import Scope
-from kairix.use_cases import _contradict_defaults as _defaults
 
 logger = logging.getLogger(__name__)
+
+
+def _default_check_contradiction(**kwargs: Any) -> list[Any]:
+    from kairix.knowledge.contradict.detector import check_contradiction
+
+    return check_contradiction(**kwargs)
+
+
+def _default_llm_backend() -> Any:
+    from kairix.platform.llm import get_default_backend
+
+    return get_default_backend()
 
 
 @dataclass(frozen=True)
@@ -61,9 +72,16 @@ class ContradictOutput:
 
 @dataclass(frozen=True)
 class ContradictDeps:
-    """Injectable dependencies for ``run_contradict``."""
+    """Injectable dependencies for ``run_contradict``.
 
-    check_fn: Callable[..., list[Any]] | None = None
+    Mirrors ``WorkerDeps`` (kairix/worker.py): ``check_fn`` is
+    non-Optional with a ``default_factory`` returning the production
+    helper. ``llm_backend`` is a value (not a callable) — when None
+    the run_contradict loop resolves the production backend lazily so
+    the LLM stack stays unloaded at import time.
+    """
+
+    check_fn: Callable[..., list[Any]] = field(default_factory=lambda: _default_check_contradiction)
     llm_backend: Any | None = None
 
 
@@ -102,10 +120,9 @@ def run_contradict(
         deps: Injectable dependencies; production callers leave None.
     """
     d = deps or ContradictDeps()
-    check = d.check_fn or _defaults.default_check_contradiction
 
     try:
-        llm = d.llm_backend if d.llm_backend is not None else _defaults.default_llm_backend()
+        llm = d.llm_backend if d.llm_backend is not None else _default_llm_backend()
 
         kwargs: dict[str, Any] = {
             "content": content,
@@ -118,7 +135,7 @@ def run_contradict(
         if agent is not None:
             kwargs["agent"] = agent
 
-        results = check(**kwargs)
+        results = d.check_fn(**kwargs)
         hits = [_project(r) for r in results]
         return ContradictOutput(
             content=content,

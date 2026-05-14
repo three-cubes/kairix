@@ -60,15 +60,15 @@ def scan_for_entities(db: sqlite3.Connection, limit: int = 500) -> list[EntityCa
         (limit * 5,),  # over-fetch since many won't match
     ).fetchall()
 
-    for path, title in rows:
-        _check_path_patterns(path, title, candidates)
+    for path, _title in rows:
+        _check_path_patterns(path, candidates)
 
     # Deduplicate and sort by confidence
     result = sorted(candidates.values(), key=lambda c: (-c.confidence, c.name))
     return result[:limit]
 
 
-def _check_path_patterns(path: str, title: str, candidates: dict[str, EntityCandidate]) -> None:
+def _check_path_patterns(path: str, candidates: dict[str, EntityCandidate]) -> None:
     """Check if a document path matches entity folder patterns."""
     for pattern, entity_type, confidence in [
         (_ORG_PATTERNS, "Organisation", 0.85),

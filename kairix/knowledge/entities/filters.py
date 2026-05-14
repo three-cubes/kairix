@@ -2,8 +2,8 @@
 
 Composing these filters in order via :class:`ChainedSuggestionFilter` produces
 the entity-suggest correction pipeline that fixes the dogfood-reported bug
-where role phrases (e.g., "the APAC GTM") leaked through as ``ORG`` and
-known entities the small NER model doesn't recognise (e.g., "Avanade",
+where role phrases (e.g., "the regional team") leaked through as ``ORG`` and
+short proper-noun acronyms the small NER model doesn't recognise (e.g.,
 "MIT") were silently dropped.
 
 Each filter is a self-contained Strategy: no if/elif dispatch on type,
@@ -28,7 +28,7 @@ class RolePhraseFilter:
     only (the surrounding ``context`` is ignored here):
 
     1. ``the [Word]+`` — leading definite article followed by one or more
-       words, e.g. "the APAC GTM", "the regional lead".
+       words, e.g. "the regional lead", "the platform team".
     2. ``[Title] (Officer|Director|Lead|Manager|VP|Head|Chief|President|
        Engineer|Architect)`` — a single capitalised word followed by a
        known role noun. Plain role titles without a name attached.
@@ -39,7 +39,9 @@ class RolePhraseFilter:
     """
 
     # Words after the article must be alphabetic; allows uppercase acronyms.
-    _ARTICLE_PATTERN = re.compile(r"^the\s+[A-Za-z][A-Za-z]*(?:\s+[A-Za-z][A-Za-z]*)+$", re.IGNORECASE)
+    # IGNORECASE is set, so character classes use `[a-z]` only — adding `A-Z`
+    # would duplicate every range under IGNORECASE (Sonar python:S5869).
+    _ARTICLE_PATTERN = re.compile(r"^the\s+[a-z][a-z]*(?:\s+[a-z][a-z]*)+$", re.IGNORECASE)
 
     # Plain-role: capitalised word + role noun (no further words — that would
     # imply a person's full title, e.g. "John Smith Director" is unusual; we
@@ -85,10 +87,19 @@ class KnownEntityAllowlist:
     The allowlist is supplied as a list of :class:`Suggestion` dicts at
     construction time (G4: configuration at the boundary — file resolution
     happens in the factory, not here). For each allowlist entry whose
-    ``text`` substring-appears in the ``context`` (case-insensitive) and
-    is missing from the input suggestions, a new entry is appended with
-    ``source="allowlist"`` and ``confidence=1.0``. Existing suggestions
-    are preserved unchanged, even if their text matches an allowlist entry.
+    ``text`` appears as a **word-boundary token** in the ``context``
+    (case-insensitive) and is missing from the input suggestions, a new
+    entry is appended with ``source="allowlist"`` and ``confidence=1.0``.
+    Existing suggestions are preserved unchanged, even if their text
+    matches an allowlist entry.
+
+    Match semantics (#249 fix). Substring matching (``text in context``)
+    fired false positives — an override for ``"BB"`` matched ``"abbey"``
+    or ``"BBBB"``. Word-boundary matching via ``re.search(r"\\b{text}\\b",
+    context, IGNORECASE)`` requires the term to be a standalone token. The
+    ``case_insensitive`` flag at the override-file layer still works:
+    expansion at load time produces lower/upper/title variants, each of
+    which the word-boundary regex matches case-insensitively here.
     """
 
     def __init__(self, entities: list[Suggestion]) -> None:
@@ -97,14 +108,13 @@ class KnownEntityAllowlist:
     def apply(self, suggestions: list[Suggestion], context: str) -> list[Suggestion]:
         result: list[Suggestion] = list(suggestions)
         existing_texts = {s.get("text", "").lower() for s in suggestions}
-        context_lower = context.lower()
         for entry in self._entities:
             text = entry.get("text", "")
             if not text:
                 continue
             if text.lower() in existing_texts:
                 continue
-            if text.lower() not in context_lower:
+            if not _matches_word_boundary(text, context):
                 continue
             promoted: Suggestion = {
                 "text": text,
@@ -115,6 +125,27 @@ class KnownEntityAllowlist:
             result.append(promoted)
             existing_texts.add(text.lower())
         return result
+
+
+def _matches_word_boundary(text: str, context: str) -> bool:
+    """Return True when ``text`` appears as a word-boundary token in ``context``.
+
+    Case-insensitive. ``re.escape`` neutralises regex metacharacters so
+    override entries containing punctuation (``"C++"``, ``"AT&T"``) don't
+    blow up the regex compiler. Each end of the pattern uses ``\\b`` only
+    when the adjacent character is a word character — Python's ``\\b``
+    asserts the transition between a word and a non-word character, so
+    anchoring against a non-word character at the boundary (e.g. trailing
+    ``+`` in ``"C++"``) would never match. Falling back to a lookaround
+    against ``\\W`` or string-boundary keeps the punctuation case working.
+    """
+    if not text:
+        return False
+    escaped = re.escape(text)
+    left_boundary = r"\b" if text[0].isalnum() or text[0] == "_" else r"(?:^|(?<=\W))"
+    right_boundary = r"\b" if text[-1].isalnum() or text[-1] == "_" else r"(?:$|(?=\W))"
+    pattern = re.compile(rf"{left_boundary}{escaped}{right_boundary}", re.IGNORECASE)
+    return bool(pattern.search(context))
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +178,8 @@ class NerLabelFilter:
         new_label = self._lookup_override(text)
         if new_label is None:
             # Pass through — return a shallow copy to avoid aliasing.
-            return dict(suggestion)  # type: ignore[return-value]
-        updated: Suggestion = dict(suggestion)  # type: ignore[assignment]
+            return dict(suggestion)  # type: ignore[return-value]  # dict() loses TypedDict narrowing; runtime matches Suggestion
+        updated: Suggestion = dict(suggestion)  # type: ignore[assignment]  # dict() loses TypedDict narrowing; runtime matches Suggestion
         updated["label"] = new_label
         return updated
 

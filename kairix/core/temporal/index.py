@@ -15,14 +15,15 @@ from __future__ import annotations
 
 import logging
 import math
-import os as _os
 import re
 from collections import Counter
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 
 from kairix.core.search.bm25 import FTS_STOP_WORDS as _STOP_WORDS
 from kairix.core.temporal.chunker import TemporalChunk, chunk_board, chunk_memory_log
+from kairix.paths import boards_dir_override as _boards_dir_override
 from kairix.paths import document_root as _doc_root_fn
 
 logger = logging.getLogger(__name__)
@@ -36,12 +37,48 @@ _MEMORY_LOG_FILENAME_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.md$")
 # ---------------------------------------------------------------------------
 
 
-def _boards_dir() -> Path:
-    """Return the boards directory, respecting KAIRIX_BOARDS_DIR override."""
-    override = _os.environ.get("KAIRIX_BOARDS_DIR")
-    if override:
-        return Path(override)
-    return _doc_root_fn() / "01-Projects" / "Boards"
+def _boards_dir(document_root: Path | None = None) -> Path:
+    """Return the boards directory, respecting KAIRIX_BOARDS_DIR override.
+
+    ``document_root`` is an injectable seam (defaults to the production
+    ``paths.document_root()``) so tests can pass a tmp-path-rooted directory
+    without monkeypatching env vars or the paths module.
+    """
+    override = _boards_dir_override()
+    if override is not None:
+        return override
+    root = document_root if document_root is not None else _doc_root_fn()
+    return root / "01-Projects" / "Boards"
+
+
+def _memory_log_date(filename: str) -> date | None:
+    """Parse a memory-log filename (``YYYY-MM-DD.md``) into a date, or None."""
+    m = _MEMORY_LOG_FILENAME_RE.match(filename)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def _date_in_range(log_date: date, start: date | None, end: date | None) -> bool:
+    """Inclusive range check; ``None`` bounds are treated as open."""
+    if start is not None and log_date < start:
+        return False
+    if end is not None and log_date > end:
+        return False
+    return True
+
+
+def _iter_agent_memory_dirs(agent_knowledge_dir: Path) -> Iterator[Path]:
+    """Yield ``{agent}/memory`` directories under the agent-knowledge root."""
+    for agent_dir in agent_knowledge_dir.iterdir():
+        if not agent_dir.is_dir():
+            continue
+        memory_dir = agent_dir / "memory"
+        if memory_dir.is_dir():
+            yield memory_dir
 
 
 def get_memory_log_paths(
@@ -66,34 +103,17 @@ def get_memory_log_paths(
     Returns:
         Sorted list of matching file paths.
     """
-    paths: list[str] = []
     doc_root = document_root or _doc_root_fn()
-
     agent_knowledge_dir = doc_root / "04-Agent-Knowledge"
     if not agent_knowledge_dir.is_dir():
-        return paths
+        return []
 
-    for agent_dir in agent_knowledge_dir.iterdir():
-        if not agent_dir.is_dir():
-            continue
-        memory_dir = agent_dir / "memory"
-        if not memory_dir.is_dir():
-            continue
-
+    paths: list[str] = []
+    for memory_dir in _iter_agent_memory_dirs(agent_knowledge_dir):
         for log_file in memory_dir.iterdir():
-            m = _MEMORY_LOG_FILENAME_RE.match(log_file.name)
-            if not m:
+            log_date = _memory_log_date(log_file.name)
+            if log_date is None or not _date_in_range(log_date, start, end):
                 continue
-            try:
-                log_date = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-            except ValueError:
-                continue
-
-            if start is not None and log_date < start:
-                continue
-            if end is not None and log_date > end:
-                continue
-
             paths.append(str(log_file))
 
     paths.sort()
@@ -164,6 +184,67 @@ def _recency_factor(chunk_date: date | None, end: date | None) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _collect_board_chunks(document_root: Path | None) -> list[TemporalChunk]:
+    """Scan Kanban board markdown files and emit their chunks; per-file errors logged."""
+    chunks: list[TemporalChunk] = []
+    boards = _boards_dir(document_root=document_root)
+    if not boards.is_dir():
+        return chunks
+    for board_path in sorted(boards.glob("*.md")):
+        try:
+            chunks.extend(chunk_board(str(board_path)))
+        except Exception as e:
+            logger.warning("query_temporal_chunks: error chunking board %r — %s", board_path, e)
+    return chunks
+
+
+def _collect_memory_chunks(start: date | None, end: date | None, document_root: Path | None) -> list[TemporalChunk]:
+    """Scan in-range memory logs and emit their chunks; per-file errors logged."""
+    chunks: list[TemporalChunk] = []
+    for log_path in get_memory_log_paths(start, end, document_root=document_root):
+        try:
+            chunks.extend(chunk_memory_log(log_path))
+        except Exception as e:
+            logger.warning("query_temporal_chunks: error chunking memory log %r — %s", log_path, e)
+    return chunks
+
+
+def _filter_chunks(
+    chunks: list[TemporalChunk],
+    start: date | None,
+    end: date | None,
+    chunk_types: list[str] | None,
+) -> list[TemporalChunk]:
+    """Apply date-range and chunk-type filters; memory chunks pre-filtered upstream."""
+    out: list[TemporalChunk] = []
+    for chunk in chunks:
+        # Board card chunks: enforce date filter when the chunk carries a date.
+        # Memory log chunks: already filtered by filename date in get_memory_log_paths.
+        if chunk.chunk_type == "board_card" and chunk.date is not None:
+            if not _date_in_range(chunk.date, start, end):
+                continue
+        out.append(chunk)
+    if chunk_types is not None:
+        out = [c for c in out if c.chunk_type in chunk_types]
+    return out
+
+
+def _rank_chunks(topic: str, chunks: list[TemporalChunk], end: date | None, limit: int) -> list[TemporalChunk]:
+    """Score each chunk with BM25 x recency, return top-N."""
+    query_tokens = _tokenise(topic)
+    all_doc_tokens = [_tokenise(c.text) for c in chunks]
+    avg_dl = sum(len(t) for t in all_doc_tokens) / max(len(all_doc_tokens), 1)
+
+    scored: list[tuple[float, TemporalChunk]] = []
+    for chunk, doc_tokens in zip(chunks, all_doc_tokens, strict=True):
+        bm25 = _bm25_score(query_tokens, doc_tokens, avg_dl)
+        recency = _recency_factor(chunk.date, end)
+        combined = bm25 * (0.7 + 0.3 * recency)  # weight: 70% relevance, 30% recency
+        scored.append((combined, chunk))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [chunk for _, chunk in scored[:limit]]
+
+
 def query_temporal_chunks(
     topic: str,
     start: date | None,
@@ -197,64 +278,11 @@ def query_temporal_chunks(
         Returns [] on any failure.
     """
     try:
-        all_chunks: list[TemporalChunk] = []
-
-        # 1. Board files
-        boards = _boards_dir()
-        for board_path in sorted(boards.glob("*.md")) if boards.is_dir() else []:
-            try:
-                all_chunks.extend(chunk_board(str(board_path)))
-            except Exception as e:
-                logger.warning("query_temporal_chunks: error chunking board %r — %s", board_path, e)
-
-        # 2. Memory logs in date range
-        memory_paths = get_memory_log_paths(start, end, document_root=document_root)
-        for log_path in memory_paths:
-            try:
-                all_chunks.extend(chunk_memory_log(log_path))
-            except Exception as e:
-                logger.warning(
-                    "query_temporal_chunks: error chunking memory log %r — %s",
-                    log_path,
-                    e,
-                )
-
-        # 3. Filter by date range
-        date_filtered: list[TemporalChunk] = []
-        for chunk in all_chunks:
-            # Memory log chunks: already filtered by filename date above
-            # Board card chunks: apply date filter if chunk has a date
-            if chunk.chunk_type == "board_card" and chunk.date is not None:
-                if start is not None and chunk.date < start:
-                    continue
-                if end is not None and chunk.date > end:
-                    continue
-            date_filtered.append(chunk)
-
-        # 4. Filter by chunk_type
-        if chunk_types is not None:
-            date_filtered = [c for c in date_filtered if c.chunk_type in chunk_types]
-
-        if not date_filtered:
+        all_chunks = _collect_board_chunks(document_root) + _collect_memory_chunks(start, end, document_root)
+        filtered = _filter_chunks(all_chunks, start, end, chunk_types)
+        if not filtered:
             return []
-
-        # 5. BM25 x recency scoring
-        query_tokens = _tokenise(topic)
-        all_doc_tokens = [_tokenise(c.text) for c in date_filtered]
-        avg_dl = sum(len(t) for t in all_doc_tokens) / max(len(all_doc_tokens), 1)
-
-        scored: list[tuple[float, TemporalChunk]] = []
-        for chunk, doc_tokens in zip(date_filtered, all_doc_tokens, strict=True):
-            bm25 = _bm25_score(query_tokens, doc_tokens, avg_dl)
-            recency = _recency_factor(chunk.date, end)
-            combined = bm25 * (0.7 + 0.3 * recency)  # weight: 70% relevance, 30% recency
-            scored.append((combined, chunk))
-
-        # Sort descending by score
-        scored.sort(key=lambda x: x[0], reverse=True)
-
-        return [chunk for _, chunk in scored[:limit]]
-
+        return _rank_chunks(topic, filtered, end, limit)
     except Exception as e:
         logger.warning("query_temporal_chunks: unexpected error — %s", e)
         return []

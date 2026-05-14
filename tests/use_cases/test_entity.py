@@ -195,3 +195,59 @@ def test_validate_envelope_includes_all_fields() -> None:
     assert env["name"] == "Acme"
     assert env["updated"] is True
     assert env["matches"] == []
+
+
+# ---------------------------------------------------------------------------
+# production_suggest — #166: vault-driven override loading is wired in.
+# ---------------------------------------------------------------------------
+
+
+def test_production_suggest_returns_empty_when_neo4j_unavailable(tmp_path) -> None:
+    """``production_suggest`` short-circuits to ``[]`` when Neo4j is down.
+
+    Confirms the override-file resolution + chain construction codepath
+    is reachable from ``EntitySuggestDeps.suggest_fn``'s default factory.
+    The Neo4j-down branch returns before the spaCy import so this works
+    in environments that don't have spaCy installed (CI default).
+
+    F2-clean: the override file path is passed via the production
+    ``overrides_path`` kwarg, not by monkeypatching the env var.
+    """
+    from kairix.use_cases.entity import production_suggest
+
+    overrides_file = tmp_path / "_entity-overrides.md"
+    overrides_file.write_text('- "YYY": ORG\n', encoding="utf-8")
+
+    class _UnavailableNeo4j:
+        available = False
+
+    result = production_suggest("YYY did a thing.", _UnavailableNeo4j(), overrides_path=overrides_file)
+    assert result == []
+
+
+def test_production_suggest_loads_overrides_before_calling_suggest_entities(tmp_path, caplog) -> None:
+    """The override file is read on every call: a malformed entry produces
+    the expected loader-warning, and the call still returns (no raise).
+
+    Sabotage-prove: this asserts the override-loader is actually invoked
+    by ``production_suggest`` (the warning would not appear if the
+    loader were short-circuited). If a future refactor stops reading
+    the file, the warning disappears and this test flips.
+    """
+    import logging
+
+    from kairix.use_cases.entity import production_suggest
+
+    overrides_file = tmp_path / "_entity-overrides.md"
+    overrides_file.write_text('- this is malformed\n- "RealOrg": ORG\n', encoding="utf-8")
+
+    class _UnavailableNeo4j:
+        available = False
+
+    with caplog.at_level(logging.WARNING, logger="kairix.knowledge.entities.overrides"):
+        result = production_suggest("text", _UnavailableNeo4j(), overrides_path=overrides_file)
+
+    assert result == []
+    assert any("unparseable entry" in rec.message for rec in caplog.records), (
+        "expected the override loader to be invoked and to warn on the malformed entry"
+    )

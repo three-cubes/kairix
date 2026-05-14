@@ -1,8 +1,8 @@
-"""F7 / F9: Per-file coverage floor at 85%.
+"""F7 / F9: Per-file coverage floor at 90%.
 
 Repository-wide coverage averages can hide files with 0% coverage.
 This check enforces a per-file floor: every kairix/* source file in
-the ``coverage.xml`` report must be ≥85% covered.
+the ``coverage.xml`` report must be ≥90% covered.
 
 Modes:
 
@@ -42,15 +42,39 @@ from xml.etree import ElementTree as ET
 sys.path.insert(0, str(Path(__file__).parent))
 from _arch_lib import gate
 
-FLOOR = 85.0  # per-file coverage percentage threshold
+FLOOR = 90.0  # per-file coverage percentage threshold
 
 
-REMEDIATION = f"""A file dropped below {FLOOR:.0f}% coverage. Add tests that
-drive the public surface; do not add `# pragma: no cover` to silence the
-gate. If the file genuinely cannot be covered (e.g. it is exclusively
+REMEDIATION = f"""Refactor to add tests that drive the public surface
+until each listed file is ≥ {FLOOR:.0f}% covered (do NOT add
+``# pragma: no cover`` to silence the gate) to pass.
+
+fix: add tests that drive the public surface of each listed file
+through a Fake* from tests/fakes.py until coverage is ≥ {FLOOR:.0f}%.
+If a file is genuinely production-only infrastructure, extract its
+testable logic into a use-case class and reduce the file to a thin
+Adapter — do NOT silence with ``# pragma: no cover``.
+next: re-run ``pytest --cov=kairix --cov-report=xml`` then
+``python3 scripts/checks/check_per_file_coverage.py`` to confirm the
+gate goes green.
+run: bash scripts/safe-commit.sh "test(<area>): lift <file> per-file coverage above floor"
+
+Pass example:
+  # tests/use_cases/test_search_pipeline.py
+  def test_search_pipeline_runs_query() -> None:
+      pipeline = SearchPipeline(retriever=FakeRetriever(hits=[Hit('id', 1.0)]))
+      result = pipeline.run('q')
+      assert result == [Hit('id', 1.0)]
+
+Forbidden example:
+  # in kairix/core/search/pipeline.py — silencing the coverage gate
+  def run(self, query: str) -> list[Hit]:
+      ...  # <pragma: no cover>   # (with no rationale)
+
+If the file genuinely cannot be covered (it is exclusively
 production-infrastructure code that requires a live external service),
-the right action is to extract the testable logic into a use-case class
-and reduce the production-only file to a thin Adapter — not to suppress.
+extract the testable logic into a use-case class and reduce the
+production-only file to a thin Adapter — do not suppress.
 
 Per-file coverage is the right unit of measurement: a 91% repo average
 can hide a file at 0%."""

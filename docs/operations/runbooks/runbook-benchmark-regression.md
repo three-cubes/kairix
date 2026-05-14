@@ -84,7 +84,7 @@ kairix --version
 **Rollback to previous version:**
 
 ```bash
-pip install git+https://github.com/quanyeomans/kairix@<PREVIOUS_TAG>
+pip install git+https://github.com/three-cubes/kairix@<PREVIOUS_TAG>
 kairix onboard check
 kairix benchmark run --suite suites/your-suite.yaml
 ```

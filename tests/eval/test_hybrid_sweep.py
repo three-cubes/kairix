@@ -46,7 +46,7 @@ class TestHybridSweepConfig:
     def test_frozen(self) -> None:
         cfg = HybridSweepConfig(name="test", mode="hybrid")
         with pytest.raises(AttributeError):
-            cfg.rrf_k = 100  # type: ignore[misc]
+            cfg.rrf_k = 100  # type: ignore[misc]  # asserting frozen dataclass rejects mutation
 
 
 # ---------------------------------------------------------------------------

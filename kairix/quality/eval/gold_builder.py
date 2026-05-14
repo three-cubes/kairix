@@ -105,14 +105,14 @@ def _validate_weights(weights: tuple[float, float, float]) -> None:
     """
     w_fp, w_title, w_doc = weights
     for label, w in (("filepath", w_fp), ("title", w_title), ("doc", w_doc)):
-        if not math.isfinite(w) or w <= 0:  # pragma: no cover
+        if not math.isfinite(w) or w <= 0:  # pragma: no cover — defensive; presets are finite-positive
             raise ValueError(
                 f"gold_builder: BM25 weight {label}={w!r} must be finite and positive; "
                 f"weights tuple = (filepath, title, doc)"
             )
 
 
-def _vector_search(  # pragma: no cover
+def _vector_search(  # pragma: no cover — prod-only path; tests inject FakeRetriever
     query: str,
     collections: list[str] | None = None,
     limit: int = 10,
@@ -210,7 +210,7 @@ class GoldBuilder:
         # The lazy-construction branch is production-only — tests always inject
         # FakeLLMJudge via the constructor, so the AzureChatBackend wiring runs
         # only from CLI entry points (kairix.quality.eval.cli).
-        if self._llm_judge is None:  # pragma: no cover
+        if self._llm_judge is None:  # pragma: no cover — prod-only lazy default; tests inject FakeLLMJudge
             from kairix._azure import AzureChatBackend
             from kairix.quality.eval.judge import LLMJudge as ProductionLLMJudge
 
@@ -220,7 +220,7 @@ class GoldBuilder:
     def _get_retriever(self) -> RetrieverProtocol:
         """Return the configured Retriever or construct a production default."""
         # Lazy-construction branch is production-only — tests inject FakeRetriever.
-        if self._retriever is None:  # pragma: no cover
+        if self._retriever is None:  # pragma: no cover — prod-only lazy default; tests inject FakeRetriever
             self._retriever = _DefaultGoldRetriever()
         return self._retriever
 
@@ -487,6 +487,73 @@ class GoldBuilder:
 
         return graded_candidates
 
+    def _resolve_credentials(self, credentials: tuple[str, str, str] | None) -> tuple[str, str] | None:
+        """Return (api_key, endpoint) or None when credentials are missing."""
+        if credentials is not None:
+            api_key, endpoint, _deployment = credentials
+        else:
+            api_key, endpoint, _deployment = fetch_llm_credentials()
+        if not api_key or not endpoint:
+            logger.error("gold_builder: no API credentials — cannot run judge")
+            return None
+        return api_key, endpoint
+
+    def _calibrate_judge(self, judge: Any, api_key: str, endpoint: str) -> None:
+        """Run the judge calibration step, handling fake-judge kwarg mismatch."""
+        logger.info("gold_builder: running calibration...")
+        # Cast to Any so the production ``calibrate(api_key=, endpoint=)``
+        # call type-checks even though the protocol signature is
+        # ``calibrate() -> bool``.
+        judge_any = cast(Any, judge)
+        try:
+            judge_any.calibrate(api_key=api_key, endpoint=endpoint)
+        except TypeError:
+            # FakeLLMJudge.calibrate() takes no kwargs
+            judge.calibrate()
+        logger.info("gold_builder: calibration passed")
+
+    def _grade_case_gold_titles(
+        self, candidates: list[PooledCandidate], report: GoldBuildReport
+    ) -> list[dict[str, Any]]:
+        """Update grade-distribution counters and return ``gold_titles`` for the case."""
+        gold_titles: list[dict[str, Any]] = []
+        for c in sorted(candidates, key=lambda x: x.grade, reverse=True):
+            report.grade_distribution[c.grade] = report.grade_distribution.get(c.grade, 0) + 1
+            if c.grade >= 1:
+                gold_titles.append({"title": path_title(c.path), "relevance": c.grade})
+        return gold_titles
+
+    def _process_case(
+        self,
+        case: dict[str, Any],
+        systems: list[str],
+        judge_runs: int,
+        limit_per_system: int,
+        api_key: str,
+        endpoint: str,
+        report: GoldBuildReport,
+    ) -> bool:
+        """Pool + grade one query case; mutate ``case`` in place. Return True on processed."""
+        query = case.get("query", "")
+        if not query:
+            return False
+
+        candidates = self.pool(query, systems, limit_per_system=limit_per_system)
+        report.total_candidates_pooled += len(candidates)
+        if not candidates:
+            logger.warning("gold_builder: no candidates for query %r", query[:60])
+            return False
+
+        candidates = self.grade(query, candidates, runs=judge_runs, api_key=api_key, endpoint=endpoint)
+        report.total_judge_calls += len(candidates) * judge_runs
+
+        case["gold_titles"] = self._grade_case_gold_titles(candidates, report)
+        case["score_method"] = "ndcg"
+        # Preserve original gold_paths for comparison but mark as legacy.
+        if "gold_paths" in case:
+            case["legacy_gold_paths"] = case.pop("gold_paths")
+        return True
+
     def build_independent_gold(
         self,
         suite_path: Path,
@@ -520,7 +587,6 @@ class GoldBuilder:
         if systems is None:
             systems = ["bm25-equal", "bm25-filepath", "bm25-title", "vector"]
 
-        # Load suite
         with open(suite_path) as f:
             suite_data = yaml.safe_load(f)
 
@@ -529,77 +595,20 @@ class GoldBuilder:
             logger.error("gold_builder: no cases found in suite %s", suite_path)
             return GoldBuildReport()
 
-        # Fetch credentials
-        if credentials is not None:
-            api_key, endpoint, _deployment = credentials
-        else:
-            api_key, endpoint, _deployment = fetch_llm_credentials()
-        if not api_key or not endpoint:
-            logger.error("gold_builder: no API credentials — cannot run judge")
+        creds = self._resolve_credentials(credentials)
+        if creds is None:
             return GoldBuildReport()
+        api_key, endpoint = creds
 
-        # Calibrate via the injected judge
         judge = self._get_llm_judge()
         if calibrate_first:
-            logger.info("gold_builder: running calibration...")
-            # Cast to Any so the production ``calibrate(api_key=, endpoint=)``
-            # call type-checks even though the protocol signature is
-            # ``calibrate() -> bool``.
-            judge_any = cast(Any, judge)
-            try:
-                judge_any.calibrate(api_key=api_key, endpoint=endpoint)
-            except TypeError:
-                # FakeLLMJudge.calibrate() takes no kwargs
-                judge.calibrate()
-            logger.info("gold_builder: calibration passed")
+            self._calibrate_judge(judge, api_key, endpoint)
 
         report = GoldBuildReport()
-
         for i, case in enumerate(cases):
-            query = case.get("query", "")
-            if not query:
-                continue
-
-            logger.info("gold_builder: [%d/%d] %s", i + 1, len(cases), query[:60])
-
-            # Pool candidates
-            candidates = self.pool(query, systems, limit_per_system=limit_per_system)
-            report.total_candidates_pooled += len(candidates)
-
-            if not candidates:
-                logger.warning("gold_builder: no candidates for query %r", query[:60])
-                continue
-
-            # Grade via the injected LLMJudge
-            candidates = self.grade(
-                query,
-                candidates,
-                runs=judge_runs,
-                api_key=api_key,
-                endpoint=endpoint,
-            )
-            report.total_judge_calls += len(candidates) * judge_runs
-
-            # Build gold_titles from graded candidates (grade >= 1)
-            gold_titles = []
-            for c in sorted(candidates, key=lambda x: x.grade, reverse=True):
-                report.grade_distribution[c.grade] = report.grade_distribution.get(c.grade, 0) + 1
-                if c.grade >= 1:
-                    gold_titles.append(
-                        {
-                            "title": path_title(c.path),
-                            "relevance": c.grade,
-                        }
-                    )
-
-            # Update case with independent gold
-            case["gold_titles"] = gold_titles
-            case["score_method"] = "ndcg"
-            # Preserve original gold_paths for comparison but mark as legacy
-            if "gold_paths" in case:
-                case["legacy_gold_paths"] = case.pop("gold_paths")
-
-            report.queries_processed += 1
+            logger.info("gold_builder: [%d/%d] %s", i + 1, len(cases), case.get("query", "")[:60])
+            if self._process_case(case, systems, judge_runs, limit_per_system, api_key, endpoint, report):
+                report.queries_processed += 1
 
         # Update metadata
         suite_data.setdefault("meta", {})["gold_method"] = "trec-pooling-llm-judge"
@@ -607,7 +616,6 @@ class GoldBuilder:
         suite_data["meta"]["judge_runs"] = judge_runs
         suite_data["meta"]["n_cases"] = report.queries_processed
 
-        # Write output
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
             yaml.dump(suite_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
@@ -615,12 +623,11 @@ class GoldBuilder:
         report.avg_candidates_per_query = (
             report.total_candidates_pooled / report.queries_processed if report.queries_processed > 0 else 0
         )
-
         logger.info("gold_builder: %s", report)
         return report
 
 
-class _DefaultGoldRetriever:  # pragma: no cover
+class _DefaultGoldRetriever:  # pragma: no cover — prod-only shim; tests inject FakeRetriever
     """Production Retriever for the gold builder — delegates to module-level
     ``_vector_search``.
 

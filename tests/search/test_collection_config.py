@@ -7,7 +7,7 @@ import pytest
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.config_loader import (
     ResolveConfigDeps,
-    _merge_retrieval_config,
+    merge_retrieval_config,
     resolve_retrieval_config,
 )
 
@@ -18,7 +18,7 @@ class TestMergeRetrievalConfig:
     @pytest.mark.unit
     def test_top_level_override(self) -> None:
         base = RetrievalConfig.defaults()
-        merged = _merge_retrieval_config(base, {"fusion_strategy": "rrf", "vec_limit": 30})
+        merged = merge_retrieval_config(base, {"fusion_strategy": "rrf", "vec_limit": 30})
         assert merged.fusion_strategy == "rrf"
         assert merged.vec_limit == 30
         assert merged.bm25_limit == base.bm25_limit  # unchanged
@@ -26,7 +26,7 @@ class TestMergeRetrievalConfig:
     @pytest.mark.unit
     def test_nested_entity_override(self) -> None:
         base = RetrievalConfig.defaults()
-        merged = _merge_retrieval_config(base, {"boosts": {"entity": {"factor": 0.50}}})
+        merged = merge_retrieval_config(base, {"boosts": {"entity": {"factor": 0.50}}})
         assert merged.entity.factor == pytest.approx(0.50)
         assert merged.entity.cap == base.entity.cap  # unchanged
         assert merged.entity.enabled == base.entity.enabled  # unchanged
@@ -34,20 +34,20 @@ class TestMergeRetrievalConfig:
     @pytest.mark.unit
     def test_nested_procedural_override(self) -> None:
         base = RetrievalConfig.defaults()
-        merged = _merge_retrieval_config(base, {"boosts": {"procedural": {"factor": 2.0}}})
+        merged = merge_retrieval_config(base, {"boosts": {"procedural": {"factor": 2.0}}})
         assert merged.procedural.factor == pytest.approx(2.0)
         assert merged.procedural.enabled == base.procedural.enabled
 
     @pytest.mark.unit
     def test_empty_override_returns_base(self) -> None:
         base = RetrievalConfig.defaults()
-        merged = _merge_retrieval_config(base, {})
+        merged = merge_retrieval_config(base, {})
         assert merged == base
 
     @pytest.mark.unit
     def test_full_override(self) -> None:
         base = RetrievalConfig.defaults()
-        merged = _merge_retrieval_config(
+        merged = merge_retrieval_config(
             base,
             {
                 "fusion_strategy": "rrf",
@@ -77,7 +77,7 @@ class TestMergeRetrievalConfig:
         """
         base = RetrievalConfig.defaults()
         # Default is ("multi_hop", "semantic") on RetrievalConfig.
-        merged = _merge_retrieval_config(base, {"rerank_intents": ["conceptual"]})
+        merged = merge_retrieval_config(base, {"rerank_intents": ["conceptual"]})
         assert merged.rerank_intents == ("conceptual",)
         # Other fields unchanged.
         assert merged.fusion_strategy == base.fusion_strategy
@@ -89,7 +89,7 @@ class TestMergeRetrievalConfig:
         unless ``rerank.enabled`` is True (the global force-on lever).
         """
         base = RetrievalConfig.defaults()
-        merged = _merge_retrieval_config(base, {"rerank_intents": []})
+        merged = merge_retrieval_config(base, {"rerank_intents": []})
         assert merged.rerank_intents == ()
 
 

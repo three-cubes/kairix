@@ -33,6 +33,46 @@ _WIKILINK_RE = WIKILINK_RE
 # ---------------------------------------------------------------------------
 
 
+def _build_target_to_path(entities: list[WikiEntity]) -> dict[str, str]:
+    """Map each entity's wikilink target (``[[target]]``) onto its vault_path."""
+    target_to_path: dict[str, str] = {}
+    for entity in entities:
+        m = re.match(r"\[\[([^\]|]+)", entity.link)
+        if m:
+            target_to_path[m.group(1)] = entity.vault_path
+    return target_to_path
+
+
+def _broken_link_rows(
+    md_file: Path,
+    content: str,
+    doc_path: Path,
+    target_to_path: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Emit a row per [[wikilink]] in ``content`` whose tracked vault_path is missing."""
+    rows: list[dict[str, Any]] = []
+    for link_match in _WIKILINK_RE.finditer(content):
+        link_target = link_match.group(1)
+        expected_path = target_to_path.get(link_target)
+        if expected_path is None:
+            continue  # not a tracked entity link
+        full_expected = doc_path / expected_path
+        if full_expected.exists():
+            continue
+        # Tolerate trailing-slash differences in the vault_path.
+        alt_path = doc_path / expected_path.rstrip("/")
+        if alt_path.exists():
+            continue
+        rows.append(
+            {
+                "file": str(md_file.relative_to(doc_path)),
+                "link": f"[[{link_target}]]",
+                "reason": f"vault_path not found: {expected_path}",
+            }
+        )
+    return rows
+
+
 def find_broken_links(
     document_root: str = str(Path.home() / "kairix-vault"),
     vault_root: str | None = None,
@@ -45,54 +85,95 @@ def find_broken_links(
     """
     from kairix.knowledge.wikilinks.resolver import get_entities
 
-    root = vault_root or document_root
-    entities = get_entities()
-    # Build lookup: wikilink target → vault_path
-    target_to_path: dict[str, str] = {}
-    for entity in entities:
-        # Extract link target from [[target]] or [[target|display]]
-        m = re.match(r"\[\[([^\]|]+)", entity.link)
-        if m:
-            target_to_path[m.group(1)] = entity.vault_path
-
-    doc_path = Path(root)
+    target_to_path = _build_target_to_path(get_entities())
+    doc_path = Path(vault_root or document_root)
     results: list[dict[str, Any]] = []
-
-    # Walk all markdown files in document store
     for md_file in doc_path.rglob("*.md"):
         try:
             content = md_file.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-
-        for link_match in _WIKILINK_RE.finditer(content):
-            link_target = link_match.group(1)
-            if link_target not in target_to_path:
-                continue  # Not a tracked entity link, skip
-
-            expected_path = target_to_path[link_target]
-            full_expected = doc_path / expected_path
-
-            # Check if path exists (as file or directory)
-            if not full_expected.exists():
-                # Also check without trailing slash
-                alt_path = doc_path / expected_path.rstrip("/")
-                if not alt_path.exists():
-                    rel_file = str(md_file.relative_to(doc_path))
-                    results.append(
-                        {
-                            "file": rel_file,
-                            "link": f"[[{link_target}]]",
-                            "reason": f"vault_path not found: {expected_path}",
-                        }
-                    )
-
+        results.extend(_broken_link_rows(md_file, content, doc_path, target_to_path))
     return results
 
 
 # ---------------------------------------------------------------------------
 # Unlinked mention sampling
 # ---------------------------------------------------------------------------
+
+
+def _gather_audit_files(doc_path: Path, paths: KairixPaths) -> list[Path]:
+    """Collect every ``should_inject``-eligible .md file under doc_path + workspaces."""
+    eligible: list[Path] = []
+    for md_file in doc_path.rglob("*.md"):
+        if should_inject(str(md_file), paths=paths):
+            eligible.append(md_file)
+    workspaces_root = paths.workspace_root
+    if workspaces_root.exists():
+        for md_file in workspaces_root.rglob("*.md"):
+            if should_inject(str(md_file), paths=paths):
+                eligible.append(md_file)
+    return eligible
+
+
+def _read_audit_file(md_file: Path) -> str | None:
+    """Read an audit-eligible .md file; return None when oversize or unreadable."""
+    try:
+        if md_file.stat().st_size > MAX_FILE_SIZE:
+            return None
+        return md_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _already_linked_names(content: str) -> set[str]:
+    """Collect every entity-name that already appears inside ``[[wikilinks]]``."""
+    already_linked: set[str] = set()
+    for m in _WIKILINK_RE.finditer(content):
+        already_linked.add(m.group(1))
+        if m.lastindex and m.lastindex >= 2:
+            display = re.search(r"\[\[[^\]|]+\|([^\]]+)\]\]", m.group(0))
+            if display:
+                already_linked.add(display.group(1))
+    return already_linked
+
+
+def _count_plain_mentions(entity: WikiEntity, content: str) -> int:
+    """Count whole-word plain-text mentions of every trigger for ``entity``."""
+    total = 0
+    for trigger in entity.all_triggers():
+        escaped = re.escape(trigger)
+        pattern = rf"(?<!\w){escaped}(?!\w)"
+        total += len(re.findall(pattern, content, re.IGNORECASE))
+    return total
+
+
+def _relative_audit_path(md_file: Path, doc_path: Path) -> str:
+    """Convert an absolute path to one relative to ``doc_path`` when nested under it."""
+    md_str = str(md_file)
+    doc_str = str(doc_path)
+    return str(md_file.relative_to(doc_path)) if md_str.startswith(doc_str) else md_str
+
+
+def _scan_file_for_unlinked(
+    md_file: Path,
+    doc_path: Path,
+    entities: list[WikiEntity],
+) -> list[dict[str, Any]]:
+    """Emit one row per (entity, count>0) pair for unlinked mentions in this file."""
+    content = _read_audit_file(md_file)
+    if content is None:
+        return []
+    already_linked = _already_linked_names(content)
+    rel_file = _relative_audit_path(md_file, doc_path)
+    rows: list[dict[str, Any]] = []
+    for entity in entities:
+        if any(t in already_linked for t in entity.all_triggers()):
+            continue
+        count = _count_plain_mentions(entity, content)
+        if count > 0:
+            rows.append({"file": rel_file, "entity_name": entity.name, "mention_count": count})
+    return rows
 
 
 def find_unlinked_mentions(
@@ -117,74 +198,20 @@ def find_unlinked_mentions(
                        ``None``, falls back to ``KairixPaths.resolve()``.
     """
     paths = paths or KairixPaths.resolve()
-
     doc_path = Path(document_root)
+    eligible = _gather_audit_files(doc_path, paths)
 
-    # Gather eligible files
-    eligible: list[Path] = []
-    for md_file in doc_path.rglob("*.md"):
-        if should_inject(str(md_file), paths=paths):
-            eligible.append(md_file)
-
-    # Also check workspace memory files
-    workspaces_root = paths.workspace_root
-    if workspaces_root.exists():
-        for md_file in workspaces_root.rglob("*.md"):
-            if should_inject(str(md_file), paths=paths):
-                eligible.append(md_file)
-
-    # Sample
     if len(eligible) > sample_size:
-        # NOSONAR: non-security audit sampling — picking a
-        # representative subset of files for human review; no security boundary.
+        # NOSONAR: non-security audit sampling — picking a representative
+        # subset of files for human review; no security boundary.
         sampled = random.sample(eligible, sample_size)
     else:
         sampled = list(eligible)
 
     results: list[dict[str, Any]] = []
     for md_file in sampled:
-        try:
-            size = md_file.stat().st_size
-            if size > MAX_FILE_SIZE:
-                continue
-            content = md_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
+        results.extend(_scan_file_for_unlinked(md_file, doc_path, entities))
 
-        # Find already-linked entity names in this file
-        already_linked: set[str] = set()
-        for m in _WIKILINK_RE.finditer(content):
-            already_linked.add(m.group(1))
-            if m.lastindex and m.lastindex >= 2:
-                display = re.search(r"\[\[[^\]|]+\|([^\]]+)\]\]", m.group(0))
-                if display:
-                    already_linked.add(display.group(1))
-
-        for entity in entities:
-            # Skip if already linked
-            if any(t in already_linked for t in entity.all_triggers()):
-                continue
-
-            # Count plain-text mentions (whole word)
-            count = 0
-            for trigger in entity.all_triggers():
-                escaped = re.escape(trigger)
-                pattern = rf"(?<!\w){escaped}(?!\w)"
-                count += len(re.findall(pattern, content, re.IGNORECASE))
-
-            if count > 0:
-                md_str = str(md_file)
-                doc_str = str(doc_path)
-                rel_file = str(md_file.relative_to(doc_path)) if md_str.startswith(doc_str) else md_str
-                results.append(
-                    {
-                        "file": rel_file,
-                        "entity_name": entity.name,
-                        "mention_count": count,
-                    }
-                )
-
-    # Sort by mention count descending
     results.sort(key=lambda x: -x["mention_count"])
     return results
 

@@ -249,12 +249,17 @@ def llm_judge(
     Args:
         query:        The search query to judge.
         paths:        Retrieved document paths.
-        snippets:     Retrieved document snippets.
+        snippets:     Retrieved document snippets — accepted for caller
+                      symmetry with ``score_case`` (``llm`` arm), but the
+                      prompt judges paths-only to match the original
+                      ``run-benchmark-hybrid.py`` scorer for cross-run
+                      comparability.
         chat_backend: ``ChatBackend`` protocol implementation. Defaults to
                       ``AzureChatBackend`` constructed lazily.
 
     Returns 0.0 on any failure (API error, parse error, timeout).
     """
+    _ = snippets  # consumed at signature time; explicit drop documents intent
     try:
         if not paths:
             return 0.0
@@ -432,7 +437,12 @@ def score_case(
     ``deps`` carries the classifier (for ``classification`` cases) and the
     chat backend (for ``llm`` cases). When ``None``, production defaults are
     constructed — the unit-test path always passes deps with fakes.
+
+    ``retrieval_meta`` is accepted for caller symmetry with ``retrieve_case``
+    (both helpers share the same tuple shape inside ``run_benchmark``); the
+    dispatcher itself doesn't consult metadata to pick a score method.
     """
+    _ = retrieval_meta  # explicit drop documents intent
     deps = deps if deps is not None else BenchmarkDeps()
 
     if case.score_method == "classification":

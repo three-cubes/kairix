@@ -14,7 +14,7 @@ set -e
 
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(py|md|yaml|yml|sh|json|toml)$' | grep -v "pre-commit-confidential-check.sh" || true)
 
-if [ -z "$STAGED_FILES" ]; then
+if [[ -z "$STAGED_FILES" ]]; then
     exit 0
 fi
 
@@ -27,7 +27,7 @@ BLOCKED_PATTERNS=(
 )
 
 # Load operator-specific patterns from .confidential-patterns (gitignored)
-if [ -f ".confidential-patterns" ]; then
+if [[ -f ".confidential-patterns" ]]; then
     while IFS= read -r line; do
         # Skip empty lines and comments
         [[ -z "$line" || "$line" == \#* ]] && continue
@@ -39,7 +39,7 @@ FAILURES=0
 
 for pattern in "${BLOCKED_PATTERNS[@]}"; do
     MATCHES=$(echo "$STAGED_FILES" | xargs grep -lnE "$pattern" 2>/dev/null || true)
-    if [ -n "$MATCHES" ]; then
+    if [[ -n "$MATCHES" ]]; then
         echo "BLOCKED: confidential pattern found in staged files:"
         echo "$MATCHES" | while read -r file; do
             echo "  $file:"
@@ -49,7 +49,7 @@ for pattern in "${BLOCKED_PATTERNS[@]}"; do
     fi
 done
 
-if [ "$FAILURES" -gt 0 ]; then
+if [[ "$FAILURES" -gt 0 ]]; then
     echo ""
     echo "Commit blocked: $FAILURES confidential pattern(s) found in staged files."
     echo "To bypass (emergencies only): git commit --no-verify"

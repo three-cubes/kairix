@@ -76,14 +76,14 @@ def test_classify_whitespace_only() -> None:
 def test_classify_never_raises() -> None:
     """Classifier must never raise even for garbage input."""
     garbage_inputs = [
-        None,  # type: ignore[arg-type]
-        12345,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]  # deliberately wrong type to exercise robustness contract
+        12345,  # type: ignore[arg-type]  # deliberately wrong type to exercise robustness contract
         "!@#$%^&*()",
         "\x00\x01\x02",
         "a" * 10_000,
     ]
     for inp in garbage_inputs:
-        result = classify(inp)  # type: ignore[arg-type]
+        result = classify(inp)  # type: ignore[arg-type]  # inp union includes non-str on purpose
         assert isinstance(result, QueryIntent)
 
 

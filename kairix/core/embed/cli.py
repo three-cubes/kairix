@@ -13,13 +13,37 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from kairix.core.db import get_db_path, open_db
 
 from .embed import DEFAULT_BATCH_SIZE
 from .recall_check import run_recall_gate
+
+
+def _default_pipeline_runner() -> Callable[..., Any]:
+    """Lazy-import the pipeline runner so cmd_embed stays cheap to import."""
+    from kairix.core.embed.use_cases import run_incremental_embed_pipeline
+
+    return run_incremental_embed_pipeline
+
+
+@dataclass
+class EmbedCliDeps:
+    """Injection seam for the embed CLI.
+
+    Production callers leave this as the default — the use case runner is
+    lazily imported on first call. Tests pass a Deps with a stand-in
+    runner so cmd_embed's exit-code mapping can be exercised without
+    touching the real DB / Azure / lockfile.
+    """
+
+    pipeline_runner_factory: Callable[[], Callable[..., Any]] = field(default_factory=lambda: _default_pipeline_runner)
+    post_embed_summarise: Callable[[], None] = field(default_factory=lambda: _run_post_embed_summarise)
+
 
 LOG_FILE = Path(
     os.environ.get(
@@ -94,7 +118,7 @@ def release_lock(lock_fh: IO[str]) -> None:
         pass
 
 
-def cmd_embed(args: argparse.Namespace) -> int:
+def cmd_embed(args: argparse.Namespace, *, deps: EmbedCliDeps | None = None) -> int:
     """Run the embedding pipeline.
 
     Thin shim over ``run_incremental_embed_pipeline``. The use case
@@ -107,7 +131,8 @@ def cmd_embed(args: argparse.Namespace) -> int:
       1  — embed had failed chunks OR recall gate fired an alert
       2  — pipeline raised (DB unreachable, schema migration, etc.)
     """
-    from kairix.core.embed.use_cases import run_incremental_embed_pipeline
+    deps = deps or EmbedCliDeps()
+    run_incremental_embed_pipeline = deps.pipeline_runner_factory()
 
     try:
         result = run_incremental_embed_pipeline(
@@ -141,7 +166,7 @@ def cmd_embed(args: argparse.Namespace) -> int:
 
     # Post-embed summarise — non-critical; failures only logged
     if not args.skip_summarise:
-        _run_post_embed_summarise()
+        deps.post_embed_summarise()
 
     if not result.success:
         return 1
@@ -252,7 +277,36 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> None:
+def cmd_rebuild_fts(args: argparse.Namespace) -> int:
+    """Rebuild the documents_fts BM25 index in isolation. Self-heal for #223.
+
+    Reads from the same documents + content tables that the embed pipeline
+    populates — does NOT touch the embed pipeline, vector index, or
+    recall canaries. Cheap (~30s on a 50k-doc corpus); use after the
+    BM25 leg silently went offline.
+    """
+    del args  # unused — no flags
+    from pathlib import Path
+
+    from kairix.core.db import get_db_path, open_db
+    from kairix.core.db.fts import check_fts_available, rebuild_fts
+
+    db = open_db(Path(get_db_path()))
+    try:
+        before = check_fts_available(db)
+        print(f"FTS state before rebuild: available={before.available} reason={before.reason} rows={before.row_count}")
+
+        count = rebuild_fts(db)
+
+        after = check_fts_available(db)
+        print(f"FTS state after rebuild:  available={after.available} reason={after.reason} rows={after.row_count}")
+        print(f"Rebuilt: {count} documents indexed")
+    finally:
+        db.close()
+    return 0
+
+
+def main(argv: list[str] | None = None, *, deps: EmbedCliDeps | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="kairix embed",
         description="Embed documents into the kairix vector index",
@@ -295,6 +349,12 @@ def main(argv: list[str] | None = None) -> None:
     # status
     sub.add_parser("status", help="Show embedding status")
 
+    # rebuild-fts — self-heal entry for #223
+    sub.add_parser(
+        "rebuild-fts",
+        help="Rebuild the documents_fts BM25 index from scratch (self-heal for the BM25 leg).",
+    )
+
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
 
@@ -307,11 +367,13 @@ def main(argv: list[str] | None = None) -> None:
             args.skip_recall_check = False
             args.rebuild_canaries = False
             args.skip_summarise = False
-        sys.exit(cmd_embed(args))
+        sys.exit(cmd_embed(args, deps=deps))
     elif args.command == "recall-check":
         sys.exit(cmd_recall(args))
     elif args.command == "status":
         sys.exit(cmd_status(args))
+    elif args.command == "rebuild-fts":
+        sys.exit(cmd_rebuild_fts(args))
 
 
 if __name__ == "__main__":

@@ -71,7 +71,7 @@ _SOURCE_TOKEN_CAPS: dict[str, int] = {
 }
 
 # Total context budget before truncation (3000 tokens ~ 2300 words)
-_TOTAL_CONTEXT_CAP = 3000
+TOTAL_CONTEXT_CAP = 3000
 
 # Priority order for truncation when over budget (lowest priority first)
 _TRUNCATION_ORDER = [
@@ -97,18 +97,18 @@ def _run_source(name: str, fn, *args) -> tuple[str, str]:
         return name, ""
 
 
-def _trim_context(context: dict[str, str]) -> dict[str, str]:
+def trim_context(context: dict[str, str]) -> dict[str, str]:
     """
-    Trim context sources if total token estimate exceeds _TOTAL_CONTEXT_CAP.
+    Trim context sources if total token estimate exceeds TOTAL_CONTEXT_CAP.
     Truncates lowest-priority sources first.
     """
     total = sum(estimate_tokens(v) for v in context.values())
-    if total <= _TOTAL_CONTEXT_CAP:
+    if total <= TOTAL_CONTEXT_CAP:
         return context
 
     trimmed = dict(context)
     for source_name in _TRUNCATION_ORDER:
-        if total <= _TOTAL_CONTEXT_CAP:
+        if total <= TOTAL_CONTEXT_CAP:
             break
         if trimmed.get(source_name):
             current = trimmed[source_name]
@@ -128,7 +128,6 @@ def generate_briefing(
     *,
     deps: BriefingDeps | None = None,
     sources: dict[str, Callable] | None = None,
-    output_dir: Path | None = None,
 ) -> str:
     """
     Generate a session briefing for the given agent.
@@ -145,8 +144,6 @@ def generate_briefing(
                     real implementations via ``default_factory``. Tests
                     construct ``BriefingDeps(synthesise_fn=fake, ...)``.
         sources:    Per-source callable overrides (key = source name).
-        output_dir: Optional output directory override (currently unused
-                    by this function; reserved for future).
 
     Returns:
         Full briefing content (with header). Never raises.
@@ -249,7 +246,7 @@ def generate_briefing(
         )
 
     # Trim context if over budget
-    context = _trim_context(context)
+    context = trim_context(context)
 
     # Step 7: Synthesise
     briefing_body = synthesise(agent, context, max_tokens=800)
@@ -270,8 +267,8 @@ def generate_briefing(
             out_path,
             time.monotonic() - t_start,
         )
-    except OSError as e:
-        logger.error("pipeline: could not write briefing file — %s", e)
+    except OSError:
+        logger.exception("pipeline: could not write briefing file")
         # Return the content anyway
 
     # Read back what was written (includes header added by writer)
@@ -314,13 +311,10 @@ class BriefingPipeline:
         sources:    Per-source callable overrides (key = source name).
         deps:       Injectable dependencies (synthesise_fn, write_fn).
                     Defaults to production implementations.
-        output_dir: Optional output directory override (unused by
-                    generate_briefing today, reserved for future).
     """
 
     sources: dict[str, Callable] = field(default_factory=dict)
     deps: BriefingDeps = field(default_factory=BriefingDeps)
-    output_dir: Path | None = None
 
     def generate(self, agent: str) -> str:
         """Generate a session briefing for the given agent.
@@ -338,5 +332,4 @@ class BriefingPipeline:
             agent=agent,
             deps=self.deps,
             sources=self.sources if self.sources else None,
-            output_dir=self.output_dir,
         )

@@ -14,9 +14,19 @@ from pathlib import Path
 import pytest
 
 from kairix.agents.briefing.cli import build_parser, format_output, main
+from kairix.core.health import HealthDeps
 from kairix.use_cases.brief import BriefDeps, BriefOutput
 
 pytestmark = pytest.mark.unit
+
+
+def _healthy_health_deps() -> HealthDeps:
+    return HealthDeps(
+        secrets_loaded_fn=lambda: True,
+        embed_backend_available_fn=lambda: True,
+        bm25_index_available_fn=lambda: True,
+        neo4j_available_fn=lambda: True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +93,7 @@ def _build_deps(content: str = "x", out_dir: Path = Path("/tmp/brief")) -> Brief
     return BriefDeps(
         generate_fn=lambda agent, **_: content,
         briefing_dir_fn=lambda: out_dir,
+        health_deps=_healthy_health_deps(),
     )
 
 

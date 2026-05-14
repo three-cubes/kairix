@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -160,14 +160,18 @@ def test_run_research_synthesises_best_effort_after_max_turns() -> None:
 
 @pytest.mark.unit
 def test_run_research_handles_exception() -> None:
-    """Graph returns error dict when something goes wrong."""
-    from kairix.agents.research.graph import run_research
+    """Graph returns error dict when something goes wrong.
 
-    with patch(
-        "kairix.agents.research.graph.build_researcher_graph",
-        side_effect=RuntimeError("boom"),
-    ):
-        result = run_research("broken query")
+    F1-clean: inject a failing graph_builder via ResearchGraphDeps instead
+    of @patch'ing the module-level build_researcher_graph symbol. The
+    exception-path contract is unchanged.
+    """
+    from kairix.agents.research.graph import ResearchGraphDeps, run_research
+
+    def _broken_builder(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("boom")
+
+    result = run_research("broken query", deps=ResearchGraphDeps(graph_builder=_broken_builder))
 
     assert result["error"] != ""
     assert len(result["gaps"]) >= 1

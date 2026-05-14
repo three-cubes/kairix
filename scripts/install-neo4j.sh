@@ -49,7 +49,7 @@ _install_docker() {
     echo "→ Installing Neo4j via Docker Compose..."
 
     if ! command -v docker &>/dev/null; then
-        echo "ERROR: docker not found. Install Docker first: https://docs.docker.com/get-docker/"
+        echo "ERROR: docker not found. Install Docker first: https://docs.docker.com/get-docker/" >&2
         exit 1
     fi
 
@@ -88,7 +88,7 @@ COMPOSE
     while ! nc -z localhost 7687 2>/dev/null; do
         attempts=$((attempts + 1))
         if [[ $attempts -ge 30 ]]; then
-            echo "ERROR: Neo4j did not start within 30s. Check: docker compose -f ${INSTALL_DIR}/docker-compose.yml logs"
+            echo "ERROR: Neo4j did not start within 30s. Check: docker compose -f ${INSTALL_DIR}/docker-compose.yml logs" >&2
             exit 1
         fi
         sleep 1
@@ -110,7 +110,7 @@ _install_apt() {
     echo "→ Installing Neo4j via apt..."
 
     if ! command -v apt-get &>/dev/null; then
-        echo "ERROR: apt-get not found. Use --docker on non-Debian systems."
+        echo "ERROR: apt-get not found. Use --docker on non-Debian systems." >&2
         exit 1
     fi
 
@@ -132,7 +132,7 @@ _install_apt() {
     while ! nc -z localhost 7687 2>/dev/null; do
         attempts=$((attempts + 1))
         if [[ $attempts -ge 30 ]]; then
-            echo "ERROR: Neo4j did not start within 30s. Check: sudo journalctl -u neo4j -n 50"
+            echo "ERROR: Neo4j did not start within 30s. Check: sudo journalctl -u neo4j -n 50" >&2
             exit 1
         fi
         sleep 1

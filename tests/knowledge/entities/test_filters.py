@@ -118,6 +118,68 @@ class TestKnownEntityAllowlist:
         existing = [_ner("ContosoCo", "ORG")]
         assert allow.apply(existing, "ContosoCo") == existing
 
+    @pytest.mark.unit
+    def test_does_not_match_substring_within_word(self) -> None:
+        """#249: ``"BB"`` must not promote on ``"abbey road"``.
+
+        Substring matching (``text in context``) fired false positives —
+        an override for an acronym like ``"BB"`` matched any word
+        containing ``b`` ``b``. The word-boundary fix requires the term
+        to stand alone as a token.
+
+        Sabotage-prove: replace ``_matches_word_boundary`` with
+        ``return text.lower() in context.lower()`` and this test fails.
+        """
+        allow = KnownEntityAllowlist([{"text": "BB", "label": "ORG"}])
+        result = allow.apply([], "abbey road traffic update")
+        assert result == [], f"expected no promotion; got {result!r}"
+
+    @pytest.mark.unit
+    def test_matches_token_at_word_boundary(self) -> None:
+        """#249: ``"BB"`` must still promote on ``"the BB project"``.
+
+        Counter to the substring-rejection test: when the term genuinely
+        appears as a standalone token the override fires. This pins the
+        feature against an over-tight regex that would also reject the
+        valid case.
+
+        Sabotage-prove: replace ``\\b`` with ``\\B`` (the inverse) and
+        this test fails.
+        """
+        allow = KnownEntityAllowlist([{"text": "BB", "label": "ORG"}])
+        result = allow.apply([], "the BB project ships next week")
+        assert len(result) == 1, f"expected one promotion; got {result!r}"
+        assert result[0]["text"] == "BB"
+        assert result[0]["label"] == "ORG"
+        assert result[0]["source"] == "allowlist"
+
+    @pytest.mark.unit
+    def test_matches_term_with_trailing_punctuation_in_context(self) -> None:
+        """Allowlist terms surrounded by punctuation still promote.
+
+        Word-boundary matching needs to treat ``,``, ``.``, ``!`` etc as
+        boundary terminators, which is the standard ``\\b`` behaviour.
+        """
+        allow = KnownEntityAllowlist([{"text": "AcmeCorp", "label": "ORG"}])
+        result = allow.apply([], "AcmeCorp, the regional lead, attended.")
+        assert len(result) == 1
+        assert result[0]["text"] == "AcmeCorp"
+
+    @pytest.mark.unit
+    def test_matches_term_with_punctuation_in_term(self) -> None:
+        """Override terms with punctuation match when surrounded by non-word chars.
+
+        Terms ending in non-word characters (``"C++"``, ``"AT&T"``)
+        cannot use ``\\b`` at the trailing edge — Python's ``\\b``
+        requires a word↔non-word transition. The helper falls back to a
+        lookaround when the term itself has non-word boundary
+        characters.
+        """
+        allow = KnownEntityAllowlist([{"text": "C++", "label": "ORG"}])
+        result = allow.apply([], "the C++ team shipped today")
+        assert len(result) == 1
+        assert result[0]["text"] == "C++"
+
 
 # ---------------------------------------------------------------------------
 # NerLabelFilter

@@ -12,11 +12,57 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from kairix.use_cases import _entity_defaults as _defaults
-
 logger = logging.getLogger(__name__)
+
+
+def _default_neo4j_client() -> Any:
+    from kairix.knowledge.graph.client import get_client
+
+    return get_client()
+
+
+def production_suggest(
+    text: str,
+    neo4j_client: Any,
+    *,
+    overrides_path: Path | None = None,
+) -> list[Any]:
+    """Production suggest wrapper — loads the vault override file once.
+
+    Reads ``${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md``
+    (or the ``KAIRIX_ENTITY_OVERRIDES_PATH`` operator override), builds
+    the filter chain with the resulting allowlist + label overrides,
+    and hands it to ``suggest_entities``. Missing / malformed override
+    file falls back to the default chain — never blocks. Closes #166.
+
+    ``overrides_path`` is a deployment-time seam: operators or callers
+    that resolve the override file themselves (CLI flag, in-memory
+    config) pass it in here. Production callers leave it ``None`` and
+    the canonical path resolves from ``kairix.paths.entity_overrides_path``.
+    F6-clean — the kwarg has a production use, not just test ergonomics.
+    """
+    from kairix.knowledge.entities.filters import default_suggestion_filter_chain
+    from kairix.knowledge.entities.overrides import load_entity_overrides
+    from kairix.knowledge.entities.suggest import suggest_entities
+    from kairix.paths import entity_overrides_path
+
+    path = overrides_path if overrides_path is not None else entity_overrides_path()
+    overrides = load_entity_overrides(path)
+    chain = default_suggestion_filter_chain(
+        allowlist=overrides.allowlist,
+        person_overrides=overrides.person_overrides,
+        org_overrides=overrides.org_overrides,
+    )
+    return suggest_entities(text, neo4j_client, filter_chain=chain)
+
+
+def _default_validate(name: str, neo4j_client: Any, update: bool) -> dict[str, Any]:
+    from kairix.knowledge.entities.validate import validate_entity
+
+    return validate_entity(name, neo4j_client, update=update)
 
 
 # ---------------------------------------------------------------------------
@@ -47,8 +93,16 @@ class EntitySuggestOutput:
 
 @dataclass(frozen=True)
 class EntitySuggestDeps:
-    suggest_fn: Callable[..., list[Any]] | None = None
-    neo4j_client_fn: Callable[[], Any] | None = None
+    """Injectable dependencies for ``run_entity_suggest``.
+
+    Mirrors ``WorkerDeps`` (kairix/worker.py): each callable is
+    non-Optional with a ``default_factory`` returning the production
+    helper. Tests pass concrete fakes; production callers leave
+    ``deps=None``.
+    """
+
+    suggest_fn: Callable[..., list[Any]] = field(default_factory=lambda: production_suggest)
+    neo4j_client_fn: Callable[[], Any] = field(default_factory=lambda: _default_neo4j_client)
 
 
 def _project_suggestion(s: Any) -> SuggestedEntityHit:
@@ -72,12 +126,10 @@ def run_entity_suggest(
     Never raises — failures populate ``error``.
     """
     d = deps or EntitySuggestDeps()
-    suggest = d.suggest_fn or _defaults.default_suggest
-    neo4j_factory = d.neo4j_client_fn or _defaults.default_neo4j_client
 
     try:
-        neo4j = neo4j_factory()
-        raw = suggest(text, neo4j)
+        neo4j = d.neo4j_client_fn()
+        raw = d.suggest_fn(text, neo4j)
         hits = [_project_suggestion(s) for s in raw]
         new_count = sum(1 for h in hits if h.is_new)
         return EntitySuggestOutput(
@@ -142,8 +194,15 @@ class EntityValidateOutput:
 
 @dataclass(frozen=True)
 class EntityValidateDeps:
-    validate_fn: Callable[..., dict[str, Any]] | None = None
-    neo4j_client_fn: Callable[[], Any] | None = None
+    """Injectable dependencies for ``run_entity_validate``.
+
+    Mirrors ``WorkerDeps``: ``validate_fn`` and ``neo4j_client_fn``
+    are non-Optional with ``default_factory`` wiring the production
+    helpers.
+    """
+
+    validate_fn: Callable[..., dict[str, Any]] = field(default_factory=lambda: _default_validate)
+    neo4j_client_fn: Callable[[], Any] = field(default_factory=lambda: _default_neo4j_client)
 
 
 def _project_match(m: Any) -> EntityValidateMatch:
@@ -175,12 +234,10 @@ def run_entity_validate(
     Never raises — failures populate ``error``.
     """
     d = deps or EntityValidateDeps()
-    validate = d.validate_fn or _defaults.default_validate
-    neo4j_factory = d.neo4j_client_fn or _defaults.default_neo4j_client
 
     try:
-        neo4j = neo4j_factory()
-        result = validate(name, neo4j, update=update)
+        neo4j = d.neo4j_client_fn()
+        result = d.validate_fn(name, neo4j, update=update)
         matches = [_project_match(m) for m in result.get("matches", [])]
         return EntityValidateOutput(
             name=str(result.get("name", name)),

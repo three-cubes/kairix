@@ -21,6 +21,14 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kairix.platform.onboard.check import CheckResult
+
+# Canonical filename for the agent usage guide installed into the shared
+# knowledge base by `kairix onboard guide`.
+_AGENT_USAGE_GUIDE_FILENAME = "kairix-usage.md"
 
 # ---------------------------------------------------------------------------
 # Env self-loader (ERR-003 fix)
@@ -73,7 +81,9 @@ def _self_load_env(explicit_path: str | None) -> tuple[str | None, list[str]]:
         loaded = _load_env_file(explicit_path)
         return (explicit_path, loaded)
 
-    env_var_path = os.environ.get("KAIRIX_ENV_FILE", "")
+    from kairix.paths import env_file_override
+
+    env_var_path = env_file_override() or ""
     if env_var_path:
         loaded = _load_env_file(env_var_path)
         return (env_var_path, loaded)
@@ -92,70 +102,98 @@ def _self_load_env(explicit_path: str | None) -> tuple[str | None, list[str]]:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    from kairix.platform.onboard.check import run_all_checks
-
     # Self-load env files so check results are context-independent (ERR-003)
     env_source, env_keys = _self_load_env(getattr(args, "env_file", None))
+
+    if args.json:
+        return _render_check_json(env_source)
+    return _render_check_human(env_source, env_keys)
+
+
+def _render_check_json(env_source: str | None) -> int:
+    """Emit the structured JSON surface and return the exit code.
+
+    Shape: ``{passed, total, fully_passed, failures: [...], env_source}``.
+    ``env_source`` is operator metadata, not part of ``OnboardResult``,
+    surfaced here so an admin running ``--json`` sees which env file was
+    loaded.
+    """
+    from dataclasses import asdict
+
+    from kairix.platform.onboard.check import run_onboard_check
+
+    outcome = run_onboard_check()
+    output = {
+        "passed": outcome.passed,
+        "total": outcome.total,
+        "fully_passed": outcome.fully_passed,
+        "failures": [asdict(f) for f in outcome.failures],
+        "env_source": env_source,
+    }
+    print(json.dumps(output, indent=2))
+    return 0 if outcome.fully_passed else 1
+
+
+def _render_check_human(env_source: str | None, env_keys: list[str]) -> int:
+    """Emit the human-readable surface and return the exit code.
+
+    Renders from ``CheckResult`` (which carries the multi-line fix
+    guidance); JSON renders from ``OnboardResult`` (one-line remediation).
+    """
+    from kairix.platform.onboard.check import run_all_checks
 
     results = run_all_checks()
     passed = sum(1 for r in results if r.ok)
     total = len(results)
     all_ok = passed == total
 
-    if args.json:
-        output = {
-            "ok": all_ok,
-            "passed": passed,
-            "total": total,
-            "env_source": env_source,
-            "checks": [
-                {
-                    "name": r.name,
-                    "ok": r.ok,
-                    "detail": r.detail,
-                    "fix": r.fix,
-                }
-                for r in results
-            ],
-        }
-        print(json.dumps(output, indent=2))
-        return 0 if all_ok else 1
-
-    # Human-readable output
     print()
     print("kairix deployment check")
+    _print_env_banner(env_source, env_keys)
+    print("─" * 50)
+    for r in results:
+        _print_check_result(r)
+    print("─" * 50)
+    _print_check_summary(passed=passed, total=total, all_ok=all_ok)
+    print()
+    return 0 if all_ok else 1
+
+
+def _print_env_banner(env_source: str | None, env_keys: list[str]) -> None:
+    """Print the ``env:`` line above the check results."""
     if env_source:
         loaded_note = f" ({len(env_keys)} keys loaded)" if env_keys else " (no new keys — already in env)"
         print(f"  env: {env_source}{loaded_note}")
     else:
         print("  env: none — using current environment")
-    print("─" * 50)
-    for r in results:
-        icon = "✓" if r.ok else "✗"
-        print(f"  {icon} {r.name}")
-        print(f"    {r.detail}")
-        if not r.ok and r.fix:
-            for line in r.fix.strip().splitlines():
-                print(f"      {line}")
-        print()
 
-    print("─" * 50)
+
+def _print_check_result(r: CheckResult) -> None:
+    """Render one ``CheckResult`` row (icon + name + detail + fix lines)."""
+    icon = "✓" if r.ok else "✗"
+    print(f"  {icon} {r.name}")
+    print(f"    {r.detail}")
+    if not r.ok and r.fix:
+        for line in r.fix.strip().splitlines():
+            print(f"      {line}")
+    print()
+
+
+def _print_check_summary(*, passed: int, total: int, all_ok: bool) -> None:
+    """Render the trailing summary block (pass count + next steps)."""
     if all_ok:
         print(f"  All {total} checks passed")
         print()
         print("  kairix is fully operational. Try:")
         print('  kairix search "what are our engineering standards" --agent builder')
-    else:
-        failed = total - passed
-        print(f"  {passed}/{total} checks passed — {failed} failed")
-        print()
-        print("  Fix the ✗ items above, then re-run: kairix onboard check")
-        print()
-        print("  Common first fix: run scripts/deploy-vm.sh to install the wrapper")
-        print("  and ensure kairix is on PATH for agent exec contexts.")
+        return
+    failed = total - passed
+    print(f"  {passed}/{total} checks passed — {failed} failed")
     print()
-
-    return 0 if all_ok else 1
+    print("  Fix the ✗ items above, then re-run: kairix onboard check")
+    print()
+    print("  Common first fix: run scripts/deploy-vm.sh to install the wrapper")
+    print("  and ensure kairix is on PATH for agent exec contexts.")
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +203,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def cmd_guide(args: argparse.Namespace) -> int:
     """Install the agent usage guide into the document store's shared knowledge base."""
-    doc_root = args.document_root or os.environ.get("KAIRIX_DOCUMENT_ROOT", "")
+    from kairix.paths import document_root_override
+
+    doc_root = args.document_root or document_root_override() or ""
     if not doc_root:
         print(
             "Error: --document-root is required (or set KAIRIX_DOCUMENT_ROOT)",
@@ -199,16 +239,16 @@ def cmd_guide(args: argparse.Namespace) -> int:
     else:
         # Try to find the shared knowledge directory
         candidates = [
-            doc_path / "04-Agent-Knowledge" / "shared" / "kairix-usage.md",
-            doc_path / "shared" / "kairix-usage.md",
-            doc_path / "agent-knowledge" / "shared" / "kairix-usage.md",
+            doc_path / "04-Agent-Knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
+            doc_path / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
+            doc_path / "agent-knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
         ]
         dest_or_none: Path | None = None
         for c in candidates:
             if c.parent.exists():
                 dest_or_none = c
                 break
-        dest = dest_or_none if dest_or_none is not None else doc_path / "kairix-usage.md"
+        dest = dest_or_none if dest_or_none is not None else doc_path / _AGENT_USAGE_GUIDE_FILENAME
 
     if args.dry_run:
         print("Would install agent usage guide:")
@@ -258,7 +298,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> int:
+    """`kairix onboard` entry point.
+
+    Returns the exit code (0 = success, 1 = failure) rather than calling
+    ``sys.exit`` directly so tests can drive ``main(...)`` and assert on
+    the return value without catching SystemExit. The package-level
+    entry point in ``kairix/cli.py`` is responsible for translating this
+    int into the process exit code.
+    """
     parser = argparse.ArgumentParser(
         prog="kairix onboard",
         description="Deployment diagnostics and agent onboarding tools.",
@@ -293,8 +341,11 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.subcommand == "check":
-        sys.exit(cmd_check(args))
-    elif args.subcommand == "guide":
-        sys.exit(cmd_guide(args))
-    elif args.subcommand == "verify":
-        sys.exit(cmd_verify(args))
+        return cmd_check(args)
+    if args.subcommand == "guide":
+        return cmd_guide(args)
+    if args.subcommand == "verify":
+        return cmd_verify(args)
+    # argparse with required=True makes this unreachable in practice;
+    # surface as a non-zero exit if argparse semantics ever change.
+    return 2

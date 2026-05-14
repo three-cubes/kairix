@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from kairix.paths import reflib_root_override
 
 _REFLIB_ROOT_HELP = "Reference library root directory (default: KAIRIX_REFLIB_ROOT env var)"
 
@@ -85,7 +86,7 @@ def _resolve_reflib_root(arg: str | None) -> str:
     """Resolve the reference library root from arg or env var."""
     if arg:
         return arg
-    env = os.environ.get("KAIRIX_REFLIB_ROOT")
+    env = reflib_root_override()
     if env:
         return env
     print("Error: --reflib-root or KAIRIX_REFLIB_ROOT required", file=sys.stderr)

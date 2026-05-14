@@ -25,14 +25,33 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "${SCRIPT_DIR}/../.." || exit 2
 
-REMEDIATION="Add an inline rationale after the suppression. Format:
-  x = 1  # NOSONAR — <why this rule does not apply>
-  x = 1  # noqa: BLE001  # <why this rule does not apply>
-  x = 1  # pragma: no cover  # <why this line is genuinely untestable>
-  x = 1  # type: ignore[union-attr]  # <why mypy is wrong here>
-  x = 1  # nosec B607  # <why bandit's concern does not apply>
-The rationale is read at every code review and is the receipt that the
-suppression is deliberate, not a way to silence a real warning."
+REMEDIATION="Refactor to add an inline rationale after each suppression
+(or delete the suppression entirely if the underlying warning is real) to pass.
+
+fix: add an inline rationale after each bare suppression (everything
+after the suppression token counts; an em-dash + one-line justification
+is the canonical shape) — or delete the suppression entirely if the
+underlying warning is a real issue you should address.
+next: re-run ``bash scripts/checks/check-suppressions-have-rationale.sh``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh \"chore(<area>): document suppression rationale\"
+
+Pass example:
+  x = 1  # NOSONAR — internal log path; not user-controlled
+  result = requests.get(url)  # noqa: BLE001 — caller pins context
+
+Forbidden example:
+  x = 1  # NOSONAR
+  result = requests.get(url)  # noqa: BLE001
+
+Each rationale is the receipt that the suppression is deliberate, not a
+way to silence a real warning. The rationale is reviewed every time the
+line is touched. Patterns covered:
+  # NOSONAR                          (Sonar)
+  # noqa  or  # noqa: CODE           (ruff / flake8)
+  # pragma: no cover                 (coverage.py — F7 bypass)
+  # type: ignore  or  # type: ignore[code]   (mypy)
+  # nosec  or  # nosec B607          (bandit)"
 
 # Match a bare suppression at end-of-line (allowing trailing whitespace).
 # Reject only the bare form; rationale (any non-whitespace after the

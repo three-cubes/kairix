@@ -58,9 +58,39 @@ python3 "${SCRIPT_DIR}/check_bdd_happy_path.py" || overall=1
 # F13 — BDD no implementation symbols
 python3 "${SCRIPT_DIR}/check_bdd_no_implementation_leaks.py" || overall=1
 
+# F14 — sonar.issue.ignore entries require rationale
+python3 "${SCRIPT_DIR}/check_sonar_ignore_rationale.py" || overall=1
+
+# F15 — no logging of secret-named variables in plaintext
+python3 "${SCRIPT_DIR}/check_no_logging_secrets.py" || overall=1
+
+# F16 — cognitive complexity per function
+python3 "${SCRIPT_DIR}/check_cognitive_complexity.py" || overall=1
+
+# F17 — no duplicated string literal ≥10 chars / ≥3 occurrences
+python3 "${SCRIPT_DIR}/check_no_duplicate_string.py" || overall=1
+
+# F18 — no commented-out code
+python3 "${SCRIPT_DIR}/check_no_commented_out_code.py" || overall=1
+
+# F19 — unused parameter must be _ prefixed
+python3 "${SCRIPT_DIR}/check_unused_params_named.py" || overall=1
+
+# F20 — empty function body requires docstring or intent comment
+python3 "${SCRIPT_DIR}/check_empty_body_intent.py" || overall=1
+
+# F21 — actionable-feedback marker rule for check scripts
+python3 "${SCRIPT_DIR}/check_actionable_feedback.py" || overall=1
+
+# F22 — repo path naming conventions per tree
+python3 "${SCRIPT_DIR}/check_path_naming.py" || overall=1
+
+# F23 — every top-level directory has a README.md
+python3 "${SCRIPT_DIR}/check_readme_coverage.py" || overall=1
+
 # F7 — needs coverage.xml. Skip if not present or skip flag set.
-if [ "$skip_coverage" -eq 0 ]; then
-    if [ -f "${REPO_ROOT}/coverage.xml" ]; then
+if [[ "$skip_coverage" -eq 0 ]]; then
+    if [[ -f "${REPO_ROOT}/coverage.xml" ]]; then
         python3 "${SCRIPT_DIR}/check_per_file_coverage.py" "${REPO_ROOT}/coverage.xml" || overall=1
     else
         printf '\033[0;33mskip [arch:per-file-coverage-floor]\033[0m — coverage.xml not found.\n'
@@ -69,7 +99,7 @@ if [ "$skip_coverage" -eq 0 ]; then
 fi
 
 echo
-if [ "$overall" -eq 0 ]; then
+if [[ "$overall" -eq 0 ]]; then
     printf '\033[0;32m=== All architecture fitness functions passed ===\033[0m\n'
 else
     printf '\033[0;31m=== Architecture fitness functions FAILED ===\033[0m\n'

@@ -58,24 +58,42 @@ def main(argv: list[str] | None = None, *, neo4j_client: Any = None) -> None:
 
 
 def _resolve_document_root(arg: str | None) -> str:
-    import os
+    from kairix.paths import document_root_override
 
     if arg:
         return arg
-    env = os.environ.get("KAIRIX_DOCUMENT_ROOT")
+    env = document_root_override()
     if env:
         return env
     print("Error: --document-root or KAIRIX_DOCUMENT_ROOT required", file=sys.stderr)
     sys.exit(1)
 
 
+def _print_count_line(label: str, found: int, upserted: int, dry_run: bool) -> None:
+    """Print one ``label N found[, M upserted | (dry run)]`` line for the crawl summary.
+
+    ``label`` already includes its own ``:`` + alignment whitespace so the caller
+    controls column alignment exactly.
+    """
+    suffix = f", {upserted} upserted" if not dry_run else " (dry run — not written)"
+    print(f"  {label}{found} found{suffix}")
+
+
+def _print_crawl_report(report: Any, document_root: str) -> None:
+    """Print the human-readable summary block for a crawl report."""
+    mode = "[DRY RUN] " if report.dry_run else ""
+    print(f"{mode}Document store crawl complete: {document_root}")
+    _print_count_line("Organisations: ", report.organisations_found, report.organisations_upserted, report.dry_run)
+    _print_count_line("Persons:       ", report.persons_found, report.persons_upserted, report.dry_run)
+    _print_count_line("Outcomes:      ", report.outcomes_found, report.outcomes_upserted, report.dry_run)
+    _print_count_line("Edges:         ", report.edges_found, report.edges_upserted, report.dry_run)
+
+
 def _cmd_crawl(args: argparse.Namespace, *, neo4j_client: Any = None) -> None:
     import logging
 
-    if args.verbose:
-        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(message)s")
-    else:
-        logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+    level = logging.DEBUG if args.verbose else logging.WARNING
+    logging.basicConfig(level=level, format="%(levelname)s %(message)s")
 
     document_root = _resolve_document_root(args.document_root)
 
@@ -91,29 +109,7 @@ def _cmd_crawl(args: argparse.Namespace, *, neo4j_client: Any = None) -> None:
         args.dry_run = True
 
     report = crawl(document_root=document_root, neo4j_client=neo4j_client, dry_run=args.dry_run)
-
-    mode = "[DRY RUN] " if report.dry_run else ""
-    print(f"{mode}Document store crawl complete: {document_root}")
-    print(f"  Organisations: {report.organisations_found} found", end="")
-    if not report.dry_run:
-        print(f", {report.organisations_upserted} upserted")
-    else:
-        print(" (dry run — not written)")
-    print(f"  Persons:       {report.persons_found} found", end="")
-    if not report.dry_run:
-        print(f", {report.persons_upserted} upserted")
-    else:
-        print(" (dry run — not written)")
-    print(f"  Outcomes:      {report.outcomes_found} found", end="")
-    if not report.dry_run:
-        print(f", {report.outcomes_upserted} upserted")
-    else:
-        print(" (dry run — not written)")
-    print(f"  Edges:         {report.edges_found} found", end="")
-    if not report.dry_run:
-        print(f", {report.edges_upserted} upserted")
-    else:
-        print(" (dry run — not written)")
+    _print_crawl_report(report, document_root)
 
     if report.errors:
         print(f"\n  Errors ({len(report.errors)}):")

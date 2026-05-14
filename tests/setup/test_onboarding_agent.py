@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
-from kairix.platform.setup.agent import recommend_from_profile
+from kairix.platform.setup.agent import OnboardingAgentDeps, recommend_from_profile
 
 pytestmark = pytest.mark.unit
 
@@ -66,19 +64,26 @@ class TestRecommendFromProfile:
         assert result["fusion_strategy"] == "bm25_primary"
 
     def test_llm_failure_returns_rule_based(self) -> None:
-        with patch(
-            "kairix.platform.setup.agent._call_llm",
-            side_effect=RuntimeError("LLM unavailable"),
-        ):
-            result = recommend_from_profile(
-                total_docs=100,
-                format_counts={"md": 100},
-                date_file_pct=0.20,
-                procedural_pct=0.10,
-                entity_pct=0.05,
-                api_key="test-key",
-                endpoint="https://test.example.com",
-            )
+        """When the LLM call fails, the rule-based recommendations still apply.
+
+        F1-clean: tests inject a failing chat callable via OnboardingAgentDeps
+        rather than @patch'ing the internal _call_llm helper. The fail-path
+        contract is unchanged.
+        """
+
+        def _boom(prompt: str, api_key: str, endpoint: str) -> str:
+            raise RuntimeError("LLM unavailable")
+
+        result = recommend_from_profile(
+            total_docs=100,
+            format_counts={"md": 100},
+            date_file_pct=0.20,
+            procedural_pct=0.10,
+            entity_pct=0.05,
+            api_key="test-key",
+            endpoint="https://test.example.com",
+            deps=OnboardingAgentDeps(chat=_boom),
+        )
         assert result is not None
         assert "llm_advice" not in result  # LLM failed, no advice added
         assert result["temporal_boost"] is True  # rule-based still works

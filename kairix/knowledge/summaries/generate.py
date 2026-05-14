@@ -65,7 +65,7 @@ _L1_SYSTEM = (
 # ---------------------------------------------------------------------------
 
 
-def _first_n_words(text: str, n: int) -> str:
+def first_n_words(text: str, n: int) -> str:
     """Return the first n whitespace-separated words of text."""
     words = text.split()
     return " ".join(words[:n])
@@ -96,11 +96,11 @@ class SummariesDeps:
 
 def _call_chat(
     messages: list[dict],
-    api_key: str,
-    endpoint: str,
+    _api_key: str,
+    _endpoint: str,
     deployment: str,
     max_tokens: int,
-    deps: SummariesDeps | None = None,
+    deps: SummariesDeps,
 ) -> tuple[str, int]:
     """
     Call Azure OpenAI chat completions via the shared SDK client.
@@ -109,9 +109,12 @@ def _call_chat(
 
     The api_key, endpoint, and deployment parameters are accepted for backwards
     compatibility but ignored — credentials are resolved by ``kairix._azure``.
+
+    ``deps`` is required (non-Optional). Public callers
+    (``generate_l0``/``generate_l1``/``generate_summaries``) resolve the
+    production-default at their boundary so this internal helper has no
+    lazy-init branch — eliminates an uncovered code path per #204.
     """
-    if deps is None:  # pragma: no cover — production lazy default; tests pass deps=SummariesDeps(chat=fake)
-        deps = SummariesDeps()
     content = deps.chat(messages, max_tokens=max_tokens)
     # Token usage is not available from the shared client; estimate from output length.
     tokens_est = estimate_tokens(content)
@@ -138,7 +141,9 @@ def generate_l0(
     Uses the first 800 words of content. Returns the abstract string.
     Raises on API failure.
     """
-    truncated = _first_n_words(content, 800)
+    if deps is None:  # pragma: no cover — production lazy default; tests pass deps=SummariesDeps(chat=fake)
+        deps = SummariesDeps()
+    truncated = first_n_words(content, 800)
     messages = [
         {"role": "system", "content": _L0_SYSTEM},
         {"role": "user", "content": f"Document path: {path}\n\n{truncated}"},
@@ -162,7 +167,9 @@ def generate_l1(
     Uses the first 2000 words of content. Returns the overview string.
     Raises on API failure.
     """
-    truncated = _first_n_words(content, 2000)
+    if deps is None:  # pragma: no cover — production lazy default; tests pass deps=SummariesDeps(chat=fake)
+        deps = SummariesDeps()
+    truncated = first_n_words(content, 2000)
     messages = [
         {"role": "system", "content": _L1_SYSTEM},
         {"role": "user", "content": f"Document path: {path}\n\n{truncated}"},
@@ -229,8 +236,8 @@ def generate_summaries(
                 )
             )
 
-        except Exception as exc:
-            logger.error("generate_summaries: failed for %s — %s", path, exc)
+        except Exception:
+            logger.exception("generate_summaries: failed for %s", path)
             continue
 
         # Sleep between individual calls (within batch) as well

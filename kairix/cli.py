@@ -2,6 +2,7 @@
 kairix — private knowledge retrieval for AI agents and teams.
 
 Subcommands:
+  bootstrap   Agent orientation envelope: role, board, recent memory, goals, health
   embed       Embed documents into the kairix vector index
   search      Hybrid search: BM25 + vector via RRF
   entity      Entity management: suggest (NER), validate (Wikidata)
@@ -22,7 +23,7 @@ Subcommands:
   reference-library  Reference library: install entities, check status, run extraction
   eval        Evaluation harness: gold suite build, judge, sweep, monitor, gate
   setup       First-time onboarding wizard for credentials and paths
-  worker      Background worker: re-index, recall-check, embedding refresh on a timer
+  worker      Background worker: run loop, pause/resume operator controls
   config      Validate kairix.config.yaml against the schema and print errors
 
 See KAIRIX-ARCHITECTURE.md for architecture, ADRs, and roadmap.
@@ -33,6 +34,7 @@ import sys
 # Dispatch table: command name → (module_path, function_name, accepts_args)
 # Lazy imports keep startup fast — only the selected command is imported.
 COMMANDS: dict[str, tuple[str, str, bool]] = {
+    "bootstrap": ("kairix.bootstrap_cli", "main", True),
     "embed": ("kairix.core.embed.cli", "main", False),
     "entity": ("kairix.knowledge.entities.cli", "main", True),
     "curator": ("kairix.agents.curator.cli", "main", True),
@@ -54,7 +56,7 @@ COMMANDS: dict[str, tuple[str, str, bool]] = {
     "eval": ("kairix.quality.eval.cli", "main", True),
     "reference-library": ("kairix.knowledge.reflib.cli", "main", True),
     "setup": ("kairix.platform.setup.cli", "main", True),
-    "worker": ("kairix.worker", "main", False),
+    "worker": ("kairix.worker_cli", "main", True),
     "config": ("kairix.core.search.config_validator", "main", True),
 }
 

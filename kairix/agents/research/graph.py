@@ -73,6 +73,12 @@ class ResearchGraphDeps:
     # they are stateful objects (or absent) and live as plain object slots.
     llm_backend: Any = None
     confidence_parser: Any = None
+    # F1-clean test seam for the graph-build failure path: tests inject a
+    # graph_builder that raises instead of @patch'ing build_researcher_graph.
+    # Production callers leave default, which lazy-binds the real builder.
+    graph_builder: Callable[..., Any] = field(
+        default_factory=lambda: build_researcher_graph,
+    )
 
 
 def build_researcher_graph(
@@ -161,7 +167,11 @@ def run_research(
         gaps, confidence, turns, error.
     """
     try:
-        compiled = build_researcher_graph(deps=deps)
+        # Use deps.graph_builder (defaults to build_researcher_graph) so
+        # tests can inject a failing builder for the exception-path contract
+        # without @patch'ing the module.
+        d = deps if deps is not None else ResearchGraphDeps()
+        compiled = d.graph_builder(deps=d)
 
         initial_state: ResearcherState = {
             "query": query,
