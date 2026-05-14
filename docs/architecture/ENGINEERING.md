@@ -29,17 +29,18 @@ Every merge to `main` must pass all four CI stages. No exceptions without a docu
 | Type checking | mypy (strict) | Zero errors | ✅ Yes |
 | Linting | ruff | Zero errors | ✅ Yes |
 | Unit tests | pytest | 100% pass | ✅ Yes |
-| Test coverage (per-file) | F7 | ≥ 85% on every kairix/* file (ratcheted) | ✅ Yes |
+| Test coverage (per-file) | F7 | ≥ 90% on every kairix/* file (ratcheted from 85% in v2026.5.15) | ✅ Yes |
+| Test coverage (aggregate) | pytest-cov | ≥ 88% overall (`fail_under`) | ✅ Yes |
 | SAST | bandit | Zero HIGH findings | ✅ Yes |
 | Dependency CVEs | pip-audit | Zero CVEs with fixes | ✅ Yes |
 | Contract tests | pytest -m contract | Zero failures | ✅ Yes |
-| Architecture fitness functions (atomic) | F1–F6, F8, F10–F13 | Zero net-new violations | ✅ Yes |
-| Architecture fitness functions (holistic) | F9 (unit ∪ integration coverage union ≥ 85%) | Zero net-new violations | ✅ Yes |
+| Architecture fitness functions (atomic) | F1–F8, F10–F23 | Zero net-new violations | ✅ Yes |
+| Architecture fitness functions (holistic) | F9 (unit ∪ integration coverage union ≥ 90%) | Zero net-new violations | ✅ Yes |
 | Build | pip install -e . | Succeeds | ✅ Yes |
 
-**Architecture fitness functions** are mechanical, blocking checks that encode rejected patterns (e.g. forbidden monkeypatching, internal-name imports in tests, unmarked tests). They run at three layers — pre-commit, `safe-commit.sh`, and CI Stage 0. Pre-existing violations are grandfathered in `.architecture/baseline/`; net-new violations block. Canonical reference: [`fitness-functions.md`](./fitness-functions.md).
+**Architecture fitness functions (F1–F23)** are mechanical, blocking checks that encode rejected patterns (e.g. forbidden monkeypatching, internal-name imports in tests, unmarked tests, logging of secret-named variables, repo path-naming conventions, README resolver coverage). They run at three layers — pre-commit, `safe-commit.sh`, and CI Stage 0 (F9 in Stage 5). Pre-existing violations are grandfathered in `.architecture/baseline/`; net-new violations block. Canonical reference: [`fitness-functions.md`](./fitness-functions.md).
 
-**Per-file coverage floor (mechanical, F7):** every `kairix/*` source file must clear 85% line coverage. Pre-existing violations are grandfathered in `.architecture/baseline/per-file-coverage-floor-files.txt`; new files must land at >=85% from day one. The aggregate 80% pytest-cov gate stays in place as a backstop.
+**Per-file coverage floor (mechanical, F7):** every `kairix/*` source file must clear 90% line coverage (ratcheted from 85% in v2026.5.15 after F7 baseline closed to zero). Pre-existing violations are grandfathered in `.architecture/baseline/per-file-coverage-floor-files.txt`; new files must land at ≥ 90% from day one. The aggregate 88% pytest-cov `fail_under` gate is a backstop.
 
 **Codecov surfaces:**
 - **Coverage** — two flags upload from CI: `unit` (Stage 2: `pytest -m "unit or bdd or contract" --cov`) and `integration` (Stage 3: `pytest -m integration --cov`). Carryforward is enabled for both so the dashboard doesn't flap when only one stage runs. Patch target = 85% (matches F7). Components: Search / Agents / Knowledge / Quality / Core for per-area dashboards.
@@ -59,7 +60,7 @@ Five stages run on every push and PR. Stages 3 and 4 run in parallel after Stage
 ```
 push/PR
   │
-  ├── Stage 0: Architecture fitness (30s)   ← runs F1-F6, F8 (F7 in Stage 2)
+  ├── Stage 0: Architecture fitness (30s)   ← runs F1-F8 + F10-F23 atomic checks (F9 in Stage 5)
   │     bash scripts/checks/run-all.sh --skip-coverage
   │
   ├── Stage 1: Contracts (30s)              ← fast gate, fails fast
@@ -104,7 +105,7 @@ push/PR
 
 ```bash
 # Pin to a tagged release — do not deploy from @main
-pip install git+https://github.com/quanyeomans/kairix@v2026.04.18
+pip install git+https://github.com/three-cubes/kairix@v2026.04.18
 
 # Or from PyPI when published:
 pip install kairix==2026.4.18
@@ -114,7 +115,7 @@ kairix onboard check
 kairix search "test query" --agent <your-agent>
 ```
 
-**Rollback:** `pip install git+https://github.com/quanyeomans/kairix@<previous-tag>`. All state is in SQLite/document store — safe.
+**Rollback:** `pip install git+https://github.com/three-cubes/kairix@<previous-tag>`. All state is in SQLite/document store — safe.
 
 ### 2.4 Override process (emergency only)
 
@@ -167,16 +168,21 @@ KAIRIX_E2E=1 pytest -m e2e      # Manual only
 
 ### 3.3 Mocking rules
 
+**Canonical fakes first.** Reach for `tests/fakes.py` (`FakeLLMBackend`, `FakeNeo4jClient`, `FakePaths`, etc.) before defining inline stubs. Fakes are Protocol-compliant and injected through constructor seams — no monkeypatching, no `@patch` on kairix internals (enforced by F1 / F2).
+
 **Mock only external services:**
-- Azure OpenAI API (use `unittest.mock.patch` or `responses` library)
-- File system (use `tempfile.TemporaryDirectory()`)
+- Azure OpenAI API — use `FakeLLMBackend` from `tests/fakes.py`, injected via the relevant `*Deps` dataclass
+- HTTP / Neo4j — use `FakeNeo4jClient` from `tests/fixtures/neo4j_mock.py`
+- File system — use `tempfile.TemporaryDirectory()` and pass paths through `FakePaths`
 
 **Keep real:**
 - SQLite operations (use test DB via `KAIRIX_TEST_DB` env var)
 - Internal logic and data structures
 - usearch extension (integration tests load the real `.so`)
 
-**Never mock the thing under test.** If the test requires mocking the module being tested, the test is testing the wrong thing.
+**Never mock the thing under test.** If the test requires mocking the module being tested, the test is testing the wrong thing — refactor the production code to take a dependency via a Protocol seam instead.
+
+**No `@patch` on kairix internals (F1) and no `monkeypatch.setenv("KAIRIX_*")` (F2)** — fitness-function enforced. To test env-driven behaviour, refactor the production entry point to accept the dependency (path, client, ctx) as a kwarg and pass a fake.
 
 ### 3.4 What must have a test
 
@@ -256,6 +262,7 @@ These rules are enforced by CI (CodeQL, Bandit, detect-secrets) and must be foll
 
 ### Logging
 
+- **No logging of secret-named variables in plaintext (F15, fitness-function enforced).** `logger.*`, `print`, `sys.std{out,err}.write`, and `raise X(...)` calls must not pass any `*_api_key` / `*_token` / `*_secret` / `*_password` / `*_credential` / `bearer` / `jwt` / `*_private_key` argument (or f-string interpolation thereof) outside the `kairix/{secrets,credentials}.py` boundary modules.
 - **Never log exception objects** from credential-fetching code paths. An exception raised during Key Vault fetch, secrets file parsing, or auth can contain the raw credential value in its message. Log the operation name and return code only.
 - **Never log user query content** at any log level without an explicit opt-in env var (e.g. `KAIRIX_DEBUG_QUERIES=1`). Queries may contain personal or commercially sensitive information.
 - **Never log raw LLM responses** at DEBUG. Truncate or omit entirely — `logger.debug("step: failed")` not `logger.debug("step: failed %r", raw_response)`.

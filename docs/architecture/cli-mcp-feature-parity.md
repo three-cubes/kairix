@@ -132,7 +132,7 @@ These are confirmed once Phase 1 lands; later phases follow the pattern.
 
 ## Tracking
 
-Umbrella issue: [#168](https://github.com/quanyeomans/kairix/issues/168).
+Umbrella issue: [#168](https://github.com/three-cubes/kairix/issues/168).
 Each phase is its own PR linked from the umbrella; each Phase-3 sub-item
 is its own commit chain so they can be cherry-picked independently if
 priorities shift.

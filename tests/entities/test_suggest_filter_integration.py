@@ -59,11 +59,11 @@ def _doc_with_entities(text: str, entities: list[tuple[str, str]]) -> _FakeDoc:
 
 @pytest.mark.unit
 def test_role_phrase_dropped_by_default_chain() -> None:
-    """The dogfood failure: 'the APAC GTM' tagged as ORG should be dropped by RolePhraseFilter."""
-    nlp = _FakeNlp(_doc_with_entities("the APAC GTM is hiring", [("the APAC GTM", "ORG")]))
+    """Role phrase 'the regional team' tagged as ORG should be dropped by RolePhraseFilter."""
+    nlp = _FakeNlp(_doc_with_entities("the regional team is hiring", [("the regional team", "ORG")]))
     neo4j = FakeNeo4jClient(entities=[])
 
-    result = suggest_entities("the APAC GTM is hiring", neo4j, nlp=nlp)
+    result = suggest_entities("the regional team is hiring", neo4j, nlp=nlp)
 
     # Default chain drops role phrases; survivors list is empty.
     assert [r.text for r in result] == []
@@ -72,12 +72,12 @@ def test_role_phrase_dropped_by_default_chain() -> None:
 @pytest.mark.unit
 def test_real_org_passes_through_default_chain() -> None:
     """A bona-fide org name that NER caught should survive the default chain."""
-    nlp = _FakeNlp(_doc_with_entities("Bupa Australia announced a new initiative.", [("Bupa", "ORG")]))
+    nlp = _FakeNlp(_doc_with_entities("Globex Australia announced a new initiative.", [("Globex", "ORG")]))
     neo4j = FakeNeo4jClient(entities=[])
 
-    result = suggest_entities("Bupa Australia announced a new initiative.", neo4j, nlp=nlp)
+    result = suggest_entities("Globex Australia announced a new initiative.", neo4j, nlp=nlp)
 
-    assert [r.text for r in result] == ["Bupa"]
+    assert [r.text for r in result] == ["Globex"]
     assert result[0].label == "ORG"
     assert result[0].is_new is True
 
@@ -135,6 +135,6 @@ def test_neo4j_unavailable_short_circuits_before_filter() -> None:
     class _UnavailableNeo4j:
         available = False
 
-    nlp = _FakeNlp(_doc_with_entities("Bupa announced.", [("Bupa", "ORG")]))
-    result = suggest_entities("Bupa announced.", _UnavailableNeo4j(), nlp=nlp)
+    nlp = _FakeNlp(_doc_with_entities("Globex announced.", [("Globex", "ORG")]))
+    result = suggest_entities("Globex announced.", _UnavailableNeo4j(), nlp=nlp)
     assert result == []

@@ -13,14 +13,14 @@ Get kairix running and searching your documents in under 30 minutes.
 ### 1. Get the compose file
 
 ```bash
-curl -O https://raw.githubusercontent.com/quanyeomans/kairix/main/docker-compose.yml
-curl -O https://raw.githubusercontent.com/quanyeomans/kairix/main/.env.example
+curl -O https://raw.githubusercontent.com/three-cubes/kairix/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/three-cubes/kairix/main/.env.example
 ```
 
 Or clone the full repo:
 
 ```bash
-git clone https://github.com/quanyeomans/kairix
+git clone https://github.com/three-cubes/kairix
 cd kairix
 ```
 
@@ -72,7 +72,8 @@ This indexes your documents for search. For 1,000 documents (~4,000 chunks), exp
 ### 6. Verify your setup
 
 ```bash
-docker compose exec kairix kairix onboard check
+docker compose exec kairix kairix onboard check          # human-readable
+docker compose exec kairix kairix onboard check --json   # structured — exits 0 only on 9/9, wire into your healthcheck
 ```
 
 You should see:
@@ -93,17 +94,18 @@ kairix deployment check
   All 9 checks passed
 ```
 
-If any checks fail, the output explains what to fix.
+If any checks fail, the output explains exactly what to fix — each failure carries an `remediation` string. The `--json` shape `{passed, total, fully_passed, failures: [{check, detail, remediation}]}` is the canonical healthcheck signal: structured, machine-readable, exit 0 only on full pass.
 
 ### 7. Verify search quality
 
-Run the built-in benchmark against the reference library:
+Run the built-in benchmark against the reference library — bundled suites resolve by name:
 
 ```bash
-docker compose exec kairix kairix eval
+docker compose exec kairix kairix benchmark list           # enumerate bundled suites
+docker compose exec kairix kairix benchmark run reflib     # runs the reference-library gold suite
 ```
 
-This indexes the reference library (5,800+ open-source documents), runs a 200-case gold suite, and reports search quality scores. Expected baseline:
+This indexes the reference library (5,800+ open-source documents), runs a 200-case gold suite, and reports search quality scores. Sensible defaults shipped with kairix gate the run (in `pyproject.toml` under `[tool.kairix.benchmark.gates]`): overall **≥ 0.78**, temporal **≥ 0.55**, entity **≥ 0.80**, contextual_prep **≥ 0.60**. Expected baseline:
 
 | Metric | Expected |
 |--------|----------|
@@ -146,7 +148,8 @@ See [connecting-agents.md](connecting-agents.md) for OpenClaw, LangGraph, and ot
 
 ## What happens next
 
-- **Documents are indexed automatically** every hour by the worker service
-- **The MCP server** exposes 7 tools: search, entity, prep, timeline, research, contradict, usage_guide
-- **Run `kairix onboard check`** any time to verify everything is working
-- **Run `kairix eval`** to benchmark search quality against the reference library
+- **Documents are indexed automatically** every hour by the worker service. Operator controls: `kairix worker pause` / `resume` / `status`.
+- **The MCP server exposes 11 tools** — `search`, `entity`, `prep`, `timeline`, `research`, `contradict`, `usage_guide`, `brief`, `bootstrap`, `entity_suggest`, `entity_validate`. Each response carries a `health` envelope (`vector_search` / `bm25` / `chat` / `secrets_loaded`) so agents know what's online and what to surface to their human admin.
+- **Agents should call `kairix bootstrap <agent>` at session start** to get a one-shot orientation envelope (role, board, recent memory, active goals, health).
+- **Run `kairix onboard check --json`** any time — exit 0 means 9/9, exit 1 prints structured failures with remediation strings.
+- **Run `kairix benchmark run reflib`** to benchmark search quality against the bundled reference-library gold suite. `kairix benchmark list` enumerates the bundled set.

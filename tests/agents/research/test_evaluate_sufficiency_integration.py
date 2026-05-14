@@ -24,8 +24,8 @@ from tests.fakes import FakeLLMBackend
 def _state_with_chunks() -> dict[str, Any]:
     """Minimal ResearcherState shape with a non-empty retrieved_chunks list."""
     return {
-        "query": "what did we decide about Bupa governance?",
-        "refined_query": "Bupa governance decisions",
+        "query": "what did we decide about Globex governance?",
+        "refined_query": "Globex governance decisions",
         "retrieved_chunks": [{"path": "doc1.md", "snippet": "Decision: ..."}],
         "turns": 0,
     }

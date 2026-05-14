@@ -5,7 +5,7 @@ Read [CLAUDE.md](CLAUDE.md) for engineering standards and [CONSTRAINTS.md](CONST
 ## Setup
 
 ```bash
-git clone https://github.com/quanyeomans/kairix
+git clone https://github.com/three-cubes/kairix
 cd kairix
 pip install -e ".[dev,neo4j,agents,rerank]"
 ```

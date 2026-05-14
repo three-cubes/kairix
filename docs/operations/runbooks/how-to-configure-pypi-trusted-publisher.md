@@ -39,8 +39,8 @@ If `kairix` doesn't exist on PyPI yet, you have two options:
 **Option A — Pre-create via GitHub OIDC (recommended for new projects):**
 1. Go to https://pypi.org/manage/account/publishing/
 2. Add a new "pending publisher" with these fields:
-   - **PyPI project name**: `kairix`
-   - **Owner**: `quanyeomans`
+   - **PyPI project name**: `Kairix-agentic-knowledge-mgt` (the `kairix` slot was reserved by another account; see pyproject.toml note)
+   - **Owner**: `three-cubes`
    - **Repository name**: `kairix`
    - **Workflow filename**: `publish-pypi.yml`
    - **Environment name**: `release`

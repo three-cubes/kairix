@@ -73,8 +73,8 @@ dev = [
 kairix = "kairix.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/quanyeomans/kairix"
-Issues = "https://github.com/quanyeomans/kairix/issues"
+Homepage = "https://github.com/three-cubes/kairix"
+Issues = "https://github.com/three-cubes/kairix/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

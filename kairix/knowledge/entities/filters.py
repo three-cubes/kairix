@@ -2,7 +2,7 @@
 
 Composing these filters in order via :class:`ChainedSuggestionFilter` produces
 the entity-suggest correction pipeline that fixes the dogfood-reported bug
-where role phrases (e.g., "the APAC GTM") leaked through as ``ORG`` and
+where role phrases (e.g., "the regional team") leaked through as ``ORG`` and
 short proper-noun acronyms the small NER model doesn't recognise (e.g.,
 "MIT") were silently dropped.
 
@@ -28,7 +28,7 @@ class RolePhraseFilter:
     only (the surrounding ``context`` is ignored here):
 
     1. ``the [Word]+`` — leading definite article followed by one or more
-       words, e.g. "the APAC GTM", "the regional lead".
+       words, e.g. "the regional lead", "the platform team".
     2. ``[Title] (Officer|Director|Lead|Manager|VP|Head|Chief|President|
        Engineer|Architect)`` — a single capitalised word followed by a
        known role noun. Plain role titles without a name attached.

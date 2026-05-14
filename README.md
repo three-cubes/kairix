@@ -3,7 +3,7 @@
 **Give your agents the same knowledge as your team — without giving it away.**
 
 [![Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1647_passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-3966_passing-brightgreen)]()
 [![Hit@5](https://img.shields.io/badge/Hit%405-98.5%25-orange)]()
 
 ---
@@ -131,8 +131,8 @@ Kairix is the memory + context layer your agent uses to stay oriented across ses
 pip install "kairix-agentic-knowledge-mgt[agents,neo4j]" && kairix setup
 
 # Docker
-curl -O https://raw.githubusercontent.com/quanyeomans/kairix/main/docker-compose.yml \
-  && curl -O https://raw.githubusercontent.com/quanyeomans/kairix/main/.env.example \
+curl -O https://raw.githubusercontent.com/three-cubes/kairix/main/docker-compose.yml \
+  && curl -O https://raw.githubusercontent.com/three-cubes/kairix/main/.env.example \
   && cp .env.example .env && docker compose up -d
 ```
 
@@ -180,10 +180,11 @@ See [`kairix.example.config.yaml`](kairix.example.config.yaml) for the full sche
 ### 4. Verify
 
 ```bash
-kairix onboard check    # runs 9 checks: PATH → wrapper → secrets → docs → vector → Neo4j → agent memory → chunk dates → MCP
+kairix onboard check          # human-readable: runs 9 checks (PATH → wrapper → secrets → docs → vector → Neo4j → agent memory → chunk dates → MCP)
+kairix onboard check --json   # structured: same checks, machine-readable, exits 0 only on 9/9 — wire into your docker-compose healthcheck or external monitor
 ```
 
-Green output looks like `9/9 passed`. Common failures and the canonical remediation for each:
+Green output looks like `9/9 passed`. The `--json` shape is `{passed, total, fully_passed, failures: [{check, detail, remediation}]}` — each failure carries an operator-actionable `remediation` string verbatim. Common failures and the canonical fix for each:
 
 | Check | Means | Canonical fix |
 |-------|-------|---------------|
@@ -247,6 +248,10 @@ The `kairix-memory-prompt` plugin ships with kairix (since #246 W5) at `/opt/kai
 
 **Tell your agent what to do with kairix:** the canonical operating contract is in [`docs/agents/AGENT-SETUP.md`](docs/agents/AGENT-SETUP.md) — when to call `tool_search`, when to call `tool_brief`, how to read the `health` envelope, and what to do when kairix degrades. Point your agent at that file first.
 
+**At session start, agents call `kairix bootstrap <agent>`** to get a one-shot orientation envelope: role, current `Board.md`, last N daily memory entries, active goals, and a `health` field showing what's online (`vector_search`, `bm25`, `chat`, `secrets_loaded`). Markdown by default, `--json` for tooling. The MCP equivalent is `tool_bootstrap(agent, max_memory_days=3)`. The openclaw plugin shipped at `/opt/kairix/plugins/openclaw/memory-prompt/` runs this automatically and injects the result into the session prompt — agents start oriented, not reactive.
+
+**Every MCP tool response carries a `health` field** (`vector_search` / `bm25` / `chat` / `secrets_loaded` / `degraded_reason` / `next_action`). When kairix is partially down, agents still get whatever subsystem works, plus a concrete instruction to surface to the admin — they never silently fail.
+
 See the [full quick-start guide](docs/getting-started/quick-start.md) for the detailed install path, and [connecting agents](docs/getting-started/connecting-agents.md) for LangGraph / CrewAI / VS Code integrations.
 
 **Ships with:** 5,800+ reference library documents and a 200-case gold suite for immediate quality verification.
@@ -282,14 +287,15 @@ See [SECURITY.md](SECURITY.md) for detail.
 ## Development
 
 ```bash
-git clone https://github.com/quanyeomans/kairix
+git clone https://github.com/three-cubes/kairix
 cd kairix
 pip install -e ".[dev,neo4j,agents,rerank]"
-pytest tests/                    # 1,675 tests
-ruff check kairix/ tests/        # lint
+bash scripts/safe-commit.sh "msg"  # canonical commit gate: lint, format, mypy, ~3,966 tests, security, fitness
+pytest tests/                      # bare test run
+ruff check kairix/ tests/          # lint only
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture, PR process, and versioning.
+`scripts/safe-commit.sh` is the single entry point — it runs every gate the CI runs in the same order before letting the commit through; failing gates print the exact fix command. See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture and PR process, and [docs/architecture/fitness-functions.md](docs/architecture/fitness-functions.md) for the F1–F23 architecture fitness functions that enforce structural invariants.
 
 ---
 
