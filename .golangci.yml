@@ -7,6 +7,10 @@
 # This file is read by golangci-lint from the repo root regardless of which
 # services/<name>/ the lint targets — golangci-lint walks upward to find it.
 
+# golangci-lint v2 schema marker; v1 configs are silently rejected with
+# "unsupported version of the configuration".
+version: "2"
+
 run:
   timeout: 5m
   # Discover every services/<name> module that golangci-lint is invoked
