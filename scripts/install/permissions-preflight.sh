@@ -44,6 +44,7 @@ REQUIRED_KEYS=(
 
 log() {
     echo "[kairix-preflight] $*" >&2
+    return 0
 }
 
 fail() {
@@ -52,20 +53,20 @@ fail() {
 }
 
 # ── 1. .env readable by service user ──────────────────────────────────────
-if [ ! -f "$ENV_FILE" ]; then
+if [[ ! -f "$ENV_FILE" ]]; then
     fail ".env file missing: $ENV_FILE"
 fi
 
 # Self-heal ownership/perms when running as root and the file is owned
 # by someone else (the #167 case where install left it openclaw:openclaw).
-if [ "$(id -u)" = "0" ]; then
+if [[ "$(id -u)" == "0" ]]; then
     current_owner=$(stat -c '%U:%G' "$ENV_FILE" 2>/dev/null || stat -f '%Su:%Sg' "$ENV_FILE")
-    if [ "$current_owner" != "${KAIRIX_USER}:${KAIRIX_GROUP}" ]; then
+    if [[ "$current_owner" != "${KAIRIX_USER}:${KAIRIX_GROUP}" ]]; then
         log "fixing ownership of $ENV_FILE: $current_owner → ${KAIRIX_USER}:${KAIRIX_GROUP}"
         chown "${KAIRIX_USER}:${KAIRIX_GROUP}" "$ENV_FILE" || fail "chown $ENV_FILE failed"
     fi
     current_mode=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE")
-    if [ "$current_mode" != "640" ] && [ "$current_mode" != "0640" ]; then
+    if [[ "$current_mode" != "640" && "$current_mode" != "0640" ]]; then
         log "fixing mode of $ENV_FILE: $current_mode → 640"
         chmod 640 "$ENV_FILE" || fail "chmod $ENV_FILE failed"
     fi
@@ -74,13 +75,13 @@ fi
 # Verify the service user can read .env (works when running as root via
 # ExecStartPre= and as the service user via direct invocation).
 if ! sudo -u "$KAIRIX_USER" test -r "$ENV_FILE" 2>/dev/null; then
-    if ! [ -r "$ENV_FILE" ]; then
+    if [[ ! -r "$ENV_FILE" ]]; then
         fail ".env not readable: $ENV_FILE (user=$(id -un))"
     fi
 fi
 
 # ── 2. secrets file present and non-empty ────────────────────────────────
-if [ ! -s "$SECRETS_FILE" ]; then
+if [[ ! -s "$SECRETS_FILE" ]]; then
     fail "secrets file missing or empty: $SECRETS_FILE — is kairix-fetch-secrets.service enabled and running?"
 fi
 
@@ -96,12 +97,12 @@ for key in "${REQUIRED_KEYS[@]}"; do
         . "${APP_DIR}/.env" 2>/dev/null
         eval "echo \${${key}:-}"
     )
-    if [ -z "$value" ]; then
+    if [[ -z "$value" ]]; then
         missing_keys="${missing_keys} ${key}"
     fi
 done
 
-if [ -n "$missing_keys" ]; then
+if [[ -n "$missing_keys" ]]; then
     fail "required env keys missing after merging .env + secrets:${missing_keys}"
 fi
 

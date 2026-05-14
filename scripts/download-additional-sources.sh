@@ -19,7 +19,7 @@ clone_repo() {
     local tmp
     tmp=$(mktemp -d)
     git clone --depth 1 --quiet "$url" "$tmp/repo" 2>/dev/null || {
-        echo "FAIL (clone error)"
+        echo "FAIL (clone error)" >&2
         rm -rf "$tmp"
         return
     }

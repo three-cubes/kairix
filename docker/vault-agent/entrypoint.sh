@@ -12,7 +12,7 @@ fetch_and_write() {
     kv_name_local="$KV_NAME"
     tmpfile=$(mktemp "${SECRETS_DIR}/.secrets.XXXXXX")
     chmod 600 "$tmpfile"
-    _fetch() { az keyvault secret show --vault-name "$kv_name_local" --name "$1" --query value -o tsv 2>/dev/null || echo ""; }
+    _fetch() { local secret_name="$1"; az keyvault secret show --vault-name "$kv_name_local" --name "$secret_name" --query value -o tsv 2>/dev/null || echo ""; }
     {
         echo "KAIRIX_LLM_API_KEY=$(_fetch kairix-llm-api-key)"
         echo "KAIRIX_LLM_ENDPOINT=$(_fetch kairix-llm-endpoint)"

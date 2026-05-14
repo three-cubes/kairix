@@ -15,8 +15,8 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
-pass() { echo -e "  ${GREEN}✓${NC} $1"; }
-fail() { echo -e "  ${RED}✗${NC} $1"; exit 1; }
+pass() { local msg="$1"; echo -e "  ${GREEN}✓${NC} ${msg}"; }
+fail() { local msg="$1"; echo -e "  ${RED}✗${NC} ${msg}"; exit 1; }
 
 echo "preflight: running quality gates"
 

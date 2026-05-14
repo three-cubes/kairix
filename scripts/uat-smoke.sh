@@ -34,7 +34,7 @@ set -u
 MCP_URL="http://127.0.0.1:8182"
 SMOKE_QUERY="what is kairix"
 
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
     case "$1" in
         --mcp-url) MCP_URL="$2"; shift 2 ;;
         --smoke-query) SMOKE_QUERY="$2"; shift 2 ;;
@@ -51,14 +51,20 @@ FAIL=0
 FAILED_CHECKS=()
 
 pass() {
+    local name="$1"
+    local detail="$2"
     PASS=$((PASS + 1))
-    echo "[PASS] $1 — $2"
+    echo "[PASS] ${name} — ${detail}"
+    return 0
 }
 
 fail() {
+    local name="$1"
+    local detail="$2"
     FAIL=$((FAIL + 1))
-    FAILED_CHECKS+=("$1")
-    echo "[FAIL] $1 — $2"
+    FAILED_CHECKS+=("${name}")
+    echo "[FAIL] ${name} — ${detail}"
+    return 0
 }
 
 # ── 1. MCP /healthz ready ─────────────────────────────────────────────────
@@ -73,6 +79,7 @@ check_healthz() {
     else
         fail "mcp-healthz" "endpoint returned but not ready: $out"
     fi
+    return 0
 }
 
 # ── 2. MCP /mcp tools/list responds ────────────────────────────────────────
@@ -110,11 +117,12 @@ check_cli_help() {
             missing="${missing} ${cmd}"
         fi
     done
-    if [ -z "$missing" ]; then
+    if [[ -z "$missing" ]]; then
         pass "cli-help" "all 18 subcommands listed"
     else
         fail "cli-help" "missing subcommand(s) in help banner:${missing}"
     fi
+    return 0
 }
 
 # ── 4. Config validation ──────────────────────────────────────────────────
@@ -132,11 +140,12 @@ check_onboard() {
     local out rc
     out=$(kairix onboard check 2>&1)
     rc=$?
-    if [ $rc -eq 0 ]; then
+    if [[ $rc -eq 0 ]]; then
         pass "onboard-check" "no critical deployment issues"
     else
         fail "onboard-check" "exit ${rc}: $(echo "$out" | tail -3 | tr '\n' ' ')"
     fi
+    return 0
 }
 
 # ── 6. Benchmark mock run ─────────────────────────────────────────────────
@@ -144,7 +153,7 @@ check_benchmark_mock() {
     local out rc
     out=$(kairix benchmark run --system mock --suite contract 2>&1)
     rc=$?
-    if [ $rc -ne 0 ]; then
+    if [[ $rc -ne 0 ]]; then
         fail "benchmark-mock" "benchmark run failed: $(echo "$out" | tail -3 | tr '\n' ' ')"
         return
     fi
@@ -155,6 +164,7 @@ check_benchmark_mock() {
     else
         fail "benchmark-mock" "no weighted_total in output"
     fi
+    return 0
 }
 
 # ── 7. Search smoke ───────────────────────────────────────────────────────
@@ -162,7 +172,7 @@ check_search() {
     local out rc
     out=$(kairix search "${SMOKE_QUERY}" --limit 3 2>&1)
     rc=$?
-    if [ $rc -ne 0 ]; then
+    if [[ $rc -ne 0 ]]; then
         fail "search-smoke" "search failed: $(echo "$out" | tail -3 | tr '\n' ' ')"
         return
     fi
@@ -170,11 +180,12 @@ check_search() {
     # human-readable banner with at least one result.
     local hits
     hits=$(echo "$out" | grep -cE '^\s*[0-9]+\.\s|"score"' || true)
-    if [ "${hits:-0}" -gt 0 ]; then
+    if [[ "${hits:-0}" -gt 0 ]]; then
         pass "search-smoke" "${hits} hit(s) for \"${SMOKE_QUERY}\""
     else
         fail "search-smoke" "no hits returned"
     fi
+    return 0
 }
 
 # ── 8. Reference library status ───────────────────────────────────────────
@@ -182,7 +193,7 @@ check_reflib_status() {
     local out rc
     out=$(kairix reference-library status 2>&1)
     rc=$?
-    if [ $rc -ne 0 ]; then
+    if [[ $rc -ne 0 ]]; then
         fail "reflib-status" "exit ${rc}"
         return
     fi
@@ -191,6 +202,7 @@ check_reflib_status() {
     else
         fail "reflib-status" "unexpected output: $(echo "$out" | head -1)"
     fi
+    return 0
 }
 
 # ── Run all checks ────────────────────────────────────────────────────────
@@ -208,7 +220,7 @@ echo
 echo "=== Summary ==="
 echo "PASS: ${PASS}"
 echo "FAIL: ${FAIL}"
-if [ $FAIL -gt 0 ]; then
+if [[ $FAIL -gt 0 ]]; then
     echo "Failed checks: ${FAILED_CHECKS[*]}"
     exit 1
 fi

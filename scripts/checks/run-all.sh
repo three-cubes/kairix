@@ -65,8 +65,8 @@ python3 "${SCRIPT_DIR}/check_sonar_ignore_rationale.py" || overall=1
 python3 "${SCRIPT_DIR}/check_no_logging_secrets.py" || overall=1
 
 # F7 — needs coverage.xml. Skip if not present or skip flag set.
-if [ "$skip_coverage" -eq 0 ]; then
-    if [ -f "${REPO_ROOT}/coverage.xml" ]; then
+if [[ "$skip_coverage" -eq 0 ]]; then
+    if [[ -f "${REPO_ROOT}/coverage.xml" ]]; then
         python3 "${SCRIPT_DIR}/check_per_file_coverage.py" "${REPO_ROOT}/coverage.xml" || overall=1
     else
         printf '\033[0;33mskip [arch:per-file-coverage-floor]\033[0m — coverage.xml not found.\n'
@@ -75,7 +75,7 @@ if [ "$skip_coverage" -eq 0 ]; then
 fi
 
 echo
-if [ "$overall" -eq 0 ]; then
+if [[ "$overall" -eq 0 ]]; then
     printf '\033[0;32m=== All architecture fitness functions passed ===\033[0m\n'
 else
     printf '\033[0;31m=== Architecture fitness functions FAILED ===\033[0m\n'
