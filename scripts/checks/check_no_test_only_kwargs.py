@@ -64,8 +64,18 @@ def _module_path(path: Path) -> str:
 
 
 def file_has_violation(path: Path, allow: set[str]) -> bool:
-    """True if ``path`` declares any function with a ``*_fn=None`` kwarg
-    not in the allow-list.
+    """True if ``path`` declares any function param OR dataclass field
+    matching the ``*_fn=None`` shape, not on the allow-list.
+
+    Walks two AST shapes:
+      1. ``FunctionDef`` / ``AsyncFunctionDef`` — positional and keyword-only
+         args whose default is the ``None`` constant.
+      2. ``ClassDef`` body ``AnnAssign`` — annotated dataclass fields whose
+         value is the ``None`` constant (e.g.
+         ``x_fn: Callable | None = None`` inside a ``@dataclass`` class).
+         This catches the F6-pattern that the v1 detector missed because
+         dataclasses moved the per-param default off the function signature
+         and onto class fields.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -75,30 +85,39 @@ def file_has_violation(path: Path, allow: set[str]) -> bool:
     module_path = _module_path(path)
 
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-
-        # Check positional-or-keyword args + keyword-only args
-        args = node.args
-        # Pair each arg with its default. Defaults align to the *tail* of args.
-        positional = args.args
-        defaults = args.defaults
-        positional_with_default = list(zip(positional[len(positional) - len(defaults) :], defaults, strict=True))
-
-        kw_only = list(zip(args.kwonlyargs, args.kw_defaults, strict=True))
-
-        all_with_default = positional_with_default + kw_only
-
-        for arg, default in all_with_default:
-            param_name = arg.arg
-            if not param_name.endswith("_fn"):
-                continue
-            if not _is_none_constant(default):
-                continue
-            qualified = _qualified_param(module_path, node.name, param_name)
-            if qualified in allow:
-                continue
-            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            positional = args.args
+            defaults = args.defaults
+            positional_with_default = list(
+                zip(positional[len(positional) - len(defaults) :], defaults, strict=True)
+            )
+            kw_only = list(zip(args.kwonlyargs, args.kw_defaults, strict=True))
+            for arg, default in positional_with_default + kw_only:
+                param_name = arg.arg
+                if not param_name.endswith("_fn"):
+                    continue
+                if not _is_none_constant(default):
+                    continue
+                qualified = _qualified_param(module_path, node.name, param_name)
+                if qualified in allow:
+                    continue
+                return True
+        elif isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if not isinstance(item, ast.AnnAssign):
+                    continue
+                if not isinstance(item.target, ast.Name):
+                    continue
+                field_name = item.target.id
+                if not field_name.endswith("_fn"):
+                    continue
+                if not _is_none_constant(item.value):
+                    continue
+                qualified = _qualified_param(module_path, node.name, field_name)
+                if qualified in allow:
+                    continue
+                return True
 
     return False
 
