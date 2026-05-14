@@ -115,8 +115,10 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Engineering hub: ≥80% overall; per-module targets in PRD.md §6
-fail_under = 80
+# Engineering hub: per-file floor at 90% (F7/F9). Overall fail_under
+# tracks the current achievable floor while the per-file baseline burns
+# down; raise toward 90 as the 34 grandfathered low-coverage files lift.
+fail_under = 88
 show_missing = true
 exclude_lines = [
     "pragma: no cover",

@@ -1,8 +1,8 @@
-"""F7 / F9: Per-file coverage floor at 85%.
+"""F7 / F9: Per-file coverage floor at 90%.
 
 Repository-wide coverage averages can hide files with 0% coverage.
 This check enforces a per-file floor: every kairix/* source file in
-the ``coverage.xml`` report must be ≥85% covered.
+the ``coverage.xml`` report must be ≥90% covered.
 
 Modes:
 
@@ -42,7 +42,7 @@ from xml.etree import ElementTree as ET
 sys.path.insert(0, str(Path(__file__).parent))
 from _arch_lib import gate
 
-FLOOR = 85.0  # per-file coverage percentage threshold
+FLOOR = 90.0  # per-file coverage percentage threshold
 
 
 REMEDIATION = f"""A file dropped below {FLOOR:.0f}% coverage. Add tests that
