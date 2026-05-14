@@ -1,0 +1,133 @@
+name: "6 · Reflib benchmark history capture (per-release archive)"
+
+# Captures one reflib benchmark run per release and opens a PR back into
+# develop archiving the result under benchmark-results/history/. Closes #271.
+#
+# Trigger: a GitHub Release is created (matches docker-publish.yml /
+# publish-pypi.yml, so this fires on the same artefact moment).
+#
+# The benchmark runs against the in-repo fixture corpus
+# (tests/integration/reflib_fixture/) via `suites/reflib-contract-suite.yaml`
+# and the mock-reflib backend. That fixture is intentionally stable across
+# releases — absolute scores are NOT comparable to a live-index run, but
+# release-to-release deltas are meaningful. See
+# benchmark-results/history/INDEX.md for the read-this-table preamble.
+#
+# Output: one JSON under benchmark-results/history/<tag>-<date>.json plus
+# one row appended to benchmark-results/history/INDEX.md, opened as a PR
+# against develop (no auto-merge — the human gate at PR creation is
+# preserved per feedback_release_hitl).
+#
+# Workflow inputs (github.ref_name, inputs.ref) are routed through env:
+# bindings before any run: usage, per the workflow-injection guidance
+# (#170 release.yml convention).
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    # Manual entrypoint so a release that fired before this workflow
+    # existed (or a backfill) can be captured retroactively.
+    inputs:
+      ref:
+        description: 'Git ref to benchmark (release tag, e.g. v2026.5.15)'
+        required: true
+        type: string
+
+permissions:
+  contents: write       # required to push the PR branch
+  pull-requests: write  # required to open the PR
+
+jobs:
+  capture:
+    name: Capture reflib benchmark for release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # The benchmark output JSON the workflow pipes through update_reflib_history.py.
+      RESULT_JSON: /tmp/reflib-history-result.json
+
+    steps:
+      - name: Resolve release tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          if [ "$EVENT_NAME" = "release" ]; then
+            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$INPUT_REF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install kairix
+        run: pip install -e ".[dev]"
+
+      - name: Run reflib contract suite against fixture corpus
+        # The mock-reflib backend reads the stable fixture under
+        # tests/integration/reflib_fixture/ — no live index needed.
+        # `kairix benchmark run --output <dir>` writes the JSON under that
+        # directory; we move it to a known path for the next step.
+        run: |
+          mkdir -p /tmp/reflib-out
+          python -m kairix.quality.benchmark.cli run \
+            --suite reflib-contract \
+            --system bm25 \
+            --output /tmp/reflib-out
+          ls -la /tmp/reflib-out/
+          latest=$(ls -t /tmp/reflib-out/*.json | head -1)
+          cp "$latest" "$RESULT_JSON"
+
+      - name: Archive result + append INDEX.md row
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # Switch to develop so the archive lands on a branch we can PR
+          # back. Checkout of the tag's commit was only for the benchmark
+          # binary itself; the archive update is a develop-tracked change.
+          git fetch origin develop
+          git checkout develop
+          git reset --hard origin/develop
+          python3 scripts/update_reflib_history.py "$RESULT_JSON" --tag "$TAG"
+
+      - name: Open PR against develop
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: bot/reflib-history-${{ env.TAG }}
+          base: develop
+          commit-message: "chore(eval): archive reflib benchmark for release tag (#271)"
+          title: "chore(eval): archive reflib benchmark for release tag"
+          body: |
+            Automated reflib benchmark capture for the current release.
+
+            - Runs `kairix benchmark run --suite reflib-contract` against
+              the in-repo fixture corpus (`tests/integration/reflib_fixture/`).
+            - Archives the JSON under `benchmark-results/history/`.
+            - Appends one row to `benchmark-results/history/INDEX.md`.
+
+            Stable fixture corpus means cross-release deltas are
+            comparable; absolute scores are not directly comparable to
+            production live-index runs. See
+            `benchmark-results/history/INDEX.md` for the read-this-table
+            preamble.
+
+            Closes #271 (when the human merges this PR).
+          labels: |
+            automated
+            benchmark
+          add-paths: |
+            benchmark-results/history/
