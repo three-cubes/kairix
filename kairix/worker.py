@@ -462,6 +462,39 @@ def _run_maintenance_task(
     transition(WorkerPhase.IDLE)
 
 
+def _maybe_run_maintenance_cycle(
+    *,
+    deps: WorkerDeps,
+    transition: Callable[[WorkerPhase], None],
+    now: float,
+    maintenance_active: bool,
+    last_entity: float,
+    last_health: float,
+    last_wikilinks: float,
+    schedule: _Schedule,
+) -> tuple[float, float, float]:
+    """Run any maintenance task whose interval has elapsed; return updated timestamps.
+
+    Three near-identical "if interval elapsed → run task → record timestamp"
+    blocks collapsed into a dispatch loop to keep ``main``'s cognitive
+    complexity under the F16 / S3776 limit (#250 follow-up).
+    """
+    if not maintenance_active:
+        return (last_entity, last_health, last_wikilinks)
+
+    tasks = (
+        ("entity", schedule.entity, last_entity, run_entity_seed),
+        ("health", schedule.health, last_health, run_health_check),
+        ("wikilinks", schedule.wikilinks, last_wikilinks, run_wikilinks_inject),
+    )
+    new_times: dict[str, float] = {"entity": last_entity, "health": last_health, "wikilinks": last_wikilinks}
+    for name, interval, last_run, task in tasks:
+        if now - last_run >= interval:
+            _run_maintenance_task(deps, transition, task)
+            new_times[name] = now
+    return (new_times["entity"], new_times["health"], new_times["wikilinks"])
+
+
 def main(
     *,
     deps: WorkerDeps | None = None,
@@ -567,17 +600,16 @@ def main(
             maintenance_active, previously_skipping_maint, consecutive_embed_noops
         )
 
-        if maintenance_active and now - last_entity >= schedule.entity:
-            _run_maintenance_task(deps, _transition, run_entity_seed)
-            last_entity = now
-
-        if maintenance_active and now - last_health >= schedule.health:
-            _run_maintenance_task(deps, _transition, run_health_check)
-            last_health = now
-
-        if maintenance_active and now - last_wikilinks >= schedule.wikilinks:
-            _run_maintenance_task(deps, _transition, run_wikilinks_inject)
-            last_wikilinks = now
+        last_entity, last_health, last_wikilinks = _maybe_run_maintenance_cycle(
+            deps=deps,
+            transition=_transition,
+            now=now,
+            maintenance_active=maintenance_active,
+            last_entity=last_entity,
+            last_health=last_health,
+            last_wikilinks=last_wikilinks,
+            schedule=schedule,
+        )
 
         # Sleep 60 seconds between checks
         for _ in range(60):
