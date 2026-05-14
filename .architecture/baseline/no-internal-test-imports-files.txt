@@ -9,4 +9,3 @@ tests/search/test_config_loader.py
 tests/store/test_crawler.py
 tests/summaries/test_generate.py
 tests/test_paths.py
-tests/wikilinks/test_resolver.py

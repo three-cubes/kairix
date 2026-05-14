@@ -182,22 +182,31 @@ def _extract_aliases(entity_name: str, link: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _neo4j_get_client() -> Neo4jClient:
-    """Thin wrapper around graph.get_client() — isolated here for test monkeypatching."""
+def default_neo4j_client() -> Neo4jClient:
+    """Thin wrapper around graph.get_client() — the production default.
+
+    Promoted from ``_neo4j_get_client`` (F5): tests inject a fake client
+    via ``load_entities_from_neo4j(client=fake)`` rather than monkeypatching
+    this lookup.
+    """
     from kairix.knowledge.graph.client import get_client
 
     return get_client()
 
 
-def load_entities_from_neo4j() -> list[WikiEntity]:
+def load_entities_from_neo4j(client: Neo4jClient | None = None) -> list[WikiEntity]:
     """
     Load entities with vault_path from the Neo4j graph.
 
     Queries Organisation and Person nodes. Returns empty list if Neo4j is
     unavailable or has no entities with vault_path populated.
+
+    ``client`` is the F1/F5-clean test seam: tests pass a fake; production
+    callers omit the kwarg and the live client is constructed.
     """
     try:
-        client = _neo4j_get_client()
+        if client is None:
+            client = default_neo4j_client()
         if not client.available:
             return []
 
@@ -232,15 +241,18 @@ def load_entities_from_neo4j() -> list[WikiEntity]:
 # ---------------------------------------------------------------------------
 
 
-def get_entities() -> list[WikiEntity]:
+def get_entities(client: Neo4jClient | None = None) -> list[WikiEntity]:
     """
     Load entities from Neo4j (preferred), then bootstrap index.
 
     Falls back to the bootstrap index if Neo4j is unavailable or returns
     fewer than _DB_THRESHOLD entities with vault_path populated.
+
+    ``client`` is passed through to ``load_entities_from_neo4j`` — production
+    callers omit it for the default Neo4j connection; tests inject fakes.
     """
     # Try Neo4j first
-    neo4j_entities = load_entities_from_neo4j()
+    neo4j_entities = load_entities_from_neo4j(client=client)
     if len(neo4j_entities) >= _DB_THRESHOLD:
         return neo4j_entities
 
