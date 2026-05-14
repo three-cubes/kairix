@@ -368,11 +368,7 @@ def test_load_env_file_returns_loaded_keys(tmp_path) -> None:
 
     env_file = tmp_path / "x.env"
     env_file.write_text(
-        '# a comment\n'
-        "\n"
-        "KAIRIX_TEST_NEW_KEY_42=hello\n"
-        "MALFORMED_NO_EQUALS\n"
-        '"KAIRIX_TEST_QUOTED_42"="quoted-value"\n'
+        '# a comment\n\nKAIRIX_TEST_NEW_KEY_42=hello\nMALFORMED_NO_EQUALS\n"KAIRIX_TEST_QUOTED_42"="quoted-value"\n'
     )
 
     loaded = cli_mod._load_env_file(str(env_file))
@@ -400,7 +396,7 @@ def test_self_load_env_explicit_path_wins(tmp_path) -> None:
     env_file = tmp_path / "explicit.env"
     env_file.write_text("KAIRIX_EXPLICIT_NEW=yes\n")
 
-    source, loaded = cli_mod._self_load_env(str(env_file))
+    source, _loaded = cli_mod._self_load_env(str(env_file))
     assert source == str(env_file)
     # Loaded keys list may include KAIRIX_EXPLICIT_NEW (if not previously set)
     # Sabotage-prove: source is exactly the explicit path, not a probe path
@@ -566,7 +562,9 @@ def test_guide_error_when_guide_source_missing(tmp_path, capsys, monkeypatch) ->
 
 
 @pytest.mark.unit
-def test_guide_writes_to_default_path_when_agent_knowledge_dir_exists(guide_source_in_pkg_root, tmp_path, capsys) -> None:
+def test_guide_writes_to_default_path_when_agent_knowledge_dir_exists(
+    guide_source_in_pkg_root, tmp_path, capsys
+) -> None:
     """When 04-Agent-Knowledge/shared exists, the guide installs there by default."""
     doc_root = tmp_path / "vault"
     shared_dir = doc_root / "04-Agent-Knowledge" / "shared"

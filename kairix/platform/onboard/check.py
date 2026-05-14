@@ -115,8 +115,7 @@ _CANONICAL_REMEDIATIONS: dict[str, str] = {
         "`KAIRIX_LLM_API_KEY=...` and `KAIRIX_LLM_ENDPOINT=...`."
     ),
     "document_root_configured": (
-        "Set `KAIRIX_DOCUMENT_ROOT=/your/docs/path` in /opt/kairix/service.env and "
-        "ensure the directory exists."
+        "Set `KAIRIX_DOCUMENT_ROOT=/your/docs/path` in /opt/kairix/service.env and ensure the directory exists."
     ),
     "vector_search_working": (
         "Run `docker logs kairix-worker-1` for embed-pipeline errors; confirm "
@@ -139,15 +138,14 @@ _CANONICAL_REMEDIATIONS: dict[str, str] = {
     ),
     "mcp_service": (
         "Register kairix with at least one MCP consumer harness: "
-        "`openclaw mcp set mcp-kairix '{\"type\":\"stdio\",\"command\":\"/path/to/kairix-start.sh\"}'`, "
+        '`openclaw mcp set mcp-kairix \'{"type":"stdio","command":"/path/to/kairix-start.sh"}\'`, '
         "add to ~/Library/Application Support/Claude/claude_desktop_config.json, or run "
         "`sudo systemctl enable --now kairix-mcp.service`."
     ),
 }
 
 _UNKNOWN_CHECK_REMEDIATION = (
-    "Report this failure as a bug in kairix.platform.onboard.check — the check has no "
-    "canonical remediation registered."
+    "Report this failure as a bug in kairix.platform.onboard.check — the check has no canonical remediation registered."
 )
 
 
