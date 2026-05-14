@@ -33,9 +33,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SONAR_FILE = REPO_ROOT / "sonar-project.properties"
 
-RULE_KEY_PATTERN = re.compile(
-    r"^sonar\.issue\.ignore\.multicriteria\.([A-Za-z0-9_-]+)\.ruleKey="
-)
+RULE_KEY_PATTERN = re.compile(r"^sonar\.issue\.ignore\.multicriteria\.([A-Za-z0-9_-]+)\.ruleKey=")
 BAD_TOKENS = ("TODO", "FIXME", "XXX", "fixme", "todo")
 
 
@@ -83,7 +81,7 @@ def _has_real_rationale(comment_block: list[str]) -> bool:
 def main() -> int:
     if not SONAR_FILE.exists():
         # No sonar config to check; not a failure.
-        print(f"\033[0;32mok [arch:sonar-ignore-rationale]\033[0m — no sonar-project.properties (skipped).")
+        print("\033[0;32mok [arch:sonar-ignore-rationale]\033[0m — no sonar-project.properties (skipped).")
         return 0
 
     lines = SONAR_FILE.read_text().splitlines()

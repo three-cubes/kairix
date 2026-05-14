@@ -85,7 +85,9 @@ def _audit_baseline(baseline_file: Path, coverage_rates: dict[Path, float]) -> l
     stale: list[tuple[str, str]] = []
     if not baseline_file.exists():
         return stale
-    entries = [line.strip() for line in baseline_file.read_text().splitlines() if line.strip() and not line.startswith("#")]
+    entries = [
+        line.strip() for line in baseline_file.read_text().splitlines() if line.strip() and not line.startswith("#")
+    ]
     is_coverage = baseline_file.name in COVERAGE_BASELINES
     for entry in entries:
         path = Path(entry)

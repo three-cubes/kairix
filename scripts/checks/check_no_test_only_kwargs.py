@@ -89,9 +89,7 @@ def file_has_violation(path: Path, allow: set[str]) -> bool:
             args = node.args
             positional = args.args
             defaults = args.defaults
-            positional_with_default = list(
-                zip(positional[len(positional) - len(defaults) :], defaults, strict=True)
-            )
+            positional_with_default = list(zip(positional[len(positional) - len(defaults) :], defaults, strict=True))
             kw_only = list(zip(args.kwonlyargs, args.kw_defaults, strict=True))
             for arg, default in positional_with_default + kw_only:
                 param_name = arg.arg
