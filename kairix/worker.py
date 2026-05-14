@@ -21,13 +21,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kairix.paths import worker_state_path
+from kairix.paths import worker_pause_flag_path, worker_state_path
 from kairix.worker_state import WorkerPhase, WorkerState, read_state, write_state
 
 if TYPE_CHECKING:
     from kairix.core.embed.use_cases import EmbedPipelineResult
 
 logger = logging.getLogger(__name__)
+
+# #224 phase 4 — pause-flag polling cadence.
+# When the worker is in PAUSED phase, it sleeps this long between flag
+# re-checks. Short enough that operators see resumption quickly (CLI tells
+# them "may take up to 5s"), long enough not to thrash on a touch-file
+# stat call. Exposed as a module constant so tests can run a couple of
+# iterations through the pause-check without injecting the value.
+PAUSE_POLL_INTERVAL_S = 5
 
 # Task schedule (seconds between runs)
 EMBED_INTERVAL = 3600  # 1 hour
@@ -112,16 +120,21 @@ class WorkerDeps:
     health_check: Callable[[], list[Any]] = field(default_factory=lambda: _default_health_check)
     wikilinks: Callable[[], None] = field(default_factory=lambda: _default_wikilinks_inject)
     sleep: Callable[[float], None] = field(default_factory=lambda: time.sleep)
-    # #224 phase 5 — observable state. ``state`` defaults to None and is
-    # initialised inside main() so the boot path can read any prior state
-    # off disk first. ``state_path`` defaults to the production location
-    # via ``worker_state_path()``; tests pass a tmp_path. ``write_state_fn``
-    # is the test seam — F6-clean (typed Callable with default_factory, not
-    # ``write_state_fn: Callable | None = None``).
-    state: WorkerState | None = None
+    # #224 phase 4-5 combined — observable state + pause flag.
+    # ``state`` is the in-memory dataclass the loop mutates on phase changes.
+    # ``state`` defaults to None so the boot path in main() can read prior
+    # state off disk first (restart_count survives container restarts).
+    # ``state_path`` is where it gets persisted via ``write_state_fn`` so
+    # operators (and ``kairix worker status``) can read it.
+    # ``read_state_fn`` is the read-side test seam mirroring ``write_state_fn``.
+    # ``pause_flag_path`` is the touch-file the operator-facing
+    # ``kairix worker pause/resume`` toggles; the loop polls it each
+    # iteration. All are F6-clean (typed, default_factory).
+    state: WorkerState = field(default_factory=WorkerState)
     state_path: Path = field(default_factory=worker_state_path)
     write_state_fn: Callable[[WorkerState, Path], None] = field(default_factory=lambda: write_state)
     read_state_fn: Callable[[Path], WorkerState | None] = field(default_factory=lambda: read_state)
+    pause_flag_path: Path = field(default_factory=worker_pause_flag_path)
 
 
 @dataclass(frozen=True)
@@ -333,18 +346,17 @@ def main(
     # etc.) so operators see lifetime totals across restarts. If no prior
     # state, we start fresh.
     #
-    # ``deps.state`` is the test seam: tests pass a hand-constructed
-    # WorkerState and skip the read_state_fn entirely.
-    state = deps.state
-    if state is None:
-        prior = deps.read_state_fn(deps.state_path)
-        if prior is not None:
-            state = prior
-            state.restart_count = state.restart_count + 1
-            logger.info("worker: resumed from prior state — restart_count=%d", state.restart_count)
-        else:
-            state = WorkerState()
-            logger.info("worker: no prior state on disk — starting fresh")
+    # Try disk first so ``restart_count`` survives container restarts; fall
+    # back to ``deps.state`` (a fresh default WorkerState in production, or a
+    # test-supplied override).
+    prior = deps.read_state_fn(deps.state_path)
+    if prior is not None:
+        state = prior
+        state.restart_count = state.restart_count + 1
+        logger.info("worker: resumed from prior state — restart_count=%d", state.restart_count)
+    else:
+        state = deps.state
+        logger.info("worker: no prior state on disk — starting fresh")
     # Persist initial state (STARTING) so ``kairix worker status`` is
     # answerable immediately after boot, before the first embed completes.
     state.current_phase = WorkerPhase.STARTING
@@ -357,10 +369,6 @@ def main(
         Each call is a single write — the persistence layer's temp-file +
         rename keeps concurrent ``kairix worker status`` readers safe.
         """
-        # ``state`` is closed-over from main(); never None by this point —
-        # main() reassigns it before defining this closure.
-        if state is None:  # pragma: no cover — main() guarantees state is bound before _transition runs
-            return
         state.current_phase = phase
         state.last_phase_change_at = time.time()
         deps.write_state_fn(state, deps.state_path)
@@ -400,7 +408,29 @@ def main(
     last_embed = time.monotonic()
     _transition(WorkerPhase.IDLE)
 
+    # #224 phase 4: track whether we logged the pause entry already so the
+    # paused message doesn't spam every 5s while the flag is held. Cleared
+    # when the flag is removed so the next pause cycle re-logs.
+    previously_paused = False
+
     while running:
+        # #224 phase 4 — operator-controlled pause. Polled at the very top
+        # of each loop iteration. While the flag is present the worker
+        # skips all task work, sleeps for PAUSE_POLL_INTERVAL_S, and rechecks.
+        # No state side-effects, no embed/seed/health calls, no advancing of
+        # backoff streaks — the only thing that happens is the flag re-check.
+        if deps.pause_flag_path.exists():
+            if not previously_paused:
+                _transition(WorkerPhase.PAUSED)
+                logger.info("worker: paused — flag file present at %s", deps.pause_flag_path)
+                previously_paused = True
+            deps.sleep(PAUSE_POLL_INTERVAL_S)
+            continue
+        if previously_paused:
+            _transition(WorkerPhase.IDLE)
+            logger.info("worker: resumed — flag file removed")
+            previously_paused = False
+
         now = time.monotonic()
         effective_embed_interval = compute_embed_interval(_embed_interval, consecutive_embed_noops)
 

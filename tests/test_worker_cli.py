@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from kairix.worker_cli import build_parser, format_status, main, status
+from kairix.worker_cli import build_parser, format_status, main, pause, resume, status
 from kairix.worker_state import WorkerPhase, WorkerState, write_state
 
 pytestmark = pytest.mark.unit
@@ -158,3 +158,136 @@ def test_main_status_returns_zero_when_state_exists(tmp_path: Path) -> None:
     write_state(WorkerState(current_phase=WorkerPhase.IDLE), state_path)
     rc = main(["status"], state_path=state_path)
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# pause / resume (#224 phase 4)
+# ---------------------------------------------------------------------------
+
+
+def test_pause_cli_creates_flag_file(tmp_path: Path) -> None:
+    """``main(["pause"])`` creates the flag file at the injected path.
+
+    Sabotage proof: removing the ``path.touch()`` line in worker_cli.pause
+    leaves the file absent and this assert fails.
+    """
+    flag = tmp_path / ".worker-paused"
+    assert not flag.exists()
+
+    exit_code = main(["pause"], flag_path=flag)
+
+    assert exit_code == 0
+    assert flag.exists(), "pause must create the flag file"
+
+
+def test_resume_cli_removes_flag_file(tmp_path: Path) -> None:
+    """Pre-touch the flag, dispatch ``main(["resume"])``, assert it's gone.
+
+    Sabotage proof: replacing ``unlink(missing_ok=True)`` with a no-op
+    leaves the flag in place and this assert fails.
+    """
+    flag = tmp_path / ".worker-paused"
+    flag.touch()
+    assert flag.exists()
+
+    exit_code = main(["resume"], flag_path=flag)
+
+    assert exit_code == 0
+    assert not flag.exists(), "resume must remove the flag file"
+
+
+def test_resume_cli_is_idempotent_when_flag_missing(tmp_path: Path) -> None:
+    """``resume`` without a pre-existing flag returns 0 without raising.
+
+    Sabotage proof: switching to ``unlink()`` (no missing_ok) would raise
+    FileNotFoundError and this test would fail with an unhandled exception.
+    """
+    flag = tmp_path / ".worker-paused"
+    assert not flag.exists()
+
+    exit_code = main(["resume"], flag_path=flag)
+
+    assert exit_code == 0
+    assert not flag.exists()
+
+
+def test_pause_cli_is_idempotent_when_flag_already_present(tmp_path: Path) -> None:
+    """Calling pause twice in a row leaves the flag present and exit 0.
+
+    Sabotage proof: if pause raised on existing flag (e.g. ``open(x, "x")``
+    instead of touch), the second call would error.
+    """
+    flag = tmp_path / ".worker-paused"
+    flag.touch()
+
+    exit_code = main(["pause"], flag_path=flag)
+
+    assert exit_code == 0
+    assert flag.exists()
+
+
+def test_pause_function_returns_zero_and_creates_file(tmp_path: Path) -> None:
+    """The ``pause`` helper (called directly) creates the flag and returns 0.
+
+    Sabotage proof: returning anything other than 0 from ``pause`` would
+    fail this assertion; the brief requires exit 0 on success.
+    """
+    flag = tmp_path / ".worker-paused"
+
+    result = pause(flag_path=flag)
+
+    assert result == 0
+    assert flag.exists()
+
+
+def test_resume_function_returns_zero_and_removes_file(tmp_path: Path) -> None:
+    """The ``resume`` helper (called directly) removes the flag and returns 0.
+
+    Sabotage proof: returning anything other than 0 would fail this assert.
+    """
+    flag = tmp_path / ".worker-paused"
+    flag.touch()
+
+    result = resume(flag_path=flag)
+
+    assert result == 0
+    assert not flag.exists()
+
+
+def test_pause_creates_parent_directory_if_missing(tmp_path: Path) -> None:
+    """A fresh data dir layout (parent dir doesn't exist yet) is created.
+
+    Sabotage proof: dropping the ``mkdir(parents=True, exist_ok=True)``
+    leaves the parent missing and ``touch`` raises FileNotFoundError.
+    """
+    flag = tmp_path / "nested" / "data" / ".worker-paused"
+    assert not flag.parent.exists()
+
+    exit_code = main(["pause"], flag_path=flag)
+
+    assert exit_code == 0
+    assert flag.exists()
+
+
+def test_pause_cli_prints_resume_instruction(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The pause output tells the operator how to resume — discoverability check.
+
+    Sabotage proof: changing the print to anything not containing 'resume'
+    would fail this. The string is the operator-facing UX contract.
+    """
+    flag = tmp_path / ".worker-paused"
+    main(["pause"], flag_path=flag)
+    out = capsys.readouterr().out
+    assert "resume" in out.lower(), f"pause output must mention resume; got: {out!r}"
+
+
+def test_resume_cli_prints_latency_warning(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Resume output warns about the up-to-5s poll latency — operator UX.
+
+    Sabotage proof: changing the print would fail this. The 5s note is
+    important because operators may otherwise expect instant resume.
+    """
+    flag = tmp_path / ".worker-paused"
+    main(["resume"], flag_path=flag)
+    out = capsys.readouterr().out
+    assert "5s" in out, f"resume output must mention the 5s latency; got: {out!r}"
