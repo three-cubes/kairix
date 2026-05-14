@@ -231,6 +231,44 @@ def test_default_budget_constant_is_two_seconds() -> None:
     assert HEALTH_PROBE_BUDGET_S == 2.0
 
 
+def test_secrets_probe_timeout_reports_budget_in_degraded_reason() -> None:
+    """Sabotage anchor: when the secrets probe times out the snapshot
+    must call that out specifically — not the generic 'not resolvable'
+    message — so an operator can debug a slow probe vs a missing key."""
+
+    def slow_secrets() -> bool:
+        time.sleep(5.0)
+        return True
+
+    out = probe_health(
+        HealthDeps(
+            secrets_loaded_fn=slow_secrets,
+            embed_backend_available_fn=lambda: True,
+            bm25_index_available_fn=lambda: True,
+            neo4j_available_fn=lambda: True,
+        ),
+        budget_s=0.4,
+    )
+    assert "secrets probe exceeded" in out.degraded_reason
+
+
+def test_bm25_probe_timeout_reports_budget_in_degraded_reason() -> None:
+    def slow_bm25() -> bool:
+        time.sleep(5.0)
+        return True
+
+    out = probe_health(
+        HealthDeps(
+            secrets_loaded_fn=lambda: True,
+            embed_backend_available_fn=lambda: True,
+            bm25_index_available_fn=slow_bm25,
+            neo4j_available_fn=lambda: True,
+        ),
+        budget_s=0.4,
+    )
+    assert "BM25 probe exceeded" in out.degraded_reason
+
+
 # ---------------------------------------------------------------------------
 # Default factory wiring (sabotage check)
 # ---------------------------------------------------------------------------

@@ -52,7 +52,7 @@ def _default_secrets_loaded() -> bool:
     try:
         value = get_secret("kairix-llm-api-key", required=False)
         return bool(value)
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover  # defensive lazy-import guard for get_secret
         logger.warning("_default_secrets_loaded probe failed: %s", exc, exc_info=True)
         return False
 
@@ -68,7 +68,7 @@ def _default_embed_backend_available() -> bool:
 
         importlib.import_module("kairix.core.embed.embed")
         return True
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover  # defensive guard for optional-extra import failure
         logger.warning("_default_embed_backend_available probe failed: %s", exc, exc_info=True)
         return False
 
@@ -84,7 +84,7 @@ def _default_bm25_index_available() -> bool:
         from kairix.paths import db_path
 
         return db_path().exists()
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover  # defensive lazy-import guard for paths.db_path
         logger.warning("_default_bm25_index_available probe failed: %s", exc, exc_info=True)
         return False
 
@@ -99,7 +99,7 @@ def _default_neo4j_available() -> bool:
         from kairix.knowledge.graph.client import get_client
 
         return bool(get_client().available)
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover  # defensive lazy-import guard for get_client
         logger.warning("_default_neo4j_available probe failed: %s", exc, exc_info=True)
         return False
 
