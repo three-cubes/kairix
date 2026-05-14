@@ -1,7 +1,8 @@
 name: "3 · Docker publish (release)"
 
 # Publishes Docker image to GitHub Container Registry (ghcr.io).
-# - Release: pushes :latest and :vX.Y.Z tags
+# - Stable release: pushes :latest and :vX.Y.Z tags
+# - Alpha pre-release (is_alpha=true OR GitHub prerelease): pushes :vX.Y.ZaN ONLY (no :latest)
 # - Develop push: pushes :develop tag (pre-release for VM testing)
 
 on:
@@ -18,11 +19,17 @@ on:
   workflow_dispatch:
     # Manual entrypoint used by release.yml to re-fire publish after a
     # GITHUB_TOKEN-created release (which doesn't fan out — #230). Also
-    # useful for backfilling a missed release.
+    # used by release-alpha.yml for the alpha tag path (Phase 1 of #272).
+    # Also useful for backfilling a missed release.
     inputs:
       ref:
-        description: 'Git ref to build (tag for release builds, e.g. v2026.5.14)'
+        description: 'Git ref to build (tag for release builds, e.g. v2026.5.14 or v2026.5.14a1)'
         required: true
+        type: string
+      is_alpha:
+        description: 'Alpha pre-release: tag image as :vX.Y.ZaN only (skip :latest)'
+        required: false
+        default: 'false'
         type: string
 
 env:
@@ -65,12 +72,23 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_REF: ${{ inputs.ref }}
+          INPUT_IS_ALPHA: ${{ inputs.is_alpha }}
+          RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
-          if [ "$EVENT_NAME" = "release" ]; then
+          if [ "$EVENT_NAME" = "release" ] && [ "$RELEASE_IS_PRERELEASE" = "true" ]; then
+            # GitHub pre-release (alpha): version tag only, NO :latest.
+            VERSION="${REF_NAME#v}"
+            echo "tags=${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "release" ]; then
+            # Stable release: version tag + :latest.
             VERSION="${REF_NAME#v}"
             echo "tags=${IMAGE}:latest,${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_IS_ALPHA" = "true" ]; then
+            # Manual dispatch for alpha (from release-alpha.yml): version tag only, NO :latest.
+            VERSION="${INPUT_REF#v}"
+            echo "tags=${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            # Treat manual dispatch with a vX.Y.Z ref the same as a release.
+            # Manual dispatch for stable backfill: treat as a stable release.
             VERSION="${INPUT_REF#v}"
             echo "tags=${IMAGE}:latest,${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
           else
