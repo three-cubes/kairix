@@ -131,9 +131,9 @@ def generate_query_for_document(doc: dict, category: str) -> dict:
     }
 
     query_templates = templates.get(category, templates["recall"])
-    # NOSONAR: non-security template selection for benchmark
-    # query generation; deterministic via random.seed() in build_suite().
-    query_text = random.choice(query_templates)
+    query_text = random.choice(
+        query_templates
+    )  # NOSONAR — non-security template pick for benchmark generation; seeded in build_suite().
 
     # Normalise title for gold matching
     normalised_title = title.lower().replace(" ", "-").replace("_", "-")
@@ -173,9 +173,9 @@ def build_suite(
         if not available:
             available = list(TARGET_DISTRIBUTION.keys())
 
-        # NOSONAR: non-security category selection for
-        # benchmark distribution; deterministic via random.seed() above.
-        category = random.choice(available)
+        category = random.choice(
+            available
+        )  # NOSONAR — non-security category pick for benchmark distribution; seeded above.
         case = generate_query_for_document(doc, category)
         case_counter[category] += 1
         cases.append(case)

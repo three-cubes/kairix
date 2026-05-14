@@ -203,9 +203,9 @@ _FRAMEWORK_PATTERN = re.compile(
 )
 
 # Matches title-case proper nouns (2-5 words starting with capitals)
-# NOSONAR: bounded repetition `{1,4}` and word-boundary anchors;
-# no nested quantifiers — backtracking is linear in input length.
-_PROPER_NOUN_PATTERN = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,4})\b")
+_PROPER_NOUN_PATTERN = re.compile(
+    r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,4})\b"
+)  # NOSONAR — bounded `{1,4}` repetition with word-boundary anchors; backtracking linear.
 
 # Heading extraction
 _HEADING_RE = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)

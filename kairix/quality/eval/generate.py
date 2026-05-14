@@ -240,9 +240,9 @@ def sample_documents(
         return []
 
     docs = filter_and_process_sampled_rows(rows, _MIN_DOC_LENGTH)
-    # NOSONAR: non-security shuffle for benchmark sample
-    # ordering — repeatable via random.seed() in tests; no trust boundary.
-    random.shuffle(docs)
+    random.shuffle(
+        docs
+    )  # NOSONAR — non-security shuffle for benchmark sample order; seeded in tests; no trust boundary.
     return docs[:n]
 
 

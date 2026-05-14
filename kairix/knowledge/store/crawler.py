@@ -311,9 +311,9 @@ def parse_frontmatter(path: Path) -> dict[str, Any]:
         # No frontmatter found at all — also try lenient match (no trailing newline)
         import re
 
-        # NOSONAR: non-greedy `.*?` bounded by literal `\n---`
-        # terminator; input is markdown frontmatter (file-bounded).
-        lenient = re.match(r"\A---\s*\n(.*?)\n---", text, re.DOTALL)
+        lenient = re.match(
+            r"\A---\s*\n(.*?)\n---", text, re.DOTALL
+        )  # NOSONAR — non-greedy `.*?` bounded by `\n---`; file-bounded frontmatter input.
         if not lenient:
             return {}
         block = lenient.group(1)
@@ -321,8 +321,9 @@ def parse_frontmatter(path: Path) -> dict[str, Any]:
         # Re-extract the raw YAML block for full yaml.safe_load parsing
         import re
 
-        # NOSONAR: same bounded-input rationale as above.
-        match = re.match(r"\A---\s*\n(.*?)\n---", text, re.DOTALL)
+        match = re.match(
+            r"\A---\s*\n(.*?)\n---", text, re.DOTALL
+        )  # NOSONAR — same bounded-input rationale as the lenient match above.
         if not match:
             return dict(simple_parsed)  # fallback to simple parsing
         block = match.group(1)

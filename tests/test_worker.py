@@ -303,10 +303,9 @@ def test_shutdown_handler_sets_running_false(tmp_path: Path) -> None:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # NOSONAR: test sends a real SIGTERM to itself to
-            # exercise the worker's shutdown handler. Self-targeted; no
-            # external reach.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(
+                os.getpid(), signal.SIGTERM
+            )  # NOSONAR — self-signal SIGTERM to exercise shutdown handler; no external reach.
 
     main(
         deps=WorkerDeps(
@@ -337,8 +336,7 @@ def test_main_loop_runs_embed_on_interval(tmp_path: Path) -> None:
         nonlocal call_count
         call_count += 1
         if call_count >= 2:
-            # NOSONAR: self-signal to drive worker shutdown loop.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal to drive worker shutdown loop.
 
     def entity_then_noop() -> None:
         nonlocal entity_called
@@ -380,8 +378,7 @@ def test_shutdown_handler_via_sigint(tmp_path: Path) -> None:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # NOSONAR: self-signal to drive Ctrl-C path on the worker.
-            os.kill(os.getpid(), signal.SIGINT)
+            os.kill(os.getpid(), signal.SIGINT)  # NOSONAR — self-signal to drive Ctrl-C path on the worker.
 
     main(
         deps=WorkerDeps(
@@ -443,8 +440,9 @@ def test_main_loop_calls_wikilinks_at_interval(tmp_path: Path) -> None:
         if call_counts["embed"] >= 2:
             import os
 
-            # NOSONAR: self-signal so the loop exits after we observe wikilinks running.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(
+                os.getpid(), signal.SIGTERM
+            )  # NOSONAR — self-signal so the loop exits after we observe wikilinks running.
 
     def _wikilinks() -> None:
         call_counts["wikilinks"] += 1
@@ -586,8 +584,7 @@ def _shutdown_after_first_embed() -> typing.Callable[[], None]:
         if call_count["n"] >= 1:
             import os
 
-            # NOSONAR: self-signal so the worker loop exits after one cycle.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal so the worker loop exits after one cycle.
 
     return _embed
 
@@ -654,8 +651,7 @@ def test_main_loop_writes_state_on_maintenance_transition(tmp_path: Path) -> Non
         if call_counter["embed"] >= 2:
             import os
 
-            # NOSONAR: self-signal to exit the loop after observing maintenance.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal to exit the loop after observing maintenance.
 
     def _capture(state: WorkerState, path: Path) -> None:
         captured_phases.append(state.current_phase)
@@ -793,8 +789,7 @@ def test_main_loop_increments_counters_from_embed_outcome(tmp_path: Path) -> Non
         if embed_call_count["n"] >= 1:
             import os
 
-            # NOSONAR: end the loop after one embed cycle.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — end the loop after one embed cycle.
         return _Result()
 
     final_states: list[WorkerState] = []
@@ -856,8 +851,7 @@ def test_main_loop_increments_recall_alerts_when_gate_fails(tmp_path: Path) -> N
         if embed_count["n"] >= 1:
             import os
 
-            # NOSONAR: end loop after one embed.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — end loop after one embed.
         return _Result()
 
     captured: list[int] = []
@@ -921,9 +915,9 @@ def test_main_loop_enters_paused_phase_when_flag_present(tmp_path: Path) -> None
     def _sleep_then_shutdown(seconds: float) -> None:
         sleep_calls.append(seconds)
         if len(sleep_calls) >= 2:
-            # NOSONAR: test sends a real SIGTERM to itself to drive the
-            # worker's shutdown handler. Self-targeted; no external reach.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(
+                os.getpid(), signal.SIGTERM
+            )  # NOSONAR — self-signal SIGTERM to drive shutdown handler; no external reach.
 
     state = WorkerState()
     deps = WorkerDeps(
@@ -986,8 +980,7 @@ def test_main_loop_resumes_to_idle_when_flag_removed(tmp_path: Path) -> None:
         # we only count post-resume embed calls by requiring the second
         # one (which only happens after the flag is removed).
         if embed_calls >= 2:
-            # NOSONAR: self-signal to drive worker shutdown.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal to drive worker shutdown.
 
     state = WorkerState()
     deps = WorkerDeps(
@@ -1037,9 +1030,9 @@ def test_main_loop_does_not_run_embed_while_paused(tmp_path: Path) -> None:
         nonlocal sleep_count
         sleep_count += 1
         if sleep_count >= 3:
-            # NOSONAR: self-signal to terminate the loop after we've
-            # observed multiple pause iterations.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(
+                os.getpid(), signal.SIGTERM
+            )  # NOSONAR — self-signal to terminate the loop after we've observed multiple pause iterations.
 
     embed_calls = 0
     seed_calls = 0
@@ -1125,8 +1118,7 @@ def test_main_skips_maintenance_when_noop_streak_above_threshold(tmp_path: Path)
         # If we shut down on call 1 the loop never executes — the
         # gate would look like it worked even if the gate code was deleted.
         if embed_calls["n"] >= 2:
-            # NOSONAR: self-signal so the worker loop exits.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal so the worker loop exits.
         # Returns None — counts as a no-op, so streak increments rather
         # than resetting.
 
@@ -1195,8 +1187,7 @@ def test_main_runs_maintenance_when_noop_streak_below_threshold(tmp_path: Path) 
         # Two iterations: startup embed + one in-loop embed, then exit.
         # That gives the maintenance branches one chance to fire.
         if embed_calls["n"] >= 2:
-            # NOSONAR: self-signal so the worker loop exits.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal so the worker loop exits.
 
     def _seed() -> None:
         seed_calls["n"] += 1
@@ -1272,9 +1263,9 @@ def test_maintenance_resumes_after_embed_finds_work(tmp_path: Path) -> None:
     def _embed_returns_work_then_shutdown() -> object:
         embed_calls["n"] += 1
         if embed_calls["n"] >= 2:
-            # NOSONAR: self-signal so the worker loop exits after the
-            # streak-reset embed has driven one full maintenance pass.
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(
+                os.getpid(), signal.SIGTERM
+            )  # NOSONAR — self-signal so worker loop exits after streak-reset embed runs maintenance.
         # Every call returns a "real work" result. Startup embed bumps
         # the streak from 11 down to 0 (because did_work=True). The
         # second in-loop embed keeps it at 0 — maintenance fires.

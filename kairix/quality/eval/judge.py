@@ -317,9 +317,9 @@ class LLMJudge:
         indexed = list(enumerate(candidates))  # (original_index, (stem, snippet))
 
         if shuffle:
-            # NOSONAR: non-security shuffle to prevent positional
-            # bias in LLM judge prompts; deterministic via random.seed() in tests.
-            random.shuffle(indexed)
+            random.shuffle(
+                indexed
+            )  # NOSONAR — non-security shuffle to break LLM judge positional bias; seeded in tests.
 
         shuffle_order = tuple(candidates[i][0] for i, _ in indexed)
         labels = _LABELS[: len(indexed)]

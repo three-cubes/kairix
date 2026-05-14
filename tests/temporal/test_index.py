@@ -323,9 +323,8 @@ class TestQueryTemporalChunksException:
     def test_returns_empty_when_topic_is_none(self, doc_root: Path) -> None:
         """Passing topic=None triggers an AttributeError inside the scorer;
         query_temporal_chunks catches it and returns []."""
-        # NOSONAR(python:S5655) on next call — deliberate type misuse to exercise the outer-except branch.
-        results = query_temporal_chunks(
-            topic=None,  # type: ignore[arg-type]  # NOSONAR(python:S5655) — see note above
+        results = query_temporal_chunks(  # NOSONAR(python:S5655) — see type: ignore below; outer-except.
+            topic=None,  # type: ignore[arg-type]  # deliberate type misuse — see NOSONAR above.
             start=None,
             end=None,
             document_root=doc_root,

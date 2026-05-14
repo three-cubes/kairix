@@ -143,8 +143,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
         # CLI trust boundary: --output is user-supplied. The kairix CLI runs
         # with the calling user's filesystem permissions and operates inside
         # the local-process trust model; the user can already write anywhere
-        # their account permits via shell redirection. NOSONAR markers cover
-        # both the path resolution and the write where S2083 fires.
+        # their account permits via shell redirection. The trailing
+        # suppressions below cover the path resolution and the write where
+        # S2083 fires.
         output_path = Path(args.output).expanduser().resolve()  # NOSONAR — CLI trust boundary; see comment above
         if not output_path.parent.exists():
             print(
