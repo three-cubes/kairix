@@ -11,9 +11,7 @@ _state: dict = {}
 _ALL_CATEGORIES = ["temporal", "procedural", "entity", "conceptual", "recall"]
 
 
-@given(
-    parsers.re(r"benchmark scores with (?P<category>\w+) at (?P<weak>[0-9.]+) " r"and all others at (?P<rest>[0-9.]+)")
-)
+@given(parsers.re(r"benchmark scores with (?P<category>\w+) at (?P<weak>[0-9.]+) and all others at (?P<rest>[0-9.]+)"))
 def scores_with_one_weak(category: str, weak: str, rest: str) -> None:
     """Build a scores dict with one weak category and the rest at a baseline."""
     scores = {cat: float(rest) for cat in _ALL_CATEGORIES}

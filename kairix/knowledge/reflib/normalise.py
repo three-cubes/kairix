@@ -103,7 +103,7 @@ def is_gutenberg_text(source: SourceDef) -> bool:
 def collect_and_filter_source_files(
     source_path: Path,
     source: SourceDef,
-    config: NormaliseConfig,
+    _config: NormaliseConfig,
     report: NormaliseReport,
 ) -> list[Path]:
     """Read and filter .md files for a source, updating the report."""
@@ -220,7 +220,7 @@ def write_output_files(
 
 def build_catalogue_entry(
     collection: str,
-    dir_name: str,
+    _dir_name: str,
     source: SourceDef,
     count: int,
     size: int,

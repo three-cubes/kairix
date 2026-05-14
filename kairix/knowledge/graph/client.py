@@ -388,8 +388,8 @@ class Neo4jClient:
             logger.info("Neo4j password rotated successfully")
             self._password = new_password
             return True
-        except Exception as e:
-            logger.error("rotate_password failed: %s", e)
+        except Exception:
+            logger.exception("rotate_password failed")
             return False
 
 

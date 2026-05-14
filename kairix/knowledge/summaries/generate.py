@@ -96,8 +96,8 @@ class SummariesDeps:
 
 def _call_chat(
     messages: list[dict],
-    api_key: str,
-    endpoint: str,
+    _api_key: str,
+    _endpoint: str,
     deployment: str,
     max_tokens: int,
     deps: SummariesDeps,
@@ -236,8 +236,8 @@ def generate_summaries(
                 )
             )
 
-        except Exception as exc:
-            logger.error("generate_summaries: failed for %s — %s", path, exc)
+        except Exception:
+            logger.exception("generate_summaries: failed for %s", path)
             continue
 
         # Sleep between individual calls (within batch) as well

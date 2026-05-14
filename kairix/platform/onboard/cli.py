@@ -26,6 +26,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kairix.platform.onboard.check import CheckResult
 
+# Canonical filename for the agent usage guide installed into the shared
+# knowledge base by `kairix onboard guide`.
+_AGENT_USAGE_GUIDE_FILENAME = "kairix-usage.md"
+
 # ---------------------------------------------------------------------------
 # Env self-loader (ERR-003 fix)
 # ---------------------------------------------------------------------------
@@ -235,16 +239,16 @@ def cmd_guide(args: argparse.Namespace) -> int:
     else:
         # Try to find the shared knowledge directory
         candidates = [
-            doc_path / "04-Agent-Knowledge" / "shared" / "kairix-usage.md",
-            doc_path / "shared" / "kairix-usage.md",
-            doc_path / "agent-knowledge" / "shared" / "kairix-usage.md",
+            doc_path / "04-Agent-Knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
+            doc_path / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
+            doc_path / "agent-knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
         ]
         dest_or_none: Path | None = None
         for c in candidates:
             if c.parent.exists():
                 dest_or_none = c
                 break
-        dest = dest_or_none if dest_or_none is not None else doc_path / "kairix-usage.md"
+        dest = dest_or_none if dest_or_none is not None else doc_path / _AGENT_USAGE_GUIDE_FILENAME
 
     if args.dry_run:
         print("Would install agent usage guide:")

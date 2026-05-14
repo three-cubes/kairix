@@ -58,15 +58,15 @@ class _FakeSuiteGenerator:
 
 
 def _gen_result(**kw: Any) -> Any:
-    defaults = dict(
-        calibration_passed=True,
-        n_accepted=10,
-        n_rejected=2,
-        n_failed=1,
-        category_counts={"recall": 5, "entity": 5},
-        errors=[],
-        output_path="/tmp/out.yaml",
-    )
+    defaults: dict[str, Any] = {
+        "calibration_passed": True,
+        "n_accepted": 10,
+        "n_rejected": 2,
+        "n_failed": 1,
+        "category_counts": {"recall": 5, "entity": 5},
+        "errors": [],
+        "output_path": "/tmp/out.yaml",
+    }
     defaults.update(kw)
     return SimpleNamespace(**defaults)
 
@@ -397,7 +397,7 @@ def test_auto_gold_writes_suite(monkeypatch, tmp_path: Path) -> None:
 
     class _Db:
         def close(self):
-            pass
+            """Test stub — exercises the close() path; no-op for fake DB."""
 
     monkeypatch.setattr(core_db, "open_db", lambda p: _Db())
     profile = SimpleNamespace(
@@ -468,7 +468,7 @@ def test_tune_returns_recommendations_when_corpus_hints_available(monkeypatch, t
 
     class _Db:
         def close(self) -> None:
-            pass
+            """Test stub — exercises the close() path; no-op for fake DB."""
 
     monkeypatch.setattr(core_db, "get_db_path", lambda: str(tmp_path / "k.db"))
     monkeypatch.setattr(core_db, "open_db", lambda p: _Db())

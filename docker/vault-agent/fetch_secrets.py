@@ -153,9 +153,9 @@ def main() -> None:
                     "No secrets fetched (attempt %d). Check KAIRIX_KV_NAME and Azure auth.",
                     consecutive_failures,
                 )
-        except Exception as exc:
+        except Exception:
             consecutive_failures += 1
-            logger.error("Unexpected error fetching secrets (attempt %d): %s", consecutive_failures, exc)
+            logger.exception("Unexpected error fetching secrets (attempt %d)", consecutive_failures)
 
         time.sleep(REFRESH_INTERVAL)
 

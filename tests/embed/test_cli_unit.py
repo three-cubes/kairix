@@ -57,22 +57,22 @@ def _make_args(
 
 
 def _result(**kw: Any) -> EmbedPipelineResult:
-    defaults = dict(
-        embedded=0,
-        failed=0,
-        skipped=0,
-        duration_s=0.0,
-        cost_usd=0.0,
-        db_path="/tmp/k.db",
-        timestamp=0,
-        recall_score=None,
-        recall_passed=None,
-        recall_alert=None,
-        scan_new=0,
-        scan_updated=0,
-        scan_errors=0,
-        diagnostics=[],
-    )
+    defaults: dict[str, Any] = {
+        "embedded": 0,
+        "failed": 0,
+        "skipped": 0,
+        "duration_s": 0.0,
+        "cost_usd": 0.0,
+        "db_path": "/tmp/k.db",
+        "timestamp": 0,
+        "recall_score": None,
+        "recall_passed": None,
+        "recall_alert": None,
+        "scan_new": 0,
+        "scan_updated": 0,
+        "scan_errors": 0,
+        "diagnostics": [],
+    }
     defaults.update(kw)
     return EmbedPipelineResult(**defaults)
 

@@ -146,8 +146,13 @@ def load_yaml_file(path: Path) -> dict:
     return raw
 
 
-def validate_meta_and_cases_structure(raw: dict, path: str) -> tuple[dict, list[dict], list[str]]:
-    """Validate root dict has valid meta and cases. Returns (meta, raw_cases, errors)."""
+def validate_meta_and_cases_structure(raw: dict, _path: str) -> tuple[dict, list[dict], list[str]]:
+    """Validate root dict has valid meta and cases. Returns (meta, raw_cases, errors).
+
+    ``_path`` is accepted for caller symmetry (the loader passes it for
+    error-message context elsewhere in the validation chain) but isn't
+    needed here — the structural check is purely shape-based.
+    """
     meta = raw.get("meta", {})
     if not isinstance(meta, dict):
         raise ValueError("'meta' must be a mapping")
@@ -394,11 +399,16 @@ def validate_suite(
     Args:
         suite:  The BenchmarkSuite to validate.
         db:     Open sqlite3.Connection to the kairix index.
-        strict: If True, missing gold paths are errors. If False, they are warnings.
+        strict: Accepted for CLI symmetry (the bench CLI passes both
+                ``strict=False`` during pre-flight and ``strict=True``
+                during canonical validation). Today the checks always
+                emit errors; a future warning tier would consult this
+                flag to soften missing-gold-path messages.
 
     Returns:
         List of error strings. Empty list means all checks passed.
     """
+    _ = strict  # explicit drop documents intent
     errors: list[str] = []
 
     # Collect gold paths from recall cases that use path-based identity

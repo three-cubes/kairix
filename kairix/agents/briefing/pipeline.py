@@ -128,7 +128,6 @@ def generate_briefing(
     *,
     deps: BriefingDeps | None = None,
     sources: dict[str, Callable] | None = None,
-    output_dir: Path | None = None,
 ) -> str:
     """
     Generate a session briefing for the given agent.
@@ -145,8 +144,6 @@ def generate_briefing(
                     real implementations via ``default_factory``. Tests
                     construct ``BriefingDeps(synthesise_fn=fake, ...)``.
         sources:    Per-source callable overrides (key = source name).
-        output_dir: Optional output directory override (currently unused
-                    by this function; reserved for future).
 
     Returns:
         Full briefing content (with header). Never raises.
@@ -270,8 +267,8 @@ def generate_briefing(
             out_path,
             time.monotonic() - t_start,
         )
-    except OSError as e:
-        logger.error("pipeline: could not write briefing file — %s", e)
+    except OSError:
+        logger.exception("pipeline: could not write briefing file")
         # Return the content anyway
 
     # Read back what was written (includes header added by writer)
@@ -314,13 +311,10 @@ class BriefingPipeline:
         sources:    Per-source callable overrides (key = source name).
         deps:       Injectable dependencies (synthesise_fn, write_fn).
                     Defaults to production implementations.
-        output_dir: Optional output directory override (unused by
-                    generate_briefing today, reserved for future).
     """
 
     sources: dict[str, Callable] = field(default_factory=dict)
     deps: BriefingDeps = field(default_factory=BriefingDeps)
-    output_dir: Path | None = None
 
     def generate(self, agent: str) -> str:
         """Generate a session briefing for the given agent.
@@ -338,5 +332,4 @@ class BriefingPipeline:
             agent=agent,
             deps=self.deps,
             sources=self.sources if self.sources else None,
-            output_dir=self.output_dir,
         )

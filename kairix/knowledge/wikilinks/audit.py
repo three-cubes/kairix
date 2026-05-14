@@ -24,6 +24,10 @@ from kairix.paths import KairixPaths
 
 _LOG_PATH = str(Path.home() / ".cache" / "kairix" / "wikilinks-log.jsonl")
 
+# Markdown table separator row used in the report's 3-column tables (Broken,
+# Unlinked, Audit-Summary sections all share the same column layout).
+_MD_TABLE_SEPARATOR_3COL = "|---|---|---|"
+
 # Canonical wikilink regex (excludes anchor links)
 _WIKILINK_RE = WIKILINK_RE
 
@@ -204,7 +208,7 @@ def _render_broken_links(broken: list[dict[str, Any]]) -> list[str]:
         f"Found **{len(broken)}** broken wikilink(s):",
         "",
         "| File | Link | Reason |",
-        "|---|---|---|",
+        _MD_TABLE_SEPARATOR_3COL,
     ]
     for item in broken[:20]:
         lines.append(f"| {item['file']} | {item['link']} | {item['reason']} |")
@@ -224,7 +228,7 @@ def _render_unlinked_mentions(unlinked: list[dict[str, Any]]) -> list[str]:
         f"Found **{len(unlinked)}** unlinked entity mention(s) in sampled files:",
         "",
         "| File | Entity | Mentions |",
-        "|---|---|---|",
+        _MD_TABLE_SEPARATOR_3COL,
     ]
     for item in unlinked[:20]:
         lines.append(f"| {item['file']} | {item['entity_name']} | {item['mention_count']} |")
@@ -254,7 +258,7 @@ def _render_recent_injections(recent: list[dict[str, Any]]) -> list[str]:
         "### Recent Files",
         "",
         "| File | Entities Injected | Mode |",
-        "|---|---|---|",
+        _MD_TABLE_SEPARATOR_3COL,
     ]
     for entry in recent[-10:]:
         mode = "dry-run" if entry.get("dry_run") else "live"

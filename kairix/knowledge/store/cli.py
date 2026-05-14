@@ -13,6 +13,9 @@ import json
 import sys
 from typing import Any
 
+# Suffix shown after each per-entity count line when --dry-run is set.
+_DRY_RUN_SUFFIX = " (dry run — not written)"
+
 
 def main(argv: list[str] | None = None, *, neo4j_client: Any = None) -> None:
     """Entry point for `kairix store`.
@@ -98,22 +101,22 @@ def _cmd_crawl(args: argparse.Namespace, *, neo4j_client: Any = None) -> None:
     if not report.dry_run:
         print(f", {report.organisations_upserted} upserted")
     else:
-        print(" (dry run — not written)")
+        print(_DRY_RUN_SUFFIX)
     print(f"  Persons:       {report.persons_found} found", end="")
     if not report.dry_run:
         print(f", {report.persons_upserted} upserted")
     else:
-        print(" (dry run — not written)")
+        print(_DRY_RUN_SUFFIX)
     print(f"  Outcomes:      {report.outcomes_found} found", end="")
     if not report.dry_run:
         print(f", {report.outcomes_upserted} upserted")
     else:
-        print(" (dry run — not written)")
+        print(_DRY_RUN_SUFFIX)
     print(f"  Edges:         {report.edges_found} found", end="")
     if not report.dry_run:
         print(f", {report.edges_upserted} upserted")
     else:
-        print(" (dry run — not written)")
+        print(_DRY_RUN_SUFFIX)
 
     if report.errors:
         print(f"\n  Errors ({len(report.errors)}):")

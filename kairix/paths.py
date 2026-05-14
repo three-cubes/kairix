@@ -21,6 +21,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# XDG-style user cache directory name (Path.home() / _USER_CACHE_DIR / "kairix").
+# Centralised so the path is the same wherever a non-Docker, non-service install
+# resolves a cache location.
+_USER_CACHE_DIR = ".cache"
+
 
 def is_docker_runtime_check() -> bool:
     """Detect if running inside a Docker container."""
@@ -98,7 +103,7 @@ def default_cache_dir(platform: str = sys.platform) -> Path:
     xdg = os.environ.get("XDG_CACHE_HOME")
     if xdg:
         return Path(xdg) / "kairix"
-    return Path.home() / ".cache" / "kairix"
+    return Path.home() / _USER_CACHE_DIR / "kairix"
 
 
 def default_workspace_root() -> Path:
@@ -270,7 +275,7 @@ def summaries_db_path() -> Path:
     return Path(
         os.environ.get(
             "KAIRIX_SUMMARIES_DB",
-            str(Path.home() / ".cache" / "kairix" / "summaries.db"),
+            str(Path.home() / _USER_CACHE_DIR / "kairix" / "summaries.db"),
         )
     )
 
@@ -437,7 +442,7 @@ def monitor_log_path() -> Path:
     raw = os.environ.get("KAIRIX_MONITOR_LOG")
     if raw:
         return Path(raw)
-    return Path.home() / ".cache" / "kairix" / "monitor.jsonl"
+    return Path.home() / _USER_CACHE_DIR / "kairix" / "monitor.jsonl"
 
 
 def search_log_path() -> Path:

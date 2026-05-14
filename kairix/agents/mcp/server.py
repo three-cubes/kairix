@@ -267,9 +267,15 @@ def tool_research(
 
     The optional ``deps`` parameter forwards a ``ResearchDeps`` directly
     to the use case — production callers leave it None.
+
+    ``agent`` is accepted for signature parity with the other tools and
+    logged for traceability; the research use case is agent-agnostic
+    today (no per-agent scope/tier filtering), so it isn't threaded
+    further.
     """
     from kairix.use_cases.research import research_output_to_envelope, run_research_use_case
 
+    logger.info("mcp.research: agent=%r turns<=%d", agent, max_turns)
     out = run_research_use_case(query, max_turns=max_turns, deps=deps)
     return research_output_to_envelope(out)
 

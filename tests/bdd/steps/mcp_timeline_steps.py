@@ -8,9 +8,7 @@ from kairix.agents.mcp.server import tool_timeline
 _state: dict = {}
 
 
-@when(
-    parsers.re(r'the agent calls tool_timeline with query "(?P<query>[^"]*)"' r'(?: and anchor "(?P<anchor>[^"]*)")?')
-)
+@when(parsers.re(r'the agent calls tool_timeline with query "(?P<query>[^"]*)"(?: and anchor "(?P<anchor>[^"]*)")?'))
 def call_tool_timeline(query, anchor):
     _state["exception"] = None
     _state["result"] = None

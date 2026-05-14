@@ -160,7 +160,7 @@ def build_suite(
     random.seed(seed)
 
     cases = []
-    case_counter = {cat: 0 for cat in TARGET_DISTRIBUTION}
+    case_counter = dict.fromkeys(TARGET_DISTRIBUTION, 0)
 
     # Assign categories proportionally
     for doc in documents:
@@ -190,7 +190,7 @@ def build_suite(
         "multi_hop": "M",
         "cross_collection": "X",
     }
-    cat_counters = {cat: 0 for cat in prefix_map}
+    cat_counters = dict.fromkeys(prefix_map, 0)
     for case in cases:
         cat = case["category"]
         cat_counters[cat] += 1

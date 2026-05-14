@@ -339,7 +339,7 @@ class LLMJudge:
         except Exception as e:
             logger.warning("LLMJudge.grade: API error for query %r — %s", query[:60], e)
 
-        grades: dict[str, int] = {stem: 0 for stem in stems}
+        grades: dict[str, int] = dict.fromkeys(stems, 0)
         for label, (_orig_idx, (stem, _)) in zip(labels, indexed, strict=False):
             grades[stem] = label_grades.get(label, 0)
 

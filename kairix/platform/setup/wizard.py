@@ -19,6 +19,10 @@ from kairix.platform.setup.prompts import SetupContext, prompt, prompt_choice, p
 
 logger = logging.getLogger(__name__)
 
+# Default markdown glob applied to every preset collection — kairix only
+# indexes Markdown content and every preset uses this same pattern.
+_MARKDOWN_GLOB = "**/*.md"
+
 # Old _prompt, _prompt_choice, _prompt_yn removed — replaced by
 # kairix.platform.setup.prompts which supports interactive, non-interactive, and JSON modes.
 
@@ -277,7 +281,7 @@ def run_setup(
     collections_config: dict[str, Any] | None = None
     if coll_idx == 0:
         collections_config = {
-            "shared": [{"name": "all", "path": ".", "glob": "**/*.md"}],
+            "shared": [{"name": "all", "path": ".", "glob": _MARKDOWN_GLOB}],
         }
         print("  \u2713 All documents will be searchable.\n")
     elif coll_idx == 1:
@@ -285,23 +289,23 @@ def run_setup(
         if preset_key == "consulting":
             collections_config = {
                 "shared": [
-                    {"name": "clients", "path": "Clients", "glob": "**/*.md"},
-                    {"name": "projects", "path": "Projects", "glob": "**/*.md"},
-                    {"name": "knowledge", "path": "Knowledge", "glob": "**/*.md"},
-                    {"name": "entities", "path": "Entities", "glob": "**/*.md"},
+                    {"name": "clients", "path": "Clients", "glob": _MARKDOWN_GLOB},
+                    {"name": "projects", "path": "Projects", "glob": _MARKDOWN_GLOB},
+                    {"name": "knowledge", "path": "Knowledge", "glob": _MARKDOWN_GLOB},
+                    {"name": "entities", "path": "Entities", "glob": _MARKDOWN_GLOB},
                 ],
             }
         elif preset_key == "technical":
             collections_config = {
                 "shared": [
-                    {"name": "docs", "path": "docs", "glob": "**/*.md"},
-                    {"name": "runbooks", "path": "runbooks", "glob": "**/*.md"},
-                    {"name": "reference", "path": "reference", "glob": "**/*.md"},
+                    {"name": "docs", "path": "docs", "glob": _MARKDOWN_GLOB},
+                    {"name": "runbooks", "path": "runbooks", "glob": _MARKDOWN_GLOB},
+                    {"name": "reference", "path": "reference", "glob": _MARKDOWN_GLOB},
                 ],
             }
         else:
             collections_config = {
-                "shared": [{"name": "all", "path": ".", "glob": "**/*.md"}],
+                "shared": [{"name": "all", "path": ".", "glob": _MARKDOWN_GLOB}],
             }
         print(f"  \u2713 {len(collections_config['shared'])} collections configured.\n")
     elif coll_idx == 2:
@@ -310,7 +314,7 @@ def run_setup(
         workspace_root = str(_ws_root_fn())
         collections_config = {
             "shared": [
-                {"name": "all", "path": ".", "glob": "**/*.md"},
+                {"name": "all", "path": ".", "glob": _MARKDOWN_GLOB},
                 {
                     "name": "workspaces",
                     "path": workspace_root,

@@ -29,6 +29,9 @@ from kairix.paths import KairixPaths, wikilinks_last_run_path
 # Timestamp file to track last run — env read lives in kairix.paths (F4).
 _LAST_RUN_PATH = str(wikilinks_last_run_path())
 
+# Label appended to per-file status lines when --dry-run is set.
+_DRY_RUN_LABEL = "(dry-run)"
+
 
 def main(argv: list[str] | None = None, *, paths: KairixPaths | None = None) -> None:
     """Entry point for `kairix wikilinks` subcommand.
@@ -113,7 +116,7 @@ def _inject_single(path: str, entities: list[Any], dry_run: bool, *, paths: Kair
         return
     injected = inject_file(path, entities, dry_run=dry_run, paths=paths)
     if injected:
-        mode = "(dry-run)" if dry_run else ""
+        mode = _DRY_RUN_LABEL if dry_run else ""
         print(f"  ✅ {path} {mode}")
         for name in injected:
             print(f"     + [[{name}]]")
@@ -132,7 +135,7 @@ def _inject_all(entities: list[Any], dry_run: bool, *, paths: KairixPaths) -> No
         if injected:
             total_files += 1
             total_links += len(injected)
-            mode = "(dry-run)" if dry_run else ""
+            mode = _DRY_RUN_LABEL if dry_run else ""
             print(f"  ✅ {path} {mode}")
             for name in injected:
                 print(f"     + [[{name}]]")
@@ -171,7 +174,7 @@ def _inject_changed(entities: list[Any], dry_run: bool, *, paths: KairixPaths) -
         if injected:
             total_files += 1
             total_links += len(injected)
-            mode = "(dry-run)" if dry_run else ""
+            mode = _DRY_RUN_LABEL if dry_run else ""
             print(f"  ✅ {path} {mode}")
             for name in injected:
                 print(f"     + [[{name}]]")
@@ -229,8 +232,12 @@ def _audit_cmd(argv: list[str], *, paths: KairixPaths) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _status_cmd(argv: list[str]) -> None:
-    """Handle `kairix wikilinks status`."""
+def _status_cmd(_argv: list[str]) -> None:
+    """Handle `kairix wikilinks status`.
+
+    ``_argv`` is accepted for sub-handler signature uniformity with the
+    inject/audit handlers; status takes no flags of its own.
+    """
     entities = get_entities()
     last_run = _read_last_run()
     log_entries = _read_log_entries()

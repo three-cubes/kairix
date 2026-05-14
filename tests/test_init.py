@@ -23,7 +23,7 @@ import pytest
 
 def _snapshot_kairix_modules() -> dict[str, ModuleType | None]:
     """Capture every kairix submodule currently in sys.modules."""
-    return {name: sys.modules[name] for name in list(sys.modules) if name == "kairix" or name.startswith("kairix.")}
+    return {name: sys.modules[name] for name in sys.modules if name == "kairix" or name.startswith("kairix.")}
 
 
 def _restore_kairix_modules(snapshot: dict[str, ModuleType | None]) -> None:

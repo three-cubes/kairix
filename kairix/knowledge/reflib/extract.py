@@ -482,7 +482,7 @@ def extract_seed_entities(
     rel_path: str,
     domain: str,
     entities: list[RawEntity],
-    relationships: list[RawRelationship],
+    _relationships: list[RawRelationship],
 ) -> None:
     """Check for seed entities in document text using a single compiled regex."""
     found: set[str] = set()

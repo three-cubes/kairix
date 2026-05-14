@@ -514,12 +514,15 @@ def build_case(
         intent:       The intent category.
         judge_result: Output of judge_batch().
         paths:        Retrieved paths (parallel to judge candidates).
-        snippets:     Retrieved snippets.
+        snippets:     Retrieved snippets — accepted for caller symmetry
+                      with the upstream judge call; this builder uses
+                      judge grades, not the raw snippets.
         case_id:      Case identifier (e.g. "GEN-R001").
 
     Returns:
         Dict ready for YAML serialisation, or None if no grade-2 doc found.
     """
+    _ = (paths, snippets)  # caller-symmetry params; both consumed at the judge step
 
     grade_2_count = sum(1 for g in judge_result.grades.values() if g == 2)
     if grade_2_count == 0:
@@ -835,8 +838,8 @@ class SuiteGenerator:
         accepted_cases: list[dict[str, Any]] = []
         n_rejected = 0
         n_failed = 0
-        category_counts: dict[str, int] = {cat: 0 for cat in active_cats}
-        id_counters: dict[str, int] = {cat: 0 for cat in active_cats}
+        category_counts: dict[str, int] = dict.fromkeys(active_cats, 0)
+        id_counters: dict[str, int] = dict.fromkeys(active_cats, 0)
 
         for doc in docs:
             if len(accepted_cases) >= n_cases:

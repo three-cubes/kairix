@@ -757,7 +757,7 @@ def test_probe_sse_harness_port_listening(monkeypatch) -> None:
 
     class _FakeSocket:
         def __init__(self, *args, **kwargs):
-            pass
+            """Test stub — accepts any args; the socket isn't actually opened."""
 
         def __enter__(self):
             return self

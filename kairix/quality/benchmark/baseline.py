@@ -169,14 +169,14 @@ def run_gate(baseline_path: str, current_path: str) -> int:
     """
     try:
         baseline = load_result(baseline_path)
-    except (FileNotFoundError, ValueError) as e:
-        logger.error("Loading baseline: %s", e)
+    except (FileNotFoundError, ValueError):
+        logger.exception("Loading baseline")
         return 1
 
     try:
         current = load_result(current_path)
-    except (FileNotFoundError, ValueError) as e:
-        logger.error("Loading current result: %s", e)
+    except (FileNotFoundError, ValueError):
+        logger.exception("Loading current result")
         return 1
 
     result = compare(baseline, current)
