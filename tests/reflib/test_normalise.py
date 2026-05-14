@@ -14,9 +14,9 @@ import pytest
 from kairix.knowledge.reflib.normalise import (
     NormaliseConfig,
     NormaliseReport,
-    _collect_markdown_files,
-    _discover_sources,
-    _is_gutenberg_text,
+    collect_markdown_files,
+    discover_sources,
+    is_gutenberg_text,
     normalise,
 )
 from kairix.knowledge.reflib.sources import SourceDef
@@ -97,7 +97,7 @@ def _make_raw_library(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# _discover_sources
+# discover_sources
 # ---------------------------------------------------------------------------
 
 
@@ -105,7 +105,7 @@ class TestDiscoverSources:
     @pytest.mark.integration
     def test_finds_source_dirs(self, tmp_path: Path) -> None:
         raw = _make_raw_library(tmp_path)
-        results = _discover_sources(raw)
+        results = discover_sources(raw)
 
         # Should find at least the two sub-directories
         dir_pairs = [(col, dn) for col, dn, _ in results if dn]
@@ -117,12 +117,12 @@ class TestDiscoverSources:
         raw = tmp_path / "raw"
         raw.mkdir()
         (raw / "stray-file.txt").write_text("not a directory")
-        results = _discover_sources(raw)
+        results = discover_sources(raw)
         assert len([r for r in results if r[1] != ""]) == 0
 
 
 # ---------------------------------------------------------------------------
-# _collect_markdown_files
+# collect_markdown_files
 # ---------------------------------------------------------------------------
 
 
@@ -134,12 +134,12 @@ class TestCollectMarkdownFiles:
         (d / "a.md").write_text("# A")
         (d / "b.md").write_text("# B")
         (d / "c.txt").write_text("not markdown")
-        files = _collect_markdown_files(d)
+        files = collect_markdown_files(d)
         assert len(files) == 2
 
 
 # ---------------------------------------------------------------------------
-# _is_gutenberg_text
+# is_gutenberg_text
 # ---------------------------------------------------------------------------
 
 
@@ -155,7 +155,7 @@ class TestIsGutenbergText:
             source_url="https://www.gutenberg.org/ebooks/123",
             format="text",
         )
-        assert _is_gutenberg_text(src) is True
+        assert is_gutenberg_text(src) is True
 
     @pytest.mark.unit
     def test_non_gutenberg_source(self) -> None:
@@ -168,7 +168,7 @@ class TestIsGutenbergText:
             source_url="https://github.com/example/repo",
             format="markdown",
         )
-        assert _is_gutenberg_text(src) is False
+        assert is_gutenberg_text(src) is False
 
 
 # ---------------------------------------------------------------------------

@@ -66,7 +66,7 @@ class NormaliseReport:
     collections: dict[str, int] = field(default_factory=dict)
 
 
-def _discover_sources(input_dir: Path) -> list[tuple[str, str, Path]]:
+def discover_sources(input_dir: Path) -> list[tuple[str, str, Path]]:
     """Walk input_dir and yield (collection, dir_name, source_path) triples."""
     results: list[tuple[str, str, Path]] = []
     for collection_dir in sorted(input_dir.iterdir()):
@@ -90,12 +90,12 @@ def _discover_sources(input_dir: Path) -> list[tuple[str, str, Path]]:
     return results
 
 
-def _collect_markdown_files(source_path: Path) -> list[Path]:
+def collect_markdown_files(source_path: Path) -> list[Path]:
     """Find all markdown files in a source directory."""
     return sorted(source_path.rglob("*.md"))
 
 
-def _is_gutenberg_text(source: SourceDef) -> bool:
+def is_gutenberg_text(source: SourceDef) -> bool:
     """Check if a source contains Project Gutenberg texts."""
     return source.format == "text" and "gutenberg" in source.source_url.lower()
 
@@ -107,7 +107,7 @@ def collect_and_filter_source_files(
     report: NormaliseReport,
 ) -> list[Path]:
     """Read and filter .md files for a source, updating the report."""
-    md_files = _collect_markdown_files(source_path)
+    md_files = collect_markdown_files(source_path)
     report.total_input += len(md_files)
     filtered = filter_collection(md_files, source)
     report.filtered_boilerplate += len(md_files) - len(filtered)
@@ -260,7 +260,7 @@ def normalise(config: NormaliseConfig) -> NormaliseReport:
     all_hashed: list[tuple[Path, str]] = []
     output_files: dict[Path, str] = {}
 
-    sources = _discover_sources(config.input_dir)
+    sources = discover_sources(config.input_dir)
     today = date.today().isoformat()
 
     for collection, dir_name, source_path in sources:
@@ -285,7 +285,7 @@ def normalise(config: NormaliseConfig) -> NormaliseReport:
             )
             continue
 
-        is_gutenberg = _is_gutenberg_text(source)
+        is_gutenberg = is_gutenberg_text(source)
         source_files = process_source_collection(
             collection,
             dir_name,
