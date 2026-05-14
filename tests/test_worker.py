@@ -1081,3 +1081,236 @@ def test_main_loop_does_not_run_embed_while_paused(tmp_path: Path) -> None:
     assert health_calls == 0, f"health check must not run while paused; got {health_calls} calls"
     assert wikilinks_calls == 0, f"wikilinks must not run while paused; got {wikilinks_calls} calls"
     assert sleep_count >= 1, "loop must have entered the pause poll at least once"
+
+
+# ---------------------------------------------------------------------------
+# #224 phase 2 — skip-on-noop maintenance gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_main_skips_maintenance_when_noop_streak_above_threshold(tmp_path: Path) -> None:
+    """When the no-op streak is at/above MAINTENANCE_SKIP_NOOP_THRESHOLD,
+    none of entity_seed / health_check / wikilinks_inject should fire from
+    the main loop.
+
+    Sabotage proof: removed the ``maintenance_active and`` guard from the
+    three maintenance ``if`` blocks in ``main()`` and the test fails
+    because each fake gets called once per loop iteration. Restored the
+    guards and the test passes again.
+    """
+    import os
+
+    from kairix.worker import MAINTENANCE_SKIP_NOOP_THRESHOLD
+
+    state_path = tmp_path / "worker-state.json"
+
+    embed_calls = {"n": 0}
+    seed_calls = {"n": 0}
+    health_calls = {"n": 0}
+    wikilinks_calls = {"n": 0}
+
+    def _embed_noop_then_shutdown() -> None:
+        embed_calls["n"] += 1
+        # Two iterations: startup embed (call 1) doesn't signal so the
+        # while loop body still runs; the in-loop embed (call 2) fires
+        # SIGTERM after the maintenance branches have had their chance.
+        # If we shut down on call 1 the loop never executes — the
+        # gate would look like it worked even if the gate code was deleted.
+        if embed_calls["n"] >= 2:
+            # NOSONAR: self-signal so the worker loop exits.
+            os.kill(os.getpid(), signal.SIGTERM)
+        # Returns None — counts as a no-op, so streak increments rather
+        # than resetting.
+
+    def _seed() -> None:
+        seed_calls["n"] += 1
+
+    def _health() -> list:
+        health_calls["n"] += 1
+        return []
+
+    def _wikilinks() -> None:
+        wikilinks_calls["n"] += 1
+
+    # Pre-set the streak above the threshold. The startup embed is a
+    # no-op so the streak bumps by 1 — still well above the threshold.
+    seed_streak = MAINTENANCE_SKIP_NOOP_THRESHOLD + 1
+    deps = WorkerDeps(
+        embed=_embed_noop_then_shutdown,
+        entity_seed=_seed,
+        health_check=_health,
+        wikilinks=_wikilinks,
+        sleep=lambda _s: None,
+        state=WorkerState(consecutive_embed_noops=seed_streak),
+        state_path=state_path,
+        write_state_fn=lambda *_: None,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,
+        entity_seed_interval=0,
+        health_check_interval=0,
+        wikilinks_interval=0,
+    )
+
+    assert seed_calls["n"] == 0, (
+        f"entity_seed must not run when streak ({seed_streak}+) >= threshold ({MAINTENANCE_SKIP_NOOP_THRESHOLD}); "
+        f"got {seed_calls['n']} call(s)"
+    )
+    assert health_calls["n"] == 0, f"health_check must not run above threshold; got {health_calls['n']} call(s)"
+    assert wikilinks_calls["n"] == 0, (
+        f"wikilinks_inject must not run above threshold; got {wikilinks_calls['n']} call(s)"
+    )
+
+
+@pytest.mark.unit
+def test_main_runs_maintenance_when_noop_streak_below_threshold(tmp_path: Path) -> None:
+    """When the no-op streak is below the threshold, all three
+    maintenance scans fire on their normal schedule.
+
+    Sabotage proof: forced ``maintenance_active = False`` unconditionally
+    in main() and the assertion that all three fakes were called fired,
+    confirming the maintenance branches really do gate on the flag.
+    """
+    import os
+
+    state_path = tmp_path / "worker-state.json"
+
+    embed_calls = {"n": 0}
+    seed_calls = {"n": 0}
+    health_calls = {"n": 0}
+    wikilinks_calls = {"n": 0}
+
+    def _embed_then_shutdown() -> None:
+        embed_calls["n"] += 1
+        # Two iterations: startup embed + one in-loop embed, then exit.
+        # That gives the maintenance branches one chance to fire.
+        if embed_calls["n"] >= 2:
+            # NOSONAR: self-signal so the worker loop exits.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def _seed() -> None:
+        seed_calls["n"] += 1
+
+    def _health() -> list:
+        health_calls["n"] += 1
+        return []
+
+    def _wikilinks() -> None:
+        wikilinks_calls["n"] += 1
+
+    deps = WorkerDeps(
+        embed=_embed_then_shutdown,
+        entity_seed=_seed,
+        health_check=_health,
+        wikilinks=_wikilinks,
+        sleep=lambda _s: None,
+        state=WorkerState(consecutive_embed_noops=0),
+        state_path=state_path,
+        write_state_fn=lambda *_: None,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,
+        entity_seed_interval=0,
+        health_check_interval=0,
+        wikilinks_interval=0,
+    )
+
+    assert seed_calls["n"] >= 1, "entity_seed should run when streak is below threshold"
+    assert health_calls["n"] >= 1, "health_check should run when streak is below threshold"
+    assert wikilinks_calls["n"] >= 1, "wikilinks_inject should run when streak is below threshold"
+
+
+@pytest.mark.unit
+def test_maintenance_resumes_after_embed_finds_work(tmp_path: Path) -> None:
+    """Start above the threshold; the very next embed call returns a
+    result with embedded>0 so the streak resets to 0 and maintenance
+    resumes on the same iteration.
+
+    Sabotage proof: replaced the ``maintenance_active and`` guard on the
+    three maintenance blocks with plain ``True`` and the test still
+    passed (because work-finding embed reset the streak). Then forced
+    ``maintenance_active = False`` unconditionally and the resume
+    assertions failed — confirming the streak-reset path really does
+    re-arm the gate. Restored both and the test passes for the right
+    reason.
+    """
+    import os
+
+    from kairix.worker import MAINTENANCE_SKIP_NOOP_THRESHOLD
+
+    state_path = tmp_path / "worker-state.json"
+
+    embed_calls = {"n": 0}
+    seed_calls = {"n": 0}
+    health_calls = {"n": 0}
+    wikilinks_calls = {"n": 0}
+
+    class _DidWorkResult:
+        """An embed result that reports real work done — drives
+        ``EmbedRunOutcome.did_work=True`` so the loop resets the streak.
+        """
+
+        embedded = 3
+        failed = 0
+        recall_passed = True
+        recall_alert = None
+        diagnostics: typing.ClassVar[list[str]] = []
+        recall_score = 0.95
+
+    def _embed_returns_work_then_shutdown() -> object:
+        embed_calls["n"] += 1
+        if embed_calls["n"] >= 2:
+            # NOSONAR: self-signal so the worker loop exits after the
+            # streak-reset embed has driven one full maintenance pass.
+            os.kill(os.getpid(), signal.SIGTERM)
+        # Every call returns a "real work" result. Startup embed bumps
+        # the streak from 11 down to 0 (because did_work=True). The
+        # second in-loop embed keeps it at 0 — maintenance fires.
+        return _DidWorkResult()
+
+    def _seed() -> None:
+        seed_calls["n"] += 1
+
+    def _health() -> list:
+        health_calls["n"] += 1
+        return []
+
+    def _wikilinks() -> None:
+        wikilinks_calls["n"] += 1
+
+    seed_streak = MAINTENANCE_SKIP_NOOP_THRESHOLD + 1
+    deps = WorkerDeps(
+        embed=_embed_returns_work_then_shutdown,
+        entity_seed=_seed,
+        health_check=_health,
+        wikilinks=_wikilinks,
+        sleep=lambda _s: None,
+        state=WorkerState(consecutive_embed_noops=seed_streak),
+        state_path=state_path,
+        write_state_fn=lambda *_: None,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,
+        entity_seed_interval=0,
+        health_check_interval=0,
+        wikilinks_interval=0,
+    )
+
+    # Streak resets on the very first (startup) embed because did_work=True.
+    # The in-loop iteration then sees streak=0 < threshold → maintenance fires.
+    assert seed_calls["n"] >= 1, (
+        f"entity_seed should resume after embed reset the streak; got {seed_calls['n']} call(s)"
+    )
+    assert health_calls["n"] >= 1, (
+        f"health_check should resume after embed reset the streak; got {health_calls['n']} call(s)"
+    )
+    assert wikilinks_calls["n"] >= 1, (
+        f"wikilinks_inject should resume after embed reset the streak; got {wikilinks_calls['n']} call(s)"
+    )

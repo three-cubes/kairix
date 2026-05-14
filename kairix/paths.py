@@ -215,6 +215,30 @@ def worker_pause_flag_path() -> Path:
     return _default_data_dir() / ".worker-paused"
 
 
+def maintenance_skip_noop_threshold() -> int:
+    """#224 phase 2 — number of consecutive no-op embed cycles after which
+    the worker also skips the three maintenance scans (entity_seed,
+    health_check, wikilinks_inject).
+
+    When embed runs find nothing changed N times in a row, the maintenance
+    scans are pointless work; skipping them lets a long-idle shared host
+    drop to near-zero CPU/IO until the next document change. Reads
+    ``KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD`` (int) — default 10. F4
+    keeps the env read centralised here in paths.py.
+    """
+    raw = os.environ.get("KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD")
+    if raw is None:
+        return 10
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD=%r is not an int; using default 10",
+            raw,
+        )
+        return 10
+
+
 def db_path() -> Path:
     """Get the database path."""
     return KairixPaths.resolve().db_path

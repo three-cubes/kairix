@@ -21,7 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kairix.paths import worker_pause_flag_path, worker_state_path
+from kairix.paths import (
+    maintenance_skip_noop_threshold,
+    worker_pause_flag_path,
+    worker_state_path,
+)
 from kairix.worker_state import WorkerPhase, WorkerState, read_state, write_state
 
 if TYPE_CHECKING:
@@ -48,6 +52,16 @@ WIKILINKS_INTERVAL = 3600  # 1 hour — runs after embed; --changed mtime-filter
 # on a long-idle vault but also don't churn CPU/IO every hour for nothing.
 EMBED_BACKOFF_NOOP_THRESHOLD = 2  # after N consecutive no-ops, start backing off
 EMBED_BACKOFF_MAX_INTERVAL = 14400  # 4 hours — cap on backed-off embed interval
+
+# #224 phase 2 — maintenance-skip threshold.
+# When the embed no-op streak hits this count, the three maintenance scans
+# (entity_seed, health_check, wikilinks_inject) become pointless work and
+# the worker skips them too until embed next finds work. Resolved at module
+# import time from KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD via paths.py
+# (F4 — env reads stay centralised). Threshold tuned to default 10 so the
+# embed-backoff exponential has time to slow polling down before we silence
+# maintenance, but operators can lower it on tiny shared hosts.
+MAINTENANCE_SKIP_NOOP_THRESHOLD = maintenance_skip_noop_threshold()
 
 
 def _default_embed() -> EmbedPipelineResult:
@@ -413,6 +427,12 @@ def main(
     # when the flag is removed so the next pause cycle re-logs.
     previously_paused = False
 
+    # #224 phase 2: same one-shot-log pattern as ``previously_paused`` —
+    # toggles when we cross MAINTENANCE_SKIP_NOOP_THRESHOLD in either
+    # direction so operators see one entry/exit message per skip episode
+    # rather than a log line on every loop iteration.
+    previously_skipping_maint = False
+
     while running:
         # #224 phase 4 — operator-controlled pause. Polled at the very top
         # of each loop iteration. While the flag is present the worker
@@ -454,19 +474,37 @@ def main(
             last_embed = now
             _transition(WorkerPhase.IDLE)
 
-        if now - last_entity >= _entity_interval:
+        # #224 phase 2 — skip-on-noop maintenance gating. After
+        # MAINTENANCE_SKIP_NOOP_THRESHOLD consecutive no-op embed cycles
+        # the three maintenance scans become pointless work; gate each
+        # block on ``maintenance_active`` so the idle host stays quiet.
+        # Embed continues on its (already exponentially-backed-off)
+        # cadence, so a single fresh document still resumes everything.
+        maintenance_active = consecutive_embed_noops < MAINTENANCE_SKIP_NOOP_THRESHOLD
+        if not maintenance_active and not previously_skipping_maint:
+            logger.info(
+                "worker: skipping maintenance scans — %d consecutive no-op embeds (threshold %d)",
+                consecutive_embed_noops,
+                MAINTENANCE_SKIP_NOOP_THRESHOLD,
+            )
+            previously_skipping_maint = True
+        elif maintenance_active and previously_skipping_maint:
+            logger.info("worker: maintenance scans resumed — embed found work")
+            previously_skipping_maint = False
+
+        if maintenance_active and now - last_entity >= _entity_interval:
             _transition(WorkerPhase.MAINTENANCE)
             run_entity_seed(deps)
             last_entity = now
             _transition(WorkerPhase.IDLE)
 
-        if now - last_health >= _health_interval:
+        if maintenance_active and now - last_health >= _health_interval:
             _transition(WorkerPhase.MAINTENANCE)
             run_health_check(deps)
             last_health = now
             _transition(WorkerPhase.IDLE)
 
-        if now - last_wikilinks >= _wikilinks_interval:
+        if maintenance_active and now - last_wikilinks >= _wikilinks_interval:
             _transition(WorkerPhase.MAINTENANCE)
             run_wikilinks_inject(deps)
             last_wikilinks = now
