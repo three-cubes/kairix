@@ -71,7 +71,7 @@ _SOURCE_TOKEN_CAPS: dict[str, int] = {
 }
 
 # Total context budget before truncation (3000 tokens ~ 2300 words)
-_TOTAL_CONTEXT_CAP = 3000
+TOTAL_CONTEXT_CAP = 3000
 
 # Priority order for truncation when over budget (lowest priority first)
 _TRUNCATION_ORDER = [
@@ -97,18 +97,18 @@ def _run_source(name: str, fn, *args) -> tuple[str, str]:
         return name, ""
 
 
-def _trim_context(context: dict[str, str]) -> dict[str, str]:
+def trim_context(context: dict[str, str]) -> dict[str, str]:
     """
-    Trim context sources if total token estimate exceeds _TOTAL_CONTEXT_CAP.
+    Trim context sources if total token estimate exceeds TOTAL_CONTEXT_CAP.
     Truncates lowest-priority sources first.
     """
     total = sum(estimate_tokens(v) for v in context.values())
-    if total <= _TOTAL_CONTEXT_CAP:
+    if total <= TOTAL_CONTEXT_CAP:
         return context
 
     trimmed = dict(context)
     for source_name in _TRUNCATION_ORDER:
-        if total <= _TOTAL_CONTEXT_CAP:
+        if total <= TOTAL_CONTEXT_CAP:
             break
         if trimmed.get(source_name):
             current = trimmed[source_name]
@@ -249,7 +249,7 @@ def generate_briefing(
         )
 
     # Trim context if over budget
-    context = _trim_context(context)
+    context = trim_context(context)
 
     # Step 7: Synthesise
     briefing_body = synthesise(agent, context, max_tokens=800)

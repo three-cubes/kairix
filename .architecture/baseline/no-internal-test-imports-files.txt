@@ -1,5 +1,4 @@
 tests/bdd/steps/recall_steps.py
-tests/briefing/test_pipeline.py
 tests/contracts/test_eval_protocols.py
 tests/mcp/test_affordance.py
 tests/search/test_config_loader.py
