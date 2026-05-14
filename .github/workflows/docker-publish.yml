@@ -15,6 +15,15 @@ on:
       - "kairix/**"
       - "pyproject.toml"
       - "reference-library/**"
+  workflow_dispatch:
+    # Manual entrypoint used by release.yml to re-fire publish after a
+    # GITHUB_TOKEN-created release (which doesn't fan out — #230). Also
+    # useful for backfilling a missed release.
+    inputs:
+      ref:
+        description: 'Git ref to build (tag for release builds, e.g. v2026.5.14)'
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -29,6 +38,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # workflow_dispatch checks out the input ref so we build the
+          # tagged commit, not the default branch tip.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
 
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
@@ -44,9 +57,14 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
+          INPUT_REF: ${{ inputs.ref }}
         run: |
           if [ "$EVENT_NAME" = "release" ]; then
             VERSION="${REF_NAME#v}"
+            echo "tags=${IMAGE}:latest,${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Treat manual dispatch with a vX.Y.Z ref the same as a release.
+            VERSION="${INPUT_REF#v}"
             echo "tags=${IMAGE}:latest,${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
           else
             echo "tags=${IMAGE}:develop" >> "$GITHUB_OUTPUT"

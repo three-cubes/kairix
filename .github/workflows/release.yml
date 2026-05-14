@@ -26,6 +26,7 @@ on:
 
 permissions:
   contents: write  # required to create tags + releases
+  actions: write   # required to dispatch downstream publish workflows (#230)
 
 jobs:
   release:
@@ -82,6 +83,19 @@ jobs:
               --notes-file /tmp/release-notes.md \
               --verify-tag
 
+      - name: Fan out to docker-publish + publish-pypi
+        # Releases created via GITHUB_TOKEN don't fan out to other
+        # workflows (GitHub's recursion guard — #230). We explicitly
+        # dispatch the downstream workflows here so a single
+        # `gh workflow run release.yml` call ends with image + PyPI
+        # published, no manual follow-up required.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh workflow run docker-publish.yml --ref main --field ref="$VERSION"
+          gh workflow run publish-pypi.yml   --ref main --field ref="$VERSION"
+
       - name: Summary
         env:
           VERSION: ${{ inputs.version }}
@@ -91,8 +105,7 @@ jobs:
             echo ""
             echo "- Tag pushed: \`$VERSION\`"
             echo "- GitHub Release created with notes from CHANGELOG.md"
-            echo ""
-            echo "Downstream workflows fire on the release event:"
-            echo "- 3 · Docker publish (release)"
-            echo "- 4 · PyPI publish (release)"
+            echo "- Downstream publishes dispatched:"
+            echo "  - 3 · Docker publish (release)"
+            echo "  - 4 · PyPI publish (release)"
           } >> "$GITHUB_STEP_SUMMARY"
