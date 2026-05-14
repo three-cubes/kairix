@@ -877,3 +877,207 @@ def test_main_loop_increments_recall_alerts_when_gate_fails(tmp_path: Path) -> N
     )
 
     assert captured[-1] == 1, f"expected one recall alert, got {captured[-1]}"
+
+
+@pytest.mark.unit
+def test_worker_deps_default_factory_binds_state_and_pause_flag_path() -> None:
+    """``WorkerDeps()`` with no overrides binds a fresh WorkerState, a Path for
+    state_path, a write_state_fn callable, and a Path for pause_flag_path.
+
+    Sabotage proof: if any of these regressed to ``None``, this would fail
+    immediately. F6 explicitly rejects the ``Optional[Callable] = None``
+    pattern; this test makes that regression visible.
+    """
+    deps = WorkerDeps()
+    assert isinstance(deps.state, WorkerState), "state must be a WorkerState dataclass instance"
+    assert isinstance(deps.state_path, Path), "state_path must be a Path"
+    assert callable(deps.write_state_fn), "write_state_fn must be callable"
+    assert isinstance(deps.pause_flag_path, Path), "pause_flag_path must be a Path"
+
+
+@pytest.mark.unit
+def test_main_loop_enters_paused_phase_when_flag_present(tmp_path: Path) -> None:
+    """Pre-touch the pause flag; run main() with a sleep stub that signals
+    SIGTERM on its second call. Assert state.current_phase ends up PAUSED.
+
+    Sabotage proof: removing the ``_transition(deps, WorkerPhase.PAUSED)``
+    call from worker.py leaves the state in STARTING and this fails.
+    """
+    import os
+
+    flag = tmp_path / ".worker-paused"
+    flag.touch()
+    state_path = tmp_path / "worker-state.json"
+
+    sleep_calls: list[float] = []
+
+    def _sleep_then_shutdown(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 2:
+            # NOSONAR: test sends a real SIGTERM to itself to drive the
+            # worker's shutdown handler. Self-targeted; no external reach.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    state = WorkerState()
+    deps = WorkerDeps(
+        embed=lambda: None,
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=_sleep_then_shutdown,
+        state=state,
+        state_path=state_path,
+        pause_flag_path=flag,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    assert state.current_phase is WorkerPhase.PAUSED, (
+        f"expected PAUSED after pause-flagged loop; got {state.current_phase}"
+    )
+    # The persisted state file must reflect the same phase.
+    persisted = state_path.read_text(encoding="utf-8")
+    assert WorkerPhase.PAUSED.value in persisted, "PAUSED phase must be persisted to state file"
+
+
+@pytest.mark.unit
+def test_main_loop_resumes_to_idle_when_flag_removed(tmp_path: Path) -> None:
+    """Pre-touch the pause flag, then in the sleep callback remove it after
+    one iteration and signal shutdown on the next iteration's task work.
+
+    Sabotage proof: dropping the resume-side ``_transition(deps, IDLE)``
+    branch leaves the state in PAUSED forever; this test fails.
+    """
+    import os
+
+    flag = tmp_path / ".worker-paused"
+    flag.touch()
+    state_path = tmp_path / "worker-state.json"
+
+    sleep_count = 0
+
+    def _remove_flag_after_one_pause_iter(_seconds: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count == 1:
+            # First pause-poll: remove the flag. Next iter the worker
+            # transitions back to IDLE and tries to run tasks.
+            flag.unlink(missing_ok=True)
+
+    embed_calls = 0
+
+    def _embed_then_shutdown() -> None:
+        nonlocal embed_calls
+        embed_calls += 1
+        # The startup embed runs before the loop even sees the flag, so
+        # we only count post-resume embed calls by requiring the second
+        # one (which only happens after the flag is removed).
+        if embed_calls >= 2:
+            # NOSONAR: self-signal to drive worker shutdown.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    state = WorkerState()
+    deps = WorkerDeps(
+        embed=_embed_then_shutdown,
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=_remove_flag_after_one_pause_iter,
+        state=state,
+        state_path=state_path,
+        pause_flag_path=flag,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,  # post-resume embed fires immediately
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    assert state.current_phase is WorkerPhase.IDLE, f"expected IDLE after flag removal; got {state.current_phase}"
+    # Confirm we actually went through PAUSED and back — the flag-removal
+    # logic only fired on the first sleep, which means the loop saw the
+    # flag, entered PAUSED, then resumed.
+    assert sleep_count >= 1, "expected at least one paused-loop iteration before resume"
+
+
+@pytest.mark.unit
+def test_main_loop_does_not_run_embed_while_paused(tmp_path: Path) -> None:
+    """While the flag is present, embed/seed/health/wikilinks must NOT be
+    called inside the main loop. The startup embed (run once before the
+    loop) is the only embed call we expect.
+
+    Sabotage proof: removing the ``continue`` from the paused branch lets
+    the rest of the loop body run and embed is called extra times.
+    """
+    import os
+
+    flag = tmp_path / ".worker-paused"
+    flag.touch()
+    state_path = tmp_path / "worker-state.json"
+
+    sleep_count = 0
+
+    def _sleep_then_shutdown(_seconds: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count >= 3:
+            # NOSONAR: self-signal to terminate the loop after we've
+            # observed multiple pause iterations.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    embed_calls = 0
+    seed_calls = 0
+    health_calls = 0
+    wikilinks_calls = 0
+
+    def _embed() -> None:
+        nonlocal embed_calls
+        embed_calls += 1
+
+    def _seed() -> None:
+        nonlocal seed_calls
+        seed_calls += 1
+
+    def _health() -> list:
+        nonlocal health_calls
+        health_calls += 1
+        return []
+
+    def _wikilinks() -> None:
+        nonlocal wikilinks_calls
+        wikilinks_calls += 1
+
+    deps = WorkerDeps(
+        embed=_embed,
+        entity_seed=_seed,
+        health_check=_health,
+        wikilinks=_wikilinks,
+        sleep=_sleep_then_shutdown,
+        state=WorkerState(),
+        state_path=state_path,
+        pause_flag_path=flag,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,
+        entity_seed_interval=0,
+        health_check_interval=0,
+        wikilinks_interval=0,
+    )
+
+    # Startup embed runs once before the loop; loop-internal embeds must NOT.
+    assert embed_calls == 1, f"expected exactly 1 startup embed while paused; got {embed_calls}"
+    assert seed_calls == 0, f"entity seed must not run while paused; got {seed_calls} calls"
+    assert health_calls == 0, f"health check must not run while paused; got {health_calls} calls"
+    assert wikilinks_calls == 0, f"wikilinks must not run while paused; got {wikilinks_calls} calls"
+    assert sleep_count >= 1, "loop must have entered the pause poll at least once"

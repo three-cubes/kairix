@@ -1,21 +1,24 @@
 """
-kairix worker — background worker CLI with observable status (#224 phase 5).
+kairix worker — operator CLI for the background worker (#224 phases 4 + 5).
 
 Subcommands:
   run     Start the worker loop (default if no subcommand given).
-  status  Print the worker's last-known state from the persisted JSON
-          file. Exit 0 if the file is present, 1 if missing — so a
-          shell-script monitor (or Docker healthcheck) can detect a
-          non-running / never-started worker.
+  status  Print the worker's last-known state from the persisted JSON file.
+          Exit 0 if present, 1 if missing — so a shell monitor (or Docker
+          healthcheck) can detect a never-started worker. (#224 phase 5)
+  pause   Touch the pause flag file. The running worker enters PAUSED phase
+          at the next loop iteration (within ``PAUSE_POLL_INTERVAL_S``) and
+          stops doing task work until the flag is removed. (#224 phase 4)
+  resume  Remove the pause flag file. The running worker transitions back
+          to IDLE at the next loop iteration. Idempotent. (#224 phase 4)
 
-Examples:
-    kairix worker            # start the loop (back-compat with v2026.5.x)
-    kairix worker run        # explicit form
-    kairix worker status     # print phase + counters
+Pause/resume are deliberately decoupled from the worker process: they only
+toggle a touch-file in the kairix data dir. A stuck/unresponsive worker can
+still be paused (so it stops piling on a shared host), and an operator pause
+survives worker restarts.
 
-The status subcommand exists so operators don't have to ``cat`` the
-JSON file and parse it themselves — and so monitoring tooling has a
-stable shape to wire alerts against.
+Tests inject ``state_path`` / ``flag_path`` directly so they don't need to
+monkeypatch env vars or touch the user's real data dir.
 """
 
 from __future__ import annotations
@@ -26,18 +29,12 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from kairix.paths import worker_state_path
+from kairix.paths import worker_pause_flag_path, worker_state_path
 from kairix.worker_state import WorkerState, read_state
 
 
 def _format_age(seconds_ago: float) -> str:
-    """Render an epoch-delta as a short human-readable duration.
-
-    Mirrors the cadence operators care about: 0..60s → seconds, 0..60m
-    → minutes, otherwise hours. ``never`` for the explicit zero
-    sentinel (``WorkerState.last_embed_run_at`` defaults to 0.0 until
-    the first embed completes).
-    """
+    """Render an epoch-delta as a short human-readable duration."""
     if seconds_ago <= 0:
         return "never"
     if seconds_ago < 60:
@@ -48,12 +45,10 @@ def _format_age(seconds_ago: float) -> str:
 
 
 def format_status(state: WorkerState, now: float | None = None) -> str:
-    """Render a ``WorkerState`` as the human-readable text ``status`` prints.
+    """Pure renderer: turn ``WorkerState`` into a multi-line status string.
 
-    Pure function so a unit test can call it directly with a fixed
-    ``now`` and assert the rendered string contains the expected fields.
-    Keeping the rendering separate from the I/O makes the status
-    sub-command testable without ever touching the filesystem.
+    ``now`` is injectable so a unit test can pin the clock and assert
+    deterministic age renderings without monkeypatching ``time.time``.
     """
     now = now if now is not None else time.time()
     last_embed = _format_age(now - state.last_embed_run_at) if state.last_embed_run_at > 0 else "never"
@@ -77,14 +72,10 @@ def status(
     out: TextIO | None = None,
     err: TextIO | None = None,
 ) -> int:
-    """``kairix worker status`` implementation.
+    """``kairix worker status`` — exit 0 if state file present, 1 if missing.
 
-    Returns the process exit code: 0 if a state file exists and was
-    readable, 1 if missing (so monitoring scripts can detect "worker
-    never started" without parsing stdout).
-
-    All I/O sinks (``out`` / ``err``) are injectable so the unit test
-    captures stdout/stderr without monkeypatching ``sys``.
+    I/O sinks are injectable so unit tests capture stdout/stderr without
+    monkeypatching ``sys``.
     """
     state_path = state_path if state_path is not None else worker_state_path()
     out = out if out is not None else sys.stdout
@@ -98,44 +89,65 @@ def status(
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Argparse for ``kairix worker [run|status]``.
+def _resolve_flag_path(flag_path: Path | None) -> Path:
+    """Pick the path the pause/resume commands should toggle."""
+    return flag_path if flag_path is not None else worker_pause_flag_path()
 
-    ``run`` is the default when no subcommand is given — preserves
-    back-compat with pre-#224 callers that invoked ``kairix worker``
-    expecting the loop to start.
-    """
+
+def pause(*, flag_path: Path | None = None) -> int:
+    """Create the pause flag file. Idempotent."""
+    path = _resolve_flag_path(flag_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    print("Worker paused. Run 'kairix worker resume' to continue.")
+    return 0
+
+
+def resume(*, flag_path: Path | None = None) -> int:
+    """Remove the pause flag file. Idempotent (missing_ok=True)."""
+    path = _resolve_flag_path(flag_path)
+    path.unlink(missing_ok=True)
+    print("Worker resume requested. May take up to 5s for the worker to pick up the change.")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Argparse for ``kairix worker [run|status|pause|resume]``."""
     parser = argparse.ArgumentParser(
         prog="kairix worker",
-        description="Background worker: re-index, recall-check, embedding refresh on a timer.",
+        description="Background worker — observable state + operator pause/resume.",
     )
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("run", help="Start the worker loop (default).")
     sub.add_parser("status", help="Print the worker's last-known phase and counters.")
+    sub.add_parser("pause", help="Pause the running worker by creating a flag file.")
+    sub.add_parser("resume", help="Resume the running worker by removing the flag file.")
     return parser
 
 
-def main(argv: list[str] | None = None, *, state_path: Path | None = None) -> int | None:
-    """CLI entry point.
-
-    Routes to either ``status`` (read JSON, print, exit code) or the
-    worker loop (``kairix.worker.main``). Returns the exit code for the
-    parent ``kairix`` dispatcher to sys.exit on; the worker loop returns
-    None (never exits normally — runs until SIGTERM).
-
-    ``state_path`` is the test seam: passing an explicit path is the
-    F1-clean way to redirect ``status`` to a tmp file without patching
-    an internal module attribute.
-    """
+def main(
+    argv: list[str] | None = None,
+    *,
+    state_path: Path | None = None,
+    flag_path: Path | None = None,
+) -> int | None:
+    """CLI entry point. Routes to the right subcommand."""
     parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.cmd == "status":
         return status(state_path=state_path)
+    if args.cmd == "pause":
+        return pause(flag_path=flag_path)
+    if args.cmd == "resume":
+        return resume(flag_path=flag_path)
 
-    # Default: run the worker loop. Lazy-import so ``status`` doesn't
-    # pay the import cost of the embed pipeline / Azure stack.
+    # Default (``None`` or ``run``): start the worker loop.
     from kairix.worker import main as worker_main
 
     worker_main()
     return None
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]) or 0)
