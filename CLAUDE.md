@@ -30,6 +30,8 @@ Ralph pattern: fine-grained file-scoped work, parallel agents with embedded back
 
 Every agent runs `safe-commit.sh` in its loop and only commits (and pushes, in non-worktree mode) when green.
 
+**Worktree isolation hygiene (#208, upstream anthropics/claude-code#59019).** Subagents dispatched with `isolation="worktree"` MUST stay inside their assigned worktree for all file writes. Do NOT `cd` to the primary checkout or to another worktree. Symptom of failed isolation: untracked files appear in the primary checkout that mirror paths the subagent claims to have written in its own worktree. Orchestrator-side defense: before each `git cherry-pick <subagent-sha>`, run `python3 scripts/checks/check_worktree_isolation.py` (use `--clean` to delete shadow copies in the primary). The subagent's commit is the canonical source; the primary's untracked copy is the stale shadow.
+
 ## Naming
 
 - Code: `snake_case` functions, `PascalCase` classes, `UPPER_SNAKE_CASE` constants
