@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from kairix.quality.benchmark.runner import BenchmarkResult, run_benchmark
@@ -21,13 +21,31 @@ from kairix.quality.benchmark.suite import BenchmarkSuite
 logger = logging.getLogger(__name__)
 
 
+def _default_search(**kwargs: Any) -> Any:
+    """Default search backend — lazy-imports and runs the production
+    search pipeline. Mirrors ``SearchPipeline.search``'s signature via
+    ``**kwargs`` so callers route ``query``/``budget``/``agent``/``scope``
+    through unchanged.
+
+    The retrieval layer (``runner.retrieve_case``) owns the actual call
+    today, so this default is only invoked when a future caller wires
+    ``BenchmarkPipeline.search_fn`` into a custom flow. Mirrors the F6
+    pattern proven by ``WorkerDeps`` (kairix/worker.py).
+    """
+    from kairix.core.factory import build_search_pipeline
+
+    pipeline = build_search_pipeline()
+    return pipeline.search(**kwargs)
+
+
 @dataclass
 class BenchmarkPipeline:
     """Composes benchmark dependencies into a runnable pipeline.
 
     Attributes:
         search_fn:        Callable matching the SearchPipeline.search signature.
-                          Passed through to the retrieval layer.
+                          Passed through to the retrieval layer. Defaults to
+                          the production search pipeline via ``default_factory``.
         system:           Retrieval backend name (hybrid, bm25, mock, mock-reflib).
         agent:            Default agent for collection scoping.
         output_dir:       If set, write JSON result file here.
@@ -36,7 +54,7 @@ class BenchmarkPipeline:
         fusion_override:  Override fusion strategy.
     """
 
-    search_fn: Callable[..., Any] | None = None
+    search_fn: Callable[..., Any] = field(default_factory=lambda: _default_search)
     system: str = "hybrid"
     agent: str | None = None
     output_dir: str | None = None

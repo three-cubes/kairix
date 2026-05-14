@@ -5,7 +5,6 @@ kairix/agents/mcp/cli.py
 kairix/agents/mcp/server.py
 kairix/cli.py
 kairix/core/classify/cli.py
-kairix/core/embed/_pipeline_defaults.py
 kairix/core/embed/cli.py
 kairix/core/search/config_validator.py
 kairix/core/temporal/cli.py

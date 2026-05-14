@@ -34,11 +34,137 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from kairix.core.embed import _pipeline_defaults as _defaults
 from kairix.core.embed.deps import EmbedDependencies
 from kairix.core.embed.embed import DEFAULT_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Production defaults — lazy-import wrappers used by ``PipelineDeps``'
+# ``default_factory`` slots. Each helper is a thin pass-through to the
+# real implementation; lazy ``from kairix.<pkg> import ...`` calls keep
+# import-time cost off any unit test that injects stand-ins.
+#
+# These helpers are tested in aggregate by
+# ``tests/integration/test_recall_gate_pipeline.py`` and the production
+# embed flow on the VM. They are on the F7 per-file-coverage baseline
+# as production-wiring code.
+# ---------------------------------------------------------------------------
+
+
+def _default_db_path() -> str:
+    from kairix.core.db import get_db_path
+
+    return str(get_db_path())
+
+
+def _default_open_db(path: Path) -> Any:
+    from kairix.core.db import open_db
+
+    return open_db(path)
+
+
+def _default_create_schema(db: Any) -> None:
+    from kairix.core.db.schema import create_schema
+
+    create_schema(db)
+
+
+def _default_validate_schema(db: Any) -> None:
+    from kairix.core.db.schema import validate_schema
+
+    validate_schema(db)
+
+
+def _default_acquire_lock() -> Any:
+    from kairix.core.embed.cli import acquire_lock
+
+    return acquire_lock()
+
+
+def _default_release_lock(lock_fh: Any) -> None:
+    from kairix.core.embed.cli import release_lock
+
+    release_lock(lock_fh)
+
+
+def _default_save_run_log(entry: dict[str, Any]) -> None:
+    from kairix.core.embed.schema import save_run_log
+
+    save_run_log(entry)
+
+
+def _default_run_embed(**kwargs: Any) -> dict[str, Any]:
+    from kairix.core.embed.embed import run_embed
+
+    return run_embed(**kwargs)
+
+
+def _default_run_recall_gate(**kwargs: Any) -> tuple[bool, dict[str, Any]]:
+    from kairix.core.embed.recall_check import run_recall_gate
+
+    return run_recall_gate(**kwargs)
+
+
+def _default_scan_documents(db: Any, diagnostics: list[str]) -> tuple[int, int, int]:
+    """Scan the document root for new/changed files and rebuild FTS.
+
+    Lives in the use-case module so ``PipelineDeps``' default factory
+    can wire it directly. Integration-tested via the full embed flow
+    against a real DB; unit testing it would require a fake document
+    corpus and is not load-bearing for the worker fix.
+    """
+    from kairix.core.db.scanner import CollectionConfig, DocumentScanner
+    from kairix.core.search.config_loader import _resolve_config_path, load_collections
+    from kairix.core.search.registry import build_agent_owner_resolver, parse_agent_registry
+    from kairix.paths import document_root, reference_library_root
+
+    droot = document_root()
+
+    agent_resolver = None
+    try:
+        config_path = _resolve_config_path()
+        if config_path is not None:
+            import yaml as _yaml
+
+            with config_path.open(encoding="utf-8") as _f:
+                _raw_yaml = _yaml.safe_load(_f) or {}
+            _registry = parse_agent_registry(_raw_yaml)
+            if _registry.list_agents():
+                agent_resolver = build_agent_owner_resolver(_registry)
+    # Agent-resolver construction is best-effort; we'd rather scan with
+    # agent_owner=NULL than skip the scan entirely.
+    except Exception as exc:
+        diagnostics.append(f"agent_resolver_unavailable: {exc}")
+
+    scanner = DocumentScanner(db, document_root=droot, agent_owner_resolver=agent_resolver)
+
+    collections_cfg = load_collections()
+    if collections_cfg and collections_cfg.shared:
+        scan_collections = [CollectionConfig(name=c.name, path=c.path, glob=c.glob) for c in collections_cfg.shared]
+        logger.info("Using %d configured collections", len(scan_collections))
+    else:
+        scan_collections = [CollectionConfig(name="default", path=".")]
+
+    reflib_root = reference_library_root()
+    if reflib_root.is_dir():
+        scan_collections.append(CollectionConfig(name="reference-library", path=str(reflib_root), glob="**/*.md"))
+
+    scan_report = scanner.scan(scan_collections)
+    if scan_report.new > 0 or scan_report.updated > 0:
+        logger.info(
+            "Scanned documents: %d new, %d updated, %d unchanged",
+            scan_report.new,
+            scan_report.updated,
+            scan_report.unchanged,
+        )
+        from kairix.core.db.fts import rebuild_fts
+
+        fts_count = rebuild_fts(db)
+        logger.info("FTS index rebuilt: %d documents", fts_count)
+
+    return scan_report.new, scan_report.updated, scan_report.errors
 
 
 @dataclass(frozen=True)
@@ -96,26 +222,37 @@ class EmbedPipelineResult:
 class PipelineDeps:
     """Injectable dependencies for ``run_incremental_embed_pipeline``.
 
-    Production callers leave every field None and the use case fills in
-    real implementations on first access. Tests construct a
-    ``PipelineDeps(...)`` with light-weight stand-ins to drive the
+    Production callers leave every field unset and the dataclass'
+    ``default_factory`` wires the real implementations. Tests construct
+    a ``PipelineDeps(...)`` with light-weight stand-ins to drive the
     orchestration end-to-end without touching real DB / Azure / disk.
 
     All fields are intentionally callables (not concrete instances) so
     the use case stays decoupled from import order and module-level
     state in the production helpers.
+
+    All callable fields use ``field(default_factory=lambda: _default_X)``
+    rather than ``Callable[...] | None = None`` (per CLAUDE.md F6
+    guidance: avoid the ``Optional[Callable] + post-init`` pattern) so
+    mypy sees the production callable directly and
+    ``run_incremental_embed_pipeline`` invokes ``pdeps.x_fn(...)``
+    without a None-fallback ladder.
     """
 
-    db_path_fn: Callable[[], str] | None = None
-    open_db_fn: Callable[[Path], Any] | None = None
-    schema_fn: Callable[[Any], None] | None = None
-    validate_schema_fn: Callable[[Any], None] | None = None
-    acquire_lock_fn: Callable[[], Any] | None = None
-    release_lock_fn: Callable[[Any], None] | None = None
-    save_run_log_fn: Callable[[dict[str, Any]], None] | None = None
-    run_embed_fn: Callable[..., dict[str, Any]] | None = None
-    run_recall_gate_fn: Callable[..., tuple[bool, dict[str, Any]]] | None = None
-    scan_documents_fn: Callable[[Any, list[str]], tuple[int, int, int]] | None = None
+    db_path_fn: Callable[[], str] = field(default_factory=lambda: _default_db_path)
+    open_db_fn: Callable[[Path], Any] = field(default_factory=lambda: _default_open_db)
+    schema_fn: Callable[[Any], None] = field(default_factory=lambda: _default_create_schema)
+    validate_schema_fn: Callable[[Any], None] = field(default_factory=lambda: _default_validate_schema)
+    acquire_lock_fn: Callable[[], Any] = field(default_factory=lambda: _default_acquire_lock)
+    release_lock_fn: Callable[[Any], None] = field(default_factory=lambda: _default_release_lock)
+    save_run_log_fn: Callable[[dict[str, Any]], None] = field(default_factory=lambda: _default_save_run_log)
+    run_embed_fn: Callable[..., dict[str, Any]] = field(default_factory=lambda: _default_run_embed)
+    run_recall_gate_fn: Callable[..., tuple[bool, dict[str, Any]]] = field(
+        default_factory=lambda: _default_run_recall_gate
+    )
+    scan_documents_fn: Callable[[Any, list[str]], tuple[int, int, int]] = field(
+        default_factory=lambda: _default_scan_documents
+    )
 
 
 def run_incremental_embed_pipeline(
@@ -152,16 +289,16 @@ def run_incremental_embed_pipeline(
     """
     pdeps = pipeline_deps or PipelineDeps()
 
-    db_path_fn = pdeps.db_path_fn or _defaults.default_db_path
-    open_db_fn = pdeps.open_db_fn or _defaults.default_open_db
-    schema_fn = pdeps.schema_fn or _defaults.default_create_schema
-    validate_fn = pdeps.validate_schema_fn or _defaults.default_validate_schema
-    acquire_fn = pdeps.acquire_lock_fn or _defaults.default_acquire_lock
-    release_fn = pdeps.release_lock_fn or _defaults.default_release_lock
-    save_log_fn = pdeps.save_run_log_fn or _defaults.default_save_run_log
-    embed_fn = pdeps.run_embed_fn or _defaults.default_run_embed
-    recall_fn = pdeps.run_recall_gate_fn or _defaults.default_run_recall_gate
-    scan_fn = pdeps.scan_documents_fn or _defaults.default_scan_documents
+    db_path_fn = pdeps.db_path_fn
+    open_db_fn = pdeps.open_db_fn
+    schema_fn = pdeps.schema_fn
+    validate_fn = pdeps.validate_schema_fn
+    acquire_fn = pdeps.acquire_lock_fn
+    release_fn = pdeps.release_lock_fn
+    save_log_fn = pdeps.save_run_log_fn
+    embed_fn = pdeps.run_embed_fn
+    recall_fn = pdeps.run_recall_gate_fn
+    scan_fn = pdeps.scan_documents_fn
 
     diagnostics: list[str] = []
 
