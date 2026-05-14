@@ -229,11 +229,12 @@ def summaries_db_path() -> Path:
     )
 
 
-def agent_memory_path(agent: str) -> Path:
+def agent_memory_path(agent: str, *, root: Path | str | None = None) -> Path:
     """Get the memory directory for an agent.
 
     Default: {document_root}/04-Agent-Knowledge/{agent}/memory
-    Override with KAIRIX_AGENT_MEMORY_ROOT env var for custom layouts.
+    Override via the ``root`` kwarg, or via ``KAIRIX_AGENT_MEMORY_ROOT``
+    env var for custom layouts.
 
     If the override path already ends with /{agent}/memory (a common
     misuse — passing the full agent-memory path rather than the parent
@@ -241,13 +242,18 @@ def agent_memory_path(agent: str) -> Path:
     path as-is rather than double-appending. This is the regression
     guard for the path-doubling bug fixed in #67 / #93 — silently
     handling the misuse with a warning is friendlier than failing.
+
+    ``root`` is the test seam (F2-clean): tests pass an explicit root
+    instead of monkeypatching ``KAIRIX_AGENT_MEMORY_ROOT``.
+    Production callers leave it None and the env-var path applies.
     """
-    override = os.environ.get("KAIRIX_AGENT_MEMORY_ROOT")
-    if override:
-        override_path = Path(override)
+    if root is None:
+        root = os.environ.get("KAIRIX_AGENT_MEMORY_ROOT")
+    if root:
+        override_path = Path(root)
         if override_path.parts[-2:] == (agent, "memory"):
             logger.warning(
-                "agent_memory_path: KAIRIX_AGENT_MEMORY_ROOT already ends with "
+                "agent_memory_path: root override already ends with "
                 "/%s/memory; using it as-is to avoid path-doubling. Pass the "
                 "parent of the agent directories (e.g. .../04-Agent-Knowledge) "
                 "to silence this warning.",

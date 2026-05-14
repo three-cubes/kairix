@@ -8,10 +8,16 @@ appended /{agent}/memory — correct. But when the user passed the full
 producing .../{agent}/memory/{agent}/memory and a missing-memory error.
 
 The fix detects the suffix and accepts it as-is.
+
+F2-clean: tests pass ``root=...`` to ``agent_memory_path`` directly
+rather than monkeypatching ``KAIRIX_AGENT_MEMORY_ROOT``. Production
+callers still get the env-var override path; the env-var resolution
+itself is covered by ``test_paths.py``.
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -20,24 +26,25 @@ from kairix.paths import agent_memory_path
 
 
 @pytest.mark.unit
-def test_bare_root_appends_agent_and_memory(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KAIRIX_AGENT_MEMORY_ROOT", "/data/documents/04-Agent-Knowledge")
-    assert agent_memory_path("shape") == Path("/data/documents/04-Agent-Knowledge/shape/memory")
+def test_bare_root_appends_agent_and_memory() -> None:
+    assert agent_memory_path("shape", root="/data/documents/04-Agent-Knowledge") == Path(
+        "/data/documents/04-Agent-Knowledge/shape/memory"
+    )
 
 
 @pytest.mark.unit
-def test_trailing_slash_root_appends_agent_and_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_trailing_slash_root_appends_agent_and_memory() -> None:
     """Trailing slash on the override should not change the resolved path."""
-    monkeypatch.setenv("KAIRIX_AGENT_MEMORY_ROOT", "/data/documents/04-Agent-Knowledge/")
-    assert agent_memory_path("shape") == Path("/data/documents/04-Agent-Knowledge/shape/memory")
+    assert agent_memory_path("shape", root="/data/documents/04-Agent-Knowledge/") == Path(
+        "/data/documents/04-Agent-Knowledge/shape/memory"
+    )
 
 
 @pytest.mark.unit
-def test_full_path_with_agent_memory_suffix_accepted_as_is(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_full_path_with_agent_memory_suffix_accepted_as_is() -> None:
     """The dogfood failure mode: caller passes .../shape/memory expecting it
     to be the memory dir. Function detects and returns as-is, no doubling."""
-    monkeypatch.setenv("KAIRIX_AGENT_MEMORY_ROOT", "/data/documents/04-Agent-Knowledge/shape/memory")
-    result = agent_memory_path("shape")
+    result = agent_memory_path("shape", root="/data/documents/04-Agent-Knowledge/shape/memory")
     # The critical assertion: NO doubled segment. Three proofs of the same
     # property — explicit equality, segment count, and the absence of the
     # buggy substring.
@@ -47,23 +54,17 @@ def test_full_path_with_agent_memory_suffix_accepted_as_is(monkeypatch: pytest.M
 
 
 @pytest.mark.unit
-def test_full_path_with_agent_memory_suffix_logs_warning(
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_full_path_with_agent_memory_suffix_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
     """The misuse path is friendly but not silent — it emits a WARNING so the
     operator can fix their --memory-root invocation."""
-    import logging
-
-    monkeypatch.setenv("KAIRIX_AGENT_MEMORY_ROOT", "/data/documents/04-Agent-Knowledge/shape/memory")
     with caplog.at_level(logging.WARNING, logger="kairix.paths"):
-        agent_memory_path("shape")
+        agent_memory_path("shape", root="/data/documents/04-Agent-Knowledge/shape/memory")
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("path-doubling" in r.getMessage() for r in warnings)
 
 
 @pytest.mark.unit
-def test_different_agents_get_different_directories(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KAIRIX_AGENT_MEMORY_ROOT", "/data/documents/04-Agent-Knowledge")
-    assert agent_memory_path("shape") != agent_memory_path("builder")
+def test_different_agents_get_different_directories() -> None:
+    root = "/data/documents/04-Agent-Knowledge"
+    assert agent_memory_path("shape", root=root) != agent_memory_path("builder", root=root)
