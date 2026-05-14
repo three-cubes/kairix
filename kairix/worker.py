@@ -21,6 +21,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kairix.paths import worker_state_path
+from kairix.worker_state import WorkerPhase, WorkerState, read_state, write_state
+
 if TYPE_CHECKING:
     from kairix.core.embed.use_cases import EmbedPipelineResult
 
@@ -109,6 +112,79 @@ class WorkerDeps:
     health_check: Callable[[], list[Any]] = field(default_factory=lambda: _default_health_check)
     wikilinks: Callable[[], None] = field(default_factory=lambda: _default_wikilinks_inject)
     sleep: Callable[[float], None] = field(default_factory=lambda: time.sleep)
+    # #224 phase 5 — observable state. ``state`` defaults to None and is
+    # initialised inside main() so the boot path can read any prior state
+    # off disk first. ``state_path`` defaults to the production location
+    # via ``worker_state_path()``; tests pass a tmp_path. ``write_state_fn``
+    # is the test seam — F6-clean (typed Callable with default_factory, not
+    # ``write_state_fn: Callable | None = None``).
+    state: WorkerState | None = None
+    state_path: Path = field(default_factory=worker_state_path)
+    write_state_fn: Callable[[WorkerState, Path], None] = field(default_factory=lambda: write_state)
+    read_state_fn: Callable[[Path], WorkerState | None] = field(default_factory=lambda: read_state)
+
+
+@dataclass(frozen=True)
+class EmbedRunOutcome:
+    """Structured outcome of one embed pass — used by ``main()`` to update
+    the persisted ``WorkerState`` counters.
+
+    Field semantics mirror ``EmbedPipelineResult`` but with safe-default
+    integers so a legacy stub returning a sparse object still feeds the
+    state counters cleanly.
+    """
+
+    did_work: bool
+    embedded: int = 0
+    failed: int = 0
+    recall_passed: bool | None = None
+
+
+def run_embed_with_outcome(deps: WorkerDeps | None = None) -> EmbedRunOutcome:
+    """Run incremental embed and return a structured outcome.
+
+    Same try/except/logging discipline as ``run_embed`` (see its
+    docstring for the "never crash the worker" rationale); this variant
+    additionally surfaces the counters main() folds into ``WorkerState``.
+    """
+    deps = deps if deps is not None else WorkerDeps()
+    try:
+        logger.info("worker: starting incremental embed")
+        result = deps.embed()
+        if result is None:
+            logger.info("worker: embed complete")
+            return EmbedRunOutcome(did_work=False)
+        embedded = getattr(result, "embedded", None)
+        failed = getattr(result, "failed", None)
+        recall_score = getattr(result, "recall_score", None)
+        recall_passed = getattr(result, "recall_passed", None)
+        recall_alert = getattr(result, "recall_alert", None)
+        diagnostics = getattr(result, "diagnostics", None) or []
+        logger.info(
+            "worker: embed complete — embedded=%s failed=%s recall=%s",
+            embedded,
+            failed,
+            f"{recall_score:.0%}" if isinstance(recall_score, float) else "n/a",
+        )
+        if isinstance(failed, int) and failed > 0:
+            logger.warning("worker: %d chunks failed during embed", failed)
+        if recall_passed is False:
+            logger.warning(
+                "worker: recall gate alert — %s",
+                recall_alert or "search quality degraded; see kairix onboard check",
+            )
+        for diag in diagnostics:
+            logger.warning("worker: %s", diag)
+        did_work = (isinstance(embedded, int) and embedded > 0) or (isinstance(failed, int) and failed > 0)
+        return EmbedRunOutcome(
+            did_work=did_work,
+            embedded=embedded if isinstance(embedded, int) else 0,
+            failed=failed if isinstance(failed, int) else 0,
+            recall_passed=recall_passed if isinstance(recall_passed, bool) else None,
+        )
+    except (Exception, SystemExit) as exc:
+        logger.warning("worker: embed pipeline raised — %s", exc)
+        return EmbedRunOutcome(did_work=False)
 
 
 def run_embed(deps: WorkerDeps | None = None) -> bool:
@@ -135,53 +211,7 @@ def run_embed(deps: WorkerDeps | None = None) -> bool:
     either the result dataclass or None (legacy). Production passes
     ``_default_embed`` which runs the use case.
     """
-    deps = deps if deps is not None else WorkerDeps()
-    try:
-        logger.info("worker: starting incremental embed")
-        result = deps.embed()
-        if result is None:
-            logger.info("worker: embed complete")
-            return False
-        # The defensive getattr() chain accommodates legacy test stubs
-        # that return ad-hoc objects without the full result dataclass.
-        embedded = getattr(result, "embedded", None)
-        failed = getattr(result, "failed", None)
-        recall_score = getattr(result, "recall_score", None)
-        recall_passed = getattr(result, "recall_passed", None)
-        recall_alert = getattr(result, "recall_alert", None)
-        diagnostics = getattr(result, "diagnostics", None) or []
-        logger.info(
-            "worker: embed complete — embedded=%s failed=%s recall=%s",
-            embedded,
-            failed,
-            f"{recall_score:.0%}" if isinstance(recall_score, float) else "n/a",
-        )
-        if isinstance(failed, int) and failed > 0:
-            logger.warning("worker: %d chunks failed during embed", failed)
-        if recall_passed is False:
-            logger.warning(
-                "worker: recall gate alert — %s",
-                recall_alert or "search quality degraded; see kairix onboard check",
-            )
-        for diag in diagnostics:
-            logger.warning("worker: %s", diag)
-        # "Did real work?" — anything > 0 for embedded or failed counts as
-        # work. Recall alerts WITHOUT new embeddings don't reset the
-        # backoff streak; they're informational, not corpus-changes.
-        did_work = (isinstance(embedded, int) and embedded > 0) or (isinstance(failed, int) and failed > 0)
-        return did_work
-    # Catch (Exception, SystemExit) — a SystemExit from the embed step
-    # (e.g. legacy CLI calling sys.exit(1) on recall-gate failure) must
-    # NOT terminate the worker. Graceful shutdown is signal-driven via
-    # SIGTERM/SIGINT in main(), which sets ``running = False`` rather
-    # than raising. KeyboardInterrupt is intentionally NOT caught — if
-    # signals fail and a Ctrl+C reaches us mid-call, propagation is the
-    # right behaviour for a developer running locally.
-    except (Exception, SystemExit) as exc:
-        logger.warning("worker: embed pipeline raised — %s", exc)
-        # Treat exceptions as "no work happened" so backoff applies — a
-        # broken embed pipeline doesn't deserve more frequent retries.
-        return False
+    return run_embed_with_outcome(deps).did_work
 
 
 def compute_embed_interval(base: int, noop_streak: int) -> int:
@@ -296,6 +326,45 @@ def main(
         _wikilinks_interval,
     )
 
+    # #224 phase 5 — boot the persisted state.
+    #
+    # If a prior run left a state file, we INCREMENT its ``restart_count``
+    # and reuse the historical counters (embedded_total, recall_alerts_total
+    # etc.) so operators see lifetime totals across restarts. If no prior
+    # state, we start fresh.
+    #
+    # ``deps.state`` is the test seam: tests pass a hand-constructed
+    # WorkerState and skip the read_state_fn entirely.
+    state = deps.state
+    if state is None:
+        prior = deps.read_state_fn(deps.state_path)
+        if prior is not None:
+            state = prior
+            state.restart_count = state.restart_count + 1
+            logger.info("worker: resumed from prior state — restart_count=%d", state.restart_count)
+        else:
+            state = WorkerState()
+            logger.info("worker: no prior state on disk — starting fresh")
+    # Persist initial state (STARTING) so ``kairix worker status`` is
+    # answerable immediately after boot, before the first embed completes.
+    state.current_phase = WorkerPhase.STARTING
+    state.last_phase_change_at = time.time()
+    deps.write_state_fn(state, deps.state_path)
+
+    def _transition(phase: WorkerPhase) -> None:
+        """Update state's phase + timestamp and persist atomically.
+
+        Each call is a single write — the persistence layer's temp-file +
+        rename keeps concurrent ``kairix worker status`` readers safe.
+        """
+        # ``state`` is closed-over from main(); never None by this point —
+        # main() reassigns it before defining this closure.
+        if state is None:  # pragma: no cover — main() guarantees state is bound before _transition runs
+            return
+        state.current_phase = phase
+        state.last_phase_change_at = time.time()
+        deps.write_state_fn(state, deps.state_path)
+
     # Track when each task last ran
     last_embed = 0.0
     last_entity = 0.0
@@ -304,7 +373,7 @@ def main(
 
     # #224 idle backoff: extend the embed interval after consecutive
     # no-op runs to avoid steady CPU/I/O pressure on idle vaults.
-    consecutive_embed_noops = 0
+    consecutive_embed_noops = state.consecutive_embed_noops
 
     # Graceful shutdown
     running = True
@@ -318,9 +387,18 @@ def main(
     signal.signal(signal.SIGINT, _shutdown)
 
     # Run embed immediately on startup
-    did_work = run_embed(deps)
-    consecutive_embed_noops = 0 if did_work else consecutive_embed_noops + 1
+    _transition(WorkerPhase.INGEST)
+    outcome = run_embed_with_outcome(deps)
+    consecutive_embed_noops = 0 if outcome.did_work else consecutive_embed_noops + 1
+    state.consecutive_embed_noops = consecutive_embed_noops
+    state.embedded_total += outcome.embedded
+    state.failed_chunks_total += outcome.failed
+    state.last_embed_run_at = time.time()
+    state.last_embed_did_work = outcome.did_work
+    if outcome.recall_passed is False:
+        state.recall_alerts_total += 1
     last_embed = time.monotonic()
+    _transition(WorkerPhase.IDLE)
 
     while running:
         now = time.monotonic()
@@ -333,21 +411,36 @@ def main(
                     effective_embed_interval,
                     consecutive_embed_noops,
                 )
-            did_work = run_embed(deps)
-            consecutive_embed_noops = 0 if did_work else consecutive_embed_noops + 1
+            _transition(WorkerPhase.INGEST)
+            outcome = run_embed_with_outcome(deps)
+            consecutive_embed_noops = 0 if outcome.did_work else consecutive_embed_noops + 1
+            state.consecutive_embed_noops = consecutive_embed_noops
+            state.embedded_total += outcome.embedded
+            state.failed_chunks_total += outcome.failed
+            state.last_embed_run_at = time.time()
+            state.last_embed_did_work = outcome.did_work
+            if outcome.recall_passed is False:
+                state.recall_alerts_total += 1
             last_embed = now
+            _transition(WorkerPhase.IDLE)
 
         if now - last_entity >= _entity_interval:
+            _transition(WorkerPhase.MAINTENANCE)
             run_entity_seed(deps)
             last_entity = now
+            _transition(WorkerPhase.IDLE)
 
         if now - last_health >= _health_interval:
+            _transition(WorkerPhase.MAINTENANCE)
             run_health_check(deps)
             last_health = now
+            _transition(WorkerPhase.IDLE)
 
         if now - last_wikilinks >= _wikilinks_interval:
+            _transition(WorkerPhase.MAINTENANCE)
             run_wikilinks_inject(deps)
             last_wikilinks = now
+            _transition(WorkerPhase.IDLE)
 
         # Sleep 60 seconds between checks
         for _ in range(60):
