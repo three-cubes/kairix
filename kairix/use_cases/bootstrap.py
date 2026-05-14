@@ -14,8 +14,11 @@ returns ``board`` and ``recent_memory`` (BM25-only paths), and the
 ``next_action`` field tells the agent what to do **right now** instead
 of leaving it to guess.
 
-The ``BootstrapHealth`` dataclass is the seed for W3 — designed to be
-reusable across every tool envelope.
+W3 promoted the health probe + dataclass into ``kairix.core.health``
+so every tool response shares one shape. ``BootstrapHealth`` survives
+here as a back-compat alias for ``KairixHealth``; the probe defers to
+``kairix.core.health.probe_health`` so bootstrap and every other tool
+read the same snapshot.
 """
 
 from __future__ import annotations
@@ -26,12 +29,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kairix.core.health import (
+    HEALTH_PROBE_BUDGET_S,
+    HealthDeps,
+    KairixHealth,
+    health_to_envelope,
+    probe_health,
+)
+
 logger = logging.getLogger(__name__)
 
-# Time-cap for the full health probe in seconds. No network calls are
-# made; this is a defence-in-depth budget against a slow filesystem or
-# a slow import (#246).
-HEALTH_PROBE_BUDGET_S: float = 2.0
+# Back-compat alias: W1 callers (and the test suite) import
+# ``BootstrapHealth`` from this module. W3 made the dataclass shared,
+# so ``BootstrapHealth`` is now ``KairixHealth`` under a friendly name.
+BootstrapHealth = KairixHealth
+
+# Re-export the budget so callers that imported it from here keep working.
+__all__ = [
+    "HEALTH_PROBE_BUDGET_S",
+    "BootstrapDeps",
+    "BootstrapHealth",
+    "BootstrapOutput",
+    "KairixHealth",
+    "MemoryEntry",
+    "bootstrap_health_to_envelope",
+    "bootstrap_output_to_envelope",
+    "bootstrap_output_to_markdown",
+    "run_bootstrap",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -50,90 +75,9 @@ def _default_document_root() -> Path:
     return document_root()
 
 
-def _default_secrets_loaded() -> bool:
-    """Lightweight probe: is ``KAIRIX_LLM_API_KEY`` resolvable?
-
-    Goes through ``kairix.secrets.get_secret`` with ``required=False`` so
-    a missing secret returns ``None`` instead of raising. The result is
-    a boolean — callers want "is the LLM credential available" not the
-    secret value.
-    """
-    from kairix.secrets import get_secret
-
-    try:
-        value = get_secret("kairix-llm-api-key", required=False)
-        return bool(value)
-    except Exception as exc:
-        logger.warning("_default_secrets_loaded probe failed: %s", exc, exc_info=True)
-        return False
-
-
-def _default_embed_backend_available() -> bool:
-    """Lightweight probe: can we import the embed backend?
-
-    A failed import or a missing client surface signals the vector-search
-    leg is offline. Never raises — returns ``False`` on any failure.
-    """
-    try:
-        import importlib
-
-        importlib.import_module("kairix.core.embed.embed")
-        return True
-    except Exception as exc:
-        logger.warning("_default_embed_backend_available probe failed: %s", exc, exc_info=True)
-        return False
-
-
-def _default_bm25_index_available() -> bool:
-    """Lightweight probe: does the FTS5 BM25 index exist on disk?
-
-    Resolves ``paths.db_path()`` and reports whether the sqlite file is
-    present. Does **not** open a connection — keeps the probe fast and
-    avoids holding a lock during bootstrap.
-    """
-    try:
-        from kairix.paths import db_path
-
-        return db_path().exists()
-    except Exception as exc:
-        logger.warning("_default_bm25_index_available probe failed: %s", exc, exc_info=True)
-        return False
-
-
 # ---------------------------------------------------------------------------
 # Output dataclasses
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class BootstrapHealth:
-    """Capability health snapshot returned with every bootstrap envelope.
-
-    Seeded here for W1 and reused across every tool envelope in W3.
-    Each ``"ok" | "degraded" | "offline"`` field tells the agent which
-    leg of kairix is usable right now; ``next_action`` is the
-    prescriptive directive the agent should follow when the snapshot is
-    not fully healthy.
-
-    Attributes:
-        vector_search: ``"ok"`` when LLM creds + embed backend resolve;
-            ``"degraded"`` when one of {creds, backend} is missing but
-            BM25 still works; ``"offline"`` when neither is usable.
-        bm25: ``"ok"`` when the FTS5 index exists; ``"offline"`` otherwise.
-        chat: ``"ok"`` when ``KAIRIX_LLM_API_KEY`` resolves; ``"offline"``
-            otherwise. Synthesis / research / brief depend on this.
-        secrets_loaded: ``True`` when the LLM credential resolved; the
-            most actionable bit for the human admin.
-        degraded_reason: Human-readable cause; empty when fully ok.
-        next_action: Prescriptive directive the agent should follow now.
-    """
-
-    vector_search: str = "ok"
-    bm25: str = "ok"
-    chat: str = "ok"
-    secrets_loaded: bool = True
-    degraded_reason: str = ""
-    next_action: str = ""
 
 
 @dataclass(frozen=True)
@@ -199,119 +143,38 @@ class BootstrapDeps:
     helpers via lazy import.
 
     F6-clean: no test-only kwargs leak into ``run_bootstrap``; all
-    seams flow through this dataclass.
+    seams flow through this dataclass. The three health probes are
+    surfaced as flat fields here for back-compat with W1 callers; they
+    project onto a ``HealthDeps`` for the shared probe below.
     """
 
     document_root_fn: Callable[[], Path] = field(default_factory=lambda: _default_document_root)
-    secrets_loaded_fn: Callable[[], bool] = field(default_factory=lambda: _default_secrets_loaded)
-    embed_backend_available_fn: Callable[[], bool] = field(default_factory=lambda: _default_embed_backend_available)
-    bm25_index_available_fn: Callable[[], bool] = field(default_factory=lambda: _default_bm25_index_available)
+    secrets_loaded_fn: Callable[[], bool] = field(default_factory=lambda: HealthDeps().secrets_loaded_fn)
+    embed_backend_available_fn: Callable[[], bool] = field(
+        default_factory=lambda: HealthDeps().embed_backend_available_fn
+    )
+    bm25_index_available_fn: Callable[[], bool] = field(default_factory=lambda: HealthDeps().bm25_index_available_fn)
 
 
 # ---------------------------------------------------------------------------
-# Health probe
+# Health probe — delegates to kairix.core.health
 # ---------------------------------------------------------------------------
 
 
-def _probe_health(deps: BootstrapDeps) -> BootstrapHealth:
-    """Compose the ``BootstrapHealth`` snapshot from the injectable probes.
+def _probe_health(deps: BootstrapDeps) -> KairixHealth:
+    """Compose the ``KairixHealth`` snapshot from the injectable probes.
 
-    Each probe is called once and the failure mode is captured. The
-    overall state is computed from the three signals:
-
-    - ``secrets_loaded=False`` → chat offline, vector search offline.
-    - ``embed_backend=False``  → vector search offline.
-    - ``bm25_index=False``     → bm25 offline.
-
-    When any leg degrades, ``degraded_reason`` and ``next_action`` carry
-    the operator-facing rationale + the agent-facing directive. No
-    network calls; no exceptions — probe failures fall through to the
-    least-healthy state.
+    Bootstrap takes the flat W1 fields on ``BootstrapDeps`` and forwards
+    them to ``kairix.core.health.probe_health`` so every tool reads the
+    same snapshot. The probe honours the 2s budget and never raises.
     """
-    secrets_loaded = _safe_bool(deps.secrets_loaded_fn)
-    embed_backend = _safe_bool(deps.embed_backend_available_fn)
-    bm25_available = _safe_bool(deps.bm25_index_available_fn)
-
-    # Chat depends only on the LLM credential.
-    chat = "ok" if secrets_loaded else "offline"
-
-    # Vector search needs both creds AND a working embed backend.
-    if secrets_loaded and embed_backend:
-        vector_search = "ok"
-    elif secrets_loaded or embed_backend:
-        vector_search = "degraded"
-    else:
-        vector_search = "offline"
-
-    bm25 = "ok" if bm25_available else "offline"
-
-    degraded_reason, next_action = _summarise_degradation(
-        secrets_loaded=secrets_loaded,
-        embed_backend=embed_backend,
-        bm25_available=bm25_available,
+    return probe_health(
+        HealthDeps(
+            secrets_loaded_fn=deps.secrets_loaded_fn,
+            embed_backend_available_fn=deps.embed_backend_available_fn,
+            bm25_index_available_fn=deps.bm25_index_available_fn,
+        )
     )
-
-    return BootstrapHealth(
-        vector_search=vector_search,
-        bm25=bm25,
-        chat=chat,
-        secrets_loaded=secrets_loaded,
-        degraded_reason=degraded_reason,
-        next_action=next_action,
-    )
-
-
-def _safe_bool(fn: Callable[[], bool]) -> bool:
-    """Call a probe, swallowing failures into ``False``."""
-    try:
-        return bool(fn())
-    except Exception as exc:
-        logger.warning("bootstrap health probe failed: %s", exc, exc_info=True)
-        return False
-
-
-def _summarise_degradation(
-    *,
-    secrets_loaded: bool,
-    embed_backend: bool,
-    bm25_available: bool,
-) -> tuple[str, str]:
-    """Render ``degraded_reason`` + ``next_action`` strings for the health snapshot.
-
-    Returns ``("", "")`` when fully healthy. The directive is always
-    prescriptive ("Use ...", "Surface ...") so the agent has a clear
-    next step.
-    """
-    if secrets_loaded and embed_backend and bm25_available:
-        return "", ""
-
-    reasons: list[str] = []
-    if not secrets_loaded:
-        reasons.append("KAIRIX_LLM_API_KEY not resolvable")
-    if not embed_backend:
-        reasons.append("embed backend unavailable")
-    if not bm25_available:
-        reasons.append("BM25 index missing")
-    degraded_reason = "; ".join(reasons)
-
-    # Prescriptive directive — depends on which leg(s) survived.
-    if bm25_available and not (secrets_loaded and embed_backend):
-        next_action = (
-            "Vector search degraded — surface this to your human and use BM25 results from tool_search. "
-            "Ask your admin to run 'kairix onboard check'."
-        )
-    elif (secrets_loaded and embed_backend) and not bm25_available:
-        next_action = (
-            "BM25 offline — vector search still works via tool_search. "
-            "Ask your admin to run 'kairix embed --rebuild-fts'."
-        )
-    else:
-        next_action = (
-            "Vector search and BM25 both offline — kairix retrieval is unavailable. "
-            "Surface this to your human; ask your admin to run 'kairix onboard check'."
-        )
-
-    return degraded_reason, next_action
 
 
 # ---------------------------------------------------------------------------
@@ -533,15 +396,12 @@ def _pick_next_action(*, agent_dir_exists: bool, board: str, health: BootstrapHe
 
 
 def bootstrap_health_to_envelope(health: BootstrapHealth) -> dict[str, Any]:
-    """Project a ``BootstrapHealth`` to the JSON dict consumers see."""
-    return {
-        "vector_search": health.vector_search,
-        "bm25": health.bm25,
-        "chat": health.chat,
-        "secrets_loaded": health.secrets_loaded,
-        "degraded_reason": health.degraded_reason,
-        "next_action": health.next_action,
-    }
+    """Project a ``BootstrapHealth`` (aka ``KairixHealth``) to the JSON dict.
+
+    Back-compat wrapper around ``kairix.core.health.health_to_envelope``
+    for W1 callers; the return shape is identical.
+    """
+    return dict(health_to_envelope(health))
 
 
 def bootstrap_output_to_envelope(out: BootstrapOutput) -> dict[str, Any]:

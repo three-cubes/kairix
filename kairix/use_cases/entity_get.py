@@ -14,6 +14,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from kairix.core.health import (
+    HealthDeps,
+    KairixHealth,
+    entity_next_action,
+    health_to_envelope,
+    probe_health,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,6 +56,7 @@ class EntityGetOutput:
     type: str = ""
     summary: str = ""
     vault_path: str = ""
+    health: KairixHealth = field(default_factory=KairixHealth)
     error: str = ""
 
 
@@ -62,6 +71,7 @@ class EntityGetDeps:
     """
 
     fetch_fn: Callable[..., dict[str, Any] | None] = field(default_factory=lambda: _default_fetch_card)
+    health_deps: HealthDeps = field(default_factory=HealthDeps)
 
 
 def run_entity_get(
@@ -78,15 +88,21 @@ def run_entity_get(
         deps: Injectable dependencies; production callers leave None.
     """
     d = deps or EntityGetDeps()
+    base_health = probe_health(d.health_deps)
+    neo4j_available = _safe_bool(d.health_deps.neo4j_available_fn)
+    health = _entity_health(base_health, neo4j_available=neo4j_available)
 
     try:
         card = d.fetch_fn(name)
     except Exception as exc:
         logger.warning("run_entity_get failed: %s", exc, exc_info=True)
-        return EntityGetOutput(name=name, error=f"{type(exc).__name__}: {exc}")
+        return EntityGetOutput(name=name, health=health, error=f"{type(exc).__name__}: {exc}")
 
     if card is None:
-        return EntityGetOutput(name=name, error=f"EntityNotFound: {name}")
+        # No row from Neo4j. When the graph is offline that's the *cause*;
+        # next_action redirects the agent at tool_search. Either way the
+        # caller gets a useful envelope, not a silent empty.
+        return EntityGetOutput(name=name, health=health, error=f"EntityNotFound: {name}")
 
     return EntityGetOutput(
         id=str(card.get("id", "") or ""),
@@ -94,6 +110,51 @@ def run_entity_get(
         type=str(card.get("type", "") or ""),
         summary=str(card.get("summary", "") or ""),
         vault_path=str(card.get("vault_path", "") or ""),
+        health=health,
+    )
+
+
+def _safe_bool(fn: Callable[[], bool]) -> bool:
+    """Call a probe, swallowing failures into ``False``."""
+    try:
+        return bool(fn())
+    except Exception as exc:
+        logger.warning("entity_get neo4j probe failed: %s", exc, exc_info=True)
+        return False
+
+
+def _entity_health(base: KairixHealth, *, neo4j_available: bool) -> KairixHealth:
+    """Overlay the entity-specific ``next_action`` + degraded_reason.
+
+    When Neo4j is offline the shared probe is silent about the graph
+    (it doesn't appear on ``KairixHealth``); this overlay surfaces the
+    cause and the prescriptive fallback to ``tool_search``.
+    """
+    directive = entity_next_action(base, neo4j_available=neo4j_available)
+    if not neo4j_available:
+        reason = base.degraded_reason
+        graph_reason = "Knowledge graph offline"
+        if reason and graph_reason not in reason:
+            reason = f"{reason}; {graph_reason}"
+        else:
+            reason = graph_reason
+        return KairixHealth(
+            vector_search=base.vector_search,
+            bm25=base.bm25,
+            chat=base.chat,
+            secrets_loaded=base.secrets_loaded,
+            degraded_reason=reason,
+            next_action=directive,
+        )
+    if not directive:
+        return base
+    return KairixHealth(
+        vector_search=base.vector_search,
+        bm25=base.bm25,
+        chat=base.chat,
+        secrets_loaded=base.secrets_loaded,
+        degraded_reason=base.degraded_reason,
+        next_action=directive,
     )
 
 
@@ -105,5 +166,6 @@ def entity_get_output_to_envelope(out: EntityGetOutput) -> dict[str, Any]:
         "type": out.type,
         "summary": out.summary,
         "vault_path": out.vault_path,
+        "health": dict(health_to_envelope(out.health)),
         "error": out.error,
     }

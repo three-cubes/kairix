@@ -23,6 +23,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from kairix.core.health import (
+    HealthDeps,
+    KairixHealth,
+    health_to_envelope,
+    probe_health,
+    search_next_action,
+)
 from kairix.core.search.intent import QueryIntent
 from kairix.core.search.scope import Scope
 from kairix.text import estimate_tokens
@@ -112,6 +119,7 @@ class SearchOutput:
     vec_failed: bool = False
     total_tokens: int = 0
     latency_ms: float = 0.0
+    health: KairixHealth = field(default_factory=KairixHealth)
     error: str = ""
 
 
@@ -129,6 +137,7 @@ class SearchDeps:
     search_fn: Callable[..., Any] = field(default_factory=lambda: _default_search)
     entity_card_fn: Callable[[str], dict[str, Any] | None] = field(default_factory=lambda: _default_entity_card)
     classify_fn: Callable[[str], QueryIntent] = field(default_factory=lambda: _default_classify)
+    health_deps: HealthDeps = field(default_factory=HealthDeps)
 
 
 _RESEARCH_WORDS_DEFAULT_BUDGET = 5000
@@ -223,6 +232,7 @@ def search_output_to_envelope(out: SearchOutput) -> dict[str, Any]:
         "vec_failed": out.vec_failed,
         "total_tokens": out.total_tokens,
         "latency_ms": out.latency_ms,
+        "health": dict(health_to_envelope(out.health)),
         "error": out.error,
     }
 
@@ -260,6 +270,8 @@ def run_search(
     search = deps.search_fn
     entity_card = deps.entity_card_fn
     classify = deps.classify_fn
+
+    health = _tool_health(probe_health(deps.health_deps), tool=_search_next_action)
 
     started = time.monotonic()
     try:
@@ -311,6 +323,7 @@ def run_search(
             vec_failed=bool(getattr(sr, "vec_failed", False)),
             total_tokens=int(getattr(sr, "total_tokens", 0) or 0),
             latency_ms=float(getattr(sr, "latency_ms", elapsed_ms) or elapsed_ms),
+            health=health,
             error=str(getattr(sr, "error", "") or ""),
         )
     except Exception as exc:
@@ -319,5 +332,32 @@ def run_search(
             query=query,
             intent="",
             results=[],
+            health=health,
             error=f"{type(exc).__name__}: {exc}",
         )
+
+
+def _search_next_action(health: KairixHealth) -> str:
+    """Wrapper so ``_tool_health`` keeps a stable callable shape."""
+    return search_next_action(health)
+
+
+def _tool_health(base: KairixHealth, *, tool: Callable[[KairixHealth], str]) -> KairixHealth:
+    """Replace the shared ``next_action`` with the tool-specific directive.
+
+    Returns the snapshot unchanged when ``tool`` returns the empty string
+    (fully healthy or the tool is happy with the shared directive).
+    Reasons remain whatever the probe set them to; only the directive
+    changes so the agent reads "what to do **for this tool**" right now.
+    """
+    directive = tool(base)
+    if not directive:
+        return base
+    return KairixHealth(
+        vector_search=base.vector_search,
+        bm25=base.bm25,
+        chat=base.chat,
+        secrets_loaded=base.secrets_loaded,
+        degraded_reason=base.degraded_reason,
+        next_action=directive,
+    )

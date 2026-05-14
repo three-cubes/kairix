@@ -93,8 +93,6 @@ Every kairix tool response includes a `health` envelope:
 3. **Say what you fell back to.** "I searched kairix but vector ranking is offline; these results are BM25-only and may rank less well by meaning."
 4. **Refer your human to `ADMIN-CONVERSATION.md`** if the remediation is an admin action (it almost always is).
 
-> **Forward reference:** the `health` envelope ships in #246 W3. Until that lands, kairix tool responses do not carry `health` and you should treat an empty result as ambiguous. Once W3 ships, treat the envelope as the source of truth for "is kairix working right now".
-
 ---
 
 ## 6. When `kairix onboard check` returns non-zero

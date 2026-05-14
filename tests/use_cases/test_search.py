@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from kairix.core.health import HealthDeps
 from kairix.core.search.intent import QueryIntent
 from kairix.core.search.scope import Scope
 from kairix.use_cases.search import (
@@ -20,7 +21,28 @@ from kairix.use_cases.search import (
     SearchHit,
     SearchOutput,
     run_search,
+    search_output_to_envelope,
 )
+
+
+def _healthy_health_deps() -> HealthDeps:
+    return HealthDeps(
+        secrets_loaded_fn=lambda: True,
+        embed_backend_available_fn=lambda: True,
+        bm25_index_available_fn=lambda: True,
+        neo4j_available_fn=lambda: True,
+    )
+
+
+def _degraded_vector_health_deps() -> HealthDeps:
+    """Vector search offline; BM25 still up — the canonical fallback case."""
+    return HealthDeps(
+        secrets_loaded_fn=lambda: False,
+        embed_backend_available_fn=lambda: True,
+        bm25_index_available_fn=lambda: True,
+        neo4j_available_fn=lambda: True,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -340,3 +362,102 @@ def test_default_scope_is_shared_agent() -> None:
     deps, captured = _build_deps()
     run_search("q", deps=deps)
     assert captured["search"][0]["scope"] is Scope.SHARED_AGENT
+
+
+# ---------------------------------------------------------------------------
+# W3: health envelope on every search response (#246)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_healthy_state_search_carries_clean_health_field() -> None:
+    deps, _ = _build_deps(sr=_FakeSearchResult(query="q"))
+    deps = SearchDeps(
+        search_fn=deps.search_fn,
+        classify_fn=deps.classify_fn,
+        entity_card_fn=deps.entity_card_fn,
+        health_deps=_healthy_health_deps(),
+    )
+    out = run_search("q", deps=deps)
+    assert out.health.vector_search == "ok"
+    assert out.health.bm25 == "ok"
+    assert out.health.chat == "ok"
+    assert out.health.degraded_reason == ""
+    assert out.health.next_action == ""
+
+
+@pytest.mark.unit
+def test_degraded_vector_returns_bm25_results_with_prescriptive_next_action() -> None:
+    """W3 contract: when vector search is offline kairix still returns
+    BM25 results AND tells the agent what to do.
+
+    Sabotage anchor: dropping ``next_action`` from the degraded branch
+    of ``search_next_action`` makes this test fail on the
+    ``next_action`` assertion."""
+    inner = _FakeInner(path="docs/note.md", title="Note", snippet="bm25 result", boosted_score=0.5)
+    budgeted = _FakeBudgeted(result=inner, content="bm25 result", tier="L1")
+    sr = _FakeSearchResult(query="q", results=[budgeted], bm25_count=1)
+    deps, _ = _build_deps(sr=sr)
+    deps = SearchDeps(
+        search_fn=deps.search_fn,
+        classify_fn=deps.classify_fn,
+        entity_card_fn=deps.entity_card_fn,
+        health_deps=_degraded_vector_health_deps(),
+    )
+
+    out = run_search("q", deps=deps)
+
+    # Results still flow from the working subsystem (BM25-only).
+    assert len(out.results) == 1
+    assert out.results[0].snippet == "bm25 result"
+    # Health surfaces the degradation.
+    assert out.health.vector_search == "degraded"
+    assert out.health.chat == "offline"
+    assert out.health.bm25 == "ok"
+    assert out.health.degraded_reason != ""
+    # Prescriptive, agent-actionable: points at admin remediation + names the fallback.
+    assert out.health.next_action != ""
+    assert "BM25-only" in out.health.next_action
+    assert "kairix onboard check" in out.health.next_action
+
+
+@pytest.mark.unit
+def test_search_envelope_includes_health_dict() -> None:
+    """The MCP/CLI envelope projection must carry the health snapshot."""
+    out = SearchOutput(query="q", intent="semantic")
+    env = search_output_to_envelope(out)
+    assert "health" in env
+    assert env["health"]["vector_search"] == "ok"
+    assert env["health"]["next_action"] == ""
+
+
+@pytest.mark.unit
+def test_every_degraded_search_response_carries_a_next_action() -> None:
+    """Sabotage anchor: removing the directive in any degraded branch
+    breaks this iteration."""
+    for secrets, embed, bm25 in (
+        (False, True, True),
+        (True, False, True),
+        (True, True, False),
+        (False, False, True),
+        (False, True, False),
+        (True, False, False),
+        (False, False, False),
+    ):
+        hd = HealthDeps(
+            secrets_loaded_fn=lambda s=secrets: s,
+            embed_backend_available_fn=lambda e=embed: e,
+            bm25_index_available_fn=lambda b=bm25: b,
+            neo4j_available_fn=lambda: True,
+        )
+        deps, _ = _build_deps()
+        deps = SearchDeps(
+            search_fn=deps.search_fn,
+            classify_fn=deps.classify_fn,
+            entity_card_fn=deps.entity_card_fn,
+            health_deps=hd,
+        )
+        out = run_search("q", deps=deps)
+        assert out.health.next_action != "", (
+            f"search envelope dropped next_action for secrets={secrets} embed={embed} bm25={bm25}"
+        )
