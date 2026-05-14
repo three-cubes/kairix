@@ -8,6 +8,7 @@ Operational procedures and incident runbooks for kairix deployments.
 
 | Symptom | Runbook |
 |---|---|
+| Multiple subsystems failing, dogfood says "search returning wrong/empty results", recall canary regressed | [kairix-retrieval-health](../../runbooks/kairix-retrieval-health.md) — start here for any cross-cutting retrieval degradation |
 | `kairix search` returns `vec=0, vec_failed=True` | [runbook-vector-search-failure](runbook-vector-search-failure.md) |
 | `kairix entity suggest` returns junk, agents miss known entities, or reflib recall regresses | [kairix-entity-audit](kairix-entity-audit.md) |
 | New documents not appearing in search after the embed cycle | [runbook-embedding-lag](runbook-embedding-lag.md) |
@@ -23,6 +24,7 @@ Operational procedures and incident runbooks for kairix deployments.
 
 | Runbook | What it covers |
 |---|---|
+| [kairix-retrieval-health](../../runbooks/kairix-retrieval-health.md) | Cross-cutting retrieval health and recovery — `kairix onboard check --json` first, then branch on the failed subsystem; full-reset fallback |
 | [runbook-vector-search-failure](runbook-vector-search-failure.md) | `vec=0, vec_failed=True` — embed credentials, vector index integrity, no-vectors-yet |
 | [runbook-embedding-lag](runbook-embedding-lag.md) | New content not searchable — sync, embed pipeline failures, scheduled-run issues |
 | [runbook-benchmark-regression](runbook-benchmark-regression.md) | NDCG degraded — before/after comparison workflow and rollback |
