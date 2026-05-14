@@ -227,6 +227,40 @@ def _format_issue_section(heading: str, issues: list[HealthIssue]) -> list[str]:
     return lines
 
 
+def _format_entity_counts(report: HealthReport) -> list[str]:
+    """Render the entity-count table (or empty-state line)."""
+    if not report.entities_by_type:
+        return ["_No entities found._"]
+    lines = ["| Type | Count |", "|------|-------|"]
+    for etype, cnt in sorted(report.entities_by_type.items()):
+        lines.append(f"| {etype} | {cnt} |")
+    return lines
+
+
+def _format_neo4j_section(report: HealthReport) -> list[str]:
+    """Render the Neo4j availability + node-count line."""
+    if not report.neo4j_available:
+        return ["⚠ Unavailable."]
+    if report.neo4j_node_counts:
+        node_summary = ", ".join(f"{cnt} {label}" for label, cnt in sorted(report.neo4j_node_counts.items()))
+        return [f"✅ Connected — {node_summary}"]
+    return ["✅ Connected — no nodes found"]
+
+
+def _format_status_footer(report: HealthReport) -> list[str]:
+    """Render the trailing status line; lists the failure dimensions when not OK."""
+    if report.ok:
+        return ["**Status: ✅ HEALTHY** — no issues found"]
+    parts: list[str] = []
+    if report.synthesis_failures:
+        parts.append(f"{len(report.synthesis_failures)} synthesis failure(s)")
+    if report.stale_entities:
+        parts.append(f"{len(report.stale_entities)} stale")
+    if report.missing_vault_path:
+        parts.append(f"{len(report.missing_vault_path)} missing vault path")
+    return [f"**Status: ⚠ ISSUES FOUND** — {', '.join(parts)}"]
+
+
 def format_report_text(report: HealthReport) -> str:
     """Format a HealthReport as vault-ready Markdown."""
     lines: list[str] = [
@@ -236,14 +270,7 @@ def format_report_text(report: HealthReport) -> str:
         f"## Entity Counts (total: {report.total_entities})",
         "",
     ]
-
-    if report.entities_by_type:
-        lines += ["| Type | Count |", "|------|-------|"]
-        for etype, cnt in sorted(report.entities_by_type.items()):
-            lines.append(f"| {etype} | {cnt} |")
-    else:
-        lines.append("_No entities found._")
-
+    lines += _format_entity_counts(report)
     lines += _format_issue_section(
         f"## Synthesis Failures ({len(report.synthesis_failures)})",
         report.synthesis_failures,
@@ -256,30 +283,10 @@ def format_report_text(report: HealthReport) -> str:
         f"## Missing Vault Path ({len(report.missing_vault_path)})",
         report.missing_vault_path,
     )
-
     lines += ["", "## Graph (Neo4j)", ""]
-    if report.neo4j_available:
-        if report.neo4j_node_counts:
-            node_summary = ", ".join(f"{cnt} {label}" for label, cnt in sorted(report.neo4j_node_counts.items()))
-            lines.append(f"✅ Connected — {node_summary}")
-        else:
-            lines.append("✅ Connected — no nodes found")
-    else:
-        lines.append("⚠ Unavailable.")
-
+    lines += _format_neo4j_section(report)
     lines += ["", "---"]
-    if report.ok:
-        lines.append("**Status: ✅ HEALTHY** — no issues found")
-    else:
-        parts = []
-        if report.synthesis_failures:
-            parts.append(f"{len(report.synthesis_failures)} synthesis failure(s)")
-        if report.stale_entities:
-            parts.append(f"{len(report.stale_entities)} stale")
-        if report.missing_vault_path:
-            parts.append(f"{len(report.missing_vault_path)} missing vault path")
-        lines.append(f"**Status: ⚠ ISSUES FOUND** — {', '.join(parts)}")
-
+    lines += _format_status_footer(report)
     return "\n".join(lines) + "\n"
 
 

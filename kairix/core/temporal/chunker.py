@@ -192,37 +192,33 @@ def chunk_board(path: str) -> list[TemporalChunk]:
         )
 
     for line in lines:
-        # Detect column heading
         h2_match = _SECTION_H2_RE.match(line)
         if h2_match:
-            # Flush any in-progress card
             _flush_card(current_column, current_status, card_buffer, card_index)
             card_buffer = []
             card_index += 1
-
             heading_text = h2_match.group(1).strip()
             current_column = heading_text
             current_status = _normalise_column(heading_text)
             continue
 
-        # Detect card start: line is a checklist item
         if _CARD_LINE_RE.match(line):
-            # Flush previous card
             _flush_card(current_column, current_status, card_buffer, card_index)
             card_buffer = [line]
             card_index += 1
-        elif card_buffer:
-            # Continuation of current card (indented or blank lines within card)
-            # Stop accumulating if we hit a non-indented non-blank line that isn't a card
-            stripped = line.strip()
-            if stripped == "" or line.startswith("  ") or line.startswith("\t"):
-                card_buffer.append(line)
-            else:
-                # Non-card content — flush and stop
-                _flush_card(current_column, current_status, card_buffer, card_index)
-                card_buffer = []
+            continue
 
-    # Flush final card
+        if not card_buffer:
+            continue
+
+        # Continuation: indented / blank lines stay with the card; anything
+        # else terminates the card buffer.
+        if line.strip() == "" or line.startswith(("  ", "\t")):
+            card_buffer.append(line)
+        else:
+            _flush_card(current_column, current_status, card_buffer, card_index)
+            card_buffer = []
+
     _flush_card(current_column, current_status, card_buffer, card_index)
 
     logger.debug("chunk_board: %r → %d chunks", path, len(chunks))
