@@ -82,6 +82,16 @@ def _try_import_neo4j() -> Any:
         return None
 
 
+# Sentinel for the Neo4jClient.__init__ ``driver_cls`` kwarg. Distinguishes
+# "caller didn't pass driver_cls — use _try_import_neo4j()" (default) from
+# "caller explicitly passed driver_cls=None — disable the driver" (test).
+class _DriverClsSentinel:
+    """Singleton marker — never instantiated by callers."""
+
+
+_USE_DEFAULT_DRIVER = _DriverClsSentinel()
+
+
 def _redact_uri(uri: str) -> str:
     """Strip any embedded ``user:pass@`` credentials from a URI before logging.
 
@@ -115,6 +125,8 @@ class Neo4jClient:
         uri: str | None = None,
         user: str | None = None,
         password: str | None = None,
+        *,
+        driver_cls: Any = _USE_DEFAULT_DRIVER,
     ) -> None:
         if uri is None or user is None or password is None:
             _uri, _user, _password = _get_neo4j_defaults()
@@ -125,11 +137,19 @@ class Neo4jClient:
         self._user = user
         self._password = password
         self._driver: Any = None
+        # F1-clean test seam (#201): tests inject a mock driver class
+        # (or explicit None to simulate 'neo4j not installed') instead of
+        # @patch'ing _try_import_neo4j. The sentinel default keeps production
+        # callers on the live driver-import path.
+        self._driver_cls_arg: Any = driver_cls
         self.available = False
         self._connect()
 
     def _connect(self) -> None:
-        driver_cls = _try_import_neo4j()
+        if isinstance(self._driver_cls_arg, _DriverClsSentinel):
+            driver_cls = _try_import_neo4j()
+        else:
+            driver_cls = self._driver_cls_arg
         if driver_cls is None:
             logger.warning("Neo4jClient: neo4j driver not installed — graph layer unavailable")
             return

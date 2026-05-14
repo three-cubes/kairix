@@ -8,7 +8,7 @@ without requiring a live database.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -19,19 +19,23 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture()
 def mock_neo4j_client() -> MagicMock:
-    """Create a Neo4jClient with a mocked driver."""
-    with patch("kairix.knowledge.graph.client._try_import_neo4j") as mock_import:
-        mock_driver_cls = MagicMock()
-        mock_driver = MagicMock()
-        mock_driver_cls.driver.return_value = mock_driver
-        mock_driver.verify_connectivity.return_value = None
-        mock_import.return_value = mock_driver_cls
+    """Create a Neo4jClient with a mocked driver via the ``driver_cls=``
+    constructor seam (F1-clean — no @patch on kairix internals)."""
+    mock_driver_cls = MagicMock()
+    mock_driver = MagicMock()
+    mock_driver_cls.driver.return_value = mock_driver
+    mock_driver.verify_connectivity.return_value = None
 
-        from kairix.knowledge.graph.client import Neo4jClient
+    from kairix.knowledge.graph.client import Neo4jClient
 
-        client = Neo4jClient(uri="bolt://test:7687", user="test", password="test")  # pragma: allowlist secret
-        assert client.available
-        return client
+    client = Neo4jClient(
+        uri="bolt://test:7687",
+        user="test",
+        password="test",  # pragma: allowlist secret
+        driver_cls=mock_driver_cls,
+    )
+    assert client.available
+    return client
 
 
 class TestDocumentMentionsEdge:
@@ -107,23 +111,31 @@ class TestDocumentMentionsEdge:
 
     @pytest.mark.unit
     def test_upsert_edge_returns_false_when_driver_none(self) -> None:
-        """upsert_edge returns False when no Neo4j driver is available."""
-        with patch("kairix.knowledge.graph.client._try_import_neo4j", return_value=None):
-            from kairix.knowledge.graph.client import Neo4jClient
+        """upsert_edge returns False when no Neo4j driver is available.
 
-            client = Neo4jClient(uri="bolt://test:7687", user="test", password="test")  # pragma: allowlist secret
-            assert not client.available
+        F1-clean: pass driver_cls=None directly through the constructor seam
+        instead of @patch'ing _try_import_neo4j to return None.
+        """
+        from kairix.knowledge.graph.client import Neo4jClient
 
-            edge = GraphEdge(
-                from_id="doc-1",
-                from_label="Document",
-                to_id="alice",
-                to_label="Person",
-                kind=EdgeKind.MENTIONS,
-                props={},
-            )
-            result = client.upsert_edge(edge)
-            assert result is False
+        client = Neo4jClient(
+            uri="bolt://test:7687",
+            user="test",
+            password="test",  # pragma: allowlist secret
+            driver_cls=None,
+        )
+        assert not client.available
+
+        edge = GraphEdge(
+            from_id="doc-1",
+            from_label="Document",
+            to_id="alice",
+            to_label="Person",
+            kind=EdgeKind.MENTIONS,
+            props={},
+        )
+        result = client.upsert_edge(edge)
+        assert result is False
 
     @pytest.mark.unit
     def test_mentions_edge_sets_properties(self, mock_neo4j_client: MagicMock) -> None:
