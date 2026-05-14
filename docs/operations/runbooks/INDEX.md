@@ -15,6 +15,7 @@ Operational procedures and incident runbooks for kairix deployments.
 | Every `mcp-kairix__*` tool returns `-32602 Invalid request parameters` | [MCP-CLIENT-MIGRATION](../MCP-CLIENT-MIGRATION.md) — your client is on `/sse` and needs to move to `/mcp` |
 | NDCG@10 dropped after a config or index change | [runbook-benchmark-regression](runbook-benchmark-regression.md) |
 | Specific queries scoring poorly | [how-to-debug-search-ranking](how-to-debug-search-ranking.md) |
+| Updating kairix on a systemd VM (package bump, unit-file change, fetch-secrets change) | [kairix-systemd-update](../../runbooks/kairix-systemd-update.md) — pre-capture, ordered restart, gate on onboard check, manual rollback |
 | Setting up MCP server for the first time | [MCP-DEPLOYMENT](../MCP-DEPLOYMENT.md) |
 | Migrating an existing MCP client off SSE | [MCP-CLIENT-MIGRATION](../MCP-CLIENT-MIGRATION.md) |
 
@@ -25,6 +26,7 @@ Operational procedures and incident runbooks for kairix deployments.
 | Runbook | What it covers |
 |---|---|
 | [kairix-retrieval-health](../../runbooks/kairix-retrieval-health.md) | Cross-cutting retrieval health and recovery — `kairix onboard check --json` first, then branch on the failed subsystem; full-reset fallback |
+| [kairix-systemd-update](../../runbooks/kairix-systemd-update.md) | Safe update + rollback for systemd-on-VM deployments — pre-update capture, ordered service restart, onboard-check gate, manual rollback |
 | [runbook-vector-search-failure](runbook-vector-search-failure.md) | `vec=0, vec_failed=True` — embed credentials, vector index integrity, no-vectors-yet |
 | [runbook-embedding-lag](runbook-embedding-lag.md) | New content not searchable — sync, embed pipeline failures, scheduled-run issues |
 | [runbook-benchmark-regression](runbook-benchmark-regression.md) | NDCG degraded — before/after comparison workflow and rollback |
