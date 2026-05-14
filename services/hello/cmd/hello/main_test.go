@@ -99,3 +99,16 @@ func TestRunHandlesStdoutWriteFailure(t *testing.T) {
 		t.Errorf("expected structured log to mention the write error, got stderr=%q", stderr.String())
 	}
 }
+
+func TestRunHandlesVersionWriteFailure(t *testing.T) {
+	// Same write-failure shape, but routed through the --version flag
+	// branch — exercises the errcheck guard added for golangci-lint v2.
+	var stderr bytes.Buffer
+	got := run([]string{"--version"}, failWriter{}, &stderr)
+	if got != 1 {
+		t.Errorf("exit code on --version write-failure: got %d, want 1", got)
+	}
+	if !strings.Contains(stderr.String(), "stdout closed") {
+		t.Errorf("expected structured log to mention the write error, got stderr=%q", stderr.String())
+	}
+}

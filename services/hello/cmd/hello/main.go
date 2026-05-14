@@ -44,7 +44,10 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	logger := slog.New(slog.NewJSONHandler(stderr, nil)) // G8: structured logs
 
 	if *showVersion {
-		fmt.Fprintf(stdout, "hello %s\n", version)
+		if _, err := fmt.Fprintf(stdout, "hello %s\n", version); err != nil {
+			logger.Error("write version", slog.String("err", err.Error()))
+			return 1
+		}
 		return 0
 	}
 
