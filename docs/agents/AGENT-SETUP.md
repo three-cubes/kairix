@@ -109,17 +109,18 @@ Every kairix tool response includes a `health` envelope:
 {
   "passed": 7,
   "total": 9,
+  "fully_passed": false,
   "failures": [
     {
       "check": "secrets_loaded",
       "detail": "LLM credentials not found in environment or secrets file: KAIRIX_LLM_API_KEY, KAIRIX_LLM_ENDPOINT",
-      "remediation": "Create /opt/kairix/secrets.env with KAIRIX_LLM_API_KEY=<value> and KAIRIX_LLM_ENDPOINT=<value> ..."
+      "remediation": "Run `sudo systemctl enable --now kairix-fetch-secrets.service` on the host; if that fails, confirm `/run/secrets/kairix.env` exists and contains `KAIRIX_LLM_API_KEY=...` and `KAIRIX_LLM_ENDPOINT=...`."
     }
   ]
 }
 ```
 
-> **Forward reference:** `--json` and structured exit code ship in #246 W4. Until then, the human-readable text is what you get; parse the `X/Y passed` line and read each failure block verbatim.
+The exit code is `0` when `fully_passed` is `true`, `1` otherwise. Use this from `docker-compose` healthchecks, CI pipelines, or any external monitor that needs to gate on kairix readiness.
 
 **What to do when the check fails:**
 

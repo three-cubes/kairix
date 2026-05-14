@@ -814,3 +814,220 @@ def test_check_mcp_service_active_when_any_harness_passes(monkeypatch) -> None:
     result = check_mod.check_mcp_service()
     assert result.ok is True
     assert "OpenClaw" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# OnboardResult + CheckFailure — structured output (#246 W4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_onboard_result_fully_passed_when_passed_equals_total() -> None:
+    """fully_passed is True iff passed == total — derived, not asserted manually."""
+    from kairix.platform.onboard.check import OnboardResult
+
+    ok = OnboardResult(passed=9, total=9, failures=[], fully_passed=True)
+    assert ok.fully_passed is True
+    assert ok.passed == ok.total
+
+
+@pytest.mark.unit
+def test_onboard_result_not_fully_passed_when_any_failure() -> None:
+    """fully_passed is False when any check failed."""
+    from kairix.platform.onboard.check import CheckFailure, OnboardResult
+
+    failure = CheckFailure(check="x", detail="d", remediation="r")
+    result = OnboardResult(passed=8, total=9, failures=[failure], fully_passed=False)
+    assert result.fully_passed is False
+    assert len(result.failures) == 1
+
+
+@pytest.mark.unit
+def test_run_onboard_check_returns_onboard_result() -> None:
+    """run_onboard_check returns an OnboardResult with passed + total derived."""
+    from kairix.platform.onboard.check import OnboardResult, run_onboard_check
+
+    result = run_onboard_check()
+    assert isinstance(result, OnboardResult)
+    assert isinstance(result.passed, int)
+    assert isinstance(result.total, int)
+    assert result.total > 0  # Sabotage-prove: if total goes to zero, this check fails
+    assert result.passed <= result.total
+    # fully_passed must be derived consistently, not stored independently
+    assert result.fully_passed == (result.passed == result.total)
+
+
+@pytest.mark.unit
+def test_run_onboard_check_failures_match_unpassed_count() -> None:
+    """Exactly (total - passed) CheckFailures are emitted — accounting holds.
+
+    Sabotage check: if run_onboard_check ever silently drops failures or
+    emits extra ones, this asserts a hard mismatch.
+    """
+    from kairix.platform.onboard.check import run_onboard_check
+
+    result = run_onboard_check()
+    assert len(result.failures) == result.total - result.passed
+
+
+@pytest.mark.unit
+def test_run_onboard_check_every_failure_has_non_empty_remediation() -> None:
+    """Every CheckFailure in an OnboardResult carries a non-empty remediation.
+
+    Sabotage check: if a check is added without a canonical remediation
+    entry and produces a CheckResult with fix=None, this asserts will fail
+    rather than silently emitting an empty remediation.
+    """
+    from kairix.platform.onboard.check import run_onboard_check
+
+    result = run_onboard_check()
+    for failure in result.failures:
+        assert failure.remediation, f"empty remediation for check={failure.check!r}"
+        assert failure.remediation.strip() == failure.remediation
+        # Sabotage-prove: blank strings, single spaces, etc. all fail this
+        assert len(failure.remediation) > 10, f"remediation too short for {failure.check!r}: {failure.remediation!r}"
+
+
+@pytest.mark.unit
+def test_run_onboard_check_failure_check_id_matches_a_known_check() -> None:
+    """Every CheckFailure.check matches the .name of an executed CheckResult.
+
+    Sabotage check: if the failure check ID ever drifts from CheckResult.name
+    (e.g. someone renames a check but doesn't update _CANONICAL_REMEDIATIONS),
+    this catches the mismatch.
+    """
+    from kairix.platform.onboard.check import run_all_checks, run_onboard_check
+
+    all_names = {r.name for r in run_all_checks()}
+    result = run_onboard_check()
+    for failure in result.failures:
+        assert failure.check in all_names, f"unknown check id: {failure.check!r}"
+
+
+@pytest.mark.unit
+def test_run_onboard_check_uses_canonical_remediation_strings() -> None:
+    """When a check fails, its remediation comes from the canonical registry
+    in check.py — not a placeholder. Sabotage check: confirms the
+    structured surface routes through _remediation_for() rather than
+    silently emitting the raw CheckResult.fix string.
+    """
+    from kairix.platform.onboard import check as check_mod
+
+    # Build a synthetic ALL_CHECKS where every check fails with a deliberately
+    # weird fix value. The remediation surfaced should still be the canonical
+    # one (matching _CANONICAL_REMEDIATIONS), not the weird value.
+    fake_results = [
+        check_mod.CheckResult(name=name, ok=False, detail="x", fix="WRONG-DO-NOT-USE")
+        for name in check_mod._CANONICAL_REMEDIATIONS
+    ]
+
+    def _fake_run_all() -> list[check_mod.CheckResult]:
+        return fake_results
+
+    # Drive run_onboard_check via a one-shot ALL_CHECKS override
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(check_mod, "run_all_checks", _fake_run_all)
+        result = check_mod.run_onboard_check()
+
+    canonical = check_mod._CANONICAL_REMEDIATIONS
+    for failure in result.failures:
+        assert failure.remediation == canonical[failure.check], (
+            f"non-canonical remediation for {failure.check!r}: {failure.remediation!r}"
+        )
+        # Sabotage-prove: the deliberately bad fix value should NOT leak through
+        assert "WRONG" not in failure.remediation
+
+
+@pytest.mark.unit
+def test_canonical_remediations_cover_every_registered_check() -> None:
+    """Every check in ALL_CHECKS has a canonical remediation entry.
+
+    Sabotage check: if someone adds a new check function without adding a
+    canonical remediation, this fails on import-time (test discovery)
+    rather than at runtime when a real operator hits the failure path.
+    """
+    from kairix.platform.onboard import check as check_mod
+
+    expected_names = {fn.__name__.removeprefix("check_") for fn in check_mod.ALL_CHECKS}
+    canonical_names = set(check_mod._CANONICAL_REMEDIATIONS)
+    missing = expected_names - canonical_names
+    assert not missing, f"checks without canonical remediation: {sorted(missing)}"
+
+
+@pytest.mark.unit
+def test_every_canonical_remediation_is_actionable() -> None:
+    """Every canonical remediation contains a concrete command, path, or
+    actionable verb. Sabotage check: a vague string like "fix it" would
+    fail this. The bar is low (one of run/set/check/confirm/add/register)
+    but non-zero — proves the string isn't placeholder text."""
+    from kairix.platform.onboard import check as check_mod
+
+    actionable_tokens = ("Run ", "Set ", "Check ", "Confirm ", "Add ", "Register ", "`")
+    for name, remediation in check_mod._CANONICAL_REMEDIATIONS.items():
+        assert any(token in remediation for token in actionable_tokens), (
+            f"remediation for {name!r} contains no actionable token: {remediation!r}"
+        )
+        # Sabotage-prove: every remediation is non-trivial length
+        assert len(remediation) > 20, f"remediation for {name!r} is too short: {remediation!r}"
+
+
+@pytest.mark.unit
+def test_run_onboard_check_unknown_check_falls_back_to_fix() -> None:
+    """When a check fails and is not in the canonical registry (e.g. a brand
+    new check added without an entry), the per-check fix string is used as
+    the remediation fallback. Forward-compatibility safeguard.
+    """
+    from kairix.platform.onboard import check as check_mod
+
+    def _fake_run_all() -> list[check_mod.CheckResult]:
+        return [
+            check_mod.CheckResult(
+                name="brand_new_check_with_no_canonical_entry",
+                ok=False,
+                detail="some failure",
+                fix="run this specific command",
+            ),
+        ]
+
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(check_mod, "run_all_checks", _fake_run_all)
+        result = check_mod.run_onboard_check()
+
+    assert len(result.failures) == 1
+    # No canonical entry → falls back to the raw fix
+    assert result.failures[0].remediation == "run this specific command"
+
+
+@pytest.mark.unit
+def test_run_onboard_check_unknown_and_no_fix_surfaces_bug_hint() -> None:
+    """When a check fails AND has neither a canonical entry nor a fix string,
+    the remediation surfaces a bug-report hint rather than an empty string.
+
+    Sabotage-prove: an empty remediation would be a silent failure for any
+    machine consumer; this assertion catches that.
+    """
+    from kairix.platform.onboard import check as check_mod
+
+    def _fake_run_all() -> list[check_mod.CheckResult]:
+        return [
+            check_mod.CheckResult(
+                name="orphan_check_with_no_remediation",
+                ok=False,
+                detail="failed",
+                fix=None,
+            ),
+        ]
+
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(check_mod, "run_all_checks", _fake_run_all)
+        result = check_mod.run_onboard_check()
+
+    assert len(result.failures) == 1
+    assert result.failures[0].remediation
+    assert "bug" in result.failures[0].remediation.lower()

@@ -107,7 +107,6 @@ omit = [
     # Each will move out of this list when tests land.
     "kairix/knowledge/contradict/cli.py",
     "kairix/knowledge/reflib/cli.py",
-    "kairix/platform/onboard/cli.py",
     "kairix/quality/benchmark/cli.py",
     # Wikilinks audit reporter — 0% coverage today, no public callers in
     # tests; flagged for backfill or removal.

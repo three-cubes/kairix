@@ -11,6 +11,11 @@ run_all_checks() returns the full list. Checks are ordered from most-fundamental
 (PATH, secrets) to most-dependent (vector search, entity graph) so failures are
 diagnosed from the bottom up.
 
+run_onboard_check() wraps run_all_checks() and returns a structured
+OnboardResult — the canonical surface for ``kairix onboard check --json``
+and for any caller (CI, docker-compose healthcheck, MCP probe) that needs
+to act on individual failures programmatically.
+
 Failure modes:
   - Checks never raise; exceptions are caught and surfaced as failed CheckResult.
   - Checks that require live external services (Neo4j, Azure KV) degrade gracefully.
@@ -40,6 +45,125 @@ class CheckResult:
     ok: bool
     detail: str
     fix: str | None = field(default=None)
+
+
+@dataclass(frozen=True)
+class CheckFailure:
+    """Single failed check, structured for machine consumption.
+
+    Every failure carries:
+      check       — short ID matching the underlying CheckResult.name
+      detail      — one-line explanation of what's wrong
+      remediation — exact operator-actionable command/check the operator
+                    should run NOW (never empty)
+
+    Design principle: the remediation string must hand the operator their
+    next concrete step. "Run `<command>`" or "Check `<path>` exists" — not
+    a description of the failure state.
+    """
+
+    check: str
+    detail: str
+    remediation: str
+
+
+@dataclass(frozen=True)
+class OnboardResult:
+    """Structured result of a full onboard check run.
+
+    Fields:
+      passed       — number of checks that returned ok=True
+      total        — total number of checks executed
+      failures     — list of CheckFailure, one per failed check, in
+                     dependency order (most fundamental first)
+      fully_passed — True iff passed == total (derived)
+
+    The CLI's ``--json`` flag emits this directly; the human-readable
+    output renders the same data with icons + indented remediations.
+
+    Exit-code semantics: 0 when fully_passed is True, 1 otherwise.
+    """
+
+    passed: int
+    total: int
+    failures: list[CheckFailure]
+    fully_passed: bool
+
+
+# ---------------------------------------------------------------------------
+# Canonical remediations
+# ---------------------------------------------------------------------------
+# Each check has a canonical operator-actionable remediation string. When a
+# check returns a CheckResult with fix=None (or a structurally empty fix),
+# the canonical remediation is substituted so every CheckFailure surfaces a
+# concrete next step. The per-check CheckResult.fix strings remain the
+# detailed multi-line guidance for human readers; CheckFailure.remediation
+# is the one-line "run this now" command an agent or healthcheck can act on.
+
+_CANONICAL_REMEDIATIONS: dict[str, str] = {
+    "kairix_on_path": (
+        "Run `bash scripts/deploy-vm.sh` on the host to install the wrapper + symlink; "
+        "or manually export `PATH=/opt/openclaw/bin:$PATH`."
+    ),
+    "wrapper_installed": (
+        "Run `bash scripts/deploy-vm.sh` to install /opt/kairix/bin/kairix-wrapper.sh "
+        "and repoint /usr/local/bin/kairix at it."
+    ),
+    "secrets_loaded": (
+        "Run `sudo systemctl enable --now kairix-fetch-secrets.service` on the host; "
+        "if that fails, confirm `/run/secrets/kairix.env` exists and contains "
+        "`KAIRIX_LLM_API_KEY=...` and `KAIRIX_LLM_ENDPOINT=...`."
+    ),
+    "document_root_configured": (
+        "Set `KAIRIX_DOCUMENT_ROOT=/your/docs/path` in /opt/kairix/service.env and "
+        "ensure the directory exists."
+    ),
+    "vector_search_working": (
+        "Run `docker logs kairix-worker-1` for embed-pipeline errors; confirm "
+        "`kairix onboard check secrets_loaded` passes; then run `kairix embed --limit 20` "
+        "to test the embed pipeline."
+    ),
+    "neo4j_reachable": (
+        "Run `bash scripts/install-neo4j.sh` to install Neo4j, then set "
+        "`KAIRIX_NEO4J_URI=bolt://localhost:7687` in /opt/kairix/service.env. "
+        "Neo4j is optional — entity boost degrades gracefully when offline."
+    ),
+    "agent_knowledge_populated": (
+        "Run `kairix embed` to populate the agent knowledge store from the document root, "
+        "or create at least one memory file at "
+        "$KAIRIX_DOCUMENT_ROOT/04-Agent-Knowledge/<agent>/memory/YYYY-MM-DD.md."
+    ),
+    "chunk_date_populated": (
+        "Run `kairix embed --rebuild-canaries` to refresh the chunk_date index. "
+        "If chunk_date is missing entirely, run `kairix embed` to trigger the migration."
+    ),
+    "mcp_service": (
+        "Register kairix with at least one MCP consumer harness: "
+        "`openclaw mcp set mcp-kairix '{\"type\":\"stdio\",\"command\":\"/path/to/kairix-start.sh\"}'`, "
+        "add to ~/Library/Application Support/Claude/claude_desktop_config.json, or run "
+        "`sudo systemctl enable --now kairix-mcp.service`."
+    ),
+}
+
+_UNKNOWN_CHECK_REMEDIATION = (
+    "Report this failure as a bug in kairix.platform.onboard.check — the check has no "
+    "canonical remediation registered."
+)
+
+
+def _remediation_for(check_name: str, fix: str | None) -> str:
+    """Return the canonical remediation for *check_name*.
+
+    Falls back to the per-check ``fix`` string only when the check name has
+    no canonical entry (which should never happen for production checks —
+    the dict above is the source of truth). Never returns empty.
+    """
+    canonical = _CANONICAL_REMEDIATIONS.get(check_name)
+    if canonical:
+        return canonical
+    if fix and fix.strip():
+        return fix.strip()
+    return _UNKNOWN_CHECK_REMEDIATION
 
 
 def _default_is_docker() -> bool:
@@ -799,3 +923,36 @@ def run_all_checks() -> list[CheckResult]:
                 )
             )
     return results
+
+
+def run_onboard_check() -> OnboardResult:
+    """Run all deployment checks and return a structured OnboardResult.
+
+    Canonical surface for:
+      - ``kairix onboard check --json`` CLI output
+      - docker-compose healthcheck (exit code is derived from .fully_passed)
+      - any caller that needs to act on individual failures programmatically
+
+    Each failed check produces a CheckFailure with a populated, non-empty
+    ``remediation`` string sourced from _CANONICAL_REMEDIATIONS. The set of
+    checks (and their order) is identical to run_all_checks() — this
+    function only restructures the output.
+    """
+    results = run_all_checks()
+    failures = [
+        CheckFailure(
+            check=r.name,
+            detail=r.detail,
+            remediation=_remediation_for(r.name, r.fix),
+        )
+        for r in results
+        if not r.ok
+    ]
+    passed = sum(1 for r in results if r.ok)
+    total = len(results)
+    return OnboardResult(
+        passed=passed,
+        total=total,
+        failures=failures,
+        fully_passed=(passed == total),
+    )

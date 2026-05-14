@@ -59,6 +59,13 @@ services:
       neo4j:
         condition: service_healthy
     restart: unless-stopped
+    # Healthcheck uses `kairix onboard check` — the canonical "is kairix
+    # working right now" probe. Exit code is 0 on full pass, 1 on any
+    # failure (see #246 W4). Each failed check carries a structured
+    # ``remediation`` string, available via ``kairix onboard check --json``
+    # for machine consumers. This probe replaces the prior HTTP-only
+    # healthcheck so it surfaces secrets / embed-pipeline failures, not
+    # just process-level liveness.
     healthcheck:
       test: ["CMD", "kairix", "onboard", "check"]
       interval: 60s

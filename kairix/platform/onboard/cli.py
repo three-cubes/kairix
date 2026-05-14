@@ -94,36 +94,37 @@ def _self_load_env(explicit_path: str | None) -> tuple[str | None, list[str]]:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    from kairix.platform.onboard.check import run_all_checks
+    from dataclasses import asdict
+
+    from kairix.platform.onboard.check import run_all_checks, run_onboard_check
 
     # Self-load env files so check results are context-independent (ERR-003)
     env_source, env_keys = _self_load_env(getattr(args, "env_file", None))
 
+    if args.json:
+        # Structured JSON output — canonical machine-readable surface.
+        # Shape: {passed, total, fully_passed, failures: [{check, detail, remediation}]}.
+        outcome = run_onboard_check()
+        output = {
+            "passed": outcome.passed,
+            "total": outcome.total,
+            "fully_passed": outcome.fully_passed,
+            "failures": [asdict(f) for f in outcome.failures],
+            # env_source is operator metadata, not part of the OnboardResult shape;
+            # surfaced here so an admin running --json sees which env file was loaded.
+            "env_source": env_source,
+        }
+        print(json.dumps(output, indent=2))
+        return 0 if outcome.fully_passed else 1
+
+    # Human-readable output — preserves the existing CLI surface for humans.
+    # We render from CheckResult (which carries the multi-line fix guidance);
+    # JSON renders from OnboardResult (which carries the one-line remediation).
     results = run_all_checks()
     passed = sum(1 for r in results if r.ok)
     total = len(results)
     all_ok = passed == total
 
-    if args.json:
-        output = {
-            "ok": all_ok,
-            "passed": passed,
-            "total": total,
-            "env_source": env_source,
-            "checks": [
-                {
-                    "name": r.name,
-                    "ok": r.ok,
-                    "detail": r.detail,
-                    "fix": r.fix,
-                }
-                for r in results
-            ],
-        }
-        print(json.dumps(output, indent=2))
-        return 0 if all_ok else 1
-
-    # Human-readable output
     print()
     print("kairix deployment check")
     if env_source:
@@ -262,7 +263,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> int:
+    """`kairix onboard` entry point.
+
+    Returns the exit code (0 = success, 1 = failure) rather than calling
+    ``sys.exit`` directly so tests can drive ``main(...)`` and assert on
+    the return value without catching SystemExit. The package-level
+    entry point in ``kairix/cli.py`` is responsible for translating this
+    int into the process exit code.
+    """
     parser = argparse.ArgumentParser(
         prog="kairix onboard",
         description="Deployment diagnostics and agent onboarding tools.",
@@ -297,8 +306,11 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.subcommand == "check":
-        sys.exit(cmd_check(args))
-    elif args.subcommand == "guide":
-        sys.exit(cmd_guide(args))
-    elif args.subcommand == "verify":
-        sys.exit(cmd_verify(args))
+        return cmd_check(args)
+    if args.subcommand == "guide":
+        return cmd_guide(args)
+    if args.subcommand == "verify":
+        return cmd_verify(args)
+    # argparse with required=True makes this unreachable in practice;
+    # surface as a non-zero exit if argparse semantics ever change.
+    return 2
