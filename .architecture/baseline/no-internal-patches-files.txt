@@ -1,4 +1,3 @@
-tests/entities/test_suggest.py
 tests/integration/test_mcp_tool_contracts.py
 tests/search/test_config_loader.py
 tests/test_paths.py

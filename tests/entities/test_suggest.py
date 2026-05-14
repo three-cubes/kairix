@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -36,28 +36,24 @@ def _make_mock_spacy(entities: list[tuple[str, str]]):
 
 @pytest.mark.unit
 def test_suggest_entities_new_entity():
-    """Entities not in Neo4j should be marked as new."""
+    """Entities not in Neo4j should be marked as new.
+
+    F1-clean: pass nlp= directly through the existing constructor seam
+    instead of @patch'ing _load_model + spacy + sys.modules. The previous
+    triple-patch was a smell that obscured what the test actually proved.
+    """
     neo4j = FakeNeo4jClient(entities=[])  # empty graph
     mock_nlp = _make_mock_spacy([("AcmeCorp", "ORG")])
 
-    with (
-        patch("kairix.knowledge.entities.suggest._load_model", return_value=mock_nlp),
-        patch("kairix.knowledge.entities.suggest.spacy", create=True),
-    ):
-        # Patch the import inside suggest_entities
-        import kairix.knowledge.entities.suggest as suggest_mod
+    result = suggest_entities("AcmeCorp is a new company.", neo4j, nlp=mock_nlp)
 
-        _ = suggest_mod._load_model  # kept to verify attribute exists
-
-        with patch.object(suggest_mod, "_load_model", return_value=mock_nlp):
-            # We need to patch out the spacy import too
-            fake_spacy = MagicMock()
-            with patch.dict("sys.modules", {"spacy": fake_spacy}):
-                fake_spacy.load.return_value = mock_nlp
-                suggest_entities("AcmeCorp is a new company.", neo4j)
-
-    # Smoke: the call completed without raising, mocking bypasses import guard
-    assert True, "smoke: suggest_entities ran without error under mock"
+    # Sabotage-prove: assert the new entity is flagged as new, not just
+    # that the call returned. With FakeNeo4jClient.entities=[] any
+    # extracted entity must be is_new=True.
+    new_acme = [s for s in result if s.text == "AcmeCorp"]
+    assert new_acme, f"expected AcmeCorp in suggestions; got {[s.text for s in result]}"
+    assert new_acme[0].is_new is True
+    assert new_acme[0].existing_id is None
 
 
 @pytest.mark.unit
