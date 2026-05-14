@@ -15,7 +15,6 @@ from typing import Any, Literal
 
 from kairix.core.search.scope import Scope
 from kairix.text import estimate_tokens
-from kairix.use_cases import _prep_defaults as _defaults
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +23,19 @@ _L0_BUDGET = 1500
 _L1_BUDGET = 3000
 _L0_MAX_TOKENS = 150
 _L1_MAX_TOKENS = 600
+
+
+def _default_search(**kwargs: Any) -> Any:
+    from kairix.core.factory import build_search_pipeline
+
+    pipeline = build_search_pipeline()
+    return pipeline.search(**kwargs)
+
+
+def _default_chat(**kwargs: Any) -> str:
+    from kairix._azure import chat_completion
+
+    return chat_completion(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -51,10 +63,17 @@ class PrepOutput:
 
 @dataclass(frozen=True)
 class PrepDeps:
-    """Injectable dependencies for ``run_prep``."""
+    """Injectable dependencies for ``run_prep``.
 
-    search_fn: Callable[..., Any] | None = None
-    chat_fn: Callable[..., str] | None = None
+    Non-Optional fields wired to production defaults via ``default_factory``
+    — eliminates the ``Optional[Callable]`` mypy regression class flagged
+    in #204. Tests construct ``PrepDeps(search_fn=fake, chat_fn=fake)``
+    with explicit overrides; ``PrepDeps()`` with no kwargs resolves to
+    the production callables defined above.
+    """
+
+    search_fn: Callable[..., Any] = field(default_factory=lambda: _default_search)
+    chat_fn: Callable[..., str] = field(default_factory=lambda: _default_chat)
 
 
 def _build_messages(query: str, tier: str, context: str) -> list[dict[str, str]]:
@@ -111,8 +130,8 @@ def run_prep(
         deps: Injectable dependencies; production callers leave None.
     """
     d = deps or PrepDeps()
-    search = d.search_fn or _defaults.default_search
-    chat = d.chat_fn or _defaults.default_chat
+    search = d.search_fn
+    chat = d.chat_fn
 
     try:
         budget = _L0_BUDGET if tier == "l0" else _L1_BUDGET

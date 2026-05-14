@@ -26,9 +26,39 @@ from typing import Any
 from kairix.core.search.intent import QueryIntent
 from kairix.core.search.scope import Scope
 from kairix.text import estimate_tokens
-from kairix.use_cases import _search_defaults as _defaults
 
 logger = logging.getLogger(__name__)
+
+
+def _default_search(
+    query: str,
+    budget: int,
+    scope: Scope,
+    agent: str | None,
+) -> Any:
+    """Lazy-load the production search pipeline.
+
+    Kept inside the use-case module (rather than a shim) so the file
+    owns its own production wiring — eliminates the ``_search_defaults``
+    indirection layer that the F7 coverage baseline had to grandfather.
+    """
+    from kairix.core.factory import build_search_pipeline
+    from kairix.core.search.config_loader import load_config
+
+    pipeline = build_search_pipeline(config=load_config())
+    return pipeline.search(query=query, budget=budget, scope=scope, agent=agent)
+
+
+def _default_entity_card(name: str) -> dict[str, Any] | None:
+    from kairix.agents.mcp.server import _fetch_entity_card
+
+    return _fetch_entity_card(name)
+
+
+def _default_classify(query: str) -> QueryIntent:
+    from kairix.core.search.intent import classify
+
+    return classify(query)
 
 
 @dataclass(frozen=True)
@@ -93,14 +123,12 @@ class SearchDeps:
     — eliminates the ``Optional[Callable]`` mypy regression class flagged
     in #204. Tests construct ``SearchDeps(search_fn=fake, ...)`` with
     explicit overrides; ``SearchDeps()`` with no kwargs resolves to the
-    production wrappers in ``_search_defaults``.
+    module-level ``_default_*`` callables.
     """
 
-    search_fn: Callable[..., Any] = field(default_factory=lambda: _defaults.default_search)
-    entity_card_fn: Callable[[str], dict[str, Any] | None] = field(
-        default_factory=lambda: _defaults.default_entity_card
-    )
-    classify_fn: Callable[[str], QueryIntent] = field(default_factory=lambda: _defaults.default_classify)
+    search_fn: Callable[..., Any] = field(default_factory=lambda: _default_search)
+    entity_card_fn: Callable[[str], dict[str, Any] | None] = field(default_factory=lambda: _default_entity_card)
+    classify_fn: Callable[[str], QueryIntent] = field(default_factory=lambda: _default_classify)
 
 
 _RESEARCH_WORDS_DEFAULT_BUDGET = 5000

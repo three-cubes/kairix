@@ -22,7 +22,3 @@ kairix/platform/onboard/check.py
 kairix/platform/setup/wizard.py
 kairix/quality/eval/cli.py
 kairix/secrets.py
-kairix/use_cases/_prep_defaults.py
-kairix/use_cases/_research_defaults.py
-kairix/use_cases/_search_defaults.py
-kairix/use_cases/_usage_guide_defaults.py
