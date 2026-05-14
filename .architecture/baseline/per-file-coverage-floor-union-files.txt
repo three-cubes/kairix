@@ -1,5 +1,4 @@
 kairix/__init__.py
-kairix/agents/briefing/cli.py
 kairix/agents/briefing/sources.py
 kairix/agents/curator/cli.py
 kairix/agents/mcp/cli.py
@@ -8,8 +7,6 @@ kairix/core/classify/cli.py
 kairix/core/embed/_pipeline_defaults.py
 kairix/core/embed/cli.py
 kairix/core/search/config_validator.py
-kairix/core/search/rerank.py
-kairix/core/search/vector_repository.py
 kairix/core/temporal/cli.py
 kairix/core/temporal/index.py
 kairix/credentials.py
@@ -21,7 +18,6 @@ kairix/knowledge/store/cli.py
 kairix/knowledge/summaries/cli.py
 kairix/knowledge/wikilinks/cli.py
 kairix/platform/onboard/check.py
-kairix/platform/setup/agent.py
 kairix/platform/setup/wizard.py
 kairix/quality/eval/cli.py
 kairix/secrets.py

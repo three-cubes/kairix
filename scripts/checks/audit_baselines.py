@@ -47,18 +47,36 @@ COVERAGE_FLOOR = 90.0
 
 
 def _coverage_rates(coverage_xml: Path) -> dict[Path, float]:
-    """Parse coverage.xml and return repo-relative path → line rate (0..1)."""
+    """Parse coverage.xml and return repo-relative path → line rate (0..1).
+
+    Cobertura emits ``filename`` relative to ``<source>`` (the source-root
+    declared by pytest-cov). Kairix's pytest-cov target is ``--cov=kairix``,
+    so the source-root is ``kairix/`` and filenames come out as ``foo.py``
+    without the ``kairix/`` prefix. Baselines store repo-relative paths
+    like ``kairix/foo.py``, so we re-prepend the source root(s) from the XML.
+    """
     if not coverage_xml.exists():
         return {}
     tree = ET.parse(coverage_xml)
+    root = tree.getroot()
+    sources = [s.text for s in root.findall(".//sources/source") if s.text]
+    # Reduce source paths to repo-relative prefixes (e.g. /home/.../kairix → "kairix").
+    prefixes = []
+    for src in sources:
+        try:
+            p = Path(src).resolve().relative_to(REPO_ROOT)
+            prefixes.append(str(p))
+        except ValueError:
+            prefixes.append("")
+    if not prefixes:
+        prefixes = [""]
     out: dict[Path, float] = {}
-    for cls in tree.getroot().findall(".//class"):
+    for cls in root.findall(".//class"):
         filename = cls.get("filename", "")
         rate = float(cls.get("line-rate", "0"))
-        # Cobertura emits source-relative paths; kairix's setup means filename
-        # is already "kairix/..." or "tests/...", which matches how baselines
-        # store paths.
-        out[Path(filename)] = rate
+        for prefix in prefixes:
+            full = Path(prefix) / filename if prefix else Path(filename)
+            out[full] = rate
     return out
 
 
