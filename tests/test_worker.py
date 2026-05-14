@@ -16,6 +16,7 @@ from __future__ import annotations
 import signal
 import typing
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -31,6 +32,7 @@ from kairix.worker import (
     run_health_check,
     run_wikilinks_inject,
 )
+from kairix.worker_state import WorkerPhase, WorkerState, write_state
 
 pytestmark = pytest.mark.unit
 
@@ -250,7 +252,7 @@ def test_worker_deps_default_factory_binds_callable_for_every_field() -> None:
     violate F5 (no internal-name imports in tests).
     """
     deps = WorkerDeps()
-    for name in ("embed", "entity_seed", "health_check", "wikilinks", "sleep"):
+    for name in ("embed", "entity_seed", "health_check", "wikilinks", "sleep", "write_state_fn", "read_state_fn"):
         value = getattr(deps, name)
         assert callable(value), (
             f"default_factory for WorkerDeps.{name} must bind a callable; "
@@ -284,7 +286,7 @@ def test_worker_deps_partial_override_preserves_other_defaults() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_shutdown_handler_sets_running_false() -> None:
+def test_shutdown_handler_sets_running_false(tmp_path: Path) -> None:
     """The _shutdown signal handler should set running=False via nonlocal."""
     import os
 
@@ -305,6 +307,8 @@ def test_shutdown_handler_sets_running_false() -> None:
             entity_seed=lambda: None,
             health_check=lambda: [],
             sleep=lambda _s: None,
+            state_path=tmp_path / "worker-state.json",
+            write_state_fn=lambda *_: None,
         ),
         embed_interval=999999,
         entity_seed_interval=999999,
@@ -314,7 +318,7 @@ def test_shutdown_handler_sets_running_false() -> None:
     assert call_count >= 1, "embed was never called"
 
 
-def test_main_loop_runs_embed_on_interval() -> None:
+def test_main_loop_runs_embed_on_interval(tmp_path: Path) -> None:
     """Main loop should run embed when interval has elapsed."""
     import os
 
@@ -344,6 +348,8 @@ def test_main_loop_runs_embed_on_interval() -> None:
             entity_seed=entity_then_noop,
             health_check=health_then_noop,
             sleep=lambda _s: None,
+            state_path=tmp_path / "worker-state.json",
+            write_state_fn=lambda *_: None,
         ),
         # Set all intervals to 0 so every task fires on every loop iteration
         embed_interval=0,
@@ -357,7 +363,7 @@ def test_main_loop_runs_embed_on_interval() -> None:
     assert health_called, "health check should have been called"
 
 
-def test_shutdown_handler_via_sigint() -> None:
+def test_shutdown_handler_via_sigint(tmp_path: Path) -> None:
     """SIGINT should also trigger graceful shutdown."""
     import os
 
@@ -376,6 +382,8 @@ def test_shutdown_handler_via_sigint() -> None:
             entity_seed=lambda: None,
             health_check=lambda: [],
             sleep=lambda _s: None,
+            state_path=tmp_path / "worker-state.json",
+            write_state_fn=lambda *_: None,
         ),
         embed_interval=999999,
         entity_seed_interval=999999,
@@ -419,7 +427,7 @@ def test_run_wikilinks_inject_survives_systemexit() -> None:
     run_wikilinks_inject(deps=WorkerDeps(wikilinks=_exits))  # must not propagate
 
 
-def test_main_loop_calls_wikilinks_at_interval() -> None:
+def test_main_loop_calls_wikilinks_at_interval(tmp_path: Path) -> None:
     """When the wikilinks interval has elapsed, main() invokes it once per cycle."""
     call_counts = {"embed": 0, "wikilinks": 0}
 
@@ -441,6 +449,8 @@ def test_main_loop_calls_wikilinks_at_interval() -> None:
             health_check=lambda: [],
             wikilinks=_wikilinks,
             sleep=lambda _s: None,
+            state_path=tmp_path / "worker-state.json",
+            write_state_fn=lambda *_: None,
         ),
         embed_interval=0,
         entity_seed_interval=999999,
@@ -549,3 +559,321 @@ def test_run_embed_returns_false_on_legacy_none_result() -> None:
     """Legacy stubs returning None must be treated as no-op (back-compat)."""
     deps = WorkerDeps(embed=lambda: None, entity_seed=lambda: None, health_check=lambda: [])
     assert run_embed(deps) is False
+
+
+# ---------------------------------------------------------------------------
+# #224 phase 5 — observable phase transitions persisted to JSON
+# ---------------------------------------------------------------------------
+
+
+def _shutdown_after_first_embed() -> typing.Callable[[], None]:
+    """Build an embed callable that signals shutdown after one call.
+
+    Used by main-loop tests to bound execution to one cycle so they
+    don't run the worker forever.
+    """
+    call_count = {"n": 0}
+
+    def _embed() -> None:
+        call_count["n"] += 1
+        if call_count["n"] >= 1:
+            import os
+
+            # NOSONAR: self-signal so the worker loop exits after one cycle.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    return _embed
+
+
+@pytest.mark.unit
+def test_main_loop_writes_state_on_phase_transition(tmp_path: Path) -> None:
+    """Every phase change calls ``deps.write_state_fn`` with the current state.
+
+    Sabotage proof: if the main loop forgot to ``write_state_fn`` at any
+    transition, the captured phase list would miss STARTING / INGEST /
+    IDLE and the assertion would fail. We exercise startup +
+    one in-loop cycle and assert all three phases appear in order.
+    """
+    state_path = tmp_path / "worker-state.json"
+    captured_phases: list[WorkerPhase] = []
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        captured_phases.append(state.current_phase)
+        # Also persist so the next reader sees the file — keeps the
+        # boot/resume path exercise-able if needed.
+        write_state(state, path)
+
+    deps = WorkerDeps(
+        embed=_shutdown_after_first_embed(),
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    # Boot writes STARTING, then INGEST (before embed), then IDLE (after embed).
+    assert WorkerPhase.STARTING in captured_phases, f"missing STARTING in {captured_phases}"
+    assert WorkerPhase.INGEST in captured_phases, f"missing INGEST in {captured_phases}"
+    assert WorkerPhase.IDLE in captured_phases, f"missing IDLE in {captured_phases}"
+    # Ordering: STARTING precedes the first INGEST.
+    assert captured_phases.index(WorkerPhase.STARTING) < captured_phases.index(WorkerPhase.INGEST)
+
+
+@pytest.mark.unit
+def test_main_loop_writes_state_on_maintenance_transition(tmp_path: Path) -> None:
+    """Entity-seed / health-check / wikilinks paths transition into
+    MAINTENANCE and back to IDLE.
+
+    Sabotage proof: if a maintenance task ran without ``_transition``
+    bracketing, ``MAINTENANCE`` would never appear in the captured list.
+    """
+    state_path = tmp_path / "worker-state.json"
+    captured_phases: list[WorkerPhase] = []
+
+    call_counter = {"embed": 0}
+
+    def _embed() -> None:
+        call_counter["embed"] += 1
+        if call_counter["embed"] >= 2:
+            import os
+
+            # NOSONAR: self-signal to exit the loop after observing maintenance.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        captured_phases.append(state.current_phase)
+
+    deps = WorkerDeps(
+        embed=_embed,
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=0,
+        entity_seed_interval=0,
+        health_check_interval=0,
+        wikilinks_interval=0,
+    )
+
+    assert WorkerPhase.MAINTENANCE in captured_phases, f"maintenance phase never written; got {captured_phases}"
+
+
+@pytest.mark.unit
+def test_main_loop_increments_restart_count_on_reboot(tmp_path: Path) -> None:
+    """A pre-existing state file's ``restart_count`` is incremented on boot.
+
+    Sabotage proof: if the boot path forgot to call ``read_state_fn`` /
+    increment, every state write would carry restart_count=0 and this
+    test would fail when asserting it's ≥ 6.
+    """
+    state_path = tmp_path / "worker-state.json"
+    seed = WorkerState(restart_count=5, embedded_total=100)
+    write_state(seed, state_path)
+
+    captured_restart_counts: list[int] = []
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        captured_restart_counts.append(state.restart_count)
+        write_state(state, path)
+
+    deps = WorkerDeps(
+        embed=_shutdown_after_first_embed(),
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    # Every write after boot should carry restart_count=6 (was 5 on disk).
+    assert captured_restart_counts, "no state writes captured"
+    assert captured_restart_counts[0] == 6, (
+        f"first post-boot write should bump restart_count 5→6; got {captured_restart_counts[0]}"
+    )
+
+
+@pytest.mark.unit
+def test_main_loop_starts_fresh_when_no_prior_state(tmp_path: Path) -> None:
+    """No prior state file → restart_count stays 0; embedded_total starts at 0.
+
+    Pairs with ``test_main_loop_increments_restart_count_on_reboot`` so
+    both branches of the boot-read path are covered.
+    """
+    state_path = tmp_path / "worker-state.json"
+    assert not state_path.exists()
+
+    captured: list[WorkerState] = []
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        # Snapshot a copy of the mutable state at each write.
+        captured.append(
+            WorkerState(
+                current_phase=state.current_phase,
+                restart_count=state.restart_count,
+                embedded_total=state.embedded_total,
+            )
+        )
+
+    deps = WorkerDeps(
+        embed=_shutdown_after_first_embed(),
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    assert captured, "no state writes captured"
+    assert captured[0].restart_count == 0, "fresh boot should start at restart_count=0"
+
+
+@pytest.mark.unit
+def test_main_loop_increments_counters_from_embed_outcome(tmp_path: Path) -> None:
+    """``embedded`` and ``failed`` counters on the embed result accumulate
+    into the persisted ``WorkerState``.
+
+    Sabotage proof: if main() forgot to fold ``outcome.embedded`` into
+    ``state.embedded_total`` the asserted final value would still be 0.
+    """
+    state_path = tmp_path / "worker-state.json"
+
+    class _Result:
+        embedded = 4
+        failed = 2
+        recall_passed = True
+        recall_alert = None
+        diagnostics: typing.ClassVar[list[str]] = []
+        recall_score = 0.9
+
+    embed_call_count = {"n": 0}
+
+    def _embed() -> _Result:
+        embed_call_count["n"] += 1
+        if embed_call_count["n"] >= 1:
+            import os
+
+            # NOSONAR: end the loop after one embed cycle.
+            os.kill(os.getpid(), signal.SIGTERM)
+        return _Result()
+
+    final_states: list[WorkerState] = []
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        final_states.append(
+            WorkerState(
+                current_phase=state.current_phase,
+                embedded_total=state.embedded_total,
+                failed_chunks_total=state.failed_chunks_total,
+            )
+        )
+
+    deps = WorkerDeps(
+        embed=_embed,
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    last = final_states[-1]
+    assert last.embedded_total == 4, f"expected 4 embedded, got {last.embedded_total}"
+    assert last.failed_chunks_total == 2, f"expected 2 failed, got {last.failed_chunks_total}"
+
+
+@pytest.mark.unit
+def test_main_loop_increments_recall_alerts_when_gate_fails(tmp_path: Path) -> None:
+    """``recall_passed=False`` from the embed outcome bumps
+    ``recall_alerts_total``.
+
+    Sabotage proof: drop the ``if outcome.recall_passed is False``
+    branch in main() and this asserts 0 == 1.
+    """
+    state_path = tmp_path / "worker-state.json"
+
+    class _Result:
+        embedded = 1
+        failed = 0
+        recall_passed = False
+        recall_alert = "degraded"
+        diagnostics: typing.ClassVar[list[str]] = []
+        recall_score = 0.1
+
+    embed_count = {"n": 0}
+
+    def _embed() -> _Result:
+        embed_count["n"] += 1
+        if embed_count["n"] >= 1:
+            import os
+
+            # NOSONAR: end loop after one embed.
+            os.kill(os.getpid(), signal.SIGTERM)
+        return _Result()
+
+    captured: list[int] = []
+
+    def _capture(state: WorkerState, path: Path) -> None:
+        captured.append(state.recall_alerts_total)
+
+    deps = WorkerDeps(
+        embed=_embed,
+        entity_seed=lambda: None,
+        health_check=lambda: [],
+        wikilinks=lambda: None,
+        sleep=lambda _s: None,
+        state_path=state_path,
+        write_state_fn=_capture,
+    )
+
+    main(
+        deps=deps,
+        embed_interval=999999,
+        entity_seed_interval=999999,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    assert captured[-1] == 1, f"expected one recall alert, got {captured[-1]}"
