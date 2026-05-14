@@ -92,7 +92,7 @@ class SearchPipeline:
 
         # 1. Classify intent
         try:
-            intent = self.classifier.classify(query)  # type: ignore[union-attr]
+            intent = self.classifier.classify(query)  # type: ignore[union-attr] — classifier may be None when graph backend unavailable; guarded by outer try
         except Exception as e:
             _logger.warning("pipeline: classify failed — %s", e)
             intent = QueryIntent.SEMANTIC

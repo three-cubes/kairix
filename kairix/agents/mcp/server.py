@@ -406,7 +406,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         from mcp.server.fastmcp import FastMCP
     # The ImportError branch is reachable only when the optional ``mcp`` extra
     # is not installed; the test suite always installs it via ``kairix[agents]``.
-    except ImportError as exc:  # pragma: no cover
+    except ImportError as exc:  # pragma: no cover — optional 'mcp' extra; tests always install kairix[agents]
         raise ImportError(
             "The 'mcp' package is required to run the MCP server. Install it with: pip install 'kairix[agents]'"
         ) from exc

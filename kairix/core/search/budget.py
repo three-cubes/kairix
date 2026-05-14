@@ -264,7 +264,7 @@ def _get_content_for_tier(
 # ---------------------------------------------------------------------------
 
 
-class _DefaultSummaryLoader:  # pragma: no cover
+class _DefaultSummaryLoader:  # pragma: no cover — Phase-2 prod loader; tests inject FakeSummaryLoader
     """Production ``SummaryLoader`` — opens the summaries DB lazily on first use."""
 
     def __init__(self) -> None:
@@ -297,7 +297,7 @@ class _DefaultSummaryLoader:  # pragma: no cover
 _summaries_warned = False
 
 
-def _open_summaries_db() -> sqlite3.Connection | None:  # pragma: no cover
+def _open_summaries_db() -> sqlite3.Connection | None:  # pragma: no cover — real SQLite; tests use FakeSummaryLoader
     """Open the summaries DB at the configured path, or return None."""
     global _summaries_warned
     from kairix.paths import summaries_db_path

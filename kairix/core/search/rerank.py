@@ -46,7 +46,9 @@ def _get_cross_encoder(model: str):
         return _cross_encoder
     _cross_encoder_checked = True
     try:
-        from sentence_transformers import CrossEncoder  # type: ignore[import-untyped]
+        from sentence_transformers import (
+            CrossEncoder,  # type: ignore[import-untyped] — sentence-transformers has no upstream type stubs
+        )
 
         _cross_encoder = CrossEncoder(model)
         logger.info("rerank: loaded cross-encoder model %r", model)

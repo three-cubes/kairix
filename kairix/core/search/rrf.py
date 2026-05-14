@@ -337,7 +337,7 @@ def _build_entity_index(
     """
     empty: tuple[dict[str, int], dict[str, int], dict[str, int], int] = ({}, {}, {}, 0)
     try:
-        rows = neo4j_client.cypher(  # type: ignore[union-attr]
+        rows = neo4j_client.cypher(  # type: ignore[union-attr] — neo4j_client typed as object; cypher() is duck-typed and exception-guarded
             "MATCH (n) WHERE n.vault_path IS NOT NULL AND n.vault_path <> '' "
             "OPTIONAL MATCH ()-[:MENTIONS]->(n) "
             "RETURN n.vault_path AS vault_path, n.name AS name, labels(n) AS labels, count(*) AS in_degree"

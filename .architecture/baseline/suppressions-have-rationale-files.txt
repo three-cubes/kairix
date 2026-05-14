@@ -1,13 +1,3 @@
-kairix/agents/mcp/server.py
-kairix/core/embed/schema.py
-kairix/core/search/bm25.py
-kairix/core/search/budget.py
-kairix/core/search/config_loader.py
-kairix/core/search/pipeline.py
-kairix/core/search/rerank.py
-kairix/core/search/rrf.py
-kairix/knowledge/entities/filters.py
-kairix/knowledge/entities/validate.py
 kairix/quality/eval/cli.py
 kairix/quality/eval/gold_builder.py
 kairix/quality/eval/monitor.py

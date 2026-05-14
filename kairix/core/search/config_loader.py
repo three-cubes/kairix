@@ -117,8 +117,8 @@ def _load_cached(config_path: Path | None) -> RetrievalConfig:
     # PyYAML is a hard dependency in pyproject.toml; the ImportError fallback
     # only fires in production builds where the optional extras are stripped.
     try:
-        import yaml  # type: ignore[import-untyped]
-    except ImportError:  # pragma: no cover
+        import yaml  # type: ignore[import-untyped] — PyYAML ships without type stubs upstream
+    except ImportError:  # pragma: no cover — PyYAML is a hard dep in pyproject; only fires in stripped builds
         logger.warning("config_loader: PyYAML not installed — using defaults")
         return RetrievalConfig.defaults()
 

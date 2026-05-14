@@ -284,7 +284,7 @@ def bm25_search(
     # Delegate to DocumentRepository when provided
     if doc_repo is not None:
         try:
-            raw = doc_repo.search_fts(query, collections=collections, limit=limit)  # type: ignore[union-attr]
+            raw = doc_repo.search_fts(query, collections=collections, limit=limit)  # type: ignore[union-attr] — doc_repo is checked non-None on line above; mypy can't narrow across try
             results = [
                 BM25Result(
                     file=r.get("file", r.get("path", "")),

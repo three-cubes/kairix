@@ -3,7 +3,7 @@
 Composing these filters in order via :class:`ChainedSuggestionFilter` produces
 the entity-suggest correction pipeline that fixes the dogfood-reported bug
 where role phrases (e.g., "the APAC GTM") leaked through as ``ORG`` and
-known entities the small NER model doesn't recognise (e.g., "Avanade",
+short proper-noun acronyms the small NER model doesn't recognise (e.g.,
 "MIT") were silently dropped.
 
 Each filter is a self-contained Strategy: no if/elif dispatch on type,
@@ -147,8 +147,8 @@ class NerLabelFilter:
         new_label = self._lookup_override(text)
         if new_label is None:
             # Pass through — return a shallow copy to avoid aliasing.
-            return dict(suggestion)  # type: ignore[return-value]
-        updated: Suggestion = dict(suggestion)  # type: ignore[assignment]
+            return dict(suggestion)  # type: ignore[return-value]  # dict() loses TypedDict narrowing; runtime matches Suggestion
+        updated: Suggestion = dict(suggestion)  # type: ignore[assignment]  # dict() loses TypedDict narrowing; runtime matches Suggestion
         updated["label"] = new_label
         return updated
 
