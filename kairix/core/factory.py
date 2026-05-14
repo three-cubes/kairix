@@ -68,10 +68,63 @@ def _resolve_retrieval_config(config: RetrievalConfig | None) -> RetrievalConfig
     return load_config()
 
 
+class _NullVectorRepository:
+    """No-op VectorRepository fallback for degraded deployments.
+
+    Production fallback when the usearch index is missing or fails to load.
+    Returns empty result sets so the rest of the SearchPipeline can continue
+    in BM25-only mode. Defined inline (not in ``tests/fakes.py``) because
+    production code must never import from ``tests/`` — the directory is
+    not shipped in the installable wheel.
+    """
+
+    def search(
+        self,
+        query_vec: list[float],
+        k: int,
+        collections: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        # Reference args so F19 (unused-params-named) sees them as used.
+        # Names are fixed by the production caller (backends.py:94 uses
+        # ``k=`` and ``collections=`` keyword arguments).
+        _ = (query_vec, k, collections)
+        return []
+
+    def add_vectors(self, items: list[tuple[str, list[float]]]) -> int:
+        _ = items
+        return 0
+
+    def count(self) -> int:
+        return 0
+
+
+class _NullGraphRepository:
+    """No-op GraphRepository fallback for degraded deployments.
+
+    Production fallback when Neo4j is unreachable or its driver fails.
+    Reports ``available=False`` so entity-boost callers route around it.
+    Defined inline for the same reason as :class:`_NullVectorRepository`.
+    """
+
+    @property
+    def available(self) -> bool:
+        return False
+
+    def find_entity(self, name: str) -> dict[str, Any] | None:
+        _ = name
+        return None
+
+    def entity_in_degrees(self) -> list[dict[str, Any]]:
+        return []
+
+    def cypher(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        _ = (query, params)
+        return []
+
+
 def _build_vector_repo() -> Any:
-    """Construct the usearch vector repo, falling back to an empty fake on failure."""
+    """Construct the usearch vector repo, falling back to a null repo on failure."""
     from kairix.core.search.vector_repository import UsearchVectorRepository
-    from tests.fakes import FakeVectorRepository
 
     try:
         from kairix.core.search.vec_index import get_vector_index
@@ -82,21 +135,19 @@ def _build_vector_repo() -> Any:
         logger.warning("factory: usearch index not available — vector search disabled")
     except Exception as e:
         logger.warning("factory: failed to load vector index — %s", e)
-    return FakeVectorRepository()
+    return _NullVectorRepository()
 
 
 def _build_graph() -> Any:
-    """Construct the Neo4j graph repo, falling back to an unavailable fake on failure."""
+    """Construct the Neo4j graph repo, falling back to a null repo on failure."""
     try:
         from kairix.knowledge.graph.client import get_client
         from kairix.knowledge.graph.repository import Neo4jGraphRepository
 
         return Neo4jGraphRepository(client=get_client())
     except Exception as e:
-        from tests.fakes import FakeGraphRepository
-
         logger.warning("factory: Neo4j unavailable — %s", e)
-        return FakeGraphRepository(available=False)
+        return _NullGraphRepository()
 
 
 def _build_fusion(cfg: RetrievalConfig) -> Any:
