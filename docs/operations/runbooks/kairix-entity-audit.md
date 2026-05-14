@@ -6,7 +6,7 @@
 
 **Warning:** Step 4 (safe purge) is destructive. It runs in dry-run mode by default and the runbook keeps it that way until the captured report has been reviewed. Never skip the dry-run.
 
-**Replaces:** the retired Mnemosyne `entity-audit.py` practice. Kairix's surfaces are different — primarily `kairix curator health`, `kairix store health`, and `scripts/prune-entities.py` — so the procedure is rebuilt from those, not ported.
+**Replaces:** the retired Mnemosyne `entity-audit.py` practice. Kairix's surfaces are different — primarily `kairix entity count`, `kairix curator health`, `kairix store health`, and `scripts/prune-entities.py` — so the procedure is rebuilt from those, not ported.
 
 ---
 
@@ -43,10 +43,13 @@ Snapshot the graph before you touch it so you can compare after.
 kairix onboard check --json > /tmp/kairix-onboard-pre.json
 jq '{ok, neo4j, vector_index, document_root}' /tmp/kairix-onboard-pre.json
 
-# Entity counts by type (the closest surface kairix exposes today to a
-# pure ``kairix entity count`` command; see "Gaps" at the bottom)
+# Entity counts by type (#259 — pure count surface)
+kairix entity count --json > /tmp/kairix-entity-count-pre.json
+jq '{total, by_type}' /tmp/kairix-entity-count-pre.json
+
+# Store-level health for synthesis/error context (kept alongside the count)
 kairix store health --json > /tmp/kairix-store-pre.json
-jq '{ok, total_entities, entities_by_type, errors}' /tmp/kairix-store-pre.json
+jq '{ok, errors}' /tmp/kairix-store-pre.json
 
 # Curator-level health: synthesis failures + stale + missing vault_path
 kairix curator health --format json --output /tmp/kairix-curator-pre.json
@@ -130,12 +133,8 @@ kairix curator health --format json --output /tmp/kairix-curator-enrich.json
 jq '.synthesis_failures | map({name, entity_type, entity_id})' \
    /tmp/kairix-curator-enrich.json
 
-# Surface 2: store health — entities with no edges, no source attribution
-kairix store health --json | jq '{
-  ok,
-  total_entities,
-  by_type: .entities_by_type
-}'
+# Surface 2: entity count — totals + by-type rollup (#259)
+kairix entity count --json | jq '{total, by_type}'
 ```
 
 For entities flagged in `synthesis_failures` that you want to keep, run validation against Wikidata:
@@ -217,11 +216,12 @@ Re-run the baseline captures from Step 0 and diff:
 ```bash
 # Capture the post-audit state
 kairix onboard check --json > /tmp/kairix-onboard-post.json
+kairix entity count --json > /tmp/kairix-entity-count-post.json
 kairix store health --json > /tmp/kairix-store-post.json
 kairix curator health --format json --output /tmp/kairix-curator-post.json
 
 # Compare entity totals — total should drop by exactly the prune count
-jq '.total_entities' /tmp/kairix-store-pre.json /tmp/kairix-store-post.json
+jq '.total' /tmp/kairix-entity-count-pre.json /tmp/kairix-entity-count-post.json
 
 # Compare issue counts — should drop, never rise
 jq '{
@@ -268,7 +268,6 @@ Some surfaces this runbook would benefit from do not exist today. Where the runb
 
 | Wanted surface | Closest substitute today | Gap issue |
 |---|---|---|
-| `kairix entity count` (just the number, no extra) | `kairix store health --json \| jq '.total_entities'` | filed |
 | `kairix entity audit` (one-shot audit covering Steps 1-4) | curator health + prune-entities.py + entity get loop | filed |
 | `kairix entity purge --dry-run / --execute` (proper CLI, not a script) | `scripts/prune-entities.py` | filed |
 | `kairix store crawl --reset` (drop-and-rebuild in one command) | manual `MATCH (n) DETACH DELETE n` + `kairix store crawl` | filed |

@@ -62,6 +62,10 @@ class FakeNeo4jClient:
             return [{"label": "Organisation", "cnt": len(self._entities)}]
         if "last_seen IS NOT NULL" in query:
             return []
+        if "labels(n) AS labels" in query and "count(n) AS count" in query:
+            # `kairix entity count` (#259): one row per entity, primary
+            # label first. The CLI sums in Python.
+            return [{"labels": [e.get("label", "")], "count": 1} for e in self._entities]
         return self._entities
 
     def find_by_name(self, name: str) -> list[dict]:
