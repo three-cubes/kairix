@@ -246,6 +246,18 @@ temporal = 0.55
 entity = 0.80
 contextual_prep = 0.60
 
+# ── check-wheel-contents ─────────────────────────────────────────────────────
+# The PyPI publish workflow runs ``check-wheel-contents`` via
+# hynek/build-and-inspect-python-package. It flags W004 ("module is not
+# located at importable path") on ``kairix/plugins/openclaw/memory-prompt/
+# plugin.py`` because the hyphenated directory cannot be a Python module.
+# That's intentional — the directory is package-data shipped to openclaw's
+# plugin loader (see [tool.setuptools.package-data] above for the rationale).
+# We exempt W004 globally; the alternative is renaming the file away from
+# ``plugin.py``, which openclaw expects verbatim.
+[tool.check-wheel-contents]
+ignore = ["W004"]
+
 # ── setuptools-scm — version derived from git tags ─────────────────────────
 # No manual version editing. Tagged commits = clean version (2026.4.28).
 # Untagged commits = dev version (2026.4.28.dev3 = 3 commits since tag).
