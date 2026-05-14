@@ -88,6 +88,9 @@ python3 "${SCRIPT_DIR}/check_path_naming.py" || overall=1
 # F23 — every top-level directory has a README.md
 python3 "${SCRIPT_DIR}/check_readme_coverage.py" || overall=1
 
+# F24 — no imports of tests.* in kairix production code
+python3 "${SCRIPT_DIR}/check_no_test_imports_in_prod.py" || overall=1
+
 # F7 — needs coverage.xml. Skip if not present or skip flag set.
 if [[ "$skip_coverage" -eq 0 ]]; then
     if [[ -f "${REPO_ROOT}/coverage.xml" ]]; then

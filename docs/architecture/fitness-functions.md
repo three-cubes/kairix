@@ -174,6 +174,7 @@ fully enforced; new violations anywhere in the codebase block.
 | F21 | Check-script failure output must carry an action marker (`fix:`, `next:`, `run:`) | structural | Python AST + shell regex | pre-commit, safe-commit, CI Stage 0 | `actionable-feedback-files.txt` |
 | F22 | Repo paths follow per-tree naming conventions | structural | Python (regex per tree) | pre-commit, safe-commit, CI Stage 0 | `path-naming-files.txt` (empty — clean) |
 | F23 | Every top-level directory has a `README.md` | structural | Python (filesystem walk) | pre-commit, safe-commit, CI Stage 0 | `readme-coverage-files.txt` |
+| F24 | No `from tests.*` / `import tests` imports in `kairix/**/*.py` | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-test-imports-in-prod-files.txt` (empty — clean) |
 
 ---
 
@@ -1683,6 +1684,94 @@ Then delete the corresponding line from
 `.architecture/baseline/readme-coverage-files.txt`. The baseline is
 expected to shrink monotonically.
 
+### F24 — No imports of `tests.*` in `kairix/` production code
+
+#### Statement
+
+Production code under `kairix/**/*.py` MUST NOT contain any
+`from tests.<...> import <...>` or `import tests[...]` statement.
+The `tests/` package is excluded from the published wheel by
+`setuptools` packaging configuration — any production reference to
+`tests.*` works on a dev checkout (where pytest puts the repo root
+on `sys.path`) but raises `ModuleNotFoundError: No module named
+'tests'` the moment an end user `pip install`s kairix.
+
+This rule was created in response to the v2026.5.15.1 → v2026.5.15.2
+incident: a production module had `from tests.fakes import
+FakeVectorRepository` as a default-parameter import. CI was green
+(tests run from the repo, `tests/` is importable). The first end
+user who ran the installed wheel hit a boot-time crash. F24 codifies
+that mistake into a mechanical gate. Issue #266.
+
+#### Why
+
+The wheel doesn't ship `tests/`. Anything in `tests/fakes.py` or
+`tests/conftest.py` is invisible to a `pip install` user. Imports of
+`tests.*` in production therefore break the installed posture, even
+though they "work" locally. The only way to catch this *before*
+release is to forbid the import shape outright — by the time it
+shows up in a release-candidate smoke test, the dogfood loop has
+already swallowed the noise.
+
+#### Detection
+
+`scripts/checks/check_no_test_imports_in_prod.py`. AST-walks every
+`kairix/**/*.py` file:
+
+  - `ast.ImportFrom` where `node.module` is `"tests"` or starts with
+    `"tests."` → flagged.
+  - `ast.Import` where any `alias.name` is `"tests"` or starts with
+    `"tests."` → flagged.
+
+The baseline at
+`.architecture/baseline/no-test-imports-in-prod-files.txt` ships
+empty — the v2026.5.15.2 release cleaned out the only known
+violation. Net-new violations block at pre-commit, in
+`safe-commit.sh`, and in CI Stage 0.
+
+#### Examples
+
+Rejected:
+
+```python
+# kairix/core/search/pipeline.py
+from tests.fakes import FakeVectorRepository      # tests/ not in wheel
+import tests                                      # ditto
+from tests import fakes                           # ditto
+from tests.fixtures.docs import SAMPLE_PAYLOAD    # ditto, deeper path
+```
+
+Allowed:
+
+```python
+# kairix/core/search/pipeline.py
+from kairix.core.vector.null import NullVectorRepository
+from kairix.core.protocols import VectorRepository
+import json
+```
+
+#### Fix pattern
+
+Move the symbol you needed out of `tests/` and into `kairix/`. The
+common case is a production-quality default implementation that was
+living in `tests/fakes.py` — re-home it under `kairix/` (for example
+as a `NullX` / `InMemoryX` in the relevant domain package) so it
+ships with the wheel. If the import was for a test seam, the
+production code shouldn't carry that seam at all — inject the
+dependency via a constructor argument and let the test pass the
+fake explicitly (the canonical kairix pattern).
+
+After fixing, verify from the installed-wheel posture, not just the
+repo:
+
+```
+pip install -e .
+python -c "import kairix.<your-module>"
+```
+
+That mirrors what the dogfood and release smoke tests do, and proves
+the import works without `tests/` on `sys.path`.
+
 ---
 
 ## SDLC integration map
@@ -2235,5 +2324,12 @@ fitness_functions:
     script: scripts/checks/check_bdd_no_implementation_leaks.py
     baseline: .architecture/baseline/bdd-no-implementation-leaks-files.txt
     precommit_hook: arch-bdd-no-implementation-leaks
+    layer: [pre-commit, safe-commit, ci-stage0]
+
+  - id: F24
+    name: no-test-imports-in-prod
+    script: scripts/checks/check_no_test_imports_in_prod.py
+    baseline: .architecture/baseline/no-test-imports-in-prod-files.txt
+    precommit_hook: arch-no-test-imports-in-prod
     layer: [pre-commit, safe-commit, ci-stage0]
 ```

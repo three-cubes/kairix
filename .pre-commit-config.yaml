@@ -184,3 +184,10 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+      - id: arch-no-test-imports-in-prod
+        name: "arch F24: no imports of tests.* in kairix production code"
+        entry: python3 scripts/checks/check_no_test_imports_in_prod.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$

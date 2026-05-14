@@ -295,7 +295,7 @@ pytest tests/                      # bare test run
 ruff check kairix/ tests/          # lint only
 ```
 
-`scripts/safe-commit.sh` is the single entry point — it runs every gate the CI runs in the same order before letting the commit through; failing gates print the exact fix command. See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture and PR process, and [docs/architecture/fitness-functions.md](docs/architecture/fitness-functions.md) for the F1–F23 architecture fitness functions that enforce structural invariants.
+`scripts/safe-commit.sh` is the single entry point — it runs every gate the CI runs in the same order before letting the commit through; failing gates print the exact fix command. See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture and PR process, and [docs/architecture/fitness-functions.md](docs/architecture/fitness-functions.md) for the F1–F24 architecture fitness functions that enforce structural invariants.
 
 ---
 

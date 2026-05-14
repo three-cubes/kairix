@@ -66,6 +66,7 @@ Mechanical, blocking checks encode rejected patterns into automation:
 - **F21** every `scripts/checks/check_*.{py,sh}` failure-output string carries at least one of the lowercase action markers `fix:`, `next:`, or `run:` — so the agent reading a gate failure gets the correction action, not just the diagnosis (#258 convergence with tc-agent-zone).
 - **F22** repo paths follow per-tree naming conventions — `kairix/**/*.py` snake_case, `tests/**/test_*.py`, `tests/bdd/features/*.feature` snake_case, `scripts/checks/check_*.{py,sh}`, `docs/**/runbooks/*.md` kebab-case, `.architecture/baseline/<rule>-files.txt` (#258).
 - **F23** every top-level directory has a `README.md` resolver — landing on `docs/`, `tests/`, `kairix/`, etc. via a path mention must hit a one-screen orientation, not a bare directory listing (#258).
+- **F24** no `from tests.*` / `import tests` imports inside `kairix/**/*.py` — `tests/` isn't shipped in the published wheel, so any production import of `tests.<x>` works locally but `ModuleNotFoundError`s the moment an end user `pip install`s kairix (#266; codifies the v2026.5.15.1 → v2026.5.15.2 incident).
 
 Pre-existing violations are grandfathered in `.architecture/baseline/`; net-new violations block at pre-commit, in `safe-commit.sh`, and in CI's Stage 0 (or Stage 5 for F9). **Canonical reference:** [docs/architecture/fitness-functions.md](docs/architecture/fitness-functions.md). Read this before adding any silencer, skip, suppression, internal import, or BDD scenario — the gate will reject lazy bypasses.
 

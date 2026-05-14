@@ -38,7 +38,7 @@ Every merge to `main` must pass all four CI stages. No exceptions without a docu
 | Architecture fitness functions (holistic) | F9 (unit ∪ integration coverage union ≥ 90%) | Zero net-new violations | ✅ Yes |
 | Build | pip install -e . | Succeeds | ✅ Yes |
 
-**Architecture fitness functions (F1–F23)** are mechanical, blocking checks that encode rejected patterns (e.g. forbidden monkeypatching, internal-name imports in tests, unmarked tests, logging of secret-named variables, repo path-naming conventions, README resolver coverage). They run at three layers — pre-commit, `safe-commit.sh`, and CI Stage 0 (F9 in Stage 5). Pre-existing violations are grandfathered in `.architecture/baseline/`; net-new violations block. Canonical reference: [`fitness-functions.md`](./fitness-functions.md).
+**Architecture fitness functions (F1–F24)** are mechanical, blocking checks that encode rejected patterns (e.g. forbidden monkeypatching, internal-name imports in tests, unmarked tests, logging of secret-named variables, repo path-naming conventions, README resolver coverage, no production imports from `tests/`). They run at three layers — pre-commit, `safe-commit.sh`, and CI Stage 0 (F9 in Stage 5). Pre-existing violations are grandfathered in `.architecture/baseline/`; net-new violations block. Canonical reference: [`fitness-functions.md`](./fitness-functions.md).
 
 **Per-file coverage floor (mechanical, F7):** every `kairix/*` source file must clear 90% line coverage (ratcheted from 85% in v2026.5.15 after F7 baseline closed to zero). Pre-existing violations are grandfathered in `.architecture/baseline/per-file-coverage-floor-files.txt`; new files must land at ≥ 90% from day one. The aggregate 88% pytest-cov `fail_under` gate is a backstop.
 
