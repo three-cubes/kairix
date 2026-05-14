@@ -83,3 +83,36 @@ class TestWriteBriefing:
     def test_returns_path_object(self, tmp_path):
         result = write_briefing("builder", "content", output_dir=tmp_path)
         assert isinstance(result, Path)
+
+    @pytest.mark.unit
+    def test_oserror_is_re_raised_when_target_path_is_a_directory(self, tmp_path, caplog):
+        """When write_text() fails, write_briefing logs and re-raises OSError.
+
+        The function deliberately catches OSError only to log it, then
+        re-raises so the caller (briefing pipeline) sees the failure
+        instead of silently swallowing it. We trigger the failure by
+        pre-creating the would-be output file path as a directory:
+        ``output_dir / "{agent}-latest.md"`` is then a directory, and
+        ``Path.write_text`` raises ``IsADirectoryError`` (an OSError
+        subclass) when it tries to open it for write.
+        """
+        import logging
+
+        # The output path the writer computes is output_dir / "{agent}-latest.md".
+        # Pre-create THAT exact path as a directory so write_text fails.
+        clashing_path = tmp_path / "builder-latest.md"
+        clashing_path.mkdir()
+
+        with caplog.at_level(logging.ERROR, logger="kairix.agents.briefing.writer"):
+            with pytest.raises(OSError):
+                write_briefing(
+                    "builder",
+                    "content",
+                    sources_count=1,
+                    token_estimate=10,
+                    output_dir=tmp_path,
+                )
+
+        assert any("failed to write briefing" in rec.message for rec in caplog.records), (
+            "expected an error log when write_text raises"
+        )

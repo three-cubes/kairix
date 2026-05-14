@@ -127,3 +127,31 @@ def test_probe_passes_default_when_no_callables_injected() -> None:
     """
     probe = build_capability_probe()
     assert callable(probe)
+
+
+def test_default_check_helpers_return_check_result_shape() -> None:
+    """Invoking the probe with NO injected callables exercises the production defaults.
+
+    The two default helpers (``_default_secrets_check`` and
+    ``_default_vector_check``) lazy-import ``onboard.check`` on first
+    call. Both onboard helpers wrap their work in try/except and return
+    a CheckResult either way, so the probe is safe to invoke even in a
+    barebones test environment without LLM credentials or a usearch
+    index. This test pins that contract: the default code path completes
+    and produces the documented dict shape with bool capability flags.
+    """
+    probe = build_capability_probe()
+    result = probe()
+
+    # Shape contract — every key the /healthz/ready endpoint relies on.
+    assert set(result.keys()) == {
+        "secrets_loaded",
+        "vector_search_capable",
+        "bm25_search_capable",
+        "detail",
+    }, f"unexpected probe keys: {sorted(result.keys())}"
+    assert isinstance(result["secrets_loaded"], bool)
+    assert isinstance(result["vector_search_capable"], bool)
+    # BM25 is implicit / always True.
+    assert result["bm25_search_capable"] is True
+    assert isinstance(result["detail"], dict)
