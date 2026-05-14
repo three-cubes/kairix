@@ -56,8 +56,21 @@ _VALID_RANGES: dict[str, tuple[float, float]] = {
 }
 
 
-def _resolve_config_path() -> Path | None:
-    """Find the config file path from env var or working directory."""
+def _resolve_config_path(explicit: Path | str | None = None) -> Path | None:
+    """Find the config file path.
+
+    Resolution order:
+      1. ``explicit`` kwarg if provided (test seam — F2-clean alternative to
+         monkeypatching ``KAIRIX_CONFIG_PATH``).
+      2. ``KAIRIX_CONFIG_PATH`` env var.
+      3. ``kairix.config.yaml`` in the current working directory.
+    """
+    if explicit is not None:
+        p = Path(explicit)
+        if p.is_file():
+            return p
+        logger.warning("config_loader: explicit config path %r not found — using defaults", str(explicit))
+        return None
     env_path = os.environ.get("KAIRIX_CONFIG_PATH")
     if env_path:
         p = Path(env_path)
@@ -127,16 +140,21 @@ def _load_cached(config_path: Path | None) -> RetrievalConfig:
         return RetrievalConfig.defaults()
 
 
-def load_config() -> RetrievalConfig:
+def load_config(config_path: Path | str | None = None) -> RetrievalConfig:
     """
     Load RetrievalConfig from YAML file or return defaults.
 
     Call this once at startup. Result is cached per process.
 
+    Args:
+        config_path: Optional explicit config-file path (test seam).
+            When None, resolves via ``KAIRIX_CONFIG_PATH`` env var, then
+            ``kairix.config.yaml`` in cwd.
+
     Raises:
         ConfigValidationError: if the config file contains out-of-range values.
     """
-    path = _resolve_config_path()
+    path = _resolve_config_path(config_path)
     if path is not None:
         logger.info("config_loader: loading config from %s", path)
     return _load_cached(path)
