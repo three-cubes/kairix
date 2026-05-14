@@ -32,6 +32,18 @@ Every agent runs `safe-commit.sh` in its loop and only commits (and pushes, in n
 
 **Worktree isolation hygiene (#208, upstream anthropics/claude-code#59019).** Subagents dispatched with `isolation="worktree"` MUST stay inside their assigned worktree for all file writes. Do NOT `cd` to the primary checkout or to another worktree. Symptom of failed isolation: untracked files appear in the primary checkout that mirror paths the subagent claims to have written in its own worktree. Orchestrator-side defense: before each `git cherry-pick <subagent-sha>`, run `python3 scripts/checks/check_worktree_isolation.py` (use `--clean` to delete shadow copies in the primary). The subagent's commit is the canonical source; the primary's untracked copy is the stale shadow.
 
+**Primary-agent review gate before every cherry-pick.** Mechanical gates (`safe-commit.sh`, pre-commit, CI) catch *correctness*. The primary agent is the gate for *intent* — that the subagent's diff matches the dispatch brief and the project's invariants. Before `git cherry-pick <subagent-sha>`, read the diff and apply this checklist, then document the pass in the cherry-pick body or post a short rationale on the PR:
+
+- ☐ **Scope** — diff matches the dispatched task; no scope creep (renames, refactors, doc edits the brief didn't authorise)
+- ☐ **Sabotage** — every new `test_*` has a sabotage-proof noted in the agent's report (mutate prod → confirm fail → restore); spot-check one
+- ☐ **Baselines** — no F-rule baseline grew unless the commit body explicitly explains why
+- ☐ **Worktree** — `python3 scripts/checks/check_worktree_isolation.py` reports clean (no shadow copies in primary)
+- ☐ **Affordance** — any new pipeline-blocking message follows the "X found. Refactor to YYY to pass." template with Pass + Forbidden examples (F15 is the reference)
+
+Failing any check: send the subagent back with a `SendMessage` correction or reject and re-dispatch with tighter brief. Don't paper over with manual edits at cherry-pick time.
+
+**Human gate on PR *creation*, not just merge.** Per `feedback_release_hitl` memory: don't push to `main`, merge `develop→main`, or cut releases without explicit per-action authorisation. Extend to release-PR opening: do NOT run `gh pr create` against `main` (or any user-visible PR for review) without the human saying "open it." Draft the body locally, present it, wait for green-light. Same gate, earlier — so the human sees the framing before the PR exists, not just before it merges.
+
 ## Naming
 
 - Code: `snake_case` functions, `PascalCase` classes, `UPPER_SNAKE_CASE` constants
