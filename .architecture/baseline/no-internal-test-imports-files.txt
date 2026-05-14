@@ -1,5 +1,4 @@
 tests/bdd/steps/recall_steps.py
-tests/contracts/test_eval_protocols.py
 tests/search/test_config_loader.py
 tests/store/test_crawler.py
 tests/test_paths.py
