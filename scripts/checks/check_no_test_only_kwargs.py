@@ -29,15 +29,37 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _arch_lib import REPO_ROOT, gate, python_files, repo_relative
 
-REMEDIATION = """Refactor:
-  - If the function has multiple stateful collaborators, extract a class and
-    take them as constructor kwargs (same shape as GoldBuilder's
-    llm_judge=, retriever=, db_path=).
-  - If the function is a Protocol Adapter, declare the dependency at the
-    Protocol level and inject the implementation at the boundary (factory).
-  - If the parameter exists ONLY for test substitution, delete it and
-    refactor the test to drive through the public surface that constructs
-    the right collaborator."""
+REMEDIATION = """Refactor to a dataclass with ``field(default_factory=...)``
+on a Deps class — the canonical shape is ``kairix/worker.py::WorkerDeps``
+— to pass.
+
+The legitimate seam is **constructor injection on a Deps class**, NOT a
+per-helper ``_fn=None`` parameter on free functions. Tests pass an
+overridden Deps; production gets the default factory.
+
+Pass example:
+  # kairix/worker.py
+  @dataclass
+  class WorkerDeps:
+      embed: Callable[[], Any] = field(default_factory=lambda: _default_embed)
+      sleep: Callable[[float], None] = field(default_factory=lambda: time.sleep)
+
+  def run_worker(deps: WorkerDeps = None) -> None:
+      deps = deps or WorkerDeps()
+      deps.embed()
+
+  # in a test
+  fake = WorkerDeps(embed=lambda: 'fake-embed', sleep=lambda _: None)
+  run_worker(deps=fake)
+
+Forbidden example:
+  def run_worker(embed_fn=None, sleep_fn=None) -> None:
+      embed_fn = embed_fn or _default_embed
+      ...
+
+If the parameter exists ONLY for test substitution, delete it and
+refactor the test to drive through the public surface that constructs
+the right collaborator."""
 
 
 _ALLOW_FILE = REPO_ROOT / ".architecture" / "baseline" / "test-only-kwargs-allow.txt"

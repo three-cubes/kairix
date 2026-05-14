@@ -12,9 +12,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "${SCRIPT_DIR}/../.." || exit 2
 
-REMEDIATION="Refactor: pass paths as a constructor argument or use FakePaths
-from tests/fakes.py. The production code must not require process-env
-mutation to be testable — that's the test-shaped-API smell #139 reverted."
+REMEDIATION="Refactor to constructor-injected FakePaths from tests/fakes.py
+(no monkeypatch.setenv / setattr / delenv on KAIRIX_* keys) to pass.
+
+KAIRIX_* env-var reads happen ONCE at the boundary inside KairixPaths
+(kairix/paths.py). Tests construct paths directly; they never mutate
+process env to influence the production read.
+
+Pass example:
+  paths = FakePaths(data_dir=tmp_path, log_dir=tmp_path / 'logs')
+  result = some_use_case(paths=paths)
+
+Forbidden example:
+  monkeypatch.setenv('KAIRIX_DATA_DIR', str(tmp_path))
+  result = some_use_case()
+
+If the production code requires process-env mutation to be testable,
+that is the test-shaped-API smell from #139 — refactor the production
+function to accept ``paths: KairixPaths`` as an explicit argument."
 
 # Delegate to AST-based detector (resolves #217 — grep matched docstring text).
 python3 "${SCRIPT_DIR}/check_no_env_monkeypatch.py" \

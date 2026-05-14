@@ -30,22 +30,38 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _arch_lib import gate, python_files, repo_relative
 
-REMEDIATION = """Add a rationale to every test-skip mechanism:
+REMEDIATION = """Refactor to add a ``reason=`` kwarg to each skip/skipif/xfail
+(or an adjacent ``#`` comment to each importorskip) — or delete the skip
+entirely and fix the underlying issue — to pass.
 
-  @pytest.mark.skip(reason="…")
-  @pytest.mark.skipif(condition, reason="…")
-  @pytest.mark.xfail(reason="…", strict=True)
-  pytest.importorskip("X", reason="…")
-  # OR: pytest.importorskip("X")  # <why optional dependency is correct here>
+Pass example:
+  @pytest.mark.skip(reason="re-enabled once #214 lands")
+  def test_xyz(): ...
+
+  @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only path")
+  def test_paths(): ...
+
+  @pytest.mark.xfail(reason="known flake on macOS CI runners", strict=True)
+  def test_flaky(): ...
+
+  starlette = pytest.importorskip("starlette", reason="MCP transport is optional")
+  # OR
+  # starlette is an optional dependency — skip if missing
+  starlette = pytest.importorskip("starlette")
+
+Forbidden example:
+  @pytest.mark.skip                                  # bare — no reason
+  @pytest.mark.skipif(sys.platform == "win32")       # condition but no reason
+  @pytest.mark.xfail                                 # bare xfail
+  pytest.importorskip("starlette")                   # no comment / kwarg
 
 A bare skip is invisible — the test looks present in the file but
-silently never runs. Silent skips have caused real regressions
-(F7 transport coverage measured 0% because the unit test silently
-skipped on missing starlette).
+silently never runs. Silent skips have caused real regressions (F7
+transport coverage measured 0% because the unit test silently skipped
+on missing starlette).
 
-If skipping is intentional, document why. If the test is broken,
-fix it; if the dependency is mandatory, install it; if the test is
-duplicated by integration coverage, delete it."""
+If the test is broken, fix it. If the dependency is mandatory, install
+it. If the test is duplicated by integration coverage, delete it."""
 
 
 def _is_pytest_mark(decorator: ast.expr, mark_name: str) -> ast.Call | ast.Attribute | None:

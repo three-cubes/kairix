@@ -166,6 +166,11 @@ fully enforced; new violations anywhere in the codebase block.
 | F13 | BDD scenarios reject implementation symbols | line pattern | Python (regex) | pre-commit, safe-commit, CI Stage 0 | `bdd-no-implementation-leaks-files.txt` |
 | F14 | `sonar.issue.ignore` entries in `sonar-project.properties` require rationale comment | line pattern | Python (regex) | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
 | F15 | No logging of secret-named variables in plaintext | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-logging-secrets-files.txt` (empty — clean) |
+| F16 | Cognitive complexity ≤ 15 per function | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `cognitive-complexity-files.txt` |
+| F17 | No string literal ≥10 chars duplicated ≥3 times in a module | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-duplicate-string-files.txt` |
+| F18 | No commented-out code | line pattern + Python parse | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-commented-out-code-files.txt` (empty — clean) |
+| F19 | Unused function parameters must be `_`-prefixed | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `unused-params-named-files.txt` |
+| F20 | Empty function bodies require docstring or intent comment | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `empty-body-intent-files.txt` |
 
 ---
 
@@ -1195,6 +1200,259 @@ human-review concerns; see the aspirational practices issue.
 
   - Dan North, "Introducing BDD" (2006) — outcomes vs implementation.
   - Liz Keogh on BDD test-infection.
+
+---
+
+### F16 — Cognitive complexity ≤ 15 per function
+
+#### Statement
+
+No function in `kairix/**` may exceed a cognitive-complexity score of
+**15** (SonarSource S3776 default).
+
+#### Why
+
+Cognitive complexity (Campbell, 2018) measures how hard the code is to
+*read*, not how hard it is to test. The score climbs with each branch
+and is amplified by nesting depth — a triple-nested `if` is harder to
+follow than three sequential `if` statements. Sonar's PR #247 burndown
+surfaced 46 files above the ceiling; F16 prevents regression and gives
+the agent a single canonical refactor pattern (extract helper / early
+return / dispatch dict).
+
+#### Detection
+
+`scripts/checks/check_cognitive_complexity.py`. AST walks each
+`FunctionDef` / `AsyncFunctionDef` and applies the SonarSource scoring
+rules: +1 per `if`/`elif`/`else`/`for`/`while`/`try`/`except`/ternary,
++1 per boolean operator in conditions, plus nesting amplifier.
+
+#### Examples
+
+Rejected (score 12+ for a single function — too tall to follow):
+
+```python
+def dispatch(cmd, args):
+    if cmd == 'search':
+        if not args:
+            for item in default_items():
+                if item.starred:
+                    if item.is_remote and item.is_local:
+                        ...
+    elif cmd == 'index':
+        ...
+```
+
+Allowed (dispatch dict + helpers — every branch reads in isolation):
+
+```python
+_HANDLERS = {'search': _handle_search, 'index': _handle_index}
+
+def dispatch(cmd, args):
+    return _HANDLERS.get(cmd, _default_handler)(args)
+```
+
+See `kairix/worker.py::WorkerDeps` for the dataclass-extraction pattern
+that flattens orchestrator complexity by moving collaborators onto a
+single `Deps` object.
+
+---
+
+### F17 — No string literal ≥10 chars duplicated ≥3 times in a module
+
+#### Statement
+
+No string literal of at least 10 characters may appear 3+ times in the
+same `kairix/**` module without being extracted to a module-level
+constant.
+
+#### Why
+
+Sonar S1192: a duplicated string literal is a refactor smell — the
+reader can't tell whether the three sites are *coupled* (they all
+reference the same conceptual thing and should change together) or
+*coincidentally identical* (renaming one shouldn't affect the others).
+Extracting to an UPPER_SNAKE constant makes the coupling explicit and
+gives renaming a single edit site.
+
+#### Detection
+
+`scripts/checks/check_no_duplicate_string.py`. AST walks
+`ast.Constant`-of-str nodes per file, skipping docstrings and
+whitespace-only values, and counts occurrences.
+
+#### Examples
+
+Rejected:
+
+```python
+def search(q):
+    if not q: raise ValueError("search query must be a non-empty string")
+def reindex(q):
+    if not q: raise ValueError("search query must be a non-empty string")
+def validate(q):
+    if not q: raise ValueError("search query must be a non-empty string")
+```
+
+Allowed:
+
+```python
+_ERROR_BAD_QUERY = "search query must be a non-empty string"
+
+def search(q):
+    if not q: raise ValueError(_ERROR_BAD_QUERY)
+def reindex(q):
+    if not q: raise ValueError(_ERROR_BAD_QUERY)
+```
+
+---
+
+### F18 — No commented-out code
+
+#### Statement
+
+A run of 3+ consecutive `#`-prefixed lines in `kairix/**` whose stripped
+content lexes as valid Python is a violation.
+
+#### Why
+
+Sonar S125: git history is the archive. Commented-out code accumulates
+confusion — is this still relevant? was it disabled in a hurry? is this
+the intended replacement for the line below? `git log -p <file>`
+recovers any prior state if anyone needs it.
+
+#### Detection
+
+`scripts/checks/check_no_commented_out_code.py`. Line-by-line scan
+identifies contiguous `#`-prefixed runs (skipping shebangs, directives
+like `# type:`, `# pyright:`, `# noqa`, and docstring lines). Each run
+is dedented and passed to `ast.parse`; if it parses AND contains a
+syntactic anchor (assignment, call, `def`, `if`, etc.) it's flagged.
+
+#### Examples
+
+Rejected:
+
+```python
+# old_path = path.replace('/old/', '/new/')
+# if old_path.startswith('/data'):
+#     old_path = old_path[6:]
+# return old_path
+def new_function():
+    return new_path()
+```
+
+Allowed (real prose):
+
+```python
+# Strip leading slash so we can join cleanly with PathLib.
+path = path.lstrip('/')
+```
+
+If the dead code might come back, reference a ticket instead:
+`# TODO #251 — re-enable after refactor`.
+
+---
+
+### F19 — Unused function parameters must be `_`-prefixed
+
+#### Statement
+
+Any non-`_`-prefixed parameter that is never read in the function body
+is a violation, unless the function is abstract, an `@overload` stub, a
+property setter (`value`), or the parameter is `self`/`cls`/`*args`/
+`**kwargs`.
+
+#### Why
+
+Sonar S1172. The fix is one of:
+
+  - **Delete** the parameter if no Protocol/abstract base requires it.
+  - **Rename to `_unused`** if the position is required by a Protocol
+    that the implementation doesn't need.
+
+The `_`-prefix is the explicit signal that the unused parameter is
+load-bearing for the contract, not just leftover code.
+
+#### Detection
+
+`scripts/checks/check_unused_params_named.py`. AST walks each
+`FunctionDef` / `AsyncFunctionDef`, collects parameter names, and
+checks each against names referenced (Load context) in the body.
+
+#### Examples
+
+Rejected:
+
+```python
+def handle(event: Event, context: Context) -> Result:
+    return Result(event.id)  # context never used
+```
+
+Allowed (Protocol requires both; this impl only uses `event`):
+
+```python
+def handle(event: Event, _context: Context) -> Result:
+    return Result(event.id)
+```
+
+Allowed (no Protocol requires `context` — delete it):
+
+```python
+def handle(event: Event) -> Result:
+    return Result(event.id)
+```
+
+---
+
+### F20 — Empty function bodies require docstring or intent comment
+
+#### Statement
+
+Any `FunctionDef` / `AsyncFunctionDef` whose body is exactly `pass`,
+`...`, or `docstring-only + pass/...` must carry either a docstring OR
+an `# Intentionally empty — <reason>` comment in the function span (or
+on the line above `def`).
+
+Abstract methods (`@abstractmethod`), `@overload` stubs, and bodies
+that are `raise NotImplementedError` are exempt.
+
+#### Why
+
+Sonar S1186. An empty body without explanation is indistinguishable
+from a truncated/forgotten implementation. The docstring or intent
+comment is the receipt that the emptiness is deliberate.
+
+#### Detection
+
+`scripts/checks/check_empty_body_intent.py`. AST walks each function,
+detects empty-body shapes, and checks for a leading docstring or an
+`Intentionally empty` comment in the function's source span.
+
+#### Examples
+
+Rejected:
+
+```python
+class Handler:
+    def on_event(self, event):
+        pass
+
+    def shutdown(self): ...
+```
+
+Allowed:
+
+```python
+class Handler:
+    def on_event(self, event):
+        """No-op default; concrete strategies override this."""
+
+    def shutdown(self):
+        # Intentionally empty — Protocol-required method that some
+        # adapters genuinely don't need.
+        pass
+```
 
 ---
 

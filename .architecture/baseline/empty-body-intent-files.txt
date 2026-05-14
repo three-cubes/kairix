@@ -1,0 +1,9 @@
+kairix/agents/mcp/readiness.py
+kairix/agents/research/protocols.py
+kairix/core/embed/recall_check.py
+kairix/core/protocols.py
+kairix/core/search/backends.py
+kairix/core/search/budget.py
+kairix/knowledge/contradict/protocols.py
+kairix/knowledge/entities/protocols.py
+kairix/quality/benchmark/runner.py

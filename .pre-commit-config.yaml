@@ -128,3 +128,38 @@ repos:
         language: system
         pass_filenames: false
         files: ^kairix/.*\.py$
+
+      - id: arch-cognitive-complexity
+        name: "arch F16: cognitive complexity <= 15 per function"
+        entry: python3 scripts/checks/check_cognitive_complexity.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-no-duplicate-string
+        name: "arch F17: no duplicated string literal (>=10 chars, >=3 occurrences)"
+        entry: python3 scripts/checks/check_no_duplicate_string.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-no-commented-out-code
+        name: "arch F18: no commented-out code"
+        entry: python3 scripts/checks/check_no_commented_out_code.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-unused-params-named
+        name: "arch F19: unused parameter requires _ prefix"
+        entry: python3 scripts/checks/check_unused_params_named.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-empty-body-intent
+        name: "arch F20: empty function body requires docstring or intent comment"
+        entry: python3 scripts/checks/check_empty_body_intent.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$

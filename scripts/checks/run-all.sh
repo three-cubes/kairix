@@ -64,6 +64,21 @@ python3 "${SCRIPT_DIR}/check_sonar_ignore_rationale.py" || overall=1
 # F15 — no logging of secret-named variables in plaintext
 python3 "${SCRIPT_DIR}/check_no_logging_secrets.py" || overall=1
 
+# F16 — cognitive complexity per function
+python3 "${SCRIPT_DIR}/check_cognitive_complexity.py" || overall=1
+
+# F17 — no duplicated string literal ≥10 chars / ≥3 occurrences
+python3 "${SCRIPT_DIR}/check_no_duplicate_string.py" || overall=1
+
+# F18 — no commented-out code
+python3 "${SCRIPT_DIR}/check_no_commented_out_code.py" || overall=1
+
+# F19 — unused parameter must be _ prefixed
+python3 "${SCRIPT_DIR}/check_unused_params_named.py" || overall=1
+
+# F20 — empty function body requires docstring or intent comment
+python3 "${SCRIPT_DIR}/check_empty_body_intent.py" || overall=1
+
 # F7 — needs coverage.xml. Skip if not present or skip flag set.
 if [[ "$skip_coverage" -eq 0 ]]; then
     if [[ -f "${REPO_ROOT}/coverage.xml" ]]; then

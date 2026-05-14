@@ -140,9 +140,7 @@ def _arg_references_secret(arg: ast.expr) -> bool:
 
     # F-string: ast.JoinedStr with FormattedValue children that wrap the actual expr.
     if isinstance(arg, ast.JoinedStr):
-        return any(
-            isinstance(part, ast.FormattedValue) and _arg_references_secret(part.value) for part in arg.values
-        )
+        return any(isinstance(part, ast.FormattedValue) and _arg_references_secret(part.value) for part in arg.values)
 
     # Single-arg call that just passes the secret through (e.g. ``str(token)``).
     if isinstance(arg, ast.Call) and len(arg.args) == 1 and not arg.keywords:

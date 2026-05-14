@@ -101,10 +101,24 @@ def main() -> int:
             print(f"  sonar-project.properties:{lineno}  multicriteria '{rule_id}' has no preceding rationale comment")
         print()
         print(
-            "Add a comment block immediately above the .ruleKey line explaining\n"
-            "why the rule is ignored for the given resourceKey. The convention is:\n"
-            "  # <ruleKey> — short reason this fires false-positive for kairix's shape\n"
-            "  sonar.issue.ignore.multicriteria.<id>.ruleKey=<ruleKey>"
+            "Refactor to add a rationale comment block immediately above each\n"
+            ".ruleKey line — at least one comment line containing an em-dash (—)\n"
+            "and a substantive reason — to pass.\n"
+            "\n"
+            "Pass example:\n"
+            "  # python:S5547 — kairix uses HMAC-SHA1 only for legacy file fingerprinting,\n"
+            "  # never for security; FIPS-mode environments are out of scope.\n"
+            "  sonar.issue.ignore.multicriteria.e1.ruleKey=python:S5547\n"
+            "  sonar.issue.ignore.multicriteria.e1.resourceKey=kairix/fingerprint.py\n"
+            "\n"
+            "Forbidden example:\n"
+            "  # TODO\n"
+            "  sonar.issue.ignore.multicriteria.e1.ruleKey=python:S5547\n"
+            "\n"
+            "Each rationale is reviewed at every PR touching sonar config; bare or\n"
+            "TODO-only blocks are rejected. Documenting WHY a rule is ignored\n"
+            "(not just THAT it is) is the receipt that the suppression is\n"
+            "deliberate."
         )
         return 1
 

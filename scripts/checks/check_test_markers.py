@@ -34,15 +34,35 @@ from _arch_lib import gate, python_files, repo_relative
 # Category markers from pyproject.toml's `[tool.pytest.ini_options].markers`.
 KNOWN_MARKERS = frozenset({"unit", "bdd", "contract", "integration", "e2e", "slow"})
 
-REMEDIATION = """Every test function must declare its category marker. Add ONE of:
+REMEDIATION = """Refactor to add ONE category marker per test
+(function-level decorator, class-level decorator, or module-level
+``pytestmark`` assignment) to pass.
 
-  @pytest.mark.unit               # function-level decorator
-  pytestmark = pytest.mark.unit   # module-level (covers all tests in file)
-  pytestmark = [pytest.mark.bdd]  # list form is also accepted at class level
+Recognised markers (per pyproject.toml): unit, bdd, contract, integration,
+e2e, slow.
 
-Recognised markers (per pyproject.toml): unit, bdd, contract, integration, e2e, slow.
+Pass example:
+  # module-level (covers every test in the file)
+  pytestmark = pytest.mark.unit
 
-Why: the test-pyramid filter (`pytest -m unit`) is only meaningful when
+  def test_search_returns_hits():
+      ...
+
+  # OR function-level
+  @pytest.mark.unit
+  def test_search_returns_hits():
+      ...
+
+  # OR list form at class level
+  class TestSearch:
+      pytestmark = [pytest.mark.bdd]
+      def test_one(self): ...
+
+Forbidden example:
+  def test_search_returns_hits():  # no marker anywhere — fails F8
+      ...
+
+Why: the test-pyramid filter (``pytest -m unit``) is only meaningful when
 every test declares its category. Unmarked tests run in every selection,
 defeating the pyramid."""
 

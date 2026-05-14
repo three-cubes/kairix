@@ -26,11 +26,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _arch_lib import gate, python_files, repo_relative
 
-REMEDIATION = """Refactor: rewrite the test to drive the public function/class
-that calls the private helper. If the public surface doesn't reach the
-branch you wanted to pin, the branch is either dead code or the public
-contract is missing — in either case, the answer is not to test the
-private name directly."""
+REMEDIATION = """Refactor to drive the public function/class that calls the
+private helper (no imports of ``_x`` from kairix.*; no imports from any
+``kairix.<...>._private`` module) to pass.
+
+If the public surface doesn't reach the branch you wanted to pin, the
+branch is either dead code or the public contract is missing — in
+either case, the answer is not to test the private name directly.
+
+Pass example:
+  from kairix.core.search import SearchPipeline  # public class
+  result = SearchPipeline(retriever=FakeRetriever(...)).run('q')
+
+Forbidden example:
+  from kairix.core.search.bm25 import _tokenize  # private helper
+  assert _tokenize('a b') == ['a', 'b']
+
+  from kairix.core.search._impl import build_index  # private module"""
 
 
 def _is_kairix_module(module: str | None) -> bool:

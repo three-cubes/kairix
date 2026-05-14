@@ -12,10 +12,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "${SCRIPT_DIR}/../.." || exit 2
 
-REMEDIATION="Refactor: tests should construct the unit under test with explicit
-fakes from tests/fakes.py, not patch kairix internals. If the
-production class lacks a constructor seam, add one (same shape as
-GoldBuilder(llm_judge=, retriever=))."
+REMEDIATION="Refactor to constructor injection with a fake from tests/fakes.py
+(no @patch / with patch on kairix.* targets) to pass.
+
+If the production class lacks a constructor seam, add one — same shape as
+GoldBuilder(llm_judge=, retriever=, db_path=). Then construct it in the
+test with a Fake* from tests/fakes.py.
+
+Pass example:
+  pipeline = SearchPipeline(retriever=FakeRetriever(hits=[...]))
+  assert pipeline.run(query='x') == ...
+
+Forbidden example:
+  @patch('kairix.core.search.bm25.bm25_search')
+  def test_search_returns_hits(mock_search): ...
+
+Stdlib boundaries (os.*, builtins.*) and external SDK boundaries
+(openai.*, httpx.*) remain allowed — F1 only blocks kairix.* targets."
 
 # Delegate to AST-based detector (resolves #214 — grep missed multi-line patch()).
 python3 "${SCRIPT_DIR}/check_no_internal_patches.py" \
