@@ -59,23 +59,24 @@
 #       path: "reference-library"
 #       glob: "**/*.md"
 #       in_default: false
-#       # The reference library has its own retrieval baseline — derived
-#       # from a hybrid sweep against the shipped corpus. Operators who
-#       # don't override this block get the global retrieval config when
-#       # they search reflib explicitly. The values below match the
-#       # known-good baseline (REFLIB_RETRIEVAL_CONFIG).
+#       # The reference library has its own retrieval baseline. The
+#       # values below produce the pinned baseline at
+#       # benchmark-results/reflib-gold-v3-baseline.json (weighted=0.901
+#       # NDCG@10=0.990 Hit@5=0.990). The corpus is keyword-sparse and
+#       # vector-rich (abstract titles + paraphrase queries), so it
+#       # depends on cross-list agreement — RRF with k=10 weights
+#       # agreement strongly. Operators who don't override get the
+#       # global retrieval config when they search reflib explicitly.
 #       retrieval:
-#         fusion_strategy: bm25_primary
+#         fusion_strategy: rrf
+#         rrf_k: 10
 #         bm25_limit: 20
-#         vec_limit: 5
+#         vec_limit: 10
 #         boosts:
 #           entity:
-#             enabled: true
-#             factor: 0.20
-#             cap: 2.0
+#             enabled: false
 #           procedural:
-#             enabled: true
-#             factor: 1.4
+#             enabled: false
 #
 #   # Per-agent collections — each agent gets its own memory scope.
 #   # Default agent_pattern still applies for legacy single-collection deployments.
