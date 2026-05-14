@@ -207,9 +207,67 @@ def reference_library_root() -> Path:
     return Path(os.environ.get("KAIRIX_REFLIB_ROOT", "reference-library"))
 
 
+def resolve_first_existing_dir(
+    override: str | None,
+    candidates: list[Path],
+    fallback: Path,
+) -> Path:
+    """Return the first usable directory from the resolution chain.
+
+    Used by ``bundled_suites_root`` (and any future shipped-asset
+    resolver that needs the same env-override → candidate-list → CWD
+    fallback semantics).
+
+    Args:
+        override: When non-empty, returned as a ``Path`` immediately.
+                  A misconfigured operator override should surface as a
+                  downstream ``FileNotFoundError`` rather than silently
+                  fall through to a default.
+        candidates: Ordered list of paths; the first one whose
+                  ``is_dir()`` returns True wins.
+        fallback: Returned when ``override`` is empty and no candidate
+                  exists on disk. Typically the legacy CWD-relative
+                  path so behaviour from before the resolver existed is
+                  preserved.
+
+    The helper is pure (no env reads of its own) so tests can drive it
+    with crafted ``tmp_path`` candidate lists — no env-var monkeypatch
+    needed (F2-clean).
+    """
+    if override:
+        return Path(override)
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return fallback
+
+
 def bundled_suites_root() -> Path:
-    """Bundled benchmark suites — ships inside the container at /opt/kairix/suites."""
-    return Path(os.environ.get("KAIRIX_SUITES_ROOT", "suites"))
+    """Resolve the bundled benchmark suites root.
+
+    Resolution order (first existing path wins; the env-var override
+    wins even if its target is missing, so misconfigurations surface as
+    explicit ``FileNotFoundError`` downstream rather than silently
+    using a fallback):
+
+      1. ``$KAIRIX_SUITES_ROOT`` — operator override.
+      2. ``<repo-root>/suites/`` — when running from a kairix source
+         checkout; preserves the dev UX where ``cd`` to the repo finds
+         ``./suites/``. Derived from the kairix package location
+         (``Path(__file__).parent.parent`` = repo root).
+      3. ``/opt/kairix/suites/`` — canonical install path the Docker
+         image ships suites at. Closes #268: the host wrapper does
+         ``docker exec`` into the container, where the CWD is unrelated
+         to where suites live.
+      4. ``./suites/`` — final CWD fallback (legacy behaviour).
+    """
+    repo_root_suites = Path(__file__).resolve().parent.parent / "suites"
+    installed_suites = Path("/opt/kairix/suites")
+    return resolve_first_existing_dir(
+        override=os.environ.get("KAIRIX_SUITES_ROOT"),
+        candidates=[repo_root_suites, installed_suites],
+        fallback=Path("suites"),
+    )
 
 
 def worker_state_path() -> Path:

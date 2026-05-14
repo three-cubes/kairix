@@ -426,14 +426,8 @@ class TestShippedAssetPaths:
         assert reference_library_root() == Path("/custom/reflib")
 
     @pytest.mark.unit
-    def test_bundled_suites_root_default(self, monkeypatch) -> None:
-        """Without KAIRIX_SUITES_ROOT set, returns the in-container default."""
-        monkeypatch.delenv("KAIRIX_SUITES_ROOT", raising=False)
-        assert bundled_suites_root() == Path("suites")
-
-    @pytest.mark.unit
     def test_bundled_suites_root_env_override(self, monkeypatch) -> None:
-        """KAIRIX_SUITES_ROOT overrides the default."""
+        """KAIRIX_SUITES_ROOT overrides every other lookup (step 1 of #268 resolution)."""
         monkeypatch.setenv("KAIRIX_SUITES_ROOT", "/custom/suites")
         assert bundled_suites_root() == Path("/custom/suites")
 
