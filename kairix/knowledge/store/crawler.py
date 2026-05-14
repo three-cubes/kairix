@@ -79,7 +79,7 @@ def crawl_organisations(
     for org_dir in sorted(clients_dir.iterdir()):
         if not org_dir.is_dir():
             continue
-        org_id = _to_slug(org_dir.name)
+        org_id = slugify(org_dir.name)
         # Canonical note: {OrgDir}/{OrgDir}.md (index file)
         index_md = org_dir / f"{org_dir.name}.md"
         canonical: Path | None
@@ -92,19 +92,19 @@ def crawl_organisations(
 
         fm: dict[str, Any] = {}
         if canonical:
-            fm = _parse_frontmatter(canonical)
+            fm = parse_frontmatter(canonical)
 
         vault_path = str(canonical.relative_to(root)) if canonical else str(org_dir.relative_to(root))
         node = OrganisationNode(
             id=org_id,
-            name=fm.get("name") or _to_display_name(org_dir.name),
+            name=fm.get("name") or display_name(org_dir.name),
             tier=str(fm.get("tier", "client")),
             engagement_status=str(fm.get("engagement_status", "active")),
             vault_path=vault_path,
-            industry=_as_list(fm.get("industry")),
-            geography=_as_list(fm.get("geography")),
-            stakeholder_personas=_as_list(fm.get("stakeholder_personas")),
-            aliases=_as_list(fm.get("aliases")),
+            industry=as_list(fm.get("industry")),
+            geography=as_list(fm.get("geography")),
+            stakeholder_personas=as_list(fm.get("stakeholder_personas")),
+            aliases=as_list(fm.get("aliases")),
         )
         orgs[org_dir.name.lower()] = node
         orgs[org_id] = node
@@ -133,8 +133,8 @@ def crawl_persons(
     persons: dict[str, PersonNode] = {}
     for people_dir in _find_people_dirs(root):
         for md_file in sorted(people_dir.glob("*.md")):
-            person_id = _to_slug(md_file.stem)
-            fm = _parse_frontmatter(md_file)
+            person_id = slugify(md_file.stem)
+            fm = parse_frontmatter(md_file)
             vault_path = str(md_file.relative_to(root))
 
             # Resolve org by name lookup in discovered orgs
@@ -143,14 +143,14 @@ def crawl_persons(
 
             person_node = PersonNode(
                 id=person_id,
-                name=fm.get("name") or _to_display_name(md_file.stem),
+                name=fm.get("name") or display_name(md_file.stem),
                 org=org_id,
                 role=str(fm.get("role") or ""),
                 relationship_type=str(fm.get("relationship_type") or "network"),
                 last_interaction=str(fm.get("last_interaction") or ""),
                 vault_path=vault_path,
-                interests=_as_list(fm.get("interests")),
-                aliases=_as_list(fm.get("aliases")),
+                interests=as_list(fm.get("interests")),
+                aliases=as_list(fm.get("aliases")),
             )
             persons[person_id] = person_node
             report.persons_found += 1
@@ -190,13 +190,13 @@ def crawl_outcomes(root: Path, report: CrawlReport, neo4j_client: Any, dry_run: 
         return
 
     for md_file in sorted(outcomes_dir.rglob("*.md")):
-        outcome_id = _to_slug(md_file.stem)
-        fm = _parse_frontmatter(md_file)
+        outcome_id = slugify(md_file.stem)
+        fm = parse_frontmatter(md_file)
         vault_path = str(md_file.relative_to(root))
 
         outcome_node = OutcomeNode(
             id=outcome_id,
-            name=fm.get("name") or _to_display_name(md_file.stem),
+            name=fm.get("name") or display_name(md_file.stem),
             domain=str(fm.get("domain") or ""),
             vault_path=vault_path,
         )
@@ -230,7 +230,7 @@ def crawl_wikilink_edges(
 
         source_path = str(md_file.relative_to(root))
         for link_target in _WIKILINK_PATTERN.findall(text):
-            target_slug = _to_slug(link_target.split("/")[-1])
+            target_slug = slugify(link_target.split("/")[-1])
             if target_slug not in all_known:
                 continue
             # Determine label of target
@@ -240,7 +240,7 @@ def crawl_wikilink_edges(
                 to_label, to_id = "Person", persons[target_slug].id
 
             edge = GraphEdge(
-                from_id=_to_slug(md_file.stem),
+                from_id=slugify(md_file.stem),
                 from_label="Document",
                 to_id=to_id,
                 to_label=to_label,
@@ -292,7 +292,7 @@ def crawl(
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _parse_frontmatter(path: Path) -> dict[str, Any]:
+def parse_frontmatter(path: Path) -> dict[str, Any]:
     """Parse YAML frontmatter from a markdown file. Returns {} on any failure.
 
     Delegates text extraction to ``extract_existing_frontmatter``, then
@@ -345,21 +345,7 @@ def _find_people_dirs(document_root: Path) -> list[Path]:
     return found
 
 
-def _to_slug(name: str) -> str:
-    """Convert a vault directory/file name to a lowercase hyphenated slug.
-
-    Delegates to ``kairix.utils.slugify`` — kept as a local alias for
-    backwards compatibility (tests import this private name).
-    """
-    return slugify(name)
-
-
-def _to_display_name(name: str) -> str:
-    """Convert slug/filename to a display name (title case, hyphens → spaces)."""
-    return display_name(name)
-
-
-def _as_list(value: Any) -> list[str]:
+def as_list(value: Any) -> list[str]:
     """Normalise a scalar, list, or None frontmatter field to list[str]."""
     if value is None:
         return []
@@ -370,7 +356,7 @@ def _as_list(value: Any) -> list[str]:
 
 def _resolve_org_id(org_raw: str, orgs: dict[str, OrganisationNode]) -> str:
     """Find an org id by name or partial match in the discovered orgs dict."""
-    slug = _to_slug(org_raw)
+    slug = slugify(org_raw)
     if slug in orgs:
         return str(orgs[slug].id)
     # Partial match: org_raw is a substring of a known org name

@@ -13,12 +13,11 @@ import pytest
 
 from kairix.knowledge.store.crawler import (
     CrawlReport,
-    _as_list,
-    _parse_frontmatter,
-    _to_display_name,
-    _to_slug,
+    as_list,
     crawl,
+    parse_frontmatter,
 )
+from kairix.utils import display_name, slugify
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,37 +47,37 @@ def _make_neo4j(available: bool = True) -> MagicMock:
 
 @pytest.mark.unit
 def test_to_slug_basic() -> None:
-    assert _to_slug("Acme Australia") == "acme-australia"
+    assert slugify("Acme Australia") == "acme-australia"
 
 
 @pytest.mark.unit
 def test_to_slug_hyphens_preserved() -> None:
-    assert _to_slug("test-person") == "test-person"
+    assert slugify("test-person") == "test-person"
 
 
 @pytest.mark.unit
 def test_to_slug_special_chars() -> None:
-    assert _to_slug("Example Ventures!") == "example-ventures"
+    assert slugify("Example Ventures!") == "example-ventures"
 
 
 @pytest.mark.unit
-def test_to_display_name() -> None:
-    assert _to_display_name("acme-australia") == "Acme Australia"
+def testdisplay_name() -> None:
+    assert display_name("acme-australia") == "Acme Australia"
 
 
 @pytest.mark.unit
 def test_as_list_none() -> None:
-    assert _as_list(None) == []
+    assert as_list(None) == []
 
 
 @pytest.mark.unit
 def test_as_list_scalar() -> None:
-    assert _as_list("consulting") == ["consulting"]
+    assert as_list("consulting") == ["consulting"]
 
 
 @pytest.mark.unit
 def test_as_list_list() -> None:
-    assert _as_list(["a", "b"]) == ["a", "b"]
+    assert as_list(["a", "b"]) == ["a", "b"]
 
 
 @pytest.mark.unit
@@ -87,7 +86,7 @@ def test_parse_frontmatter_valid(tmp_path: Path) -> None:
         tmp_path / "test.md",
         "---\nname: Acme\ntier: client\n---\n# Body",
     )
-    fm = _parse_frontmatter(md)
+    fm = parse_frontmatter(md)
     assert fm["name"] == "Acme"
     assert fm["tier"] == "client"
 
@@ -95,13 +94,13 @@ def test_parse_frontmatter_valid(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_parse_frontmatter_no_frontmatter(tmp_path: Path) -> None:
     md = _write(tmp_path / "test.md", "# Just content\nno frontmatter")
-    fm = _parse_frontmatter(md)
+    fm = parse_frontmatter(md)
     assert fm == {}
 
 
 @pytest.mark.unit
 def test_parse_frontmatter_missing_file() -> None:
-    fm = _parse_frontmatter(Path("/nonexistent/file.md"))
+    fm = parse_frontmatter(Path("/nonexistent/file.md"))
     assert fm == {}
 
 
