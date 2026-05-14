@@ -336,7 +336,7 @@ def _call_via_backend(
     )
 
 
-def _default_chat_backend() -> ChatBackend:
+def default_chat_backend() -> ChatBackend:
     """Construct the production ChatBackend lazily.
 
     Production callers that don't inject a backend get the Azure adapter.
@@ -384,7 +384,7 @@ def generate_queries(
     """
     allowed_cats = categories or list(_TARGET_DISTRIBUTION.keys())
     prompt = build_generation_prompt(doc_title, doc_body, n, allowed_cats)
-    backend: ChatBackend = chat_backend if chat_backend is not None else _default_chat_backend()
+    backend: ChatBackend = chat_backend if chat_backend is not None else default_chat_backend()
 
     for attempt in range(2):
         try:
@@ -543,7 +543,7 @@ def build_case(
     }
 
 
-def _empty_generation_result(
+def empty_generation_result(
     output_path: str,
     calibration_passed: bool,
     errors: list[str],
@@ -904,7 +904,7 @@ class SuiteGenerator:
                 api_key, endpoint, deployment = resolve_credentials(api_key, endpoint, deployment)
             except Exception as e:
                 errors.append(f"Failed to fetch credentials: {e}")
-                return _empty_generation_result(output_path, False, errors)
+                return empty_generation_result(output_path, False, errors)
 
         calibration_passed = False
         if calibrate_first:
@@ -912,7 +912,7 @@ class SuiteGenerator:
                 calibration_passed = self._calibrate(api_key, endpoint, deployment)
             except JudgeCalibrationError as e:
                 errors.append(f"Calibration failed: {e}")
-                return _empty_generation_result(output_path, False, errors)
+                return empty_generation_result(output_path, False, errors)
         else:
             calibration_passed = True
 
@@ -920,7 +920,7 @@ class SuiteGenerator:
         docs = sample_documents(db_path=db_path, n=n_cases * 10, collections=collections, seed=seed)
         if not docs:
             errors.append("sample_documents: no documents returned — check db_path")
-            return _empty_generation_result(output_path, calibration_passed, errors)
+            return empty_generation_result(output_path, calibration_passed, errors)
 
         accepted_cases, n_rejected, n_failed, category_counts = self.process_sampled_docs(
             docs,
