@@ -393,11 +393,15 @@ def test_build_search_pipeline_uses_real_vector_index_when_available() -> None:
 @pytest.mark.unit
 def test_build_search_pipeline_falls_back_when_get_vector_index_raises() -> None:
     """Drives lines 125-129 — when ``get_vector_index`` raises, the
-    factory logs a warning and substitutes ``FakeVectorRepository``.
+    factory logs a warning and substitutes a null vector repo.
+
+    Asserts behavioural fallback: ``search()`` returns ``[]`` and
+    ``count()`` returns 0, without depending on the fallback class
+    name (the inline ``_NullVectorRepository`` is private to factory).
 
     Sabotage proof: if the except handler stopped recovering, the
-    factory call would raise; this test asserts it returns a
-    well-formed pipeline.
+    factory call would raise; this test asserts a well-formed
+    pipeline whose vector search degrades silently.
     """
     from kairix.core.search import vec_index as vec_index_mod
 
@@ -412,9 +416,10 @@ def test_build_search_pipeline_falls_back_when_get_vector_index_raises() -> None
     finally:
         vec_index_mod.get_vector_index = real
 
-    # The factory threaded a FakeVectorRepository in instead of crashing.
-    repo_name = type(pipeline.vector._vector_repo).__name__
-    assert repo_name == "FakeVectorRepository"
+    # The factory threaded a null vector repo in instead of crashing.
+    repo = pipeline.vector._vector_repo
+    assert repo.search(query_vec=[0.0] * 4, k=10, collections=None) == []
+    assert repo.count() == 0
 
 
 @pytest.mark.unit
@@ -531,9 +536,13 @@ def test_build_search_pipeline_falls_back_to_fake_graph_when_get_client_raises()
     finally:
         client_mod.get_client = real
 
-    # Pipeline still constructed — graph fell back to FakeGraphRepository.
-    assert type(pipeline.graph).__name__ == "FakeGraphRepository"
+    # Pipeline still constructed — graph fell back to a null repo.
+    # Asserts the protocol surface (available=False) rather than the
+    # private inline ``_NullGraphRepository`` class name.
     assert pipeline.graph.available is False
+    assert pipeline.graph.find_entity("any") is None
+    assert pipeline.graph.entity_in_degrees() == []
+    assert pipeline.graph.cypher("RETURN 1") == []
 
 
 @pytest.mark.unit
