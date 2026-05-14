@@ -201,8 +201,13 @@ def _print_check_summary(*, passed: int, total: int, all_ok: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def cmd_guide(args: argparse.Namespace) -> int:
-    """Install the agent usage guide into the document store's shared knowledge base."""
+def _resolve_doc_root(args: argparse.Namespace) -> Path | None:
+    """Resolve and validate the document root for ``cmd_guide``.
+
+    Prints an error to ``stderr`` and returns ``None`` when the doc
+    root is unset or points at a non-existent directory; callers
+    convert ``None`` into a non-zero exit.
+    """
     from kairix.paths import document_root_override
 
     doc_root = args.document_root or document_root_override() or ""
@@ -211,44 +216,80 @@ def cmd_guide(args: argparse.Namespace) -> int:
             "Error: --document-root is required (or set KAIRIX_DOCUMENT_ROOT)",
             file=sys.stderr,
         )
-        return 1
+        return None
 
     doc_path = Path(doc_root)
     if not doc_path.exists():
         print(f"Error: document root does not exist: {doc_root}", file=sys.stderr)
-        return 1
+        return None
+    return doc_path
 
-    # Find the guide source in the kairix package
+
+def _resolve_guide_src() -> Path | None:
+    """Locate the bundled agent usage guide markdown.
+
+    Tries the in-tree source layout first, then falls back to the
+    installed-package layout. Returns ``None`` and prints an error
+    when neither candidate exists.
+    """
     guide_src = Path(__file__).parent.parent.parent / "docs" / "agent-usage-guide.md"
-    if not guide_src.exists():
-        # Fallback: look relative to the installed package
-        import kairix
+    if guide_src.exists():
+        return guide_src
 
-        pkg_root = Path(kairix.__file__).parent.parent
-        guide_src = pkg_root / "docs" / "agent-usage-guide.md"
+    import kairix
 
-    if not guide_src.exists():
-        print(f"Error: agent usage guide not found at {guide_src}", file=sys.stderr)
-        print("Check your kairix installation is complete.", file=sys.stderr)
+    pkg_root = Path(kairix.__file__).parent.parent
+    guide_src = pkg_root / "docs" / "agent-usage-guide.md"
+    if guide_src.exists():
+        return guide_src
+
+    print(f"Error: agent usage guide not found at {guide_src}", file=sys.stderr)
+    print("Check your kairix installation is complete.", file=sys.stderr)
+    return None
+
+
+def _resolve_guide_dest(args: argparse.Namespace, doc_path: Path) -> Path:
+    """Choose the install destination for the agent usage guide.
+
+    Honours ``--output`` when set; otherwise probes the PARA-style
+    shared-knowledge candidates and falls back to ``doc_path`` root.
+    """
+    if args.output:
+        return Path(args.output)
+
+    candidates = [
+        doc_path / "04-Agent-Knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
+        doc_path / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
+        doc_path / "agent-knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
+    ]
+    for candidate in candidates:
+        if candidate.parent.exists():
+            return candidate
+    return doc_path / _AGENT_USAGE_GUIDE_FILENAME
+
+
+def _print_guide_install_success(dest: Path) -> None:
+    """Print the success banner + follow-up steps after a guide install."""
+    print(f"Agent usage guide installed at: {dest}")
+    print()
+    print("Agents can now find this guide via:")
+    print('  kairix search "how do I use kairix" --agent <name>')
+    print()
+    print("Re-embed to make the guide searchable:")
+    print("  kairix embed --changed")
+
+
+def cmd_guide(args: argparse.Namespace) -> int:
+    """Install the agent usage guide into the document store's shared knowledge base."""
+    doc_path = _resolve_doc_root(args)
+    if doc_path is None:
         return 1
 
-    # Target: vault/04-Agent-Knowledge/shared/kairix-usage.md (standard PARA path)
-    # Allow override via --output
-    if args.output:
-        dest = Path(args.output)
-    else:
-        # Try to find the shared knowledge directory
-        candidates = [
-            doc_path / "04-Agent-Knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
-            doc_path / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
-            doc_path / "agent-knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
-        ]
-        dest_or_none: Path | None = None
-        for c in candidates:
-            if c.parent.exists():
-                dest_or_none = c
-                break
-        dest = dest_or_none if dest_or_none is not None else doc_path / _AGENT_USAGE_GUIDE_FILENAME
+    guide_src = _resolve_guide_src()
+    if guide_src is None:
+        return 1
+
+    dest = _resolve_guide_dest(args, doc_path)
 
     if args.dry_run:
         print("Would install agent usage guide:")
@@ -258,14 +299,7 @@ def cmd_guide(args: argparse.Namespace) -> int:
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(guide_src.read_text(encoding="utf-8"), encoding="utf-8")
-    print(f"Agent usage guide installed at: {dest}")
-    print()
-    print("Agents can now find this guide via:")
-    print('  kairix search "how do I use kairix" --agent <name>')
-    print()
-    print("Re-embed to make the guide searchable:")
-    print("  kairix embed --changed")
-
+    _print_guide_install_success(dest)
     return 0
 
 

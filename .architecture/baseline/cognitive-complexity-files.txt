@@ -31,7 +31,6 @@ kairix/knowledge/wikilinks/audit.py
 kairix/knowledge/wikilinks/cli.py
 kairix/knowledge/wikilinks/resolver.py
 kairix/platform/onboard/check.py
-kairix/platform/onboard/cli.py
 kairix/platform/setup/wizard.py
 kairix/quality/benchmark/runner.py
 kairix/quality/benchmark/suite.py
