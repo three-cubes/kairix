@@ -1,7 +1,4 @@
-kairix/agents/mcp/errors.py
 kairix/agents/mcp/server.py
-kairix/core/embed/embed.py
-kairix/core/embed/recall_check.py
 kairix/core/embed/schema.py
 kairix/core/search/bm25.py
 kairix/core/search/budget.py
