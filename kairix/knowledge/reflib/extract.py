@@ -267,7 +267,7 @@ _STOP_TITLE_WORDS = frozenset(
 )
 
 
-def _is_stop_heading(text: str) -> bool:
+def is_stop_heading(text: str) -> bool:
     """Return True if the heading text is generic/non-entity."""
     stripped = text.strip().rstrip(".")
     if stripped in _STOP_TITLE_WORDS:
@@ -286,7 +286,7 @@ def _is_stop_heading(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _domain_from_path(rel_path: str) -> str:
+def domain_from_path(rel_path: str) -> str:
     """Infer domain from the collection (first path component)."""
     parts = rel_path.split("/")
     if parts:
@@ -294,7 +294,7 @@ def _domain_from_path(rel_path: str) -> str:
     return "unknown"
 
 
-def _extract_from_frontmatter(
+def extract_from_frontmatter(
     fm: dict[str, str],
     rel_path: str,
     domain: str,
@@ -388,7 +388,7 @@ def _extract_from_frontmatter(
                 break
 
 
-def _extract_from_headings(
+def extract_from_headings(
     body: str,
     rel_path: str,
     domain: str,
@@ -406,7 +406,7 @@ def _extract_from_headings(
         text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
         text = re.sub(r"[`*_]", "", text).strip()
 
-        if _is_stop_heading(text):
+        if is_stop_heading(text):
             continue
 
         # Update heading stack for hierarchy
@@ -477,7 +477,7 @@ _SEED_NAMES_SORTED = sorted(_ALL_SEEDS.keys(), key=len, reverse=True)
 _SEED_RE = re.compile("|".join(re.escape(n) for n in _SEED_NAMES_SORTED))
 
 
-def _extract_seed_entities(
+def extract_seed_entities(
     text: str,
     rel_path: str,
     domain: str,
@@ -518,16 +518,16 @@ def _process_file(
         return
 
     rel_path = str(file_path.relative_to(reflib_root))
-    domain = _domain_from_path(rel_path)
+    domain = domain_from_path(rel_path)
 
     fm, body = extract_existing_frontmatter(text)
 
     if fm:
-        _extract_from_frontmatter(fm, rel_path, domain, entities, relationships)
+        extract_from_frontmatter(fm, rel_path, domain, entities, relationships)
 
     parent_title = (fm or {}).get("title", "")
-    _extract_from_headings(body, rel_path, domain, parent_title, entities, relationships)
-    _extract_seed_entities(text, rel_path, domain, entities, relationships)
+    extract_from_headings(body, rel_path, domain, parent_title, entities, relationships)
+    extract_seed_entities(text, rel_path, domain, entities, relationships)
 
 
 # ---------------------------------------------------------------------------

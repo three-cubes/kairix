@@ -3,7 +3,6 @@ tests/briefing/test_pipeline.py
 tests/contracts/test_eval_protocols.py
 tests/eval/test_generate.py
 tests/mcp/test_affordance.py
-tests/reflib/test_extract.py
 tests/search/test_collection_config.py
 tests/search/test_config_loader.py
 tests/store/test_crawler.py
