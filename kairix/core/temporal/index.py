@@ -36,12 +36,18 @@ _MEMORY_LOG_FILENAME_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.md$")
 # ---------------------------------------------------------------------------
 
 
-def _boards_dir() -> Path:
-    """Return the boards directory, respecting KAIRIX_BOARDS_DIR override."""
+def _boards_dir(document_root: Path | None = None) -> Path:
+    """Return the boards directory, respecting KAIRIX_BOARDS_DIR override.
+
+    ``document_root`` is an injectable seam (defaults to the production
+    ``paths.document_root()``) so tests can pass a tmp-path-rooted directory
+    without monkeypatching env vars or the paths module.
+    """
     override = _boards_dir_override()
     if override is not None:
         return override
-    return _doc_root_fn() / "01-Projects" / "Boards"
+    root = document_root if document_root is not None else _doc_root_fn()
+    return root / "01-Projects" / "Boards"
 
 
 def get_memory_log_paths(
@@ -200,7 +206,7 @@ def query_temporal_chunks(
         all_chunks: list[TemporalChunk] = []
 
         # 1. Board files
-        boards = _boards_dir()
+        boards = _boards_dir(document_root=document_root)
         for board_path in sorted(boards.glob("*.md")) if boards.is_dir() else []:
             try:
                 all_chunks.extend(chunk_board(str(board_path)))

@@ -290,13 +290,19 @@ def check_document_root_configured(env: Mapping[str, str] | None = None) -> Chec
 # Backwards-compat alias
 
 
-def check_vector_search_working() -> CheckResult:
-    """Vector search returns results with vec_count > 0 (not BM25-only fallback)."""
-    try:
-        from kairix.core.factory import build_search_pipeline
+def check_vector_search_working(pipeline: Any | None = None) -> CheckResult:
+    """Vector search returns results with vec_count > 0 (not BM25-only fallback).
 
-        _pipeline = build_search_pipeline()
-        result = _pipeline.search(query="knowledge management", budget=500)
+    Args:
+        pipeline: Injectable search pipeline for testing. Defaults to the
+                  production ``build_search_pipeline()``.
+    """
+    try:
+        if pipeline is None:
+            from kairix.core.factory import build_search_pipeline
+
+            pipeline = build_search_pipeline()
+        result = pipeline.search(query="knowledge management", budget=500)
 
         vec_count = getattr(result, "vec_count", None)
         bm25_count = getattr(result, "bm25_count", None)
@@ -420,11 +426,19 @@ def check_neo4j_reachable(neo4j_client: Any | None = None) -> CheckResult:
         )
 
 
-def check_agent_knowledge_populated() -> CheckResult:
-    """At least one agent has memory logs (required for briefing pipeline)."""
-    from kairix.paths import document_root
+def check_agent_knowledge_populated(document_root_path: Path | None = None) -> CheckResult:
+    """At least one agent has memory logs (required for briefing pipeline).
 
-    agent_knowledge = document_root() / "04-Agent-Knowledge"
+    Args:
+        document_root_path: Override for the document root. Defaults to
+                            ``kairix.paths.document_root()``.
+    """
+    if document_root_path is None:
+        from kairix.paths import document_root
+
+        document_root_path = document_root()
+
+    agent_knowledge = document_root_path / "04-Agent-Knowledge"
     if not agent_knowledge.exists():
         return CheckResult(
             name="agent_knowledge_populated",
@@ -458,15 +472,22 @@ def check_agent_knowledge_populated() -> CheckResult:
     )
 
 
-def check_chunk_date_populated() -> CheckResult:
-    """chunk_date is populated in content_vectors (required for TMP-7B temporal boost)."""
+def check_chunk_date_populated(db_path: Path | None = None) -> CheckResult:
+    """chunk_date is populated in content_vectors (required for TMP-7B temporal boost).
+
+    Args:
+        db_path: Override for the SQLite DB path. Defaults to
+                 ``kairix.core.db.get_db_path()``.
+    """
     try:
-        from kairix.core.db import get_db_path, open_db
+        from kairix.core.db import open_db
 
-        db_path = get_db_path()
-        from pathlib import Path
+        if db_path is None:
+            from kairix.core.db import get_db_path
 
-        db = open_db(Path(db_path))
+            db_path = Path(get_db_path())
+
+        db = open_db(db_path)
         try:
             # Check if the column exists first
             cols = {row[1] for row in db.execute("PRAGMA table_info(content_vectors)")}

@@ -154,3 +154,104 @@ def test_suggested_entity_is_new_flag():
     )
     assert new_entity.is_new is True
     assert existing_entity.is_new is False
+
+
+@pytest.mark.unit
+def test_suggest_entities_existing_entity_marked_not_new():
+    """Entities found in Neo4j surface with is_new=False and the existing id/name."""
+    # FakeNeo4jClient.find_by_name returns matching entity by name
+    neo4j = FakeNeo4jClient(entities=[{"id": "openclaw-id", "name": "OpenClaw"}])
+    mock_nlp = _make_mock_spacy([("OpenClaw", "ORG")])
+
+    result = suggest_entities("OpenClaw is an AI platform.", neo4j, nlp=mock_nlp)
+
+    matches = [s for s in result if s.text == "OpenClaw"]
+    assert matches, f"expected OpenClaw in suggestions; got {[s.text for s in result]}"
+    assert matches[0].is_new is False
+    assert matches[0].existing_id == "openclaw-id"
+    assert matches[0].existing_name == "OpenClaw"
+
+
+@pytest.mark.unit
+def test_suggest_entities_handles_nlp_processing_failure():
+    """When nlp(text) raises, suggest_entities logs a warning and returns []."""
+
+    class _ExplodingNLP:
+        def __call__(self, text):
+            raise RuntimeError("nlp pipeline crashed")
+
+    neo4j = FakeNeo4jClient(entities=[])
+    result = suggest_entities("any text", neo4j, nlp=_ExplodingNLP())
+    assert result == []
+
+
+@pytest.mark.unit
+def test_suggest_entities_handles_neo4j_lookup_failure():
+    """Neo4j lookup failures are logged and the entity surfaces as new."""
+
+    class _FailingNeo4j:
+        available = True
+
+        def find_by_name(self, name):
+            raise RuntimeError("graph unreachable")
+
+    mock_nlp = _make_mock_spacy([("Acme", "ORG")])
+    result = suggest_entities("Acme is a company.", _FailingNeo4j(), nlp=mock_nlp)
+    matches = [s for s in result if s.text == "Acme"]
+    assert matches
+    assert matches[0].is_new is True
+    assert matches[0].existing_id is None
+
+
+@pytest.mark.unit
+def test_suggest_entities_drops_empty_surface_form():
+    """Filter chain entries with empty 'text' are skipped (line 116)."""
+
+    class _ChainEmittingEmpty:
+        def apply(self, suggestions, context):
+            return [{"text": "", "label": "ORG"}, {"text": "RealCorp", "label": "ORG"}]
+
+    neo4j = FakeNeo4jClient(entities=[])
+    mock_nlp = _make_mock_spacy([("AcmeCorp", "ORG")])
+    result = suggest_entities("test", neo4j, filter_chain=_ChainEmittingEmpty(), nlp=mock_nlp)
+
+    surface_forms = {s.text for s in result}
+    assert "" not in surface_forms
+    assert "RealCorp" in surface_forms
+
+
+@pytest.mark.unit
+def test_suggest_entities_load_model_failure_returns_empty():
+    """When spaCy is importable but _load_model fails, suggest_entities returns []
+    (covers the `except Exception` branch around _load_model and the _load_model
+    body itself).
+
+    We install a fake `spacy` module whose `load` raises OSError. The kairix
+    code path catches that as 'spaCy load failed' and short-circuits with [].
+    No @patch on kairix internals — we only place a fake module into sys.modules,
+    same pattern used by test_suggest_graceful_import_error above.
+    """
+    import sys
+    import types
+
+    fake_spacy = types.ModuleType("spacy")
+
+    def _raise_oserror(name):
+        raise OSError("model not found")
+
+    fake_spacy.load = _raise_oserror  # type: ignore[attr-defined]  # injecting load attr on fake spacy module
+
+    sys_modules_backup = sys.modules.get("spacy")
+    sys.modules["spacy"] = fake_spacy
+
+    try:
+        neo4j = FakeNeo4jClient(entities=[])
+        result = suggest_entities("Acme is a company.", neo4j)
+        # _load_model raised RuntimeError (wrapped from OSError); kairix logged
+        # and returned [].
+        assert result == []
+    finally:
+        if sys_modules_backup is not None:
+            sys.modules["spacy"] = sys_modules_backup
+        else:
+            sys.modules.pop("spacy", None)

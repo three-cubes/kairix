@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import io
+from contextlib import redirect_stdout
+from pathlib import Path
+
 import pytest
 
+from kairix.core.search.config_validator import main as validator_main
 from kairix.core.search.config_validator import validate_config
 
 
@@ -126,3 +131,119 @@ def test_collections_must_be_mapping() -> None:
 def test_agents_must_be_list() -> None:
     errors = validate_config({"agents": {"name": "alpha"}})
     assert any("must be a list" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# main() CLI — exercise the operator entry point
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_main_no_subcommand_prints_help_returns_1() -> None:
+    """When no subcommand is passed, main prints help and returns 1."""
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        rc = validator_main([])
+    assert rc == 1
+    # argparse prints help to stdout
+    assert "validate" in stdout.getvalue() or "usage" in stdout.getvalue().lower()
+
+
+@pytest.mark.unit
+def test_main_with_explicit_valid_config(tmp_path: Path) -> None:
+    """When the YAML is well-formed and valid, main prints OK and returns 0."""
+    cfg = tmp_path / "kairix.config.yaml"
+    cfg.write_text(
+        """\
+collections:
+  shared:
+    - name: docs
+      path: docs
+  agent_pattern: "{agent}-memory"
+""",
+        encoding="utf-8",
+    )
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        rc = validator_main(["validate", str(cfg)])
+    assert rc == 0
+    assert "OK" in stdout.getvalue()
+
+
+@pytest.mark.unit
+def test_main_with_invalid_config(tmp_path: Path) -> None:
+    """When the YAML parses but fails schema rules, main lists errors and returns 1."""
+    cfg = tmp_path / "kairix.config.yaml"
+    cfg.write_text(
+        """\
+collections:
+  shared:
+    - path: docs   # missing required 'name'
+""",
+        encoding="utf-8",
+    )
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        rc = validator_main(["validate", str(cfg)])
+    assert rc == 1
+    assert "validation error" in stdout.getvalue().lower()
+
+
+@pytest.mark.unit
+def test_main_with_missing_file(tmp_path: Path) -> None:
+    """A non-existent path prints an error and returns 1."""
+    missing = tmp_path / "missing.yaml"
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        rc = validator_main(["validate", str(missing)])
+    assert rc == 1
+    assert "not found" in stdout.getvalue().lower()
+
+
+@pytest.mark.unit
+def test_main_with_invalid_yaml(tmp_path: Path) -> None:
+    """When YAML parsing fails, main prints the error and returns 1."""
+    cfg = tmp_path / "kairix.config.yaml"
+    cfg.write_text("collections: [unclosed bracket", encoding="utf-8")
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        rc = validator_main(["validate", str(cfg)])
+    assert rc == 1
+    assert "yaml" in stdout.getvalue().lower() or "parse" in stdout.getvalue().lower()
+
+
+@pytest.mark.unit
+def test_main_without_path_resolves_via_cwd(tmp_path: Path, monkeypatch) -> None:
+    """When no path arg, main calls _resolve_config_path which falls back to
+    looking for ``kairix.config.yaml`` in cwd. Empty cwd → 'No config file'."""
+    monkeypatch.chdir(tmp_path)
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        rc = validator_main(["validate"])
+    assert rc == 1
+    assert "No config file" in stdout.getvalue() or "not found" in stdout.getvalue().lower()
+
+
+@pytest.mark.unit
+def test_main_without_path_finds_cwd_config(tmp_path: Path, monkeypatch) -> None:
+    """When no path arg AND kairix.config.yaml in cwd, the cwd file is validated."""
+    cfg = tmp_path / "kairix.config.yaml"
+    cfg.write_text("collections:\n  shared: []\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        rc = validator_main(["validate"])
+    assert rc == 0
+    assert "OK" in stdout.getvalue()
+
+
+@pytest.mark.unit
+def test_main_yaml_loads_to_empty_dict_is_valid(tmp_path: Path) -> None:
+    """Empty YAML file parses to None → validate_config gets {} → no errors."""
+    cfg = tmp_path / "kairix.config.yaml"
+    cfg.write_text("", encoding="utf-8")
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        rc = validator_main(["validate", str(cfg)])
+    assert rc == 0

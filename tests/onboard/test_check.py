@@ -201,3 +201,616 @@ def test_run_all_checks_returns_list_of_check_results() -> None:
         assert isinstance(r.name, str)
         assert isinstance(r.ok, bool)
         assert isinstance(r.detail, str)
+
+
+# ---------------------------------------------------------------------------
+# check_kairix_on_path — DI via which
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_kairix_on_path_ok() -> None:
+    """which returns a path → ok=True with the path in detail."""
+    from kairix.platform.onboard.check import check_kairix_on_path
+
+    result = check_kairix_on_path(deps=OnboardChecksDeps(which=lambda _name: "/usr/local/bin/kairix"))
+    assert result.ok is True
+    assert "/usr/local/bin/kairix" in result.detail
+
+
+@pytest.mark.unit
+def test_kairix_on_path_missing() -> None:
+    """which returns None → ok=False with deploy-vm.sh hint."""
+    from kairix.platform.onboard.check import check_kairix_on_path
+
+    result = check_kairix_on_path(deps=OnboardChecksDeps(which=lambda _name: None))
+    assert result.ok is False
+    assert result.fix is not None
+    assert "deploy-vm.sh" in result.fix
+
+
+# ---------------------------------------------------------------------------
+# check_wrapper_installed — non-Docker branches via DI which + tmp_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_wrapper_check_missing_kairix_returns_failed(tmp_path: Path) -> None:
+    """When which returns None, wrapper check fails with a helpful hint."""
+    result = check_wrapper_installed(
+        deps=OnboardChecksDeps(is_docker=lambda: False, which=lambda _name: None),
+    )
+    assert result.ok is False
+    assert result.fix is not None
+    assert "deploy-vm.sh" in result.fix
+
+
+@pytest.mark.unit
+def test_wrapper_check_python_binary_returns_failed(tmp_path: Path) -> None:
+    """Symlink to a Python binary (#!python shebang) is flagged with the
+    'points to raw Python binary' detail (distinct from the 'unexpected format'
+    fallback that also matches non-shell binaries)."""
+    fake_bin = tmp_path / "kairix"
+    fake_bin.write_text("#!/usr/bin/env python3\n# pretend python binary\n")
+    result = check_wrapper_installed(
+        deps=OnboardChecksDeps(is_docker=lambda: False, which=lambda _name: str(fake_bin)),
+    )
+    assert result.ok is False
+    assert result.fix is not None
+    # The python-specific branch produces a 'raw Python binary' message;
+    # the 'unexpected format' fallback would NOT. Tightened to catch a
+    # sabotage that removes the python-detection branch.
+    assert "raw Python binary" in result.detail
+
+
+@pytest.mark.unit
+def test_wrapper_check_bash_wrapper_returns_ok(tmp_path: Path) -> None:
+    """Symlink to a bash wrapper (#!bash shebang) is accepted."""
+    fake_bin = tmp_path / "kairix-wrapper.sh"
+    fake_bin.write_text("#!/usr/bin/env bash\n# real wrapper\n")
+    result = check_wrapper_installed(
+        deps=OnboardChecksDeps(is_docker=lambda: False, which=lambda _name: str(fake_bin)),
+    )
+    assert result.ok is True
+    assert "wrapper installed" in result.detail
+
+
+@pytest.mark.unit
+def test_wrapper_check_unknown_format_returns_failed(tmp_path: Path) -> None:
+    """Binary without a recognised shebang prefix is rejected."""
+    fake_bin = tmp_path / "kairix"
+    fake_bin.write_text("ELF\x00garbage")
+    result = check_wrapper_installed(
+        deps=OnboardChecksDeps(is_docker=lambda: False, which=lambda _name: str(fake_bin)),
+    )
+    assert result.ok is False
+    assert "unexpected format" in result.detail
+
+
+@pytest.mark.unit
+def test_wrapper_check_unreadable_file_returns_failed(tmp_path: Path) -> None:
+    """When the binary cannot be opened, the except branch fires."""
+    missing = tmp_path / "does-not-exist"
+    result = check_wrapper_installed(
+        deps=OnboardChecksDeps(is_docker=lambda: False, which=lambda _name: str(missing)),
+    )
+    assert result.ok is False
+    assert "Cannot read" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# check_secrets_loaded — file with missing keys branch (line 225)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_secrets_loaded_file_missing_required_keys(tmp_path: Path) -> None:
+    """When the secrets file exists but lacks required keys, ok=False
+    with a 'missing required keys' detail and a fix hint."""
+    secrets_file = tmp_path / "kairix.env"
+    secrets_file.write_text("KAIRIX_LLM_API_KEY=onlyone\n")  # missing endpoint
+    result = check_secrets_loaded(env={"KAIRIX_SECRETS_FILE": str(secrets_file)})
+    assert result.ok is False
+    assert "missing required keys" in result.detail
+    assert result.fix is not None
+
+
+# ---------------------------------------------------------------------------
+# check_vector_search_working — DI seam via pipeline parameter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_vector_search_working_with_results() -> None:
+    """A pipeline returning >0 results with vec_count > 0 produces ok=True."""
+    from dataclasses import dataclass, field
+
+    from kairix.platform.onboard.check import check_vector_search_working
+
+    @dataclass
+    class _FakeSearchResult:
+        results: list = field(default_factory=lambda: [object(), object(), object()])
+        vec_count: int = 3
+        bm25_count: int = 5
+        vec_failed: bool = False
+
+    class _FakePipeline:
+        def search(self, query, budget):
+            return _FakeSearchResult()
+
+    result = check_vector_search_working(pipeline=_FakePipeline())
+    assert result.ok is True
+    assert "results=3" in result.detail
+
+
+@pytest.mark.unit
+def test_vector_search_working_vec_failed() -> None:
+    """vec_failed=True produces ok=False with credentials hint."""
+    from dataclasses import dataclass, field
+
+    from kairix.platform.onboard.check import check_vector_search_working
+
+    @dataclass
+    class _FakeSearchResult:
+        results: list = field(default_factory=lambda: [object()])
+        vec_count: int = 0
+        bm25_count: int = 1
+        vec_failed: bool = True
+
+    class _FakePipeline:
+        def search(self, query, budget):
+            return _FakeSearchResult()
+
+    result = check_vector_search_working(pipeline=_FakePipeline())
+    assert result.ok is False
+    assert "Vector search failed" in result.detail
+    assert result.fix is not None
+
+
+@pytest.mark.unit
+def test_vector_search_working_zero_results() -> None:
+    """vec_count=0 and result_count=0 returns 'not embedded' hint."""
+    from dataclasses import dataclass, field
+
+    from kairix.platform.onboard.check import check_vector_search_working
+
+    @dataclass
+    class _FakeSearchResult:
+        results: list = field(default_factory=list)
+        vec_count: int = 0
+        bm25_count: int = 0
+        vec_failed: bool = False
+
+    class _FakePipeline:
+        def search(self, query, budget):
+            return _FakeSearchResult()
+
+    result = check_vector_search_working(pipeline=_FakePipeline())
+    assert result.ok is False
+    assert "0 results" in result.detail
+
+
+@pytest.mark.unit
+def test_vector_search_working_pipeline_exception() -> None:
+    """Exception from pipeline.search → ok=False with credentials hint."""
+    from kairix.platform.onboard.check import check_vector_search_working
+
+    class _ExplodingPipeline:
+        def search(self, query, budget):
+            raise RuntimeError("auth failed")
+
+    result = check_vector_search_working(pipeline=_ExplodingPipeline())
+    assert result.ok is False
+    assert "Search raised" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# check_agent_knowledge_populated — DI via document_root_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_agent_knowledge_missing_directory(tmp_path: Path) -> None:
+    """No 04-Agent-Knowledge dir → ok=False with mkdir hint."""
+    from kairix.platform.onboard.check import check_agent_knowledge_populated
+
+    result = check_agent_knowledge_populated(document_root_path=tmp_path)
+    assert result.ok is False
+    assert "not found" in result.detail
+    assert result.fix is not None
+
+
+@pytest.mark.unit
+def test_agent_knowledge_empty_directory(tmp_path: Path) -> None:
+    """Empty 04-Agent-Knowledge dir → ok=False with 'No agent memory logs' detail."""
+    from kairix.platform.onboard.check import check_agent_knowledge_populated
+
+    (tmp_path / "04-Agent-Knowledge").mkdir()
+    result = check_agent_knowledge_populated(document_root_path=tmp_path)
+    assert result.ok is False
+    assert "No agent memory logs" in result.detail
+
+
+@pytest.mark.unit
+def test_agent_knowledge_populated_ok(tmp_path: Path) -> None:
+    """Memory log present → ok=True with file count in detail."""
+    from kairix.platform.onboard.check import check_agent_knowledge_populated
+
+    log_dir = tmp_path / "04-Agent-Knowledge" / "builder" / "memory"
+    log_dir.mkdir(parents=True)
+    (log_dir / "2026-05-01.md").write_text("# log")
+
+    result = check_agent_knowledge_populated(document_root_path=tmp_path)
+    assert result.ok is True
+    assert "1 files" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# check_chunk_date_populated — DI via db_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_chunk_date_populated_index_creates_then_finds_missing_column(tmp_path: Path) -> None:
+    """When the index doesn't exist, open_db creates a new empty SQLite DB
+    that lacks the content_vectors table. The check surfaces the 'column
+    missing' branch."""
+    from kairix.platform.onboard.check import check_chunk_date_populated
+
+    result = check_chunk_date_populated(db_path=tmp_path / "fresh.sqlite")
+    assert result.ok is False
+    # New DB has no table → PRAGMA returns empty → 'chunk_date not in cols'
+    assert "chunk_date" in result.detail
+
+
+@pytest.mark.unit
+def test_chunk_date_populated_missing_column(tmp_path: Path) -> None:
+    """When chunk_date column is missing, returns the 'migration required' hint."""
+    import sqlite3
+
+    from kairix.platform.onboard.check import check_chunk_date_populated
+
+    db_path = tmp_path / "index.sqlite"
+    db = sqlite3.connect(db_path)
+    # Create content_vectors WITHOUT chunk_date column
+    db.execute("CREATE TABLE content_vectors (id INTEGER PRIMARY KEY, content TEXT)")
+    db.commit()
+    db.close()
+
+    result = check_chunk_date_populated(db_path=db_path)
+    assert result.ok is False
+    assert "chunk_date" in result.detail
+
+
+@pytest.mark.unit
+def test_chunk_date_populated_empty_table(tmp_path: Path) -> None:
+    """When content_vectors is empty, returns 'vault has not been embedded'."""
+    import sqlite3
+
+    from kairix.platform.onboard.check import check_chunk_date_populated
+
+    db_path = tmp_path / "index.sqlite"
+    db = sqlite3.connect(db_path)
+    db.execute("CREATE TABLE content_vectors (id INTEGER PRIMARY KEY, chunk_date TEXT)")
+    db.commit()
+    db.close()
+
+    result = check_chunk_date_populated(db_path=db_path)
+    assert result.ok is False
+    assert "empty" in result.detail.lower() or "not been embedded" in result.detail
+
+
+@pytest.mark.unit
+def test_chunk_date_populated_zero_dated(tmp_path: Path) -> None:
+    """When all chunks have NULL chunk_date, returns the '0% dated' hint."""
+    import sqlite3
+
+    from kairix.platform.onboard.check import check_chunk_date_populated
+
+    db_path = tmp_path / "index.sqlite"
+    db = sqlite3.connect(db_path)
+    db.execute("CREATE TABLE content_vectors (id INTEGER PRIMARY KEY, chunk_date TEXT)")
+    for i in range(10):
+        db.execute("INSERT INTO content_vectors (id, chunk_date) VALUES (?, NULL)", (i,))
+    db.commit()
+    db.close()
+
+    result = check_chunk_date_populated(db_path=db_path)
+    assert result.ok is False
+    assert "0/" in result.detail or "0%" in result.detail
+
+
+@pytest.mark.unit
+def test_chunk_date_populated_low_coverage(tmp_path: Path) -> None:
+    """When < 20% of chunks have chunk_date, returns 'low coverage' hint."""
+    import sqlite3
+
+    from kairix.platform.onboard.check import check_chunk_date_populated
+
+    db_path = tmp_path / "index.sqlite"
+    db = sqlite3.connect(db_path)
+    db.execute("CREATE TABLE content_vectors (id INTEGER PRIMARY KEY, chunk_date TEXT)")
+    # 1 dated, 9 NULL → 10%
+    db.execute("INSERT INTO content_vectors (id, chunk_date) VALUES (0, '2026-05-01')")
+    for i in range(1, 10):
+        db.execute("INSERT INTO content_vectors (id, chunk_date) VALUES (?, NULL)", (i,))
+    db.commit()
+    db.close()
+
+    result = check_chunk_date_populated(db_path=db_path)
+    assert result.ok is False
+    assert "low coverage" in result.detail
+
+
+@pytest.mark.unit
+def test_chunk_date_populated_high_coverage(tmp_path: Path) -> None:
+    """When >= 20% chunks have chunk_date, returns ok=True."""
+    import sqlite3
+
+    from kairix.platform.onboard.check import check_chunk_date_populated
+
+    db_path = tmp_path / "index.sqlite"
+    db = sqlite3.connect(db_path)
+    db.execute("CREATE TABLE content_vectors (id INTEGER PRIMARY KEY, chunk_date TEXT)")
+    # All dated → 100%
+    for i in range(10):
+        db.execute("INSERT INTO content_vectors (id, chunk_date) VALUES (?, '2026-05-01')", (i,))
+    db.commit()
+    db.close()
+
+    result = check_chunk_date_populated(db_path=db_path)
+    assert result.ok is True
+    assert "100%" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# MCP probe helpers — exercise the harness probes via fake config files
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_check_mcp_service_runs_without_raising() -> None:
+    """check_mcp_service combines the harness probes and never raises."""
+    from kairix.platform.onboard.check import check_mcp_service
+
+    result = check_mcp_service()
+    assert isinstance(result, CheckResult)
+    # The function returns ok=True if any harness is active, else ok=False
+    # We accept either — the point is no exception escapes.
+    assert isinstance(result.ok, bool)
+
+
+@pytest.mark.unit
+def test_check_mcp_service_handles_invalid_openclaw_json(tmp_path: Path, monkeypatch) -> None:
+    """When openclaw.json is invalid JSON, check_mcp_service does not raise.
+
+    Drives the OpenClaw probe's JSONDecodeError branch through the public
+    check_mcp_service entry point (F5-clean — no private import).
+    """
+    from kairix.platform.onboard import check as check_mod
+
+    bogus = tmp_path / "openclaw.json"
+    bogus.write_text("not json {{{")
+    monkeypatch.setattr(check_mod, "_OPENCLAW_JSON_PATHS", (str(bogus),))
+
+    # The probe should not raise; check_mcp_service surfaces a CheckResult
+    result = check_mod.check_mcp_service()
+    assert isinstance(result, CheckResult)
+
+
+@pytest.mark.unit
+def test_run_all_checks_swallows_individual_failures(monkeypatch) -> None:
+    """If a check raises, run_all_checks catches the exception and surfaces
+    it as a failed CheckResult (lines 768-769)."""
+    from kairix.platform.onboard import check as check_mod
+
+    def _exploding_check():
+        raise RuntimeError("simulated check failure")
+
+    _exploding_check.__name__ = "check_test_simulated"
+
+    # Add an exploding check to ALL_CHECKS for this test only
+    monkeypatch.setattr(check_mod, "ALL_CHECKS", [*check_mod.ALL_CHECKS, _exploding_check])
+    results = run_all_checks()
+    test_results = [r for r in results if r.name == "test_simulated"]
+    assert len(test_results) == 1
+    assert test_results[0].ok is False
+    assert "unexpected exception" in test_results[0].detail.lower()
+
+
+# ---------------------------------------------------------------------------
+# check_chunk_date_populated — FileNotFoundError branch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_chunk_date_populated_filenotfound_branch(tmp_path: Path, monkeypatch) -> None:
+    """When open_db raises FileNotFoundError, the 'Index not found' hint surfaces.
+
+    This branch is distinct from the generic Exception fallback below.
+    """
+    from kairix.platform.onboard import check as check_mod
+
+    def _raise_fnf(_path):
+        raise FileNotFoundError("simulated missing index")
+
+    # Substitute open_db on the kairix.core.db module so the check picks it up
+    import kairix.core.db as db_mod
+
+    monkeypatch.setattr(db_mod, "open_db", _raise_fnf)
+
+    result = check_mod.check_chunk_date_populated(db_path=tmp_path / "irrelevant.sqlite")
+    assert result.ok is False
+    assert "Index not found" in result.detail
+
+
+@pytest.mark.unit
+def test_chunk_date_populated_generic_exception(tmp_path: Path, monkeypatch) -> None:
+    """When open_db raises a non-FileNotFoundError, the generic exception
+    branch fires (line 553-558)."""
+    import kairix.core.db as db_mod
+    from kairix.platform.onboard import check as check_mod
+
+    def _raise_runtime(_path):
+        raise RuntimeError("locked database")
+
+    monkeypatch.setattr(db_mod, "open_db", _raise_runtime)
+    result = check_mod.check_chunk_date_populated(db_path=tmp_path / "irrelevant.sqlite")
+    assert result.ok is False
+    assert "failed" in result.detail.lower()
+
+
+# ---------------------------------------------------------------------------
+# MCP probes — hit the executable/registered-but-broken branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_probe_openclaw_registered_with_executable_command(tmp_path: Path, monkeypatch) -> None:
+    """When openclaw.json registers mcp-kairix with an executable command,
+    the probe returns ok=True (lines 612-616)."""
+    from kairix.platform.onboard import check as check_mod
+
+    # Build a fake openclaw.json under tmp_path
+    openclaw_dir = tmp_path / ".openclaw"
+    openclaw_dir.mkdir()
+    fake_cmd = tmp_path / "kairix-start.sh"
+    fake_cmd.write_text("#!/bin/bash\necho ok\n")
+    fake_cmd.chmod(0o755)
+
+    config = openclaw_dir / "openclaw.json"
+    import json
+
+    config.write_text(
+        json.dumps(
+            {
+                "mcp": {
+                    "servers": {
+                        "mcp-kairix": {"command": str(fake_cmd)},
+                    },
+                },
+            }
+        )
+    )
+
+    # Override the module-level _OPENCLAW_JSON_PATHS to point at our fake
+    monkeypatch.setattr(check_mod, "_OPENCLAW_JSON_PATHS", (str(config),))
+
+    ok, detail = check_mod._probe_openclaw_harness()
+    assert ok is True
+    assert "OpenClaw" in detail
+
+
+@pytest.mark.unit
+def test_probe_openclaw_registered_but_command_missing(tmp_path: Path, monkeypatch) -> None:
+    """When mcp-kairix is registered but the command path doesn't exist,
+    the probe returns ok=False with a 'missing/not executable' detail (617-620)."""
+    from kairix.platform.onboard import check as check_mod
+
+    openclaw_dir = tmp_path / ".openclaw"
+    openclaw_dir.mkdir()
+    config = openclaw_dir / "openclaw.json"
+    import json
+
+    config.write_text(
+        json.dumps(
+            {
+                "mcp": {
+                    "servers": {
+                        "mcp-kairix": {"command": "/nonexistent/cmd"},
+                    },
+                },
+            }
+        )
+    )
+
+    monkeypatch.setattr(check_mod, "_OPENCLAW_JSON_PATHS", (str(config),))
+
+    ok, detail = check_mod._probe_openclaw_harness()
+    assert ok is False
+    assert "missing" in detail.lower() or "not executable" in detail.lower()
+
+
+@pytest.mark.unit
+def test_probe_claude_desktop_registered(tmp_path: Path, monkeypatch) -> None:
+    """When claude_desktop_config.json registers kairix, the probe returns ok=True."""
+    from kairix.platform.onboard import check as check_mod
+
+    config = tmp_path / "claude_desktop_config.json"
+    import json
+
+    config.write_text(json.dumps({"mcpServers": {"kairix": {"command": "kairix"}}}))
+
+    monkeypatch.setattr(check_mod, "_CLAUDE_DESKTOP_CONFIG_PATHS", (config,))
+
+    ok, detail = check_mod._probe_claude_desktop_harness()
+    assert ok is True
+    assert "Claude Desktop" in detail
+
+
+@pytest.mark.unit
+def test_probe_sse_harness_port_listening(monkeypatch) -> None:
+    """When the MCP SSE port is listening, the probe returns ok=True."""
+    import socket
+
+    from kairix.platform.onboard import check as check_mod
+
+    class _FakeSocket:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    def _fake_create_connection(*args, **kwargs):
+        return _FakeSocket()
+
+    monkeypatch.setattr(socket, "create_connection", _fake_create_connection)
+
+    ok, detail = check_mod._probe_sse_harness()
+    assert ok is True
+    assert "listening" in detail.lower()
+
+
+@pytest.mark.unit
+def test_probe_sse_harness_systemctl_active(monkeypatch) -> None:
+    """When port is not listening but systemctl says service is active,
+    the probe returns ok=True."""
+    import socket
+    import subprocess
+
+    from kairix.platform.onboard import check as check_mod
+
+    def _raise_oserror(*args, **kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(socket, "create_connection", _raise_oserror)
+
+    class _FakeCompleted:
+        stdout = "active\n"
+
+    def _fake_run(*args, **kwargs):
+        return _FakeCompleted()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    ok, detail = check_mod._probe_sse_harness()
+    assert ok is True
+    assert "active" in detail.lower()
+
+
+@pytest.mark.unit
+def test_check_mcp_service_active_when_any_harness_passes(monkeypatch) -> None:
+    """When at least one harness is configured, check_mcp_service returns ok=True."""
+    from kairix.platform.onboard import check as check_mod
+
+    monkeypatch.setattr(check_mod, "_probe_openclaw_harness", lambda: (True, "OpenClaw: configured"))
+    monkeypatch.setattr(check_mod, "_probe_claude_desktop_harness", lambda: (False, "Claude: nope"))
+    monkeypatch.setattr(check_mod, "_probe_sse_harness", lambda: (False, "SSE: nope"))
+
+    result = check_mod.check_mcp_service()
+    assert result.ok is True
+    assert "OpenClaw" in result.detail

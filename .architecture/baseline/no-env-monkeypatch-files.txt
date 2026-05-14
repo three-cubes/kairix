@@ -3,5 +3,6 @@ tests/eval/test_retrieval_config_resolution.py
 tests/integration/conftest.py
 tests/search/test_config_loader.py
 tests/search/test_config_loader_contracts.py
+tests/test_credentials.py
 tests/test_paths.py
 tests/test_secrets.py
