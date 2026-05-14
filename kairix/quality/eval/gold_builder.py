@@ -105,14 +105,14 @@ def _validate_weights(weights: tuple[float, float, float]) -> None:
     """
     w_fp, w_title, w_doc = weights
     for label, w in (("filepath", w_fp), ("title", w_title), ("doc", w_doc)):
-        if not math.isfinite(w) or w <= 0:  # pragma: no cover
+        if not math.isfinite(w) or w <= 0:  # pragma: no cover — defensive; presets are finite-positive
             raise ValueError(
                 f"gold_builder: BM25 weight {label}={w!r} must be finite and positive; "
                 f"weights tuple = (filepath, title, doc)"
             )
 
 
-def _vector_search(  # pragma: no cover
+def _vector_search(  # pragma: no cover — prod-only path; tests inject FakeRetriever
     query: str,
     collections: list[str] | None = None,
     limit: int = 10,
@@ -210,7 +210,7 @@ class GoldBuilder:
         # The lazy-construction branch is production-only — tests always inject
         # FakeLLMJudge via the constructor, so the AzureChatBackend wiring runs
         # only from CLI entry points (kairix.quality.eval.cli).
-        if self._llm_judge is None:  # pragma: no cover
+        if self._llm_judge is None:  # pragma: no cover — prod-only lazy default; tests inject FakeLLMJudge
             from kairix._azure import AzureChatBackend
             from kairix.quality.eval.judge import LLMJudge as ProductionLLMJudge
 
@@ -220,7 +220,7 @@ class GoldBuilder:
     def _get_retriever(self) -> RetrieverProtocol:
         """Return the configured Retriever or construct a production default."""
         # Lazy-construction branch is production-only — tests inject FakeRetriever.
-        if self._retriever is None:  # pragma: no cover
+        if self._retriever is None:  # pragma: no cover — prod-only lazy default; tests inject FakeRetriever
             self._retriever = _DefaultGoldRetriever()
         return self._retriever
 
@@ -620,7 +620,7 @@ class GoldBuilder:
         return report
 
 
-class _DefaultGoldRetriever:  # pragma: no cover
+class _DefaultGoldRetriever:  # pragma: no cover — prod-only shim; tests inject FakeRetriever
     """Production Retriever for the gold builder — delegates to module-level
     ``_vector_search``.
 

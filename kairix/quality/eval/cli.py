@@ -145,7 +145,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
         # the local-process trust model; the user can already write anywhere
         # their account permits via shell redirection. NOSONAR markers cover
         # both the path resolution and the write where S2083 fires.
-        output_path = Path(args.output).expanduser().resolve()  # NOSONAR
+        output_path = Path(args.output).expanduser().resolve()  # NOSONAR — CLI trust boundary; see comment above
         if not output_path.parent.exists():
             print(
                 f"Error: parent directory {output_path.parent} does not exist",

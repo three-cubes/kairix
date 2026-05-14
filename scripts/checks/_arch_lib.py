@@ -94,7 +94,7 @@ def main_entry(check_fn: object, name: str, remediation: str, *roots: str) -> in
     """
     violations: set[Path] = set()
     for path in python_files(*roots):
-        if callable(check_fn) and check_fn(path):  # type: ignore[truthy-function]
+        if callable(check_fn) and check_fn(path):  # type: ignore[truthy-function] — check_fn is typed `object` for generic dispatch; callable() guard narrows at runtime
             violations.add(repo_relative(path))
     return gate(name, violations, remediation)
 

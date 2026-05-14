@@ -69,7 +69,7 @@ def extract_related_entities(text: str) -> list[str]:
 def resolve_entity(name: str, neo4j_client: object) -> str | None:
     """Resolve entity name to Neo4j node id."""
     for variant in [name, name.lower(), name.title(), name.replace("-", " ").title()]:
-        rows = neo4j_client.find_by_name(variant)  # type: ignore[attr-defined]
+        rows = neo4j_client.find_by_name(variant)  # type: ignore[attr-defined] — neo4j_client typed `object` to keep script decoupled; .find_by_name() exists on real client
         if rows:
             return str(rows[0].get("id", ""))
     return None
@@ -120,7 +120,7 @@ def seed_brief_entities(dry_run: bool = False, vault_root: Path = VAULT_ROOT) ->
         for brief_path_str, entity_id, _entity_name in edges:
             try:
                 # Store brief cross-reference as a property on the entity node
-                neo4j.cypher(  # type: ignore[attr-defined]
+                neo4j.cypher(  # type: ignore[attr-defined] — neo4j typed via get_client()'s `object` return; .cypher() exists on real client
                     "MATCH (n {id: $id}) "
                     "SET n.mentioned_in_briefs = coalesce(n.mentioned_in_briefs, []) + [$path], "
                     "    n.brief_last_seen = $ts",

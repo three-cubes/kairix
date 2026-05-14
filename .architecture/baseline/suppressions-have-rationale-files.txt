@@ -1,9 +1,3 @@
-kairix/quality/eval/cli.py
-kairix/quality/eval/gold_builder.py
-kairix/quality/eval/monitor.py
-scripts/checks/_arch_lib.py
-scripts/prune-entities.py
-scripts/seed-brief-entities.py
 tests/bdd/steps/eval_generate_steps.py
 tests/benchmark/test_runner.py
 tests/entities/test_suggest.py
