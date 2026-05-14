@@ -14,10 +14,16 @@ on:
   workflow_dispatch:
     # Manual entrypoint used by release.yml to re-fire publish after a
     # GITHUB_TOKEN-created release (which doesn't fan out — #230).
+    # Also used by release-alpha.yml to publish pre-release tags.
     inputs:
       ref:
-        description: 'Git tag to build + publish (e.g. v2026.5.14)'
+        description: 'Git tag to build + publish (e.g. v2026.5.14 or v2026.5.15a1)'
         required: true
+        type: string
+      is_alpha:
+        description: 'Set to true for pre-release tags — routes through the release-alpha environment (no protection timer).'
+        required: false
+        default: 'false'
         type: string
 
 jobs:
@@ -38,7 +44,11 @@ jobs:
     name: Publish to PyPI
     needs: build
     runs-on: ubuntu-latest
-    environment: release
+    # Alpha tags publish through ``release-alpha`` (0-min protection timer);
+    # stable tags publish through ``release`` (60-min protection timer).
+    # Detection: ``release.prerelease`` fires for pre-release tags from the
+    # GitHub UI; ``inputs.is_alpha`` is set by release-alpha.yml's dispatch.
+    environment: ${{ (github.event.release.prerelease || inputs.is_alpha == 'true') && 'release-alpha' || 'release' }}
     permissions:
       id-token: write
     steps:
