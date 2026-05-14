@@ -270,6 +270,16 @@ def compute_embed_interval(base: int, noop_streak: int) -> int:
 def run_entity_seed(deps: WorkerDeps | None = None) -> None:
     """Run entity relationship seeding from document store structure.
 
+    Treats every outcome as non-fatal: the underlying store-crawl CLI
+    (``kairix.knowledge.store.cli``) calls ``sys.exit(0)`` on success
+    and ``sys.exit(1)`` on error. ``SystemExit`` does NOT inherit from
+    ``Exception``, so catching only ``Exception`` lets a "successful"
+    ``sys.exit(0)`` propagate out and terminate the worker process —
+    that's the #270 regression where the kairix-worker container exits
+    0 every cycle and Docker restarts it on a loop. Same
+    ``(Exception, SystemExit)`` discipline as ``run_embed`` and
+    ``run_wikilinks_inject``.
+
     Args:
         deps: Injectable worker dependencies. Tests construct
               ``WorkerDeps(entity_seed=fake)``; production omits the
@@ -281,8 +291,8 @@ def run_entity_seed(deps: WorkerDeps | None = None) -> None:
         logger.info("worker: starting entity seed")
         deps.entity_seed()
         logger.info("worker: entity seed complete")
-    except Exception as exc:
-        logger.warning("worker: entity seed failed — %s", exc)
+    except (Exception, SystemExit) as exc:
+        logger.warning("worker: entity seed raised — %s", exc)
 
 
 def run_wikilinks_inject(deps: WorkerDeps | None = None) -> None:
@@ -313,6 +323,13 @@ def run_wikilinks_inject(deps: WorkerDeps | None = None) -> None:
 def run_health_check(deps: WorkerDeps | None = None) -> None:
     """Log a health check.
 
+    Treats every outcome as non-fatal — including ``SystemExit`` —
+    for the same reason as ``run_entity_seed``: a maintenance helper
+    that calls ``sys.exit`` must not terminate the worker process.
+    See #270 for the entity-seed regression and the (Exception,
+    SystemExit) tuple discipline the worker enforces at every CLI
+    boundary.
+
     Args:
         deps: Injectable worker dependencies. Tests construct
               ``WorkerDeps(health_check=fake)``; production omits the
@@ -324,8 +341,8 @@ def run_health_check(deps: WorkerDeps | None = None) -> None:
         passed = sum(1 for r in results if r.ok)
         total = len(results)
         logger.info("worker: health check %d/%d passed", passed, total)
-    except Exception as exc:
-        logger.warning("worker: health check failed — %s", exc)
+    except (Exception, SystemExit) as exc:
+        logger.warning("worker: health check raised — %s", exc)
 
 
 @dataclass

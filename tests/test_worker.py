@@ -171,6 +171,40 @@ def test_run_entity_seed_calls_entity_seed_callable() -> None:
     assert len(calls) == 1
 
 
+def test_run_entity_seed_survives_systemexit_zero() -> None:
+    """#270 regression: the store-crawl CLI calls ``sys.exit(0)`` on
+    every successful crawl. ``SystemExit`` is NOT a subclass of
+    ``Exception``, so a plain ``except Exception`` lets the
+    "successful" exit escape — terminating the worker process with
+    exit code 0. Docker's ``restart: unless-stopped`` then loops the
+    container indefinitely. The fix catches ``(Exception, SystemExit)``.
+
+    Sabotage proof: dropping ``SystemExit`` from the ``except`` tuple
+    in ``run_entity_seed`` makes this test raise ``SystemExit`` and
+    fail (pytest reports it as an error rather than a pass), proving
+    the catch really is the gate.
+    """
+
+    def _exiting_seed() -> None:
+        raise SystemExit(0)
+
+    # Must not raise — SystemExit(0) is the success-path tear-down
+    # from kairix.knowledge.store.cli.crawl. Worker must survive it.
+    run_entity_seed(deps=WorkerDeps(entity_seed=_exiting_seed))
+
+
+def test_run_entity_seed_survives_systemexit_one() -> None:
+    """Sister test to the ``SystemExit(0)`` case — non-zero exits
+    from the store-crawl CLI (e.g. ``crawl --document-root`` reporting
+    errors) must also be non-fatal for the worker process.
+    """
+
+    def _exiting_seed() -> None:
+        raise SystemExit(1)
+
+    run_entity_seed(deps=WorkerDeps(entity_seed=_exiting_seed))  # must not propagate
+
+
 # ---------------------------------------------------------------------------
 # run_health_check() tests
 # ---------------------------------------------------------------------------
@@ -210,6 +244,19 @@ def test_run_health_check_counts_results() -> None:
         ]
 
     run_health_check(deps=WorkerDeps(health_check=_mixed_results))  # should not raise
+
+
+def test_run_health_check_survives_systemexit() -> None:
+    """Mirrors the #270 entity-seed regression: a maintenance helper
+    that calls ``sys.exit`` must not bring down the worker. Any
+    CheckResult-producing CLI that grew a ``sys.exit`` path would
+    otherwise terminate the worker on its first health check.
+    """
+
+    def _exiting_check() -> list:
+        raise SystemExit(1)
+
+    run_health_check(deps=WorkerDeps(health_check=_exiting_check))  # must not propagate
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +413,72 @@ def test_main_loop_runs_embed_on_interval(tmp_path: Path) -> None:
     assert call_count >= 2
     assert entity_called, "entity seed should have been called"
     assert health_called, "health check should have been called"
+
+
+def test_main_loop_survives_entity_seed_systemexit_zero(tmp_path: Path) -> None:
+    """#270 regression — closed-loop reproduction.
+
+    Scenario reconstructed from the production log: the entity-seed
+    callable (``kairix.knowledge.store.cli.main(["crawl", ...])``)
+    calls ``sys.exit(0)`` on every successful crawl. Pre-fix, the
+    worker caught ``Exception`` but not ``SystemExit`` so the success
+    exit propagated, ``main()`` returned, and the container exited 0.
+    Docker's restart policy then looped the container.
+
+    This test fires ``SystemExit(0)`` from the injected entity_seed
+    callable on the first call, and asserts the embed fake is called
+    at least twice (startup + one in-loop iteration). Pre-fix, the
+    second embed call never happens because the loop tears down after
+    entity_seed runs. Post-fix, the loop keeps running.
+
+    Sabotage proof: revert ``run_entity_seed`` to catch only
+    ``Exception`` and rerun — the test fails with an uncaught
+    ``SystemExit`` because the loop never reaches its second embed.
+    Restore the ``(Exception, SystemExit)`` tuple and the test passes.
+    """
+    import os
+
+    embed_calls = {"n": 0}
+    seed_calls = {"n": 0}
+
+    def _embed_then_shutdown() -> None:
+        embed_calls["n"] += 1
+        # Two iterations: startup embed (call 1) then one in-loop embed
+        # (call 2) which is the post-fix proof that the SystemExit from
+        # entity_seed did NOT bring the loop down.
+        if embed_calls["n"] >= 2:
+            os.kill(os.getpid(), signal.SIGTERM)  # NOSONAR — self-signal so the worker loop exits after #270 proof.
+
+    def _entity_seed_exits_zero() -> None:
+        seed_calls["n"] += 1
+        # Mirror kairix.knowledge.store.cli.main(["crawl", ...]) on the
+        # happy path — the CLI calls sys.exit(0) on successful crawl.
+        raise SystemExit(0)
+
+    main(
+        deps=WorkerDeps(
+            embed=_embed_then_shutdown,
+            entity_seed=_entity_seed_exits_zero,
+            health_check=lambda: [],
+            wikilinks=lambda: None,
+            sleep=lambda _s: None,
+            state_path=tmp_path / "worker-state.json",
+            write_state_fn=lambda *_: None,
+        ),
+        # All intervals zero — entity_seed fires on the first loop pass,
+        # the same one where it raised SystemExit pre-fix. Embed then
+        # gets a second call on the second pass iff the loop survived.
+        embed_interval=0,
+        entity_seed_interval=0,
+        health_check_interval=999999,
+        wikilinks_interval=999999,
+    )
+
+    assert seed_calls["n"] >= 1, "entity_seed must have been called at least once"
+    assert embed_calls["n"] >= 2, (
+        f"main loop must have completed at least 2 iterations after entity_seed raised "
+        f"SystemExit(0); got {embed_calls['n']} embed call(s). This is the #270 regression."
+    )
 
 
 def test_shutdown_handler_via_sigint(tmp_path: Path) -> None:
