@@ -7,18 +7,28 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
-## [2026.5.15] - 2026-05-14 — F-rule legacy fully burned + worker observability complete
+## [2026.5.15] - 2026-05-14 — Agent-first kairix + worker observability + F-rule legacy fully burned
 
-> **Upgrading?** Drop-in. No public API breaks. Internal: 8 use-case `_*_defaults.py` shim modules deleted (their lazy imports moved into the dataclass module); 7 fitness-function baselines now empty (F1, F3, F4, F5, F6, F7, F9); per-file coverage floor ratcheted 85% → 90%. Worker gains operator pause/resume + observable phase state + skip-on-idle maintenance.
+> **Upgrading?** Drop-in. No public API breaks. **New for agents**: `kairix bootstrap <agent>` returns a session-start orientation envelope; every MCP tool now includes a `health` field that tells agents what's offline and what to do next; `kairix onboard check --json` is the canonical "is kairix working" probe with per-check remediation strings. **New for operators**: worker pause/resume + observable phase state + skip-on-idle maintenance. **Internal**: 7 fitness-function baselines burned to zero (F1, F3, F4, F5, F6, F7, F9); per-file coverage floor ratcheted 85% → 90%; 10 shim modules deleted; 22 env-var helpers centralised in `paths.py`/`secrets.py`.
 
-### Added
+### Added — agent affordance (#246)
+
+- **`kairix bootstrap <agent>`** — single command returning the agent's session-start orientation: role, current `Board.md`, last N daily memory entries, active goals, and a `health` envelope. CLI: markdown by default, `--json` for tooling. MCP: `tool_bootstrap(agent, max_memory_days=3)`. Designed so even with vector search or chat offline, the bootstrap **still returns** board + memory and tells the agent what's degraded.
+- **`KairixHealth` envelope on every tool response.** `tool_search`, `tool_brief`, `tool_entity`, `tool_bootstrap` all return a `health` field with `vector_search` / `bm25` / `chat` status, `secrets_loaded`, `degraded_reason`, and `next_action`. When kairix degrades, the response **still returns working-subsystem results** AND tells the agent what to do next (e.g. "Ask your admin to run `kairix onboard check`; results below are BM25-only"). New shared module: `kairix/core/health.py`; threaded timeout enforces a 2s probe budget.
+- **Prescriptive MCP tool descriptions.** The `description=` string an LLM agent sees in its tool list is now a usage policy, not a definition. `tool_search`: "Call before answering any factual question about prior work…". `tool_bootstrap`: "Call at session start or whenever you switch topics…". `tool_brief`: "Call when you want a synthesised view…". `tool_entity`: "Call when you need facts about a specific named entity…".
+- **`kairix onboard check --json`** + clean exit-code semantics. Exit 0 on full pass, 1 on any failure. JSON shape: `{passed, total, fully_passed, failures: [{check, detail, remediation}]}`. Each of the 9 checks has a canonical, operator-actionable remediation string (e.g. `secrets_loaded` failure → "Run `sudo systemctl enable --now kairix-fetch-secrets.service` on the host…"). Wired as the canonical docker-compose healthcheck.
+- **`kairix-memory-prompt` openclaw plugin packaged canonically** at `kairix/plugins/openclaw/memory-prompt/`. Symlinked into the docker image at `/opt/kairix/plugins/openclaw/`. Calls `kairix bootstrap <agent>` at session start and `appendSystemContext`s the result so agents start oriented instead of reactive. Degraded fallback message when bootstrap fails — session start is never blocked.
+- **`docs/agents/AGENT-SETUP.md`** + **`docs/agents/ADMIN-CONVERSATION.md`** — the operating contract an agent reads on first run, plus the script an agent follows when discussing kairix configuration with its admin human (symptom → exact words to say → concrete command). README quick-start rewritten in agent-first ordering: install → secrets → collections → verify → wire-into-agent.
+
+### Added — operator affordance (#224, #222)
 
 - **Worker pause/resume (#224 phase 4).** `kairix worker pause` / `kairix worker resume` toggle a touch-file in the data dir. The running worker enters PAUSED at the next loop iteration (within 5s) and stops doing task work until the flag is removed. Decoupled from the worker process — a stuck worker can still be paused, and the pause survives restarts.
-- **`kairix worker status` (#224 phase 5).** Reads the persisted `WorkerState` JSON (atomic temp+rename writes) and prints phase, embedded total, failed chunks, recall alerts, restart count, uptime. Exit 0 if state file present, 1 if missing — a Docker healthcheck or shell monitor can detect a never-started worker. State survives container restarts; `restart_count` increments each boot.
-- **Worker skip-on-idle maintenance (#224 phase 2).** When `consecutive_embed_noops` ≥ 10 (env `KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD`), the worker stops running `entity_seed` / `health_check` / `wikilinks` — nothing's changing, the scans are pointless. Resumes on the next embed that does work. Friendlier to shared hosts.
-- **F14 — `sonar.issue.ignore` entries require rationale comment.** Mirrors F3 for SonarCloud suppressions in `sonar-project.properties`. The detector lives at `scripts/checks/check_sonar_ignore_rationale.py`; runs in Stage 0.
-- **Scheduled baseline audit (`.github/workflows/baseline-audit.yml`).** Mondays 08:00 UTC + workflow_dispatch. Fails if any baseline entry is stale (file deleted, or coverage now ≥ 90%). Catches drift accumulated between deliberate sweeps.
-- **`bash scripts/checks/audit_baselines.py`** — local invocation of the audit logic.
+- **`kairix worker status` (#224 phase 5).** Reads the persisted `WorkerState` JSON (atomic temp+rename writes) and prints phase, embedded total, failed chunks, recall alerts, restart count, uptime. Exit 0 if state file present, 1 if missing.
+- **Worker skip-on-idle maintenance (#224 phase 2).** When `consecutive_embed_noops` ≥ 10 (env `KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD`), the worker stops running `entity_seed` / `health_check` / `wikilinks`. Resumes on the next embed that does work. Friendlier to shared hosts.
+- **`kairix benchmark run <name>` resolves bundled suites by name (#222).** `kairix benchmark run reflib` finds the bundled `reflib-gold-v3.yaml`, reads `default_collection` from suite metadata, and runs scoped correctly — no more `--collection reference-library` tax for dogfooding. `kairix benchmark list` enumerates bundled suites with their default_collection and one-line description. Unknown suite name → exit 1 with `did you mean: kairix benchmark list?` hint.
+- **F14 — `sonar.issue.ignore` entries require rationale comment.** Mirrors F3 for SonarCloud suppressions.
+- **Scheduled baseline audit (`.github/workflows/baseline-audit.yml`).** Mondays 08:00 UTC + workflow_dispatch. Fails if any baseline entry is stale.
+- **`scripts/checks/audit_baselines.py`** — local invocation of the audit logic.
 
 ### Changed (internal — quality-exceptions Wave 2-5 + F-rule legacy closure)
 
@@ -42,14 +52,16 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ### Issues filed / closed
 
-- **Closed**: #240 (flaky embed fake), #224 (worker resource discipline — phases 1, 2, 4, 5, 6 shipped; phase 3 deferred), #203 (Wave 5 ratchet), #244 (F6 detector gap + refactor — same day).
-- **Filed**: #242 (SonarCloud project keyed under `quanyeomans` org — needs SonarCloud-admin to update GitHub binding for PR scans to work), #243 (SRE/platform-health worker — design-first issue: process model, OTel target, healthcheck protocol, remediation policy all open questions).
+- **Closed**: #246 (agent-first kairix — bootstrap + prescriptive MCP descriptions + health envelope + structured onboard check + plugin packaging + docs), #240 (flaky embed fake), #224 (worker resource discipline — phases 1, 2, 4, 5, 6 shipped; phase 3 deferred via #243), #222 (benchmark UX defaults), #203 (Wave 5 ratchet), #244 (F6 detector gap + refactor), #193 (quality-gate exceptions umbrella), #198 (F7 coverage backfill), #200 (F2 monkeypatch elimination), #201 (F1+F5 in-test internals).
+- **Filed**: #242 (SonarCloud project still keyed under `quanyeomans` org after the three-cubes rename — needs SonarCloud admin to update the GitHub binding), #243 (SRE/platform-health worker — design-first; recurring `kairix-fetch-secrets.service` disabled incident is now a concrete user story on that issue).
 
 ### Operational notes
 
-- `kairix worker status` exit code is the authoritative "worker alive AND has run" signal. State file: `${KAIRIX_DATA_DIR}/worker-state.json`.
-- Operators on shared hosts can tune `KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD` (default 10).
-- SonarCloud PR scans show red until #242 admin step lands. Develop merges unaffected (Sonar not required).
+- **Agents**: at session start, call `kairix bootstrap <your-agent>`. If `health.vector_search != "ok"`, surface that to your human and use BM25 results — don't silently fail.
+- **Admins**: `kairix onboard check --json` is the canonical health probe. Wire into your docker-compose healthcheck and any external monitor.
+- **`kairix worker status`** exit code is the authoritative "worker alive AND has run" signal. State file: `${KAIRIX_DATA_DIR}/worker-state.json`.
+- **Shared hosts**: tune `KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD` (default 10) and apply the resource caps from `docker-compose.example.yml`.
+- **SonarCloud PR scans show red until #242 admin step lands.** Branch protection on `develop` does not require SonarCloud, so merges are unaffected.
 
 ---
 
