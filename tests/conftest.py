@@ -100,6 +100,7 @@ def neo4j_client_empty():
 @pytest.fixture
 def fake_llm_backend():
     """Fake LLMBackend satisfying the Protocol. No Azure calls."""
+    import hashlib
     import struct
 
     class FakeLLM:
@@ -107,7 +108,10 @@ def fake_llm_backend():
             return "fake response"
 
         def embed(self, text: str) -> list[float]:
-            return fake_embedding(seed=hash(text) % 1000)
+            # SHA-256 truncated to 32 bits — deterministic across runs (PYTHONHASHSEED
+            # randomises hash()) and the 2^32 seed space makes collisions vanish (#240).
+            seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:4], "big")
+            return fake_embedding(seed=seed)
 
         def embed_as_bytes(self, text: str) -> bytes | None:
             vec = self.embed(text)
