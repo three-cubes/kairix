@@ -11,6 +11,13 @@ BDD step modules must be declared as pytest_plugins at the root conftest level
 (pytest restriction: pytest_plugins in sub-conftest files is not supported).
 """
 
+# Early numpy import — pre-loads the C extension before pytest-cov starts
+# instrumenting test modules. Python 3.14 + numpy 2.4 + pytest-cov hit a
+# "cannot load module more than once per process" ImportError when numpy
+# is first imported AFTER coverage tracing has begun (#211). Loading it
+# here ensures numpy is in ``sys.modules`` before the first test module
+# loads, so subsequent ``import numpy`` calls are pure dict lookups.
+import numpy  # noqa: F401 — pre-load only; see #211
 import pytest
 
 # BDD step definition modules — registered here so pytest-bdd can discover them
