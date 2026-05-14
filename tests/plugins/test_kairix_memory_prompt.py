@@ -367,3 +367,115 @@ def test_default_run_bootstrap_raises_when_binary_missing(plugin: ModuleType, tm
     )
     assert completed.returncode != 0, "default wiring must raise when binary is missing"
     assert "kairix binary not on PATH" in completed.stderr
+
+
+# ---------------------------------------------------------------------------
+# In-process unit tests for _default_run_bootstrap. The two tests above
+# spawn a clean subprocess so they verify the wiring on a real PATH but
+# do NOT contribute coverage to ``plugin.py`` in the parent pytest run
+# (coverage instruments only the parent process). The in-process tests
+# below ``monkeypatch.setattr`` shutil.which and subprocess.run on the
+# loaded plugin module so each branch (missing binary / non-zero exit /
+# happy path) executes inside the measured process.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCompleted:
+    """Tiny stand-in for ``subprocess.CompletedProcess`` — only fields the
+    plugin reads."""
+
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+@pytest.mark.unit
+def test_default_run_bootstrap_raises_in_process_when_binary_missing(
+    plugin: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In-process branch coverage: ``shutil.which`` → None → raises.
+
+    Sabotage-prove: if the wrapper silently returned an empty string
+    instead of raising, the agent prompt would silently degrade. The
+    contract is that the caller (``on_session_start``) catches the
+    exception and emits the fallback message.
+    """
+    monkeypatch.setattr(plugin.shutil, "which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="kairix binary not on PATH"):
+        plugin._default_run_bootstrap("alpha")
+
+
+@pytest.mark.unit
+def test_default_run_bootstrap_happy_path_returns_stdout(plugin: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """In-process branch coverage: exit 0 → wrapper returns captured stdout.
+
+    Sabotage-prove: if the wrapper returned ``completed.stderr`` instead
+    of stdout, this assertion would catch the swap.
+    """
+    captured_argv: list[list[str]] = []
+
+    def _fake_which(name: str) -> str:
+        return f"/fake/bin/{name}"
+
+    def _fake_run(argv: list[str], **_kwargs: Any) -> _FakeCompleted:
+        captured_argv.append(argv)
+        return _FakeCompleted(returncode=0, stdout="# envelope for alpha\n")
+
+    monkeypatch.setattr(plugin.shutil, "which", _fake_which)
+    monkeypatch.setattr(plugin.subprocess, "run", _fake_run)
+
+    out = plugin._default_run_bootstrap("alpha")
+
+    assert out == "# envelope for alpha\n"
+    assert captured_argv == [["/fake/bin/kairix", "bootstrap", "alpha"]]
+
+
+@pytest.mark.unit
+def test_default_run_bootstrap_raises_with_stderr_tail_on_non_zero_exit(
+    plugin: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In-process branch coverage: non-zero exit → wrapper raises with
+    the stderr tail spliced into the message.
+
+    Sabotage-prove: if the wrapper raised with just the return code and
+    no stderr context, an operator reading the failure would have no
+    clue what actually went wrong. The substring assertions pin both
+    sides of the message.
+    """
+    monkeypatch.setattr(plugin.shutil, "which", lambda _name: "/fake/bin/kairix")
+    stderr_blob = "line1\nline2\nERROR: agent slug not found\n"
+    monkeypatch.setattr(
+        plugin.subprocess,
+        "run",
+        lambda _argv, **_kw: _FakeCompleted(returncode=2, stderr=stderr_blob),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        plugin._default_run_bootstrap("alpha")
+
+    msg = str(excinfo.value)
+    assert "exited 2" in msg
+    assert "ERROR: agent slug not found" in msg
+
+
+@pytest.mark.unit
+def test_default_run_bootstrap_handles_empty_stderr_on_non_zero_exit(
+    plugin: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty stderr → message includes the sentinel ``<no stderr>``.
+
+    Sabotage-prove: if the wrapper omitted the sentinel and emitted a
+    bare ``exited 1`` the operator would still need to grep logs to find
+    what happened. The sentinel keeps the failure self-describing.
+    """
+    monkeypatch.setattr(plugin.shutil, "which", lambda _name: "/fake/bin/kairix")
+    monkeypatch.setattr(
+        plugin.subprocess,
+        "run",
+        lambda _argv, **_kw: _FakeCompleted(returncode=1, stderr=""),
+    )
+
+    with pytest.raises(RuntimeError, match="<no stderr>"):
+        plugin._default_run_bootstrap("alpha")
