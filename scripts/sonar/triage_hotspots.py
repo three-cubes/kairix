@@ -99,7 +99,7 @@ HOTSPOT_RATIONALES: dict[tuple[str, str], str] = {
         "${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md. "
         "Lines are short markdown list entries (a quoted term + label + "
         "optional flags); the file is operator-authored, not user-submitted. "
-        "Each regex quantifier is non-nested ([^\"]+, [A-Z_]+, .* anchored to "
+        'Each regex quantifier is non-nested ([^"]+, [A-Z_]+, .* anchored to '
         "$). No catastrophic-backtracking shape (no (.+)+/(\\w+)+ nesting). "
         "Reviewed and accepted."
     ),
