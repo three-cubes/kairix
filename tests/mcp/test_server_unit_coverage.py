@@ -105,6 +105,7 @@ def test_build_server_constructs_fastmcp_with_all_tools_registered_under_unit() 
         "brief",
         "entity_suggest",
         "entity_validate",
+        "bootstrap",
     } == names
 
 
@@ -142,6 +143,7 @@ def test_build_server_each_wrapper_dispatches_to_tool_function_under_unit() -> N
         ("brief", {"agent": "shape"}),
         ("entity_suggest", {"text": "x"}),
         ("entity_validate", {"name": "x"}),
+        ("bootstrap", {"agent": "alpha", "max_memory_days": 0}),
     ]:
         payload = _call_tool(server, tool_name, args)
         assert isinstance(payload, dict), f"tool {tool_name!r} returned non-dict: {payload!r}"

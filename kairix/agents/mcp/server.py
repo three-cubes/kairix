@@ -1,7 +1,8 @@
 """
 kairix.agents.mcp.server — MCP server exposing kairix tools to MCP-compatible agents.
 
-Provides six tools:
+Provides the following tools:
+  bootstrap    Agent orientation envelope: role, board, recent memory, goals, health
   search       Search your knowledge store — finds the best answers to any question
   entity       Entity lookup from Neo4j
   prep         Context preparation: tiered L0/L1 summary generation
@@ -386,6 +387,30 @@ def tool_brief(
     return brief_output_to_envelope(out)
 
 
+def tool_bootstrap(
+    agent: str,
+    max_memory_days: int = 3,
+    *,
+    deps: Any = None,
+) -> dict[str, Any]:
+    """Return the agent orientation envelope (#246 W1).
+
+    Thin adapter around ``kairix.use_cases.bootstrap.run_bootstrap``.
+    Returns the agent's role, current ``Board.md``, recent memory
+    entries, active goals, and a structured health snapshot — the
+    single call an agent makes at session start (or topic switch) to
+    absorb its current state. Never raises; degradation is surfaced via
+    the ``health`` field with a prescriptive ``next_action``.
+
+    The optional ``deps`` parameter forwards a ``BootstrapDeps`` directly
+    to the use case — production callers leave it None.
+    """
+    from kairix.use_cases.bootstrap import bootstrap_output_to_envelope, run_bootstrap
+
+    out = run_bootstrap(agent, deps=deps, max_memory_days=max_memory_days)
+    return bootstrap_output_to_envelope(out)
+
+
 # ---------------------------------------------------------------------------
 # FastMCP server — only constructed when mcp package is available
 # ---------------------------------------------------------------------------
@@ -413,7 +438,13 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
 
     server = FastMCP("kairix", host=host, port=port)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Call before answering any factual question about prior work, decisions, or context — "
+            "kairix indexes the team's knowledge store and finds relevant prior material. "
+            "Use this proactively at session start and whenever a question touches the team's history."
+        )
+    )
     @async_tool_handler
     def search(
         query: str,
@@ -425,7 +456,12 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         """Search your knowledge store — finds the best answers to any question."""
         return tool_search(query=query, agent=agent, scope=scope, budget=budget, limit=limit)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Call when you need facts about a specific named entity (person, company, project) — "
+            "direct knowledge-graph lookup, faster than search."
+        )
+    )
     @async_tool_handler
     def entity(name: str) -> dict[str, Any]:
         """Entity lookup from Neo4j."""
@@ -490,11 +526,30 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         """Return the kairix agent usage guide. Call this when unsure how to use kairix."""
         return tool_usage_guide(topic=topic)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Call when you want a synthesised view of a topic — kairix runs a small research loop "
+            "across the knowledge store and returns a structured briefing. "
+            "Use it when you'd otherwise be tempted to summarise from memory."
+        )
+    )
     @async_tool_handler
     def brief(agent: str) -> dict[str, Any]:
         """Generate a session briefing for an agent. Returns content + on-disk path."""
         return tool_brief(agent=agent)
+
+    @server.tool(
+        description=(
+            "Call at session start or whenever you switch topics. "
+            "Returns your agent role, current board, recent memory, and active goals — "
+            "orients you in the team's current state. "
+            "If health.vector_search != 'ok', surface that to your human."
+        )
+    )
+    @async_tool_handler
+    def bootstrap(agent: str, max_memory_days: int = 3) -> dict[str, Any]:
+        """Return the agent orientation envelope: role, board, recent memory, goals, health."""
+        return tool_bootstrap(agent=agent, max_memory_days=max_memory_days)
 
     @server.tool()
     @async_tool_handler

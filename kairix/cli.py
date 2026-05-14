@@ -2,6 +2,7 @@
 kairix — private knowledge retrieval for AI agents and teams.
 
 Subcommands:
+  bootstrap   Agent orientation envelope: role, board, recent memory, goals, health
   embed       Embed documents into the kairix vector index
   search      Hybrid search: BM25 + vector via RRF
   entity      Entity management: suggest (NER), validate (Wikidata)
@@ -33,6 +34,7 @@ import sys
 # Dispatch table: command name → (module_path, function_name, accepts_args)
 # Lazy imports keep startup fast — only the selected command is imported.
 COMMANDS: dict[str, tuple[str, str, bool]] = {
+    "bootstrap": ("kairix.bootstrap_cli", "main", True),
     "embed": ("kairix.core.embed.cli", "main", False),
     "entity": ("kairix.knowledge.entities.cli", "main", True),
     "curator": ("kairix.agents.curator.cli", "main", True),
