@@ -52,6 +52,22 @@ class SQLiteDocumentRepository:
 
         try:
             rows = db.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as e:
+            # The documents_fts-missing case is a real production fault — the
+            # entire BM25 leg of hybrid retrieval is offline. Log at ERROR
+            # (not WARNING) so it surfaces in alert pipelines, and tell the
+            # operator how to fix it. Other operational errors (table locked,
+            # corrupt index) keep the WARNING level. See #223.
+            msg = str(e)
+            if "no such table" in msg.lower() and "documents_fts" in msg:
+                logger.error(
+                    "search_fts: documents_fts is missing — BM25 leg is offline, hybrid retrieval is "
+                    "degraded to vector-only. Run 'kairix embed --rebuild-fts' to rebuild the index."
+                )
+            else:
+                logger.warning("SQLiteDocumentRepository.search_fts: FTS query failed — %s", e)
+            db.close()
+            return []
         except Exception as e:
             logger.warning("SQLiteDocumentRepository.search_fts: FTS query failed — %s", e)
             db.close()

@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from kairix.core.db.fts import rebuild_fts, sync_fts
+from kairix.core.db.fts import check_fts_available, rebuild_fts, sync_fts
 
 
 def _create_test_db() -> sqlite3.Connection:
@@ -187,3 +187,91 @@ def test_rebuild_fts_no_visibility_gap_for_concurrent_reader() -> None:
 
     reader.close()
     writer.close()
+
+
+# ---------------------------------------------------------------------------
+# check_fts_available — preflight for #223 (loud-failure surface)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_check_fts_available_returns_ok_when_table_populated() -> None:
+    """Healthy FTS — populated table returns available=True with row_count."""
+    db = _create_test_db()
+    rebuild_fts(db)
+
+    health = check_fts_available(db)
+    assert health.available is True
+    assert health.reason == "ok"
+    assert health.row_count == 2  # two active docs in fixture
+
+
+@pytest.mark.unit
+def test_check_fts_available_returns_missing_table_when_dropped() -> None:
+    """Sabotage-prove: dropped table → available=False, reason='missing_table'.
+
+    This is the #223 silent-degradation case — the preflight must
+    classify it specifically so callers can escalate to ERROR (instead
+    of generic WARNING) and offer the rebuild-fts self-heal.
+    """
+    db = _create_test_db()
+    rebuild_fts(db)
+    db.execute("DROP TABLE documents_fts")
+
+    health = check_fts_available(db)
+    assert health.available is False
+    assert health.reason == "missing_table"
+    assert health.row_count == 0
+
+
+@pytest.mark.unit
+def test_check_fts_available_returns_empty_when_table_present_but_no_rows() -> None:
+    """Empty FTS table (fresh CREATE before INSERT) is treated as unavailable —
+    BM25 over zero rows is functionally equivalent to vector-only."""
+    db = _create_test_db()
+    db.execute("CREATE VIRTUAL TABLE documents_fts USING fts5(filepath, title, doc)")
+
+    health = check_fts_available(db)
+    assert health.available is False
+    assert health.reason == "empty"
+    assert health.row_count == 0
+
+
+@pytest.mark.unit
+def test_search_fts_logs_at_error_when_documents_fts_missing(tmp_path, caplog) -> None:
+    """search_fts must log at ERROR (not WARNING) when documents_fts is missing.
+
+    The #223 silent-degradation came from the WARNING log being filtered
+    out of alert pipelines. ERROR + a 'kairix embed --rebuild-fts'
+    instruction makes it surface immediately.
+    """
+    import logging
+    from pathlib import Path as PathLike
+
+    from kairix.core.db.repository import SQLiteDocumentRepository
+
+    db_path = tmp_path / "test.sqlite"
+    db = sqlite3.connect(str(db_path))
+    db.executescript("""
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection TEXT NOT NULL,
+            path TEXT NOT NULL,
+            title TEXT,
+            hash TEXT NOT NULL,
+            active INTEGER DEFAULT 1,
+            UNIQUE(collection, path)
+        );
+        CREATE TABLE content (hash TEXT PRIMARY KEY, doc TEXT);
+    """)
+    db.commit()
+    db.close()
+
+    repo = SQLiteDocumentRepository(PathLike(db_path))
+    with caplog.at_level(logging.ERROR, logger="kairix.core.db.repository"):
+        out = repo.search_fts("hello", limit=5)
+
+    assert out == []
+    error_messages = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("documents_fts is missing" in m for m in error_messages)
+    assert any("kairix embed --rebuild-fts" in m for m in error_messages)

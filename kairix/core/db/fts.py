@@ -6,10 +6,52 @@ BM25 search. The index covers document titles and content, using the
 ``porter unicode61`` tokenizer for stemming and Unicode normalisation.
 """
 
+from __future__ import annotations
+
 import logging
 import sqlite3
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FtsHealth:
+    """Preflight result for the BM25 / FTS leg of hybrid retrieval.
+
+    ``available=False`` with ``reason="missing_table"`` means the BM25 leg
+    will silently degrade to vector-only. Callers should escalate
+    visibly (log at ERROR; surface in onboard check) and offer
+    ``kairix embed --rebuild-fts`` as the fix.
+    """
+
+    available: bool
+    reason: str  # ok | missing_table | empty | error:<detail>
+    row_count: int = 0
+
+
+def check_fts_available(db: sqlite3.Connection) -> FtsHealth:
+    """Lightweight preflight: is the FTS leg of hybrid retrieval working?
+
+    Returns ``FtsHealth(available=True, reason="ok", row_count=N)`` when
+    ``documents_fts`` exists and is queryable. Returns
+    ``available=False`` with a specific ``reason`` otherwise. Never
+    raises — callers use the structured result to decide what to do.
+    """
+    try:
+        row = db.execute("SELECT COUNT(*) FROM documents_fts").fetchone()
+    except sqlite3.OperationalError as e:
+        msg = str(e)
+        if "no such table" in msg.lower():
+            return FtsHealth(available=False, reason="missing_table")
+        return FtsHealth(available=False, reason=f"error:{msg}")
+    except Exception as e:
+        return FtsHealth(available=False, reason=f"error:{type(e).__name__}:{e}")
+
+    count = int(row[0]) if row else 0
+    if count == 0:
+        return FtsHealth(available=False, reason="empty", row_count=0)
+    return FtsHealth(available=True, reason="ok", row_count=count)
 
 
 def rebuild_fts(db: sqlite3.Connection) -> int:

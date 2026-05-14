@@ -252,6 +252,35 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rebuild_fts(args: argparse.Namespace) -> int:
+    """Rebuild the documents_fts BM25 index in isolation. Self-heal for #223.
+
+    Reads from the same documents + content tables that the embed pipeline
+    populates — does NOT touch the embed pipeline, vector index, or
+    recall canaries. Cheap (~30s on a 50k-doc corpus); use after the
+    BM25 leg silently went offline.
+    """
+    del args  # unused — no flags
+    from pathlib import Path
+
+    from kairix.core.db import get_db_path, open_db
+    from kairix.core.db.fts import check_fts_available, rebuild_fts
+
+    db = open_db(Path(get_db_path()))
+    try:
+        before = check_fts_available(db)
+        print(f"FTS state before rebuild: available={before.available} reason={before.reason} rows={before.row_count}")
+
+        count = rebuild_fts(db)
+
+        after = check_fts_available(db)
+        print(f"FTS state after rebuild:  available={after.available} reason={after.reason} rows={after.row_count}")
+        print(f"Rebuilt: {count} documents indexed")
+    finally:
+        db.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="kairix embed",
@@ -295,6 +324,12 @@ def main(argv: list[str] | None = None) -> None:
     # status
     sub.add_parser("status", help="Show embedding status")
 
+    # rebuild-fts — self-heal entry for #223
+    sub.add_parser(
+        "rebuild-fts",
+        help="Rebuild the documents_fts BM25 index from scratch (self-heal for the BM25 leg).",
+    )
+
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
 
@@ -312,6 +347,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(cmd_recall(args))
     elif args.command == "status":
         sys.exit(cmd_status(args))
+    elif args.command == "rebuild-fts":
+        sys.exit(cmd_rebuild_fts(args))
 
 
 if __name__ == "__main__":
