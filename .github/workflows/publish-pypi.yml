@@ -11,6 +11,14 @@ name: "4 · PyPI publish (release)"
 on:
   release:
     types: [created]
+  workflow_dispatch:
+    # Manual entrypoint used by release.yml to re-fire publish after a
+    # GITHUB_TOKEN-created release (which doesn't fan out — #230).
+    inputs:
+      ref:
+        description: 'Git tag to build + publish (e.g. v2026.5.14)'
+        required: true
+        type: string
 
 jobs:
   build:
@@ -21,6 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
           fetch-depth: 0  # setuptools-scm needs full history
 
       - uses: hynek/build-and-inspect-python-package@fe0a0fb1925ca263d076ca4f2c13e93a6e92a33e # v2
@@ -60,7 +69,9 @@ jobs:
         # the long form; ``import kairix`` and the ``kairix`` console
         # script are unchanged for end users.
         env:
-          TAG_NAME: ${{ github.event.release.tag_name }}
+          # release event provides .release.tag_name; workflow_dispatch
+          # passes the tag via inputs.ref.
+          TAG_NAME: ${{ github.event.release.tag_name || inputs.ref }}
         run: |
           VERSION="${TAG_NAME#v}"
           pip install "kairix-agentic-knowledge-mgt==${VERSION}"
