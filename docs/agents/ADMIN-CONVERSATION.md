@@ -23,7 +23,7 @@ The lines under each "Script:" heading are written for you to say verbatim to yo
 **Files / commands the admin needs:**
 
 - `~/.openclaw/openclaw.json` — the config file
-- The plugin currently lives at `/data/workspaces/builder/plugins/kairix-memory-prompt`. The canonical move into the kairix repo (`kairix/plugins/openclaw/memory-prompt/`) is tracked in #246 W5.
+- The plugin ships with kairix at `/opt/kairix/plugins/openclaw/memory-prompt/` in the container image and at `<site-packages>/kairix/plugins/openclaw/memory-prompt/` for non-Docker installs. Set `plugins.load.paths` to `/opt/kairix/plugins/openclaw` and openclaw discovers it on startup. Full plugin notes live in `kairix/plugins/openclaw/memory-prompt/README.md` in the kairix repo.
 
 ---
 

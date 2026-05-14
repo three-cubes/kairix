@@ -160,3 +160,58 @@ kairix config validate
 ```
 
 This catches duplicate agent names, overlapping `write_path` values (a write-isolation hazard), unknown `retrieval_overrides` keys (silent typos that would otherwise be invisible), and `agent_pattern` strings that omit the `{agent}` placeholder. Wire it into the CI pre-deploy step.
+
+## Wiring the kairix-memory-prompt plugin
+
+The kairix MCP server exposes tools an agent *can* call. For an agent to be **oriented at session start** — to arrive with its role, current `Board.md`, recent memory, and active goals already in its system prompt — openclaw also needs to load the `kairix-memory-prompt` plugin. Without it, agents start each session context-blind and react to user prompts instead of orienting themselves.
+
+The plugin ships with kairix (#246 W5) and lives in the container image at:
+
+```
+/opt/kairix/plugins/openclaw/memory-prompt/
+├── plugin.py        # openclaw entry — calls kairix bootstrap <agent>, appends stdout to system prompt
+├── plugin.json      # openclaw manifest (declares name=kairix-memory-prompt, append-only injection)
+└── README.md        # operator-facing details + the openclaw plugin API assumptions
+```
+
+For non-Docker installs the same files land under `<site-packages>/kairix/plugins/openclaw/memory-prompt/`. The container image symlinks the canonical `/opt/kairix/plugins/openclaw` path at build time so admins paste a stable path into openclaw config regardless of which Python minor version site-packages lives under.
+
+### openclaw config snippet
+
+Paste into your openclaw config (`~/.openclaw/openclaw.json` for per-user, `/etc/openclaw/openclaw.json` on the VM image):
+
+```json
+{
+  "plugins": {
+    "load": {
+      "paths": ["/opt/kairix/plugins/openclaw"]
+    },
+    "allow": ["kairix-memory-prompt"],
+    "entries": {
+      "kairix-memory-prompt": {
+        "hooks": {
+          "allowPromptInjection": true
+        }
+      }
+    }
+  }
+}
+```
+
+All three keys are required: `plugins.load.paths` tells openclaw where to discover plugins, `plugins.allow` is the explicit allowlist (defence in depth against accidental loads), and `plugins.entries.kairix-memory-prompt.hooks.allowPromptInjection` grants the plugin permission to call `appendSystemContext`. Without that last key, openclaw discovers the plugin but refuses to let it modify the system prompt — which is the failure mode the original incident exposed.
+
+### Verifying it loaded
+
+After restarting openclaw, look at the startup log for a line like:
+
+```
+[openclaw] loaded plugin: kairix-memory-prompt (hook: onSessionStart)
+```
+
+If that line is missing, the plugin did not load — re-check `plugins.allow` for the literal string `kairix-memory-prompt` and confirm `/opt/kairix/plugins/openclaw/memory-prompt/plugin.json` exists on disk.
+
+If the plugin loaded but the bootstrap envelope is missing from agent sessions, the runtime probably cannot find the `kairix` CLI. The plugin shells out to `kairix bootstrap <agent>` with a 5-second timeout; if the binary is not on the openclaw user's `$PATH` the plugin falls back to a short degraded message (`[kairix bootstrap unavailable — ask your admin to run kairix onboard check]`) and the session still starts. Fix by adding the kairix install dir to PATH for the openclaw service unit.
+
+### Failure contract — degraded != broken
+
+The plugin **never blocks session start**. On every failure path — missing binary, non-zero exit, timeout, blank agent name, empty stdout — it appends the fallback string above and returns normally. This matches the #246 affordance contract: the agent reads the fallback in its system prompt, knows kairix orientation is unavailable, and surfaces that to the user instead of silently failing. Full failure-mode notes are in `kairix/plugins/openclaw/memory-prompt/README.md`.

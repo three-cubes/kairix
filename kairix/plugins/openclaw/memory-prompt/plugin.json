@@ -1,0 +1,17 @@
+{
+  "name": "kairix-memory-prompt",
+  "version": "1.0.0",
+  "description": "Append kairix bootstrap envelope to the agent's system prompt at session start.",
+  "runtime": "python",
+  "entry": "plugin.py",
+  "entryFunction": "on_session_start",
+  "hooks": {
+    "onSessionStart": "on_session_start"
+  },
+  "capabilities": {
+    "promptInjection": "append"
+  },
+  "requires": {
+    "binaries": ["kairix"]
+  }
+}

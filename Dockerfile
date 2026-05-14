@@ -32,8 +32,20 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Create runtime directories and install runtime-only system deps (curl for healthchecks)
-RUN mkdir -p /data/documents /data/kairix /data/kairix/workspaces /opt/kairix/bin /opt/kairix/cron \
+RUN mkdir -p /data/documents /data/kairix /data/kairix/workspaces /opt/kairix/bin /opt/kairix/cron /opt/kairix/plugins \
     && apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
+# Expose the kairix-bundled openclaw plugins at a stable path (#246 W5).
+#
+# Plugins ship as package-data under
+# ``<site-packages>/kairix/plugins/openclaw/`` (configured in
+# pyproject.toml). The symlink below means admins can point openclaw's
+# ``plugins.load.paths`` at ``/opt/kairix/plugins/openclaw`` and not
+# worry about Python's site-packages location moving between Python
+# minor versions. The path matches the canonical openclaw config snippet
+# documented in ``docs/operations/MCP-DEPLOYMENT.md`` and in each
+# plugin's README.
+RUN ln -s /usr/local/lib/python3.12/site-packages/kairix/plugins/openclaw /opt/kairix/plugins/openclaw
 
 # Copy entrypoint and default config
 COPY docker/entrypoint.sh /entrypoint.sh

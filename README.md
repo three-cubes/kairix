@@ -216,7 +216,7 @@ Each failed check prints its own remediation string verbatim — agents should s
   },
   "plugins": {
     "load": {
-      "paths": ["/data/workspaces/builder/plugins"]
+      "paths": ["/opt/kairix/plugins/openclaw"]
     },
     "allow": ["kairix-memory-prompt"],
     "entries": {
@@ -230,7 +230,7 @@ Each failed check prints its own remediation string verbatim — agents should s
 }
 ```
 
-Note the plugin currently lives at `/data/workspaces/builder/plugins/kairix-memory-prompt`. The canonical move into the kairix repo (`kairix/plugins/openclaw/memory-prompt/`) is tracked in #246 W5; until that ships, reference the workspace-local path above.
+The `kairix-memory-prompt` plugin ships with kairix (since #246 W5) at `/opt/kairix/plugins/openclaw/memory-prompt/` in the container image, and at `<site-packages>/kairix/plugins/openclaw/memory-prompt/` for non-Docker installs. Full operator notes — including verification, fallback behaviour, and the openclaw plugin API the plugin relies on — live in [`kairix/plugins/openclaw/memory-prompt/README.md`](kairix/plugins/openclaw/memory-prompt/README.md).
 
 **Claude Desktop / Claude Code:** add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
