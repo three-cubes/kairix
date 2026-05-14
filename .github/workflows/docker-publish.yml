@@ -44,6 +44,11 @@ jobs:
           # workflow_dispatch checks out the input ref so we build the
           # tagged commit, not the default branch tip.
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+          # Full history required so setuptools-scm can compute the
+          # develop-push dev version (e.g. 2026.5.15.dev3+gabc1234). For
+          # release/workflow_dispatch we use the tag directly, but a
+          # shallow clone would still break the develop path (#267).
+          fetch-depth: 0
 
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
@@ -54,7 +59,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine tags
+      - name: Determine tags and version
         id: tags
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -69,8 +74,15 @@ jobs:
             VERSION="${INPUT_REF#v}"
             echo "tags=${IMAGE}:latest,${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
           else
+            # Develop push — derive setuptools-scm's natural dev version
+            # from git history on the runner (the build context strips
+            # .git via .dockerignore, so setuptools-scm inside the image
+            # can't compute it itself — see #267).
+            pip install --quiet "setuptools-scm>=8"
+            VERSION="$(python -m setuptools_scm 2>/dev/null || echo "0.0.0")"
             echo "tags=${IMAGE}:develop" >> "$GITHUB_OUTPUT"
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
@@ -78,5 +90,10 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.tags.outputs.tags }}
+          # Pass the resolved version into the Dockerfile so
+          # SETUPTOOLS_SCM_PRETEND_VERSION fixes the kairix --version
+          # output baked into the image (#267).
+          build-args: |
+            KAIRIX_VERSION=${{ steps.tags.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
