@@ -9,6 +9,7 @@ Operational procedures and incident runbooks for kairix deployments.
 | Symptom | Runbook |
 |---|---|
 | `kairix search` returns `vec=0, vec_failed=True` | [runbook-vector-search-failure](runbook-vector-search-failure.md) |
+| `kairix entity suggest` returns junk, agents miss known entities, or reflib recall regresses | [kairix-entity-audit](kairix-entity-audit.md) |
 | New documents not appearing in search after the embed cycle | [runbook-embedding-lag](runbook-embedding-lag.md) |
 | Every `mcp-kairix__*` tool returns `-32602 Invalid request parameters` | [MCP-CLIENT-MIGRATION](../MCP-CLIENT-MIGRATION.md) — your client is on `/sse` and needs to move to `/mcp` |
 | NDCG@10 dropped after a config or index change | [runbook-benchmark-regression](runbook-benchmark-regression.md) |
@@ -36,6 +37,7 @@ Operational procedures and incident runbooks for kairix deployments.
 | [how-to-run-benchmark](how-to-run-benchmark.md) | Run benchmark suite, interpret results, compare before/after |
 | [how-to-debug-search-ranking](how-to-debug-search-ranking.md) | Query intent dispatch, RRF weights, category-specific tuning |
 | [how-to-rebuild-entity-graph](how-to-rebuild-entity-graph.md) | Drop and rebuild the Neo4j entity graph from the document store |
+| [kairix-entity-audit](kairix-entity-audit.md) | Audit the entity graph — junk detection, path repair, enrichment, safe purge |
 | [how-to-configure-pypi-trusted-publisher](how-to-configure-pypi-trusted-publisher.md) | One-time PyPI Trusted Publisher setup so GitHub Releases auto-publish without long-lived tokens |
 | [MCP-DEPLOYMENT](../MCP-DEPLOYMENT.md) | Choose a transport (stdio/http/sse), wire `/mcp` and `/sse` mounts, configure agent registry, verify with `/healthz` |
 | [MCP-CLIENT-MIGRATION](../MCP-CLIENT-MIGRATION.md) | Migrate Claude Desktop / Claude Code / OpenClaw / custom Python or Node clients from `/sse` to `/mcp` |
