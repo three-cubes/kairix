@@ -477,7 +477,7 @@ def test_suite_generator_generate_suite_returns_error_on_calibration_failure(tmp
             raise JudgeCalibrationError("calibration failed for the test")
 
     output = tmp_path / "out.yaml"
-    suite_gen = SuiteGenerator(llm_judge=_FailingJudge())  # type: ignore[arg-type]
+    suite_gen = SuiteGenerator(llm_judge=_FailingJudge())  # type: ignore[arg-type]  # test double satisfies Judge protocol structurally
     result = suite_gen.generate_suite(
         output_path=str(output),
         n_cases=1,

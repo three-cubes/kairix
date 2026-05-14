@@ -126,7 +126,7 @@ class TestApplyBudgetPhase1:
             def snippet(self) -> str:
                 raise RuntimeError("boom on snippet access")
 
-        result = apply_budget([_ExplodingResult()], budget=3000)  # type: ignore[list-item]
+        result = apply_budget([_ExplodingResult()], budget=3000)  # type: ignore[list-item]  # deliberate structural duck-type to exercise except branch
         assert result == []
 
 

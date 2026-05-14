@@ -18,7 +18,7 @@ def _load_script() -> ModuleType:
     spec = importlib.util.spec_from_file_location("chunk_crm_interactions", _SCRIPT_PATH)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    spec.loader.exec_module(mod)  # type: ignore[attr-defined]  # importlib Loader protocol omits exec_module in stubs
     return mod
 
 

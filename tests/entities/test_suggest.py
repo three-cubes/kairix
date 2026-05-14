@@ -76,7 +76,7 @@ def test_suggest_graceful_import_error():
     # Remove spacy from sys.modules to simulate it not being installed
     sys_modules_backup = sys.modules.copy()
     sys.modules.pop("spacy", None)
-    sys.modules["spacy"] = None  # type: ignore
+    sys.modules["spacy"] = None  # type: ignore  # simulating uninstalled package; None forces ImportError
 
     try:
         with pytest.raises(ImportError, match="pip install"):

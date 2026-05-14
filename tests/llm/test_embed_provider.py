@@ -10,8 +10,8 @@ import pytest
 
 # Create a mock openai module so tests work without the real package installed
 _mock_openai = ModuleType("openai")
-_mock_openai.AzureOpenAI = MagicMock  # type: ignore[attr-defined]
-_mock_openai.OpenAI = MagicMock  # type: ignore[attr-defined]
+_mock_openai.AzureOpenAI = MagicMock  # type: ignore[attr-defined]  # injecting attr onto synthetic stand-in module
+_mock_openai.OpenAI = MagicMock  # type: ignore[attr-defined]  # injecting attr onto synthetic stand-in module
 
 
 @pytest.fixture(autouse=True)
@@ -24,7 +24,7 @@ def _mock_openai_module(monkeypatch):
         del sys.modules["kairix.platform.llm.embed_provider"]
 
 
-from kairix.platform.llm.embed_provider import (  # noqa: E402
+from kairix.platform.llm.embed_provider import (  # noqa: E402  # import deferred until after openai mock is installed
     AzureEmbedProvider,
     EmbedProvider,
     OpenAIEmbedProvider,

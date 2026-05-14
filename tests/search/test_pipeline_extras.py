@@ -115,7 +115,7 @@ def _build_test_pipeline(
     bm25 = BM25SearchBackend(doc_repo)
     embedding = FakeEmbeddingService()
     vector_repo = vec_repo if vec_repo is not None else FakeVectorRepository(results=vec_results or [])
-    vector = VectorSearchBackend(embedding, vector_repo)  # type: ignore[arg-type]
+    vector = VectorSearchBackend(embedding, vector_repo)  # type: ignore[arg-type]  # fakes satisfy backend protocol structurally
     graph = FakeGraphRepository(available=graph_available)
     fusion = RRFFusion(k=cfg.rrf_k)
 

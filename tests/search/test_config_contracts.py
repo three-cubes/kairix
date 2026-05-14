@@ -449,37 +449,37 @@ class TestFrozenDataclassInvariants:
     def test_retrieval_config_is_frozen(self) -> None:
         cfg = RetrievalConfig.defaults()
         with pytest.raises(FrozenInstanceError):
-            cfg.fusion_strategy = "bm25_primary"  # type: ignore[misc]
+            cfg.fusion_strategy = "bm25_primary"  # type: ignore[misc]  # asserting frozen dataclass rejects mutation
 
     @pytest.mark.contract
     def test_retrieval_config_rejects_new_attribute(self) -> None:
         cfg = RetrievalConfig.defaults()
         with pytest.raises(FrozenInstanceError):
-            cfg.brand_new_field = 123  # type: ignore[attr-defined]
+            cfg.brand_new_field = 123  # type: ignore[attr-defined]  # asserting frozen dataclass rejects new attributes
 
     @pytest.mark.contract
     def test_entity_boost_config_is_frozen(self) -> None:
         cfg = EntityBoostConfig()
         with pytest.raises(FrozenInstanceError):
-            cfg.enabled = False  # type: ignore[misc]
+            cfg.enabled = False  # type: ignore[misc]  # asserting frozen dataclass rejects mutation
 
     @pytest.mark.contract
     def test_procedural_boost_config_is_frozen(self) -> None:
         cfg = ProceduralBoostConfig()
         with pytest.raises(FrozenInstanceError):
-            cfg.factor = 9.9  # type: ignore[misc]
+            cfg.factor = 9.9  # type: ignore[misc]  # asserting frozen dataclass rejects mutation
 
     @pytest.mark.contract
     def test_temporal_boost_config_is_frozen(self) -> None:
         cfg = TemporalBoostConfig()
         with pytest.raises(FrozenInstanceError):
-            cfg.chunk_date_boost_enabled = True  # type: ignore[misc]
+            cfg.chunk_date_boost_enabled = True  # type: ignore[misc]  # asserting frozen dataclass rejects mutation
 
     @pytest.mark.contract
     def test_rerank_config_is_frozen(self) -> None:
         cfg = RerankConfig()
         with pytest.raises(FrozenInstanceError):
-            cfg.enabled = True  # type: ignore[misc]
+            cfg.enabled = True  # type: ignore[misc]  # asserting frozen dataclass rejects mutation
 
     @pytest.mark.contract
     def test_reflib_constant_is_frozen(self) -> None:
@@ -487,4 +487,4 @@ class TestFrozenDataclassInvariants:
         # caller could permanently shift the baseline used by every other
         # caller in the process.
         with pytest.raises(FrozenInstanceError):
-            REFLIB_RETRIEVAL_CONFIG.bm25_limit = 9999  # type: ignore[misc]
+            REFLIB_RETRIEVAL_CONFIG.bm25_limit = 9999  # type: ignore[misc]  # asserting shared frozen constant rejects mutation
