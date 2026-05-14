@@ -7,6 +7,52 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
+## [2026.5.15] - 2026-05-14 — F-rule legacy fully burned + worker observability complete
+
+> **Upgrading?** Drop-in. No public API breaks. Internal: 8 use-case `_*_defaults.py` shim modules deleted (their lazy imports moved into the dataclass module); 7 fitness-function baselines now empty (F1, F3, F4, F5, F6, F7, F9); per-file coverage floor ratcheted 85% → 90%. Worker gains operator pause/resume + observable phase state + skip-on-idle maintenance.
+
+### Added
+
+- **Worker pause/resume (#224 phase 4).** `kairix worker pause` / `kairix worker resume` toggle a touch-file in the data dir. The running worker enters PAUSED at the next loop iteration (within 5s) and stops doing task work until the flag is removed. Decoupled from the worker process — a stuck worker can still be paused, and the pause survives restarts.
+- **`kairix worker status` (#224 phase 5).** Reads the persisted `WorkerState` JSON (atomic temp+rename writes) and prints phase, embedded total, failed chunks, recall alerts, restart count, uptime. Exit 0 if state file present, 1 if missing — a Docker healthcheck or shell monitor can detect a never-started worker. State survives container restarts; `restart_count` increments each boot.
+- **Worker skip-on-idle maintenance (#224 phase 2).** When `consecutive_embed_noops` ≥ 10 (env `KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD`), the worker stops running `entity_seed` / `health_check` / `wikilinks` — nothing's changing, the scans are pointless. Resumes on the next embed that does work. Friendlier to shared hosts.
+- **F14 — `sonar.issue.ignore` entries require rationale comment.** Mirrors F3 for SonarCloud suppressions in `sonar-project.properties`. The detector lives at `scripts/checks/check_sonar_ignore_rationale.py`; runs in Stage 0.
+- **Scheduled baseline audit (`.github/workflows/baseline-audit.yml`).** Mondays 08:00 UTC + workflow_dispatch. Fails if any baseline entry is stale (file deleted, or coverage now ≥ 90%). Catches drift accumulated between deliberate sweeps.
+- **`bash scripts/checks/audit_baselines.py`** — local invocation of the audit logic.
+
+### Changed (internal — quality-exceptions Wave 2-5 + F-rule legacy closure)
+
+- **F-rule baselines closed.** Seven baselines went from grandfathered violations to **zero**:
+  - **F1** (no `@patch` on kairix internals): 3 → 0. Refactored `tests/test_paths.py` to inject `platform=` instead of patching `kairix.paths.sys`; `tests/search/test_config_loader.py` driven by malformed YAML naturally; one weak smoke test deleted (behaviour pinned elsewhere).
+  - **F3** (suppressions require rationale): 32 → 0. Every `# noqa` / `# NOSONAR` / `# pragma: no cover` / `# type: ignore` / `# nosec` carries an em-dash rationale.
+  - **F4** (env reads centralised): 18 → 0. 22 new helpers in `paths.py`/`secrets.py`; every `os.environ.get("KAIRIX_*")` outside those two modules now routes through a typed helper.
+  - **F5** (no internal-name imports in tests): 13 → 0. Promoted private helpers in `paths.py` and `core/search/config_loader.py` to public.
+  - **F6** (no `*_fn=None` test-only kwargs in production): 12 → 0. AST detector extended to walk `ClassDef` `AnnAssign` fields (was only walking function params); surfaced 3 dataclass-field violations all refactored to `field(default_factory=lambda: _default_X)`. Eight `_*_defaults.py` shim modules deleted — their lazy-import bodies moved into the dataclass module as `_default_X` functions.
+  - **F7 / F9** (per-file 85% floor, unit and union): 34 + 33 → 0. 23 production files lifted past 90%; 11 small files in the 85-90% band lifted to 97-100%. 90+ new sabotage-proven unit tests.
+- **F2 baseline pinned at 8** — env-feature tests for paths/secrets/credentials/config_loader plus the autouse `no_azure_calls` safety fixture. These directly test the env-var-reading API; eliminating `monkeypatch.setenv` means changing what's tested. Net-new F2 violations still block.
+- **F7/F9 floor ratcheted 85% → 90%**. `pyproject.toml`'s `fail_under` raised 80 → 88 (tracks current achievable floor).
+- **F6 AST detector extended**. v1 walked `FunctionDef` / `AsyncFunctionDef` only; v2 also walks `ClassDef` `AnnAssign` so dataclass fields shaped `x_fn: Callable | None = None` are caught.
+- **Audit script prefix fix.** `scripts/checks/audit_baselines.py` initially missed coverage-baseline matches because Cobertura's `filename` is source-root-relative. Fixed to read `<source>` and re-prepend.
+- **Deterministic `fake_llm_backend.embed`** (#240). `hash(text) % 1000` had two failure modes (PYTHONHASHSEED + 0.1% modular collisions); replaced with `sha256(text)[:4]` truncated to a 2³² seed space.
+
+### Removed
+
+- **`tests/integration/test_mcp_tool_contracts.py`** — weakly-asserting smoke test (`"results" in result or "error" in result`) requiring `@patch("kairix._azure.embed_text", ...)`. Behaviour covered by `tests/use_cases/test_search.py` + `tests/integration/test_search_pipeline.py` + `tests/contracts/test_cli_mcp_parity_search.py`.
+- **10 shim modules** — 8 `_*_defaults.py` use-case shims + `_pipeline_defaults.py` + `_timeline_defaults.py`. Bodies inlined into their dataclass modules.
+
+### Issues filed / closed
+
+- **Closed**: #240 (flaky embed fake), #224 (worker resource discipline — phases 1, 2, 4, 5, 6 shipped; phase 3 deferred), #203 (Wave 5 ratchet), #244 (F6 detector gap + refactor — same day).
+- **Filed**: #242 (SonarCloud project keyed under `quanyeomans` org — needs SonarCloud-admin to update GitHub binding for PR scans to work), #243 (SRE/platform-health worker — design-first issue: process model, OTel target, healthcheck protocol, remediation policy all open questions).
+
+### Operational notes
+
+- `kairix worker status` exit code is the authoritative "worker alive AND has run" signal. State file: `${KAIRIX_DATA_DIR}/worker-state.json`.
+- Operators on shared hosts can tune `KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD` (default 10).
+- SonarCloud PR scans show red until #242 admin step lands. Develop merges unaffected (Sonar not required).
+
+---
+
 ## [2026.5.14] - 2026-05-14 — FTS rebuild atomicity + quality-exceptions Wave 1 burndown
 
 > **Upgrading?** Drop-in. The FTS fix prevents transient `no such table: documents_fts` errors during worker rebuild cycles — operators occasionally seeing those in logs will stop seeing them. Internal refactors land alongside; no public-API changes.
