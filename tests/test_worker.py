@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import signal
+import typing
 from dataclasses import dataclass
 
 import pytest
@@ -454,3 +455,97 @@ def test_main_loop_calls_wikilinks_at_interval() -> None:
 def test_wikilinks_interval_constant_matches_embed() -> None:
     """Per #100 the inject runs on the same hourly cadence as embed."""
     assert WIKILINKS_INTERVAL == EMBED_INTERVAL
+
+
+# ---------------------------------------------------------------------------
+# #224 idle backoff — compute_embed_interval + run_embed return semantics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def testcompute_embed_interval_no_backoff_below_threshold() -> None:
+    """First N consecutive no-ops keep the base interval — no churn on a
+    just-quiet vault."""
+    from kairix.worker import EMBED_BACKOFF_NOOP_THRESHOLD, compute_embed_interval
+
+    base = 3600
+    for streak in range(EMBED_BACKOFF_NOOP_THRESHOLD + 1):
+        assert compute_embed_interval(base, streak) == base
+
+
+@pytest.mark.unit
+def testcompute_embed_interval_doubles_after_threshold() -> None:
+    """First backoff hop is 2x base; second is 4x; growth is exponential.
+    Verifies the exponential math up to the point where the 4-hour cap kicks
+    in (a separate test covers the cap)."""
+    from kairix.worker import EMBED_BACKOFF_NOOP_THRESHOLD, compute_embed_interval
+
+    # Use a small base so we can demonstrate 2x and 4x growth without
+    # hitting the 4-hour cap mid-test.
+    base = 60
+    assert compute_embed_interval(base, EMBED_BACKOFF_NOOP_THRESHOLD + 1) == base * 2
+    assert compute_embed_interval(base, EMBED_BACKOFF_NOOP_THRESHOLD + 2) == base * 4
+    assert compute_embed_interval(base, EMBED_BACKOFF_NOOP_THRESHOLD + 3) == base * 8
+
+
+@pytest.mark.unit
+def testcompute_embed_interval_caps_at_max() -> None:
+    """Backoff caps at EMBED_BACKOFF_MAX_INTERVAL so a long-idle vault still
+    runs embed every 4 hours minimum — keeps recall canaries fresh."""
+    from kairix.worker import EMBED_BACKOFF_MAX_INTERVAL, compute_embed_interval
+
+    # A huge streak must clamp to the max, not overflow.
+    assert compute_embed_interval(3600, 100) == EMBED_BACKOFF_MAX_INTERVAL
+
+
+@pytest.mark.unit
+def test_run_embed_returns_true_on_real_work(caplog: pytest.LogCaptureFixture) -> None:
+    """run_embed signals 'did real work' when the pipeline embedded chunks.
+    Used by the main loop to reset the no-op streak."""
+
+    class _Result:
+        embedded = 7
+        failed = 0
+        recall_passed = True
+        recall_alert = None
+        diagnostics: typing.ClassVar[list[str]] = []
+        recall_score = 0.95
+
+    deps = WorkerDeps(embed=lambda: _Result(), entity_seed=lambda: None, health_check=lambda: [])
+    assert run_embed(deps) is True
+
+
+@pytest.mark.unit
+def test_run_embed_returns_false_on_noop() -> None:
+    """Sabotage-prove: zero embedded AND zero failed means no real work —
+    return False so the main loop can advance the backoff streak."""
+
+    class _Result:
+        embedded = 0
+        failed = 0
+        recall_passed = True
+        recall_alert = None
+        diagnostics: typing.ClassVar[list[str]] = []
+        recall_score = 0.95
+
+    deps = WorkerDeps(embed=lambda: _Result(), entity_seed=lambda: None, health_check=lambda: [])
+    assert run_embed(deps) is False
+
+
+@pytest.mark.unit
+def test_run_embed_returns_false_on_exception() -> None:
+    """An exception in the embed step counts as no-op — broken pipelines
+    don't deserve faster retries; backoff applies."""
+
+    def _broken() -> None:
+        raise RuntimeError("simulated embed failure")
+
+    deps = WorkerDeps(embed=_broken, entity_seed=lambda: None, health_check=lambda: [])
+    assert run_embed(deps) is False
+
+
+@pytest.mark.unit
+def test_run_embed_returns_false_on_legacy_none_result() -> None:
+    """Legacy stubs returning None must be treated as no-op (back-compat)."""
+    deps = WorkerDeps(embed=lambda: None, entity_seed=lambda: None, health_check=lambda: [])
+    assert run_embed(deps) is False

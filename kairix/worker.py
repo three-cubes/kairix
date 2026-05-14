@@ -32,6 +32,12 @@ ENTITY_SEED_INTERVAL = 86400  # 24 hours
 HEALTH_CHECK_INTERVAL = 21600  # 6 hours
 WIKILINKS_INTERVAL = 3600  # 1 hour — runs after embed; --changed mtime-filters
 
+# Idle backoff (#224): when embed runs find no work to do, the next-embed
+# wait extends exponentially. Cap at 4 hours so we don't go totally silent
+# on a long-idle vault but also don't churn CPU/IO every hour for nothing.
+EMBED_BACKOFF_NOOP_THRESHOLD = 2  # after N consecutive no-ops, start backing off
+EMBED_BACKOFF_MAX_INTERVAL = 14400  # 4 hours — cap on backed-off embed interval
+
 
 def _default_embed() -> EmbedPipelineResult:
     """Default embed implementation — runs the embed use case directly.
@@ -105,8 +111,12 @@ class WorkerDeps:
     sleep: Callable[[float], None] = field(default_factory=lambda: time.sleep)
 
 
-def run_embed(deps: WorkerDeps | None = None) -> None:
+def run_embed(deps: WorkerDeps | None = None) -> bool:
     """Run incremental embed — indexes new and changed documents.
+
+    Returns ``True`` when the embed run did real work (embedded > 0 or
+    failed > 0), ``False`` when it was a no-op. The main loop uses this
+    signal to apply idle-backoff per #224.
 
     The worker treats every outcome of the embed pipeline as
     non-fatal: failed chunks, recall-gate alerts, and unexpected
@@ -131,7 +141,7 @@ def run_embed(deps: WorkerDeps | None = None) -> None:
         result = deps.embed()
         if result is None:
             logger.info("worker: embed complete")
-            return
+            return False
         # The defensive getattr() chain accommodates legacy test stubs
         # that return ad-hoc objects without the full result dataclass.
         embedded = getattr(result, "embedded", None)
@@ -155,6 +165,11 @@ def run_embed(deps: WorkerDeps | None = None) -> None:
             )
         for diag in diagnostics:
             logger.warning("worker: %s", diag)
+        # "Did real work?" — anything > 0 for embedded or failed counts as
+        # work. Recall alerts WITHOUT new embeddings don't reset the
+        # backoff streak; they're informational, not corpus-changes.
+        did_work = (isinstance(embedded, int) and embedded > 0) or (isinstance(failed, int) and failed > 0)
+        return did_work
     # Catch (Exception, SystemExit) — a SystemExit from the embed step
     # (e.g. legacy CLI calling sys.exit(1) on recall-gate failure) must
     # NOT terminate the worker. Graceful shutdown is signal-driven via
@@ -164,6 +179,26 @@ def run_embed(deps: WorkerDeps | None = None) -> None:
     # right behaviour for a developer running locally.
     except (Exception, SystemExit) as exc:
         logger.warning("worker: embed pipeline raised — %s", exc)
+        # Treat exceptions as "no work happened" so backoff applies — a
+        # broken embed pipeline doesn't deserve more frequent retries.
+        return False
+
+
+def compute_embed_interval(base: int, noop_streak: int) -> int:
+    """Apply exponential idle-backoff after a streak of no-op embed runs.
+
+    No backoff until ``EMBED_BACKOFF_NOOP_THRESHOLD`` consecutive no-ops.
+    After that, each additional no-op doubles the interval, capped at
+    ``EMBED_BACKOFF_MAX_INTERVAL`` (4 hours). The exponent is
+    ``noop_streak - threshold + 1`` so the FIRST backoff hop is 2x, not 1x.
+
+    Implements #224's "Add backoff/jitter when scans find no new or
+    changed work" acceptance criterion.
+    """
+    if noop_streak <= EMBED_BACKOFF_NOOP_THRESHOLD:
+        return base
+    exponent = noop_streak - EMBED_BACKOFF_NOOP_THRESHOLD
+    return int(min(base * (2**exponent), EMBED_BACKOFF_MAX_INTERVAL))
 
 
 def run_entity_seed(deps: WorkerDeps | None = None) -> None:
@@ -267,6 +302,10 @@ def main(
     last_health = 0.0
     last_wikilinks = 0.0
 
+    # #224 idle backoff: extend the embed interval after consecutive
+    # no-op runs to avoid steady CPU/I/O pressure on idle vaults.
+    consecutive_embed_noops = 0
+
     # Graceful shutdown
     running = True
 
@@ -279,14 +318,23 @@ def main(
     signal.signal(signal.SIGINT, _shutdown)
 
     # Run embed immediately on startup
-    run_embed(deps)
+    did_work = run_embed(deps)
+    consecutive_embed_noops = 0 if did_work else consecutive_embed_noops + 1
     last_embed = time.monotonic()
 
     while running:
         now = time.monotonic()
+        effective_embed_interval = compute_embed_interval(_embed_interval, consecutive_embed_noops)
 
-        if now - last_embed >= _embed_interval:
-            run_embed(deps)
+        if now - last_embed >= effective_embed_interval:
+            if effective_embed_interval != _embed_interval:
+                logger.info(
+                    "worker: idle backoff active — embed interval extended to %ds after %d no-op cycle(s)",
+                    effective_embed_interval,
+                    consecutive_embed_noops,
+                )
+            did_work = run_embed(deps)
+            consecutive_embed_noops = 0 if did_work else consecutive_embed_noops + 1
             last_embed = now
 
         if now - last_entity >= _entity_interval:
