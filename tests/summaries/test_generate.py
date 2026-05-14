@@ -8,7 +8,7 @@ import pytest
 
 from kairix.knowledge.summaries.generate import (
     SummariesDeps,
-    _first_n_words,
+    first_n_words,
     generate_l0,
     generate_l1,
     generate_summaries,
@@ -63,25 +63,25 @@ def test_generate_l0_uses_first_800_words():
 
 
 # ---------------------------------------------------------------------------
-# _first_n_words
+# first_n_words
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_first_n_words_under_limit():
-    assert _first_n_words("hello world", 10) == "hello world"
+def testfirst_n_words_under_limit():
+    assert first_n_words("hello world", 10) == "hello world"
 
 
 @pytest.mark.unit
-def test_first_n_words_over_limit():
+def testfirst_n_words_over_limit():
     text = " ".join(f"w{i}" for i in range(100))
-    result = _first_n_words(text, 10)
+    result = first_n_words(text, 10)
     assert len(result.split()) == 10
 
 
 @pytest.mark.unit
-def test_first_n_words_empty():
-    assert _first_n_words("", 10) == ""
+def testfirst_n_words_empty():
+    assert first_n_words("", 10) == ""
 
 
 # ---------------------------------------------------------------------------

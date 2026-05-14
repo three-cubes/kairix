@@ -4,5 +4,4 @@ tests/contracts/test_eval_protocols.py
 tests/mcp/test_affordance.py
 tests/search/test_config_loader.py
 tests/store/test_crawler.py
-tests/summaries/test_generate.py
 tests/test_paths.py

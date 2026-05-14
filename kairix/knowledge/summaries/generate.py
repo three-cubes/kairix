@@ -65,7 +65,7 @@ _L1_SYSTEM = (
 # ---------------------------------------------------------------------------
 
 
-def _first_n_words(text: str, n: int) -> str:
+def first_n_words(text: str, n: int) -> str:
     """Return the first n whitespace-separated words of text."""
     words = text.split()
     return " ".join(words[:n])
@@ -143,7 +143,7 @@ def generate_l0(
     """
     if deps is None:  # pragma: no cover — production lazy default; tests pass deps=SummariesDeps(chat=fake)
         deps = SummariesDeps()
-    truncated = _first_n_words(content, 800)
+    truncated = first_n_words(content, 800)
     messages = [
         {"role": "system", "content": _L0_SYSTEM},
         {"role": "user", "content": f"Document path: {path}\n\n{truncated}"},
@@ -169,7 +169,7 @@ def generate_l1(
     """
     if deps is None:  # pragma: no cover — production lazy default; tests pass deps=SummariesDeps(chat=fake)
         deps = SummariesDeps()
-    truncated = _first_n_words(content, 2000)
+    truncated = first_n_words(content, 2000)
     messages = [
         {"role": "system", "content": _L1_SYSTEM},
         {"role": "user", "content": f"Document path: {path}\n\n{truncated}"},
