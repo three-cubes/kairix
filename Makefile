@@ -63,7 +63,7 @@ clean:
 # behaviour so local and CI are aligned.
 
 go-modules:
-	@find services -mindepth 2 -maxdepth 2 -name go.mod -printf '%h\n' 2>/dev/null || true
+	@find services -mindepth 2 -maxdepth 2 -name go.mod -exec dirname {} \; 2>/dev/null || true
 
 go-fmt:
 	@for m in $$($(MAKE) -s go-modules); do \
