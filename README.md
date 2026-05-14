@@ -120,38 +120,134 @@ No GPU. No per-seat licensing. One VM serves your entire team of agents and huma
 
 ## Quick start
 
-### Option A: pip install
+Kairix is the memory + context layer your agent uses to stay oriented across sessions and stay aligned with its human / agent team. The flow below is written for an agent (or its admin) reading this cold: install, point at credentials, point at documents, verify, wire into your agent runtime.
+
+**Prereqs:** Python 3.10+ or Docker, an LLM API key for embeddings (Azure OpenAI or any OpenAI-compatible API), a folder of documents.
+
+### 1. Install
 
 ```bash
-pip install "kairix-agentic-knowledge-mgt[agents,neo4j]"
-kairix setup                   # interactive wizard — picks your paths, ports, collections
-kairix embed                   # index your documents
-kairix search "your question"  # find answers
-kairix mcp serve               # start MCP server for agent integration
+# pip
+pip install "kairix-agentic-knowledge-mgt[agents,neo4j]" && kairix setup
+
+# Docker
+curl -O https://raw.githubusercontent.com/quanyeomans/kairix/main/docker-compose.yml \
+  && curl -O https://raw.githubusercontent.com/quanyeomans/kairix/main/.env.example \
+  && cp .env.example .env && docker compose up -d
 ```
 
-### Option B: Docker Compose
+### 2. Configure secrets
+
+Two supported paths — pick whichever matches your deployment.
+
+**Production (Azure Key Vault):** set `KAIRIX_KV_NAME=<vault-name>` in `/opt/kairix/service.env`. Kairix resolves secrets via `az keyvault secret show` at first use. On Docker / VM deployments a `kairix-fetch-secrets.service` systemd unit can pre-populate `/run/secrets/kairix.env` from the vault so the kairix process never touches the Azure CLI at runtime.
+
+**Local dev / CI:** set the env vars directly. The four that matter:
+
+| Env var | Purpose |
+|---------|---------|
+| `KAIRIX_LLM_API_KEY` | API key for the LLM / embedding provider |
+| `KAIRIX_LLM_ENDPOINT` | LLM / embedding endpoint URL |
+| `KAIRIX_AZURE_API_KEY` | Azure OpenAI API key (when using Azure) |
+| `KAIRIX_AZURE_API_VERSION` | Azure OpenAI API version (e.g. `2024-08-01-preview`) |
+
+For the full secret map (Neo4j password, embed-specific overrides, etc.) see [`kairix/secrets.py`](kairix/secrets.py). Resolution order is: direct env vars → per-file secrets → `kairix.env` bundle → Azure Key Vault CLI fallback.
+
+### 3. Configure document collections
+
+Kairix organises your documents into named **collections** declared in `kairix.config.yaml`. Each collection has an `in_default: true|false` flag that controls whether your agent sees it in default searches:
+
+- **`in_default: true`** — collection joins the default search mix every time your agent calls `tool_search` without an explicit scope. Good for your **user library** (the team's working knowledge — projects, decisions, runbooks).
+- **`in_default: false`** — collection is still indexed and reachable via `--collection <name>` (CLI) or the `agent` parameter on `tool_search`, but it does not auto-join default scopes. Good for your **reference library** (large external corpora that would otherwise dominate result mix).
+
+Concrete example — a personal knowledge base alongside a shared reference library:
+
+```yaml
+collections:
+  shared:
+    - name: projects             # team's working knowledge
+      path: "01-Projects"
+      glob: "**/*.md"
+      # in_default defaults to true
+    - name: reference-library    # 5,000+ external docs
+      path: "reference-library"
+      glob: "**/*.md"
+      in_default: false          # opt-in scope only
+```
+
+See [`kairix.example.config.yaml`](kairix.example.config.yaml) for the full schema (per-agent paths, retrieval overrides per collection, fusion strategy).
+
+### 4. Verify
 
 ```bash
-curl -O https://raw.githubusercontent.com/quanyeomans/kairix/main/docker-compose.yml
-curl -O https://raw.githubusercontent.com/quanyeomans/kairix/main/.env.example
-cp .env.example .env        # add your LLM API key
-ln -s ~/my-notes ./documents # point to your documents
-docker compose up -d         # starts kairix + worker + Neo4j
+kairix onboard check    # runs 9 checks: PATH → wrapper → secrets → docs → vector → Neo4j → agent memory → chunk dates → MCP
 ```
 
-**Verify it works** — the container includes a reference library and gold suite. After setup:
-```bash
-docker compose exec kairix kairix eval    # runs 200-case benchmark, prints scores
-docker compose exec kairix kairix onboard check   # verifies all 9 deployment checks pass
+Green output looks like `9/9 passed`. Common failures and the canonical remediation for each:
+
+| Check | Means | Canonical fix |
+|-------|-------|---------------|
+| `kairix_on_path` | `kairix` binary not on `$PATH` | `bash scripts/deploy-vm.sh` (installs the wrapper + symlink) |
+| `wrapper_installed` | Symlink points at raw Python binary, not the shell wrapper | Run the deploy script to reinstall the wrapper |
+| `secrets_loaded` | `KAIRIX_LLM_API_KEY` / `KAIRIX_LLM_ENDPOINT` not in env or in `/run/secrets/kairix.env` | Add them to `/opt/kairix/secrets.env` or enable `kairix-fetch-secrets.service` |
+| `document_root_configured` | `KAIRIX_DOCUMENT_ROOT` unset or directory missing | `export KAIRIX_DOCUMENT_ROOT=/data/documents` (or your path) |
+| `vector_search_working` | Vector search returned 0 results or failed | Run `kairix embed`; if credentials are missing fix `secrets_loaded` first |
+| `neo4j_reachable` | Neo4j unreachable or empty | `bash scripts/install-neo4j.sh`; then `kairix store crawl --document-root $KAIRIX_DOCUMENT_ROOT` |
+| `agent_knowledge_populated` | No agent memory logs found | Create `<doc-root>/04-Agent-Knowledge/<agent>/memory/`; agents write daily logs there |
+| `chunk_date_populated` | `chunk_date` column unpopulated (temporal boost inert) | Run `kairix embed` (migration is automatic) |
+| `mcp_service` | No MCP consumer registered | See step 5 below |
+
+Each failed check prints its own remediation string verbatim — agents should surface those strings to their admin without paraphrasing. The full diagnostic lives in [`kairix/platform/onboard/check.py`](kairix/platform/onboard/check.py).
+
+### 5. Wire into your agent
+
+**OpenClaw** — register the kairix MCP server and load the kairix-memory-prompt plugin so the agent gets bootstrap context at session start:
+
+```jsonc
+{
+  "mcp": {
+    "servers": {
+      "mcp-kairix": {
+        "command": "kairix",
+        "args": ["mcp", "serve"],
+        "description": "Knowledge base search, research, entity lookup"
+      }
+    }
+  },
+  "plugins": {
+    "load": {
+      "paths": ["/data/workspaces/builder/plugins"]
+    },
+    "allow": ["kairix-memory-prompt"],
+    "entries": {
+      "kairix-memory-prompt": {
+        "hooks": {
+          "allowPromptInjection": true
+        }
+      }
+    }
+  }
+}
 ```
 
-See the [full quick-start guide](docs/getting-started/quick-start.md) for detailed setup.
+Note the plugin currently lives at `/data/workspaces/builder/plugins/kairix-memory-prompt`. The canonical move into the kairix repo (`kairix/plugins/openclaw/memory-prompt/`) is tracked in #246 W5; until that ships, reference the workspace-local path above.
 
-**What you need:**
-- Python 3.10+ (Option A) or Docker (Option B)
-- An LLM API key for embeddings (Azure OpenAI or any OpenAI-compatible API)
-- A folder of documents
+**Claude Desktop / Claude Code:** add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "kairix": {
+      "command": "kairix",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+**Tell your agent what to do with kairix:** the canonical operating contract is in [`docs/agents/AGENT-SETUP.md`](docs/agents/AGENT-SETUP.md) — when to call `tool_search`, when to call `tool_brief`, how to read the `health` envelope, and what to do when kairix degrades. Point your agent at that file first.
+
+See the [full quick-start guide](docs/getting-started/quick-start.md) for the detailed install path, and [connecting agents](docs/getting-started/connecting-agents.md) for LangGraph / CrewAI / VS Code integrations.
 
 **Ships with:** 5,800+ reference library documents and a 200-case gold suite for immediate quality verification.
 
@@ -171,6 +267,8 @@ See [SECURITY.md](SECURITY.md) for detail.
 
 | Topic | Where to look |
 |-------|--------------|
+| Agent setup (operating contract) | [docs/agents/AGENT-SETUP.md](docs/agents/AGENT-SETUP.md) |
+| Admin conversation scripts | [docs/agents/ADMIN-CONVERSATION.md](docs/agents/ADMIN-CONVERSATION.md) |
 | Connecting your agents | [docs/getting-started/connecting-agents.md](docs/getting-started/connecting-agents.md) |
 | What agents can do with kairix | [docs/user-guide/agent-usage-guide.md](docs/user-guide/agent-usage-guide.md) |
 | MCP tools reference | [docs/user-guide/mcp-tools.md](docs/user-guide/mcp-tools.md) |
