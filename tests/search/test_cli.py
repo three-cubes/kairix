@@ -183,3 +183,83 @@ def test_to_json_envelope_includes_error_field_when_set() -> None:
     out = SearchOutput(query="q", intent="", error="ConnectionError: KAIRIX_NEO4J_URI not reachable")
     env = to_json_envelope(out)
     assert env["error"].startswith("ConnectionError")
+
+
+# ---------------------------------------------------------------------------
+# main() — exercised through the public argv surface
+#
+# ``main`` is the thin CLI adapter that parses argv, calls
+# ``run_search`` for real (the use case is independently tested in
+# ``tests/use_cases/test_search.py``), prints, and exits. The CLI is
+# designed to degrade gracefully when production deps (Neo4j, Azure,
+# usearch) are unavailable — search returns empty results and stdout
+# still rendered, no exception. These tests pin that contract.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_main_text_mode_prints_query_and_intent_lines(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Sabotage: deleting `print(format_text(out))` in main() causes
+    # capsys.readouterr().out to be empty and the "Query:" assertion to fail.
+    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
+    main_module.main(["my unit test query"])
+    captured = capsys.readouterr()
+    assert "Query: my unit test query" in captured.out
+    assert "Intent:" in captured.out
+
+
+@pytest.mark.unit
+def test_main_json_mode_emits_parseable_envelope(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Sabotage: swapping to_json_envelope for format_text in the --json branch
+    # makes captured.out non-JSON and json.loads raises ValueError → test fails.
+    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
+    main_module.main(["another query", "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["query"] == "another query"
+    assert "results" in payload
+    assert "bm25_count" in payload
+
+
+@pytest.mark.unit
+def test_main_exits_nonzero_when_search_output_has_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Sabotage: removing the `if out.error: sys.exit(1)` branch makes SystemExit
+    # not fire and the pytest.raises block fails (no exception caught).
+    #
+    # We trigger an error by passing scope=all-agents which raises
+    # NotImplementedError inside run_search (DefaultCollectionResolver).
+    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
+    with pytest.raises(SystemExit) as exc_info:
+        main_module.main(["query", "--scope", "all-agents", "--agent", "shape"])
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "Error:" in captured.out
+
+
+@pytest.mark.unit
+def test_main_module_guard_invokes_main(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Sabotage: removing `main()` under `if __name__ == "__main__"` makes
+    # runpy.run_module return without printing the "Query:" line, so the
+    # captured.out assert fails.
+    #
+    # runpy executes the module as __main__ which triggers the guard line.
+    # We patch sys.argv (NOT a KAIRIX_ env var, so F2-compliant) to feed argv.
+    import runpy
+    import sys as _sys
+
+    saved_argv = _sys.argv
+    _sys.argv = ["kairix-search", "guarded module run"]
+    try:
+        runpy.run_module("kairix.core.search.cli", run_name="__main__")
+    finally:
+        _sys.argv = saved_argv
+    captured = capsys.readouterr()
+    assert "Query: guarded module run" in captured.out

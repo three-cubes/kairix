@@ -203,3 +203,259 @@ class TestVectorIndex:
         query /= np.linalg.norm(query)
         results = test_index.search(query, k=10, collections=["nonexistent"])
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Defensive-branch coverage via the public surface.
+#
+# Each test drives a private branch through ``load`` / ``search`` /
+# ``add_vectors`` / ``get_vector_index`` — the public callers that
+# already exist on the class.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_handles_unlink_oserror_during_dim_mismatch(tmp_path: Path) -> None:
+    """``load()`` survives an OSError raised while purging a stale index.
+
+    Drives lines 111-112: ``_delete_index_files`` swallows OSError.
+
+    Sabotage: removing the ``except OSError`` block in
+    ``_delete_index_files`` propagates PermissionError out of ``load()``
+    and the assert below never runs.
+    """
+    from kairix.core.search.vec_index import VectorIndex
+
+    idx_path = tmp_path / "vectors.usearch"
+    meta_path = tmp_path / "vectors.meta.json"
+    db_path = tmp_path / "index.sqlite"
+    # Build a real (small) index file and a meta with a dimension mismatch
+    # so that ``load`` walks the purge branch.
+    idx_path.write_bytes(b"placeholder")
+    meta_path.write_text('{"ndim": 99, "keys": {}, "next_key": 0}')
+
+    # Sandbox dir read-only so unlink raises PermissionError (an OSError).
+    # 0o500 = read+execute, no write → unlink fails with permission error.
+    tmp_path.chmod(0o500)
+    try:
+        idx = VectorIndex(
+            index_path=idx_path,
+            meta_path=meta_path,
+            db_path=db_path,
+        )
+        # ``load`` invokes ``_delete_index_files``; that walks both paths
+        # and the unlinks raise PermissionError → swallowed; load returns 0.
+        count = idx.load()
+        assert count == 0
+    finally:
+        tmp_path.chmod(0o700)  # restore so pytest can clean up
+
+
+@pytest.mark.unit
+def test_search_returns_empty_when_db_has_no_matching_documents(
+    tmp_path: Path,
+) -> None:
+    """``search()`` returns [] when no SQL row matches the ANN-resolved hash.
+
+    Drives line 158: ``if row is None: continue`` inside
+    ``_resolve_match_metadata`` — exercised via the public ``search``.
+
+    Sabotage: removing the row-None guard makes the metadata resolver
+    crash with TypeError on ``row["path"]`` access; the call() raises.
+    """
+    from kairix.core.search.vec_index import VectorIndex
+
+    db_path = tmp_path / "index.sqlite"
+    import sqlite3 as _sqlite3
+
+    db = _sqlite3.connect(str(db_path))
+    db.executescript("""
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY, collection TEXT, path TEXT,
+            title TEXT, hash TEXT, active INTEGER DEFAULT 1
+        );
+        CREATE TABLE content (hash TEXT PRIMARY KEY, doc TEXT);
+    """)
+    db.commit()
+    db.close()
+
+    idx = VectorIndex(
+        index_path=tmp_path / "vectors.usearch",
+        meta_path=tmp_path / "vectors.meta.json",
+        db_path=db_path,
+    )
+    rng = np.random.default_rng(0)
+    vectors = rng.random((1, 1536), dtype=np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    # Build with a hash that has no matching document row.
+    idx.build_from_vectors(["ghosthash_0"], vectors)
+
+    query = rng.random(1536).astype(np.float32)
+    query /= np.linalg.norm(query)
+    results = idx.search(query, k=5)
+    assert results == []
+
+
+@pytest.mark.unit
+def test_search_returns_empty_when_db_is_malformed(tmp_path: Path) -> None:
+    """``search()`` returns [] when the SQLite layer raises (missing schema).
+
+    Drives lines 174-175: ``except (sqlite3.Error, OSError): return []``.
+
+    Sabotage: removing the except block lets sqlite3.OperationalError
+    bubble out and the assert below never runs.
+    """
+    from kairix.core.search.vec_index import VectorIndex
+
+    db_path = tmp_path / "index.sqlite"
+    import sqlite3 as _sqlite3
+
+    db = _sqlite3.connect(str(db_path))
+    db.execute("CREATE TABLE unrelated (x INT)")  # missing 'documents' table
+    db.commit()
+    db.close()
+
+    idx = VectorIndex(
+        index_path=tmp_path / "vectors.usearch",
+        meta_path=tmp_path / "vectors.meta.json",
+        db_path=db_path,
+    )
+    rng = np.random.default_rng(0)
+    vectors = rng.random((1, 1536), dtype=np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    idx.build_from_vectors(["any_0"], vectors)
+
+    query = rng.random(1536).astype(np.float32)
+    query /= np.linalg.norm(query)
+    out = idx.search(query, k=5)
+    assert out == []
+
+
+@pytest.mark.unit
+def test_add_vectors_after_build_does_not_recreate_index(tmp_path: Path) -> None:
+    """A second ``add_vectors`` call short-circuits ``_ensure_mutable``.
+
+    Drives line 208: ``if self._mutable: return`` — exercised by the
+    public ``add_vectors`` on its second invocation.
+
+    Sabotage: removing the short-circuit makes the second
+    add_vectors hit the ``if self._index is None`` branch (which is False
+    here) and the immutable-rebuild test_key probe; the index survives
+    but `_ensure_mutable` runs full body — equivalent observed behaviour,
+    so we instead assert the index still grows by one (proves the body
+    didn't accidentally wipe the index, which the sabotage would not
+    achieve — see the "rebuilds" test for the cleaner sabotage proof).
+    """
+    from kairix.core.search.vec_index import VectorIndex
+
+    idx = VectorIndex(
+        index_path=tmp_path / "vectors.usearch",
+        meta_path=tmp_path / "vectors.meta.json",
+        db_path=tmp_path / "index.sqlite",
+    )
+    rng = np.random.default_rng(0)
+    vectors = rng.random((3, 1536), dtype=np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    idx.build_from_vectors(["a_0", "b_0", "c_0"], vectors)
+    # First add_vectors flips _mutable=True.
+    extra1 = rng.random(1536).astype(np.float32)
+    extra1 /= np.linalg.norm(extra1)
+    idx.add_vectors(["d_0"], [extra1])
+    assert len(idx) == 4
+    # Second add_vectors short-circuits — index grows from 4 to 5.
+    extra2 = rng.random(1536).astype(np.float32)
+    extra2 /= np.linalg.norm(extra2)
+    idx.add_vectors(["e_0"], [extra2])
+    assert len(idx) == 5
+
+
+@pytest.mark.unit
+def test_add_vectors_on_fresh_index_creates_mutable_index(tmp_path: Path) -> None:
+    """``add_vectors`` on a never-loaded index allocates a mutable Index.
+
+    Drives lines 211-213: ``if self._index is None: self._index = Index(...)``.
+
+    Sabotage: removing the Index() allocation lines makes ``self._index``
+    stay None and the subsequent ``self._index.add(...)`` in add_vectors
+    raises AttributeError — the call() expression fails.
+    """
+    from kairix.core.search.vec_index import VectorIndex
+
+    idx = VectorIndex(
+        index_path=tmp_path / "vectors.usearch",
+        meta_path=tmp_path / "vectors.meta.json",
+        db_path=tmp_path / "index.sqlite",
+    )
+    rng = np.random.default_rng(0)
+    vec = rng.random(1536).astype(np.float32)
+    vec /= np.linalg.norm(vec)
+    # No build_from_vectors / load — index is None until add_vectors
+    # allocates one via _ensure_mutable.
+    n = idx.add_vectors(["fresh_0"], [vec])
+    assert n == 1
+    assert len(idx) == 1
+
+
+@pytest.mark.unit
+def test_load_then_add_vectors_rebuilds_immutable_view(tmp_path: Path) -> None:
+    """``add_vectors`` after ``load(view=True)`` rebuilds the mmap as mutable.
+
+    Drives lines 222-233: the except-branch of ``_ensure_mutable`` that
+    rebuilds the index by copying every vector from the immutable view
+    into a fresh mutable Index.
+
+    Sabotage: removing the rebuild branch leaves the index pointing at
+    the immutable view; the next ``self._index.add(...)`` inside
+    ``add_vectors`` raises and the call() fails.
+    """
+    from kairix.core.search.vec_index import VectorIndex
+
+    # First instance: build and save.
+    idx_path = tmp_path / "vectors.usearch"
+    meta_path = tmp_path / "vectors.meta.json"
+    db_path = tmp_path / "index.sqlite"
+    builder = VectorIndex(index_path=idx_path, meta_path=meta_path, db_path=db_path)
+    rng = np.random.default_rng(0)
+    vectors = rng.random((3, 1536), dtype=np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    builder.build_from_vectors(["one_0", "two_0", "three_0"], vectors)
+
+    # Second instance: load (view=True → immutable mmap).
+    loaded = VectorIndex(index_path=idx_path, meta_path=meta_path, db_path=db_path)
+    assert loaded.load() == 3
+    # add_vectors triggers _ensure_mutable's immutable-rebuild branch.
+    extra = rng.random(1536).astype(np.float32)
+    extra /= np.linalg.norm(extra)
+    loaded.add_vectors(["four_0"], [extra])
+    assert len(loaded) == 4
+
+
+@pytest.mark.unit
+def test_get_vector_index_returns_none_on_loader_failure() -> None:
+    """``get_vector_index`` returns None when path arithmetic raises.
+
+    Drives lines 305-307: ``except Exception: return None``.
+
+    Sabotage: removing the except block lets the simulated RuntimeError
+    propagate out of get_vector_index, so ``out`` is never assigned and
+    the call() expression raises.
+    """
+    from kairix.core.search import vec_index as vi
+
+    vi.reset_vector_index_singleton()
+
+    class _BadPath:
+        """Path-shaped object whose ``parent / "name"`` raises."""
+
+        @property
+        def parent(self):
+            return self
+
+        def __truediv__(self, _other):
+            raise RuntimeError("simulated path arithmetic failure")
+
+    try:
+        out = vi.get_vector_index(_BadPath())  # type: ignore[arg-type]  # intentional duck-typed stand-in to exercise the except branch
+        assert out is None
+    finally:
+        vi.reset_vector_index_singleton()
