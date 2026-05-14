@@ -46,6 +46,13 @@ REMEDIATION = f"""Refactor to bring each function's cognitive-complexity
 score below {THRESHOLD} — extract helper functions, use early-return,
 and/or replace if/elif chains with a strategy/dispatch dict — to pass.
 
+fix: pick the most-nested branch in the flagged function and extract
+it into a named helper; or replace an if/elif chain with a dispatch
+dict; or invert a guard so the happy path returns early.
+next: re-run ``python3 scripts/checks/check_cognitive_complexity.py``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh "refactor(<area>): flatten cognitive complexity in <function>"
+
 Cognitive complexity measures how hard the code is to READ (Campbell,
 SonarSource S3776). It rises with every branch and is amplified by
 nesting. The fix is almost always: extract a helper, return early, or

@@ -50,6 +50,13 @@ REMEDIATION = """Refactor to either DELETE the unused parameter from the
 signature or rename it to ``_unused`` (or any ``_``-prefixed name) if the
 position is required by a Protocol/abstract base — to pass.
 
+fix: if the unused parameter is required by a Protocol/abstract-base
+position, rename it to ``_unused`` (or any ``_``-prefixed name); if it
+is not load-bearing, delete it from the signature outright.
+next: re-run ``python3 scripts/checks/check_unused_params_named.py``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh "refactor(<area>): name unused params with _ prefix"
+
 The ``_``-prefix is the explicit signal that the unused parameter is
 load-bearing for the contract, not just leftover code.
 

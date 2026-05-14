@@ -38,6 +38,14 @@ REMEDIATION = """Refactor to stakeholder language (no Mock / MagicMock /
 monkeypatch / pytest. / unittest. / ``kairix.<pkg>.<symbol>`` tokens
 in feature steps) to pass.
 
+fix: rewrite the offending Scenario in stakeholder terms ("the operator
+sees X" / "the system rejects Y") and remove any reference to
+implementation symbols. If the test is genuinely about internals, move
+it out of tests/bdd/features/ to a unit test.
+next: re-run ``python3 scripts/checks/check_bdd_no_implementation_leaks.py``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh "test(bdd): rewrite <feature> in stakeholder language"
+
 Pass example:
   Scenario: Operator runs a search and sees results
     Given an indexed knowledge store

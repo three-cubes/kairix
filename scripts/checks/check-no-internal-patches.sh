@@ -15,6 +15,15 @@ cd "${SCRIPT_DIR}/../.." || exit 2
 REMEDIATION="Refactor to constructor injection with a fake from tests/fakes.py
 (no @patch / with patch on kairix.* targets) to pass.
 
+fix: rewrite the test to construct the unit under test with a Fake*
+from tests/fakes.py (e.g. ``SearchPipeline(retriever=FakeRetriever(...))``)
+instead of patching the internal symbol. If the production class
+lacks a constructor seam, add one — same shape as
+GoldBuilder(llm_judge=, retriever=, db_path=).
+next: re-run ``bash scripts/checks/check-no-internal-patches.sh`` to
+confirm the gate goes green.
+run: bash scripts/safe-commit.sh \"test(<area>): inject fake instead of patching internals\"
+
 If the production class lacks a constructor seam, add one — same shape as
 GoldBuilder(llm_judge=, retriever=, db_path=). Then construct it in the
 test with a Fake* from tests/fakes.py.

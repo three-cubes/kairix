@@ -37,6 +37,13 @@ REMEDIATION = """Refactor to add at least one happy-path scenario per
 feature file (a scenario WITHOUT any of the negative tags @error /
 @negative / @failure / @unhappy / @error-path) to pass.
 
+fix: add a happy-path Scenario to each listed *.feature file — one
+positive scenario that demonstrates the capability's intended outcome,
+not just failure modes.
+next: re-run ``python3 scripts/checks/check_bdd_happy_path.py`` to
+confirm the gate goes green.
+run: bash scripts/safe-commit.sh "test(bdd): add happy-path scenario for <feature>"
+
 Pass example:
   Feature: Benchmark suite execution
     Scenario: Operator runs a suite and sees scores

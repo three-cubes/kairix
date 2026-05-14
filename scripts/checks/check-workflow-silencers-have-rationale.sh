@@ -38,6 +38,14 @@ REMEDIATION="Refactor to add a same-line rationale comment to each CI
 workflow silencer — or delete the silencer entirely (preferred when the
 underlying failure is real and should block the merge) — to pass.
 
+fix: add a same-line trailing ``# <reason>`` comment to each
+``continue-on-error: true`` / ``fail_ci_if_error: false`` line in the
+listed workflow files — or, preferred, delete the silencer entirely
+so CI fails loudly when the underlying issue recurs.
+next: re-run ``bash scripts/checks/check-workflow-silencers-have-rationale.sh``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh \"ci: document rationale for workflow silencer\"
+
 Pass example:
   continue-on-error: true  # codecov outage shouldn't block merge
   fail_ci_if_error: false  # see #142 — upload races on matrix runs

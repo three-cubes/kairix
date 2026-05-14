@@ -28,6 +28,14 @@ cd "${SCRIPT_DIR}/../.." || exit 2
 REMEDIATION="Refactor to add an inline rationale after each suppression
 (or delete the suppression entirely if the underlying warning is real) to pass.
 
+fix: add an inline rationale after each bare suppression (everything
+after the suppression token counts; an em-dash + one-line justification
+is the canonical shape) — or delete the suppression entirely if the
+underlying warning is a real issue you should address.
+next: re-run ``bash scripts/checks/check-suppressions-have-rationale.sh``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh \"chore(<area>): document suppression rationale\"
+
 Pass example:
   x = 1  # NOSONAR — internal log path; not user-controlled
   result = requests.get(url)  # noqa: BLE001 — caller pins context

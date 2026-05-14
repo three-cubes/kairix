@@ -17,6 +17,35 @@ import ast
 import sys
 from pathlib import Path
 
+# REMEDIATION text — the shell wrapper ``check-no-env-monkeypatch.sh``
+# owns the user-facing message that prints when the gate fails. This
+# constant exists for F21 (actionable-feedback) compliance and is
+# semantically equivalent to the shell wrapper's REMEDIATION.
+REMEDIATION = """Refactor to constructor-injected FakePaths from tests/fakes.py
+(no monkeypatch.setenv / setattr / delenv on KAIRIX_* keys) — to pass.
+
+fix: replace ``monkeypatch.setenv("KAIRIX_...", ...)`` with explicit
+construction of a ``FakePaths`` from tests/fakes.py and pass it as the
+``paths=`` argument to the use case. If the production function reads
+the env var directly, refactor it to accept ``paths: KairixPaths`` as
+an explicit argument — the boundary-only pattern from #139.
+next: re-run ``python3 scripts/checks/check_no_env_monkeypatch.py``
+(or ``bash scripts/checks/check-no-env-monkeypatch.sh``) to confirm
+the gate goes green.
+run: bash scripts/safe-commit.sh "test(<area>): use FakePaths instead of env monkeypatch"
+
+Pass example:
+  paths = FakePaths(data_dir=tmp_path, log_dir=tmp_path / 'logs')
+  result = some_use_case(paths=paths)
+
+Forbidden example:
+  monkeypatch.setenv('KAIRIX_DATA_DIR', str(tmp_path))
+  result = some_use_case()
+
+KAIRIX_* env-var reads happen ONCE at the boundary inside KairixPaths
+(kairix/paths.py). Tests construct paths directly; they never mutate
+process env to influence the production read."""
+
 _TARGET_METHODS = {"setenv", "setattr", "delenv"}
 
 

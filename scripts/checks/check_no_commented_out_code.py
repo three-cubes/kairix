@@ -44,6 +44,13 @@ MIN_RUN = 3  # require at least N contiguous lines before flagging
 REMEDIATION = f"""Refactor to delete commented-out code (git history is
 the archive — ``git log -p <file>`` recovers any prior state) to pass.
 
+fix: delete the run of {MIN_RUN}+ commented-out Python lines outright;
+if the code might come back, leave a referenced TODO ("# TODO #251 —
+re-enable after refactor") instead of the dead code itself.
+next: re-run ``python3 scripts/checks/check_no_commented_out_code.py``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh "chore(<area>): remove commented-out code"
+
 A run of {MIN_RUN}+ consecutive ``#``-prefixed lines that lex as valid
 Python statements is commented-out code (Sonar S125). Real comments
 describe WHY in prose; if it parses as Python, it was code.

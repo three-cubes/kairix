@@ -90,12 +90,25 @@ _LOG_METHODS = {"debug", "info", "warning", "warn", "error", "critical", "except
 _DIRECT_SINKS = {"print"}
 
 REMEDIATION = """Replace the secret argument with a short non-revealing summary
-before the log call. Examples that pass:
+before the log call — to pass.
+
+fix: rewrite each flagged log/print/raise call so the secret-named
+value is summarised before it reaches the sink — pass
+``api_key is not None`` (a bool), ``len(token)`` (an integer), or a
+non-secret correlation key (``client_id``, request id) instead of the
+raw value. If the call legitimately handles a secret, move it inside
+``kairix/secrets.py`` or ``kairix/credentials.py`` (the boundary
+modules that own redaction).
+next: re-run ``python3 scripts/checks/check_no_logging_secrets.py``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh "fix(<area>): redact secret before logging"
+
+Pass example:
   logger.info("api_key present: %s", api_key is not None)
   logger.info("token length: %d", len(token))
   raise ValueError(f"auth failed for client {client_id}")  # client_id not secret
 
-Forbidden shapes:
+Forbidden example:
   logger.info("api key is %s", api_key)            # passes the secret
   logger.info(f"auth = {access_token}")            # f-string interpolation
   raise RuntimeError(f"bad token: {token}")        # secret in exception text

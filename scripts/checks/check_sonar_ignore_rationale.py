@@ -36,6 +36,33 @@ SONAR_FILE = REPO_ROOT / "sonar-project.properties"
 RULE_KEY_PATTERN = re.compile(r"^sonar\.issue\.ignore\.multicriteria\.([A-Za-z0-9_-]+)\.ruleKey=")
 BAD_TOKENS = ("TODO", "FIXME", "XXX", "fixme", "todo")
 
+REMEDIATION = """Refactor to add a rationale comment block immediately above
+each ``.ruleKey`` line in ``sonar-project.properties`` — at least one
+comment line containing an em-dash (—) and a substantive reason — to pass.
+
+fix: add a comment block immediately above each
+``sonar.issue.ignore.multicriteria.<id>.ruleKey=`` line explaining WHY
+the rule is ignored — at least one comment line must contain an
+em-dash (—) and a substantive sentence (TODO/FIXME placeholders do
+not count).
+next: re-run ``python3 scripts/checks/check_sonar_ignore_rationale.py``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh "docs(sonar): document rationale for <ruleKey> ignore"
+
+Pass example:
+  # python:S5547 — kairix uses HMAC-SHA1 only for legacy file fingerprinting,
+  # never for security; FIPS-mode environments are out of scope.
+  sonar.issue.ignore.multicriteria.e1.ruleKey=python:S5547
+  sonar.issue.ignore.multicriteria.e1.resourceKey=kairix/fingerprint.py
+
+Forbidden example:
+  # TODO
+  sonar.issue.ignore.multicriteria.e1.ruleKey=python:S5547
+
+Each rationale is reviewed at every PR touching sonar config; bare or
+TODO-only blocks are rejected. Documenting WHY a rule is ignored (not
+just THAT it is) is the receipt that the suppression is deliberate."""
+
 
 def _rationale_lines_above(lines: list[str], index: int) -> list[str]:
     """Collect the contiguous comment block ending immediately above ``index``.

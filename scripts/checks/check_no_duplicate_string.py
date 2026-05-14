@@ -40,6 +40,14 @@ literal duplicated ≥{MIN_OCCURRENCES} times into a module-level
 UPPER_SNAKE_CASE constant near the top of the file, and replace every
 occurrence with the constant name — to pass.
 
+fix: declare a module-level UPPER_SNAKE_CASE constant near the top of
+the file holding the duplicated string, then replace every literal
+occurrence with the constant name so the coupling is explicit and
+renames have a single edit site.
+next: re-run ``python3 scripts/checks/check_no_duplicate_string.py``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh "refactor(<area>): extract duplicated string constant"
+
 Pass example:
   # near the top of the module
   _ERROR_BAD_QUERY = "search query must be a non-empty string"

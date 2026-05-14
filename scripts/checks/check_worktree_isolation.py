@@ -38,6 +38,31 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WORKTREES_DIR = REPO_ROOT / ".claude" / "worktrees"
 
+REMEDIATION = """Refactor to remove the shadow untracked files in the
+primary checkout (the subagent's commit is canonical; the primary's
+copy is stale leakage from anthropics/claude-code#59019) — to pass.
+
+fix: re-run this script with ``--clean`` to delete the primary's
+copies, then continue with ``git cherry-pick <subagent-sha>`` — the
+subagent's commit is the canonical version and will land cleanly once
+the shadow copies are gone.
+next: re-run ``python3 scripts/checks/check_worktree_isolation.py``
+(no flags) to confirm the gate reports zero shadow hits.
+run: python3 scripts/checks/check_worktree_isolation.py --clean
+
+Pass example:
+  $ python3 scripts/checks/check_worktree_isolation.py
+  ok [worktree-isolation] — 3 untracked file(s) in primary, none also
+    present in 2 active subagent worktree(s).
+
+Forbidden example (untracked file shadows a subagent worktree path):
+  $ python3 scripts/checks/check_worktree_isolation.py
+  FAIL [worktree-isolation] — 1 leak fingerprint(s) detected:
+    kairix/foo.py  (also exists in .claude/worktrees/agent-abc123)
+
+The subagent that wrote the file is the source of truth; the primary
+must not retain a parallel copy or the next cherry-pick will conflict."""
+
 
 def _git(*args: str, cwd: Path | None = None) -> str:
     result = subprocess.run(

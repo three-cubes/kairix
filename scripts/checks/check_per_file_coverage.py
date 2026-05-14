@@ -49,6 +49,16 @@ REMEDIATION = f"""Refactor to add tests that drive the public surface
 until each listed file is ≥ {FLOOR:.0f}% covered (do NOT add
 ``# pragma: no cover`` to silence the gate) to pass.
 
+fix: add tests that drive the public surface of each listed file
+through a Fake* from tests/fakes.py until coverage is ≥ {FLOOR:.0f}%.
+If a file is genuinely production-only infrastructure, extract its
+testable logic into a use-case class and reduce the file to a thin
+Adapter — do NOT silence with ``# pragma: no cover``.
+next: re-run ``pytest --cov=kairix --cov-report=xml`` then
+``python3 scripts/checks/check_per_file_coverage.py`` to confirm the
+gate goes green.
+run: bash scripts/safe-commit.sh "test(<area>): lift <file> per-file coverage above floor"
+
 Pass example:
   # tests/use_cases/test_search_pipeline.py
   def test_search_pipeline_runs_query() -> None:

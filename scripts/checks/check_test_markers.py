@@ -38,6 +38,14 @@ REMEDIATION = """Refactor to add ONE category marker per test
 (function-level decorator, class-level decorator, or module-level
 ``pytestmark`` assignment) to pass.
 
+fix: add ``pytestmark = pytest.mark.unit`` (or the appropriate category)
+at the top of the listed test file — that covers every test in the
+module in one line. For mixed-category files use per-function
+``@pytest.mark.<category>`` decorators instead.
+next: re-run ``python3 scripts/checks/check_test_markers.py`` to
+confirm the gate goes green.
+run: bash scripts/safe-commit.sh "test(<area>): add category marker to <file>"
+
 Recognised markers (per pyproject.toml): unit, bdd, contract, integration,
 e2e, slow.
 

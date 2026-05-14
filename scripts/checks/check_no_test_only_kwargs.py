@@ -33,6 +33,14 @@ REMEDIATION = """Refactor to a dataclass with ``field(default_factory=...)``
 on a Deps class — the canonical shape is ``kairix/worker.py::WorkerDeps``
 — to pass.
 
+fix: delete the ``*_fn=None`` parameter and move the collaborator onto
+a ``@dataclass`` Deps class with ``field(default_factory=...)``; tests
+construct an overridden Deps and pass it as a single argument. See
+``kairix/worker.py::WorkerDeps`` for the canonical shape.
+next: re-run ``python3 scripts/checks/check_no_test_only_kwargs.py``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh "refactor(<area>): replace *_fn kwargs with Deps class"
+
 The legitimate seam is **constructor injection on a Deps class**, NOT a
 per-helper ``_fn=None`` parameter on free functions. Tests pass an
 overridden Deps; production gets the default factory.

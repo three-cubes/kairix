@@ -34,6 +34,15 @@ REMEDIATION = """Refactor to add a ``reason=`` kwarg to each skip/skipif/xfail
 (or an adjacent ``#`` comment to each importorskip) — or delete the skip
 entirely and fix the underlying issue — to pass.
 
+fix: add a substantive ``reason="..."`` kwarg to every
+``@pytest.mark.skip`` / ``skipif`` / ``xfail`` decorator and either a
+``reason=`` kwarg or an immediately-preceding ``#`` comment to every
+``pytest.importorskip(...)`` call. If the test is genuinely broken,
+delete the skip and fix the underlying issue instead.
+next: re-run ``python3 scripts/checks/check_test_skip_rationale.py``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh "test(<area>): document skip rationale in <file>"
+
 Pass example:
   @pytest.mark.skip(reason="re-enabled once #214 lands")
   def test_xyz(): ...

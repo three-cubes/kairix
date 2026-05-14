@@ -49,6 +49,13 @@ REMEDIATION = """Refactor to add a one-line docstring (or an
 ``# Intentionally empty — <reason>`` comment) to each empty function
 body — to pass.
 
+fix: add either a one-line docstring describing the Protocol contract
+the function satisfies, or an ``# Intentionally empty — <reason>``
+comment that explains why the body is genuinely a no-op.
+next: re-run ``python3 scripts/checks/check_empty_body_intent.py`` to
+confirm the gate goes green.
+run: bash scripts/safe-commit.sh "docs(<area>): document intent of empty <function>"
+
 Pass example:
   def on_event(self, event: Event) -> None:
       \"\"\"No-op default; concrete strategies override this.\"\"\"

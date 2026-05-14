@@ -19,6 +19,14 @@ REMEDIATION="Refactor to read the env var inside KairixPaths.resolve()
 the value as a field on the returned object. Then inner code reads
 ``KairixPaths.resolve().<field>`` instead of os.environ.
 
+fix: move the ``os.environ.get('KAIRIX_...')`` call out of the listed
+module into ``kairix/paths.py`` (or ``kairix/secrets.py`` for
+credentials); expose the value as a field on KairixPaths and have the
+caller read ``KairixPaths.resolve().<field>`` instead.
+next: re-run ``bash scripts/checks/check-env-reads-stay-in-paths.sh``
+to confirm the gate goes green.
+run: bash scripts/safe-commit.sh \"refactor(paths): move KAIRIX_* env read into boundary\"
+
 The boundary-only pattern (#139): every KAIRIX_* env-var read happens
 ONCE at startup inside paths.py / secrets.py, never scattered.
 
