@@ -171,6 +171,7 @@ fully enforced; new violations anywhere in the codebase block.
 | F18 | No commented-out code | line pattern + Python parse | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-commented-out-code-files.txt` (empty — clean) |
 | F19 | Unused function parameters must be `_`-prefixed | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `unused-params-named-files.txt` |
 | F20 | Empty function bodies require docstring or intent comment | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `empty-body-intent-files.txt` |
+| F21 | Check-script failure output must carry an action marker (`fix:`, `next:`, `run:`) | structural | Python AST + shell regex | pre-commit, safe-commit, CI Stage 0 | `actionable-feedback-files.txt` |
 
 ---
 
@@ -1453,6 +1454,91 @@ class Handler:
         # adapters genuinely don't need.
         pass
 ```
+
+---
+
+### F21 — Check-script failure output must carry an action marker
+
+#### Statement
+
+Every fitness-function check under `scripts/checks/` MUST emit failure
+text (REMEDIATION constant, error-list append, shell `echo`/here-doc)
+that contains at least one of the three lowercase action markers:
+
+- `fix:` — a sentence describing how to correct the violation.
+- `next:` — what to do after the fix (re-run, re-check, etc.).
+- `run:` — an exact command to copy-paste.
+
+Allow-listed: `_arch_lib.py`, `_lib.sh`, `run-all.sh`,
+`audit_baselines.py`, `merge_coverage_xml.py` — shared helpers and the
+harness/orchestrator (no per-rule remediation of their own).
+
+#### Why
+
+Convergence with tc-agent-zone (issue #258). A check that fails with
+"AssertionError" or a REMEDIATION that only describes the offence
+wastes one full agent loop while the cure is re-derived. The markers
+turn the failure into an actionable instruction. The verbose
+"Refactor to YYY to pass. Pass example: ... Forbidden example: ..."
+shape used by F15 / F16 / F20 is an acceptable *extension* — F21 only
+requires the minimum: one marker.
+
+#### Detection
+
+`scripts/checks/check_actionable_feedback.py`. AST-based for Python
+check scripts (module-level `REMEDIATION = "..."` and
+`errors.append(...)` / `violations.append(...)` literals) plus
+regex-based for shell scripts (`REMEDIATION="..."` blocks and bare
+`echo`/here-doc text). A file with NO detectable remediation text is
+also treated as a violation, so silent check scripts can't bypass the
+rule. The detector deliberately scans itself — F21's own REMEDIATION
+must satisfy F21 (dogfood).
+
+#### Examples
+
+Rejected:
+
+```python
+REMEDIATION = "Some files violate the rule. Please update them."
+```
+
+Allowed (minimum — one marker):
+
+```python
+REMEDIATION = "fix: rewrite the affected REMEDIATION to include an action."
+```
+
+Allowed (richer extension — preferred for new checks; matches F15/F20):
+
+```python
+REMEDIATION = """Refactor to constructor-injected fakes to pass.
+
+fix: take the dependency as a kwarg of the unit under test and pass a
+Fake* from tests/fakes.py.
+next: re-run pytest tests/<dir>/ to confirm green.
+run: bash scripts/safe-commit.sh "test(<area>): inject fake instead of patch"
+
+Pass example:
+  pipeline = SearchPipeline(retriever=FakeRetriever(hits=[...]))
+
+Forbidden example:
+  @patch("kairix.core.search.bm25.bm25_search")
+  def test_search_returns_hits(mock): ...
+"""
+```
+
+#### Fix pattern
+
+Open the failing check script, locate the REMEDIATION constant (or
+the appended error string), and prepend `fix: <one-line action>` plus
+optionally `next: <follow-up>` and `run: <exact command>`. Re-run
+`python3 scripts/checks/check_actionable_feedback.py` to confirm.
+
+The pre-existing kairix check scripts use the "Refactor to … to pass."
+phrasing, which is descriptive but doesn't carry a literal marker —
+they are grandfathered in
+`.architecture/baseline/actionable-feedback-files.txt` until each one
+is rewritten in a baseline-burndown follow-up.
 
 ---
 

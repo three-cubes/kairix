@@ -163,3 +163,10 @@ repos:
         language: system
         pass_filenames: false
         files: ^kairix/.*\.py$
+
+      - id: arch-actionable-feedback
+        name: "arch F21: check-script failure output must be agent-actionable"
+        entry: python3 scripts/checks/check_actionable_feedback.py
+        language: system
+        pass_filenames: false
+        files: ^scripts/checks/.*$

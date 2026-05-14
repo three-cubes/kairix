@@ -79,6 +79,9 @@ python3 "${SCRIPT_DIR}/check_unused_params_named.py" || overall=1
 # F20 — empty function body requires docstring or intent comment
 python3 "${SCRIPT_DIR}/check_empty_body_intent.py" || overall=1
 
+# F21 — actionable-feedback marker rule for check scripts
+python3 "${SCRIPT_DIR}/check_actionable_feedback.py" || overall=1
+
 # F7 — needs coverage.xml. Skip if not present or skip flag set.
 if [[ "$skip_coverage" -eq 0 ]]; then
     if [[ -f "${REPO_ROOT}/coverage.xml" ]]; then
