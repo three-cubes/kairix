@@ -8,9 +8,44 @@ Never sends document content — only metadata (counts, patterns, types).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _default_chat(prompt: str, api_key: str, endpoint: str) -> str:  # pragma: no cover — prod Azure wrapper
+    """Production chat callable — wraps ``kairix._azure.chat_completion``.
+
+    Kept as a top-level function so ``OnboardingAgentDeps.chat`` has a
+    stable, typed default that doesn't import ``kairix._azure`` at
+    module-import time.
+
+    The ``api_key`` and ``endpoint`` args are part of the chat-callable
+    interface for symmetry with test fakes; the real ``chat_completion``
+    resolves credentials internally via the kairix paths layer.
+    """
+    del api_key, endpoint  # the prod path resolves Azure creds internally
+    from kairix._azure import chat_completion
+
+    return chat_completion(
+        [{"role": "user", "content": prompt}],
+        max_tokens=200,
+    )
+
+
+@dataclass
+class OnboardingAgentDeps:
+    """Injectable dependencies for the onboarding LLM call.
+
+    F1/F6-clean: tests pass ``OnboardingAgentDeps(chat=fake)`` instead
+    of patching ``kairix.platform.setup.agent._call_llm`` or threading
+    a ``*_fn=None`` kwarg. Production callers leave the kwarg unset and
+    the default factory wires the real Azure chat backend.
+    """
+
+    chat: Callable[[str, str, str], str] = field(default_factory=lambda: _default_chat)
 
 
 def recommend_from_profile(
@@ -21,6 +56,8 @@ def recommend_from_profile(
     entity_pct: float,
     api_key: str | None = None,
     endpoint: str | None = None,
+    *,
+    deps: OnboardingAgentDeps | None = None,
 ) -> dict[str, Any] | None:
     """Generate configuration recommendations from corpus profile.
 
@@ -62,6 +99,8 @@ def recommend_from_profile(
 
     # LLM enhancement (optional, additive)
     if api_key and endpoint:
+        if deps is None:  # pragma: no cover — production lazy default; tests pass deps=OnboardingAgentDeps(chat=fake)
+            deps = OnboardingAgentDeps()
         try:
             llm_advice = _call_llm(
                 total_docs,
@@ -70,6 +109,7 @@ def recommend_from_profile(
                 procedural_pct,
                 api_key,
                 endpoint,
+                chat=deps.chat,
             )
             if llm_advice:
                 rec["llm_advice"] = llm_advice
@@ -86,13 +126,18 @@ def _call_llm(
     procedural_pct: float,
     api_key: str,
     endpoint: str,
+    *,
+    chat: Callable[[str, str, str], str],
 ) -> str:
     """Call LLM with corpus metadata for tailored advice.
 
     Never sends document content — only aggregate statistics.
-    """
-    from kairix._azure import chat_completion
 
+    ``chat`` is the injected backend callable (typed shape:
+    ``(prompt, api_key, endpoint) -> str``). Production callers wire
+    the real Azure chat backend via ``OnboardingAgentDeps``; tests pass
+    a fake chat callable.
+    """
     prompt = (
         f"I have a knowledge base with {total_docs} documents. "
         f"File types: {format_counts}. "
@@ -101,7 +146,4 @@ def _call_llm(
         "What search configuration would work best? "
         "Answer in 2-3 sentences."
     )
-    return chat_completion(
-        [{"role": "user", "content": prompt}],
-        max_tokens=150,
-    )
+    return chat(prompt, api_key, endpoint)
