@@ -65,14 +65,14 @@ def main(argv: list[str] | None = None) -> None:
 
 def _resolve_port(args: argparse.Namespace) -> int:
     """Resolve MCP port: CLI flag → env var → config → auto-detect."""
-    import os
+    from kairix.paths import mcp_port_raw
 
     # CLI flag takes precedence (argparse default is 8080)
     if "--port" in sys.argv:
         return int(args.port)
 
-    # Environment variable
-    env_port = os.environ.get("KAIRIX_MCP_PORT")
+    # Environment variable (env read lives in kairix.paths — F4)
+    env_port = mcp_port_raw()
     if env_port:
         return int(env_port)
 

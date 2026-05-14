@@ -5,18 +5,16 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from kairix.paths import search_log_path
 from kairix.quality.eval.schema import QueryLogEntry
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_LOG_PATH = os.environ.get(
-    "KAIRIX_SEARCH_LOG",
-    str(Path(os.environ.get("KAIRIX_DATA_DIR", str(Path.home() / ".cache" / "kairix"))) / "logs" / "search.jsonl"),
-)
+# Env reads (KAIRIX_SEARCH_LOG / KAIRIX_DATA_DIR) live in kairix.paths.search_log_path (F4).
+_DEFAULT_LOG_PATH = str(search_log_path())
 
 
 class QueryLogger:

@@ -610,12 +610,11 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
 
-    # Resolve default log path for report
+    # Resolve default log path for report — env read lives in kairix.paths (F4).
     if args.subcommand in ("monitor", "report") and args.log is None:
-        import os
-        from pathlib import Path
+        from kairix.paths import monitor_log_path
 
-        args.log = os.environ.get("KAIRIX_MONITOR_LOG", str(Path.home() / ".cache/kairix/monitor.jsonl"))
+        args.log = str(monitor_log_path())
 
     dispatch = {
         "generate": _cmd_generate,

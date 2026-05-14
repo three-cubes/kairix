@@ -16,7 +16,6 @@ Result is cached per process (lru_cache on resolved path).
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -29,6 +28,7 @@ from kairix.core.search.config import (
     RetrievalConfig,
     TemporalBoostConfig,
 )
+from kairix.paths import config_path_override
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def _resolve_config_path(explicit: Path | str | None = None) -> Path | None:
             return p
         logger.warning("config_loader: explicit config path %r not found — using defaults", str(explicit))
         return None
-    env_path = os.environ.get("KAIRIX_CONFIG_PATH")
+    env_path = config_path_override()
     if env_path:
         p = Path(env_path)
         if p.is_file():

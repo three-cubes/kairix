@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os as _os
 import re
 from collections import Counter
 from datetime import date
@@ -23,6 +22,7 @@ from pathlib import Path
 
 from kairix.core.search.bm25 import FTS_STOP_WORDS as _STOP_WORDS
 from kairix.core.temporal.chunker import TemporalChunk, chunk_board, chunk_memory_log
+from kairix.paths import boards_dir_override as _boards_dir_override
 from kairix.paths import document_root as _doc_root_fn
 
 logger = logging.getLogger(__name__)
@@ -38,9 +38,9 @@ _MEMORY_LOG_FILENAME_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.md$")
 
 def _boards_dir() -> Path:
     """Return the boards directory, respecting KAIRIX_BOARDS_DIR override."""
-    override = _os.environ.get("KAIRIX_BOARDS_DIR")
-    if override:
-        return Path(override)
+    override = _boards_dir_override()
+    if override is not None:
+        return override
     return _doc_root_fn() / "01-Projects" / "Boards"
 
 

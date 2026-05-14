@@ -17,7 +17,6 @@ are logged as warnings and are expected to be retried on the next crawl.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from kairix.knowledge.graph.models import (
@@ -31,6 +30,7 @@ from kairix.knowledge.graph.models import (
     TechnologyNode,
 )
 from kairix.secrets import load_secrets as _load_secrets
+from kairix.secrets import neo4j_password, neo4j_uri, neo4j_user
 
 # Load vault-agent sidecar secrets before env-var reads.
 # No-op when /run/secrets/kairix.env is absent (local dev, CI).
@@ -52,12 +52,8 @@ def _get_neo4j_defaults() -> tuple[str, str, str]:
             return creds.uri, creds.user, creds.password
     except Exception:  # noqa: S110 — fallback to env vars below
         pass
-    # Fallback to env vars for backwards compatibility
-    return (
-        os.environ.get("KAIRIX_NEO4J_URI", "bolt://localhost:7687"),
-        os.environ.get("KAIRIX_NEO4J_USER", "neo4j"),
-        os.environ.get("KAIRIX_NEO4J_PASSWORD", ""),
-    )
+    # Fallback to env vars for backwards compatibility (env reads live in kairix.secrets)
+    return (neo4j_uri(), neo4j_user(), neo4j_password())
 
 
 # Constraints ensure idempotent upserts via MERGE on id property

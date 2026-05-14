@@ -234,6 +234,46 @@ def get_secret(name: str, required: bool = True) -> str | None:
     return None
 
 
+def neo4j_uri(default: str = "bolt://localhost:7687") -> str:
+    """Resolve the Neo4j bolt URI.
+
+    Reads ``KAIRIX_NEO4J_URI``; falls back to localhost. Centralised here
+    so F4's "env reads stay in paths/secrets" gate covers both the URI
+    and password reads from a single boundary.
+    """
+    return os.environ.get("KAIRIX_NEO4J_URI", default)
+
+
+def neo4j_user(default: str = "neo4j") -> str:
+    """Resolve the Neo4j username from ``KAIRIX_NEO4J_USER``."""
+    return os.environ.get("KAIRIX_NEO4J_USER", default)
+
+
+def neo4j_password() -> str:
+    """Resolve the Neo4j password from ``KAIRIX_NEO4J_PASSWORD``.
+
+    Returns the empty string when unset — callers test ``if password``
+    to decide whether the graph layer is available.
+    """
+    return os.environ.get("KAIRIX_NEO4J_PASSWORD", "")
+
+
+def set_llm_endpoint(value: str) -> None:
+    """Set ``KAIRIX_LLM_ENDPOINT`` so subsequent ``get_credentials("llm")``
+    calls resolve the operator-supplied value.
+
+    Lives here (not in ``paths.py``) because the LLM endpoint is a
+    secret-adjacent credential. The setup wizard uses it to validate
+    a fresh deployment before persisting the config file.
+    """
+    os.environ["KAIRIX_LLM_ENDPOINT"] = value
+
+
+def set_llm_api_key(value: str) -> None:
+    """Set ``KAIRIX_LLM_API_KEY`` for credential validation in the setup wizard."""
+    os.environ["KAIRIX_LLM_API_KEY"] = value
+
+
 def refresh_secrets(path: str | Path | None = None) -> int:
     """Clear cached secrets and reload from the secrets file.
 

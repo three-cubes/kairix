@@ -15,13 +15,16 @@ import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
 
+from kairix.paths import embed_vector_dims as _embed_vector_dims
+
 logger = logging.getLogger(__name__)
 
 # Environment variable for explicit DB path override
 _DB_PATH_ENV = "KAIRIX_DB_PATH"
 
-# Embedding dimensions — configurable via KAIRIX_EMBED_DIMS
-EMBED_VECTOR_DIMS = int(os.environ.get("KAIRIX_EMBED_DIMS", "1536"))
+# Embedding dimensions — configurable via KAIRIX_EMBED_DIMS. The env read
+# lives in kairix.paths.embed_vector_dims (F4: env-reads stay in paths.py).
+EMBED_VECTOR_DIMS = _embed_vector_dims()
 
 
 def get_db_path(

@@ -159,19 +159,20 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
     # Search logger — JSONL adapter writing to /data/kairix/logs/ in Docker,
     # ~/.cache/kairix/logs/ otherwise. Path resolution lives at the boundary
     # so business logic never reads env vars (G4). Query log is privacy-gated
-    # via KAIRIX_LOG_QUERIES (off by default).
-    import os
+    # via KAIRIX_LOG_QUERIES (off by default). Env reads route through
+    # kairix.paths (F4).
     from pathlib import Path
 
     from kairix.core.search.logger import JsonlSearchLogger, default_search_log_paths
+    from kairix.paths import is_docker_env, log_queries_enabled
 
-    if Path("/.dockerenv").exists() or os.environ.get("KAIRIX_DOCKER") == "1":
+    if is_docker_env():
         log_base = Path("/data/kairix/logs")
     else:
         log_base = Path.home() / ".cache" / "kairix" / "logs"
 
     search_log_path, query_log_path = default_search_log_paths(base=log_base)
-    enable_query_log = os.environ.get("KAIRIX_LOG_QUERIES") == "1"
+    enable_query_log = log_queries_enabled()
     search_logger = JsonlSearchLogger(
         search_log_path=search_log_path,
         query_log_path=query_log_path if enable_query_log else None,
@@ -203,8 +204,9 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
         except Exception as e:
             logger.warning("factory: parse_agent_registry failed — %s", e)
 
-    extra_raw = os.environ.get("KAIRIX_EXTRA_COLLECTIONS", "")
-    extra_collections = [c.strip() for c in extra_raw.split(",") if c.strip()]
+    from kairix.paths import extra_collections as _extra_collections
+
+    extra_collections = _extra_collections()
 
     collection_resolver = DefaultCollectionResolver(
         collections_config=collections_config,

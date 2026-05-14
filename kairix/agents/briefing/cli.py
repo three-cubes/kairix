@@ -68,9 +68,9 @@ def main(args: list[str] | None = None, *, deps: BriefDeps | None = None) -> Non
     parsed = build_parser().parse_args(args)
 
     if parsed.memory_root:
-        import os
+        from kairix.paths import set_agent_memory_root_override
 
-        os.environ["KAIRIX_AGENT_MEMORY_ROOT"] = parsed.memory_root
+        set_agent_memory_root_override(parsed.memory_root)
 
     print(f"Generating briefing for agent: {parsed.agent} ...", file=sys.stderr)
     out = run_brief(parsed.agent, deps=deps)

@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import logging
-import os
 import signal
 import time
 from collections.abc import Callable
@@ -22,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kairix.paths import (
+    document_root,
     maintenance_skip_noop_threshold,
     worker_pause_flag_path,
     worker_state_path,
@@ -87,7 +87,7 @@ def _default_entity_seed() -> None:
         [
             "crawl",
             "--document-root",
-            os.environ.get("KAIRIX_DOCUMENT_ROOT", str(Path.home() / "Documents")),
+            str(document_root()),
         ]
     )
 

@@ -25,12 +25,14 @@ logger = logging.getLogger(__name__)
 
 def _test_llm_connection(provider: str, endpoint: str, api_key: str, embed_model: str) -> bool:
     """Test LLM connectivity with a single embed + chat call."""
+    from kairix.secrets import set_llm_api_key, set_llm_endpoint
+
     try:
         if provider == "azure":
-            os.environ["KAIRIX_LLM_ENDPOINT"] = endpoint
-            os.environ["KAIRIX_LLM_API_KEY"] = api_key
+            set_llm_endpoint(endpoint)
+            set_llm_api_key(api_key)
         elif provider == "openai":
-            os.environ["KAIRIX_LLM_API_KEY"] = api_key
+            set_llm_api_key(api_key)
 
         from kairix.platform.llm import get_default_backend
 

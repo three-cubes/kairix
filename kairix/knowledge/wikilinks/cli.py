@@ -12,7 +12,6 @@ Usage:
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -25,10 +24,10 @@ from kairix.knowledge.wikilinks.injector import (
     should_inject,
 )
 from kairix.knowledge.wikilinks.resolver import get_entities
-from kairix.paths import KairixPaths
+from kairix.paths import KairixPaths, wikilinks_last_run_path
 
-# Timestamp file to track last run
-_LAST_RUN_PATH = os.environ.get("KAIRIX_DATA_DIR", str(Path.home() / ".cache" / "kairix")) + "/wikilinks-last-run"
+# Timestamp file to track last run — env read lives in kairix.paths (F4).
+_LAST_RUN_PATH = str(wikilinks_last_run_path())
 
 
 def main(argv: list[str] | None = None, *, paths: KairixPaths | None = None) -> None:

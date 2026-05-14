@@ -22,13 +22,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kairix.paths import monitor_log_path as _monitor_log_path
 from kairix.quality.eval.constants import CATEGORY_WEIGHTS
 
 if TYPE_CHECKING:
@@ -43,8 +43,7 @@ BenchmarkRunnerFn = Callable[..., "BenchmarkResult"]
 
 logger = logging.getLogger(__name__)
 
-# Default log path (override with KAIRIX_MONITOR_LOG env var)
-_DEFAULT_LOG_PATH: str = str(Path.home() / ".cache/kairix/monitor.jsonl")
+# Default log path resolution lives in kairix.paths.monitor_log_path (F4).
 
 # Maximum log entries to retain (rolling window)
 _MAX_LOG_ENTRIES: int = 90
@@ -196,7 +195,7 @@ def run_monitor(
         benchmark_runner = run_benchmark
 
     if log_path is None:
-        log_path = os.environ.get("KAIRIX_MONITOR_LOG", _DEFAULT_LOG_PATH)
+        log_path = str(_monitor_log_path())
 
     ts = datetime.now(tz=timezone.utc).isoformat()
 

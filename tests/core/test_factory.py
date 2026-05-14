@@ -255,15 +255,16 @@ def test_build_search_pipeline_resolver_honours_extra_collections_env() -> None:
     """``KAIRIX_EXTRA_COLLECTIONS`` is comma-split and threaded through
     to the resolver.
 
-    F2 forbids monkeypatch on KAIRIX env vars. Instead we swap the
-    *factory module's* ``os`` reference to a stand-in whose
-    ``environ`` carries the sentinel. Production code reads
-    ``os.environ.get(...)`` after importing ``os`` lazily inside the
-    function, so the swap is observed.
+    F2 forbids monkeypatch on KAIRIX env vars. The factory delegates the
+    env read to ``kairix.paths.extra_collections``; the test swaps that
+    module's ``os`` attribute to a stand-in carrying the sentinel. The
+    swap targets a stdlib namespace (``os``) rather than a kairix
+    internal, so F1/F2 stay clean.
     """
     import os
     import types
 
+    from kairix import paths as paths_mod
     from kairix.core import factory as factory_mod
 
     # Build a stand-in os module that carries a tweaked environ but
@@ -277,17 +278,13 @@ def test_build_search_pipeline_resolver_honours_extra_collections_env() -> None:
     fake_os.environ = fake_environ  # type: ignore[attr-defined]  # synthetic stand-in module; mypy doesn't know our test attrs
     fake_os.path = os.path  # type: ignore[attr-defined]  # synthetic stand-in module; mypy doesn't know our test attrs
 
-    # The lazy ``import os`` inside build_search_pipeline reads from
-    # sys.modules['os'] — swap it for the duration of the call.
-    import sys
-
-    real_os = sys.modules["os"]
-    sys.modules["os"] = fake_os
+    real_paths_os = paths_mod.os
+    paths_mod.os = fake_os  # type: ignore[assignment]  # stdlib substitution at the paths.py boundary
     try:
         cfg = RetrievalConfig(fusion_strategy="rrf")
         pipeline = build_search_pipeline(config=cfg)
     finally:
-        sys.modules["os"] = real_os
+        paths_mod.os = real_paths_os
 
     # The resolver was constructed with our extra collections — pinned
     # via the public-ish ``resolve`` surface rather than the private
@@ -303,50 +300,34 @@ def test_build_search_pipeline_resolver_honours_extra_collections_env() -> None:
 def test_build_search_pipeline_uses_docker_log_path_when_dockerenv_marker_present(
     tmp_path: Any,
 ) -> None:
-    """Drives the Docker-detection branch on line 168 by swapping
-    ``Path("/.dockerenv").exists`` via a Path subclass injected into
-    the factory module.
+    """Drives the Docker-detection branch by swapping ``kairix.paths.os``
+    so :func:`kairix.paths.is_docker_env` sees ``KAIRIX_DOCKER=1``.
 
-    The factory's ``from pathlib import Path`` is lazy, so we also
-    swap ``sys.modules['pathlib'].Path`` for the call. Filesystem
-    detection is the operator-visible signal so the swap targets the
-    public ``exists`` method only.
+    The env-read boundary moved from ``factory.py`` into
+    ``kairix.paths.is_docker_env`` (F4); the test follows by swapping the
+    ``os`` reference inside ``kairix.paths``. Stdlib substitution at the
+    boundary keeps F1/F2 clean.
     """
-    import sys
-    from pathlib import Path
+    import os
+    import types
 
-    # Capture the real Path so we can build a marker subclass.
-    real_path_cls = Path
+    from kairix import paths as paths_mod
 
-    # On Python 3.10/3.11 pathlib.Path is abstract; only PosixPath/WindowsPath
-    # carry _flavour. Subclass the concrete platform-specific class so the
-    # subclass inherits _flavour automatically. On 3.12+ this still works
-    # (PosixPath is still concrete and Path-compatible).
-    concrete_path_cls = type(Path("/"))
+    fake_environ = dict(os.environ)
+    fake_environ["KAIRIX_DOCKER"] = "1"
+    fake_environ.pop("KAIRIX_LOG_QUERIES", None)
 
-    class _FakeDockerPath(concrete_path_cls):  # type: ignore[valid-type,misc]  # dynamic Path concrete-class subclass for cross-Python-version test
-        """Path subclass whose ``exists()`` returns True for ``/.dockerenv``."""
+    fake_os = types.ModuleType("os")
+    fake_os.environ = fake_environ  # type: ignore[attr-defined]  # synthetic stand-in module
+    fake_os.path = os.path  # type: ignore[attr-defined]  # synthetic stand-in module
 
-        def exists(self, *args: Any, **kwargs: Any) -> bool:
-            if str(self) == "/.dockerenv":
-                return True
-            return real_path_cls(str(self)).exists(*args, **kwargs)
-
-    real_pathlib = sys.modules["pathlib"]
-    fake_pathlib = type(real_pathlib)("pathlib")
-    fake_pathlib.Path = _FakeDockerPath  # type: ignore[attr-defined]  # synthetic stand-in module; mypy doesn't know our test attrs
-    # Preserve everything else so downstream lazy imports keep working.
-    for attr in dir(real_pathlib):
-        if attr.startswith("__") or hasattr(fake_pathlib, attr):
-            continue
-        setattr(fake_pathlib, attr, getattr(real_pathlib, attr))
-
-    sys.modules["pathlib"] = fake_pathlib
+    real_paths_os = paths_mod.os
+    paths_mod.os = fake_os  # type: ignore[assignment]  # stdlib substitution at the paths.py boundary
     try:
         cfg = RetrievalConfig(fusion_strategy="rrf")
         pipeline = build_search_pipeline(config=cfg)
     finally:
-        sys.modules["pathlib"] = real_pathlib
+        paths_mod.os = real_paths_os
 
     # The search logger's path is rooted at /data/kairix/logs when the
     # docker marker is detected. We don't write to it; we only check

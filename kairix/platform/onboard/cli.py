@@ -73,7 +73,9 @@ def _self_load_env(explicit_path: str | None) -> tuple[str | None, list[str]]:
         loaded = _load_env_file(explicit_path)
         return (explicit_path, loaded)
 
-    env_var_path = os.environ.get("KAIRIX_ENV_FILE", "")
+    from kairix.paths import env_file_override
+
+    env_var_path = env_file_override() or ""
     if env_var_path:
         loaded = _load_env_file(env_var_path)
         return (env_var_path, loaded)
@@ -165,7 +167,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def cmd_guide(args: argparse.Namespace) -> int:
     """Install the agent usage guide into the document store's shared knowledge base."""
-    doc_root = args.document_root or os.environ.get("KAIRIX_DOCUMENT_ROOT", "")
+    from kairix.paths import document_root_override
+
+    doc_root = args.document_root or document_root_override() or ""
     if not doc_root:
         print(
             "Error: --document-root is required (or set KAIRIX_DOCUMENT_ROOT)",

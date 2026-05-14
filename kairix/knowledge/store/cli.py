@@ -58,11 +58,11 @@ def main(argv: list[str] | None = None, *, neo4j_client: Any = None) -> None:
 
 
 def _resolve_document_root(arg: str | None) -> str:
-    import os
+    from kairix.paths import document_root_override
 
     if arg:
         return arg
-    env = os.environ.get("KAIRIX_DOCUMENT_ROOT")
+    env = document_root_override()
     if env:
         return env
     print("Error: --document-root or KAIRIX_DOCUMENT_ROOT required", file=sys.stderr)

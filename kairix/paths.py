@@ -162,7 +162,7 @@ def _resolve_cached() -> KairixPaths:
 
 def _load_paths_from_config() -> dict[str, str]:
     """Load the paths: section from kairix.config.yaml if it exists."""
-    config_path = os.environ.get("KAIRIX_CONFIG_PATH", "kairix.config.yaml")
+    config_path = os.environ.get("KAIRIX_CONFIG_PATH") or "kairix.config.yaml"
     try:
         import yaml
 
@@ -266,6 +266,202 @@ def summaries_db_path() -> Path:
             str(Path.home() / ".cache" / "kairix" / "summaries.db"),
         )
     )
+
+
+def set_agent_memory_root_override(root: str) -> None:
+    """Set the ``KAIRIX_AGENT_MEMORY_ROOT`` env var so subsequent calls to
+    :func:`agent_memory_path` see the override.
+
+    Used by CLI entry points (``kairix brief --memory-root ...``) to thread
+    an operator-supplied memory root through the use case. The write
+    lives here so F4's "env reads stay in paths.py" gate covers both
+    sides of the env-var boundary.
+    """
+    os.environ["KAIRIX_AGENT_MEMORY_ROOT"] = root
+
+
+def embed_vector_dims(default: int = 1536) -> int:
+    """Embedding vector dimensions — configurable via ``KAIRIX_EMBED_DIMS``.
+
+    Returns the int value of the env var, or ``default`` when unset.
+    Reads at call time (not import time) so test fakes that mutate the
+    environment win — but production code should treat the value as fixed
+    for the lifetime of the process.
+    """
+    raw = os.environ.get("KAIRIX_EMBED_DIMS")
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_EMBED_DIMS=%r is not an int; using default %d",
+            raw,
+            default,
+        )
+        return default
+
+
+def is_docker_env() -> bool:
+    """Return True when running inside a Docker container.
+
+    Detection: ``/.dockerenv`` exists, ``KAIRIX_DOCKER=1``, or the generic
+    ``container`` env var is set. Used by factories that want to swap log
+    paths between container and host layouts.
+    """
+    return _is_docker()
+
+
+def log_queries_enabled() -> bool:
+    """Privacy-gated query-log toggle: ``KAIRIX_LOG_QUERIES=1`` enables the
+    raw-query JSONL emitter. Off by default."""
+    return os.environ.get("KAIRIX_LOG_QUERIES") == "1"
+
+
+def extra_collections() -> list[str]:
+    """Operator-supplied extra collection names — ad-hoc additions when
+    there's no full config file. Parses ``KAIRIX_EXTRA_COLLECTIONS`` as a
+    comma-separated list and returns the non-empty entries.
+    """
+    raw = os.environ.get("KAIRIX_EXTRA_COLLECTIONS", "")
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+def config_path_override() -> str | None:
+    """Explicit config path from ``KAIRIX_CONFIG_PATH``, or ``None`` when unset.
+
+    The single source of truth for the env-var override consumed by
+    ``kairix.core.search.config_loader._resolve_config_path`` and
+    ``_load_paths_from_config`` (which still reads via ``os.environ`` to
+    avoid a circular import inside this module).
+    """
+    value = os.environ.get("KAIRIX_CONFIG_PATH")
+    return value if value else None
+
+
+def boards_dir_override() -> Path | None:
+    """Operator override for the Kanban boards directory.
+
+    Reads ``KAIRIX_BOARDS_DIR``. Returns ``None`` when unset so callers can
+    fall back to ``document_root() / "01-Projects" / "Boards"``.
+    """
+    raw = os.environ.get("KAIRIX_BOARDS_DIR")
+    return Path(raw) if raw else None
+
+
+def azure_api_version(default: str = "2024-12-01-preview") -> str:
+    """Azure OpenAI API version — configurable via ``KAIRIX_AZURE_API_VERSION``."""
+    return os.environ.get("KAIRIX_AZURE_API_VERSION", default)
+
+
+def mcp_port(default: int = 8080) -> int:
+    """Resolve the MCP server port from ``KAIRIX_MCP_PORT``, or ``default``.
+
+    Used by both the MCP CLI's auto-detect path and the onboarding probe.
+    """
+    raw = os.environ.get("KAIRIX_MCP_PORT")
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_MCP_PORT=%r is not an int; using default %d",
+            raw,
+            default,
+        )
+        return default
+
+
+def mcp_port_raw() -> str | None:
+    """Raw ``KAIRIX_MCP_PORT`` env-var value, or ``None`` when unset.
+
+    Use this when callers need to distinguish "operator set the env var"
+    from "fell back to the default" — e.g. argparse-driven flag-vs-env
+    precedence in ``kairix mcp serve``.
+    """
+    raw = os.environ.get("KAIRIX_MCP_PORT")
+    return raw if raw else None
+
+
+def reflib_root_override() -> str | None:
+    """Operator override for the reference-library root via
+    ``KAIRIX_REFLIB_ROOT``. ``None`` when unset so callers can demand
+    ``--reflib-root`` instead of falling back to a baked-in default."""
+    value = os.environ.get("KAIRIX_REFLIB_ROOT")
+    return value if value else None
+
+
+def document_root_override() -> str | None:
+    """Operator override for the document-root via ``KAIRIX_DOCUMENT_ROOT``.
+
+    Mirrors :func:`reflib_root_override` semantics — returns ``None`` so
+    CLI handlers can show a "required flag" message instead of silently
+    using a default. The cached :func:`document_root` keeps its own
+    independent read (with platform defaults) for non-CLI callers.
+    """
+    value = os.environ.get("KAIRIX_DOCUMENT_ROOT")
+    return value if value else None
+
+
+def data_dir() -> Path:
+    """Public accessor for the platform-aware data dir.
+
+    Wraps the previously-private ``_default_data_dir`` so other modules can
+    centralise their "log / cache under the kairix data dir" path resolution
+    without re-reading ``KAIRIX_DATA_DIR`` (or its legacy fallback) themselves.
+    Honours ``KAIRIX_DATA_DIR`` when set — operators occasionally pin the
+    data dir directly rather than via Docker / service detection.
+    """
+    raw = os.environ.get("KAIRIX_DATA_DIR")
+    if raw:
+        return Path(raw)
+    return _default_data_dir()
+
+
+def monitor_log_path() -> Path:
+    """Search-monitor JSONL log path.
+
+    Reads ``KAIRIX_MONITOR_LOG`` directly, falling back to
+    ``~/.cache/kairix/monitor.jsonl``. Kept as a separate helper from the
+    platform-aware :func:`data_dir` because the legacy default predates the
+    XDG-aware data-dir resolution and operators are wired to the old path.
+    """
+    raw = os.environ.get("KAIRIX_MONITOR_LOG")
+    if raw:
+        return Path(raw)
+    return Path.home() / ".cache" / "kairix" / "monitor.jsonl"
+
+
+def search_log_path() -> Path:
+    """Query/search-event JSONL log path.
+
+    Order: ``KAIRIX_SEARCH_LOG`` → ``$KAIRIX_DATA_DIR/logs/search.jsonl`` →
+    ``~/.cache/kairix/logs/search.jsonl``.
+    """
+    raw = os.environ.get("KAIRIX_SEARCH_LOG")
+    if raw:
+        return Path(raw)
+    return data_dir() / "logs" / "search.jsonl"
+
+
+def wikilinks_last_run_path() -> Path:
+    """Touch-file recording the wikilinks-inject high-water timestamp.
+
+    Lives under :func:`data_dir` (so ``KAIRIX_DATA_DIR`` overrides honour
+    it) and is read by ``kairix wikilinks inject --changed``.
+    """
+    return data_dir() / "wikilinks-last-run"
+
+
+def env_file_override() -> str | None:
+    """Explicit env-file path for the deployment-check self-load step.
+
+    Reads ``KAIRIX_ENV_FILE``. Returns ``None`` (not ``""``) when unset so
+    callers can use ``is None`` / ``or`` without ambiguity.
+    """
+    value = os.environ.get("KAIRIX_ENV_FILE")
+    return value if value else None
 
 
 def agent_memory_path(agent: str, *, root: Path | str | None = None) -> Path:

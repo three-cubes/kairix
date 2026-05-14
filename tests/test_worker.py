@@ -218,12 +218,19 @@ def test_run_health_check_counts_results() -> None:
 
 
 def test_worker_has_required_imports() -> None:
-    """Worker module should have os and Path available (regression test)."""
+    """Worker module should have Path and document_root available
+    (regression test).
+
+    ``os`` was removed when the ``KAIRIX_DOCUMENT_ROOT`` env read moved
+    into ``kairix.paths.document_root`` (F4). The replacement assertion
+    pins that the helper is reachable from the worker namespace so the
+    seed-crawl branch keeps working.
+    """
     from kairix import worker
 
     # These are imported at module level — verify they exist
-    assert hasattr(worker, "os")
     assert hasattr(worker, "Path")
+    assert hasattr(worker, "document_root")
 
 
 def test_worker_constants() -> None:

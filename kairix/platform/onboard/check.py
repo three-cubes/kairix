@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kairix.paths import mcp_port as _mcp_port
+
 logger = logging.getLogger(__name__)
 
 
@@ -566,7 +568,8 @@ _CLAUDE_DESKTOP_CONFIG_PATHS = (
 )
 
 # ── SSE / HTTP ────────────────────────────────────────────────────────────────
-_MCP_SSE_PORT = int(os.environ.get("KAIRIX_MCP_PORT", "8080"))
+# Env read lives in kairix.paths.mcp_port (F4 — env reads stay in paths/secrets).
+_MCP_SSE_PORT = _mcp_port()
 
 
 def _probe_openclaw_harness() -> tuple[bool, str]:
