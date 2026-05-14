@@ -399,11 +399,19 @@ class LLMJudge:
         indexed: list[tuple[int, tuple[str, str]]],
         labels: str,
     ) -> str:
-        safe_query = query.replace("\n", " ").replace("\r", " ")
+        from kairix.quality.eval.security import sanitise_document_content
+
+        # Sanitise + cap both the query and each document snippet. Role-marker
+        # tokens (<|im_start|>, <<SYS>>, [INST]) and embedded newlines are
+        # stripped so an adversarial document cannot break out of its
+        # <document>...</document> envelope. 150-char cap on the per-doc
+        # snippet matches the judge's existing rubric design (signal is in
+        # the first paragraph).
+        safe_query = sanitise_document_content(query, cap=500)
         doc_lines = []
         for label, (_, (stem, snippet)) in zip(labels, indexed, strict=False):
-            safe_stem = stem.replace("\n", " ").replace("\r", " ")
-            safe_snippet = snippet[:150].replace("\n", " ").replace("\r", " ")
+            safe_stem = sanitise_document_content(stem, cap=200)
+            safe_snippet = sanitise_document_content(snippet, cap=150)
             doc_lines.append(f"[{label}] {safe_stem}: <document>{safe_snippet}</document>")
         docs_block = "\n".join(doc_lines)
         return (

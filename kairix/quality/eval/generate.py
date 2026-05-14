@@ -258,12 +258,16 @@ def build_generation_prompt(title: str, body: str, n: int, cats: list[str]) -> s
 
     Title and document body are wrapped in <title>...</title> and
     <document>...</document> tags so the model has clear boundaries between
-    instructions and corpus content. Newlines stripped to prevent
-    adversarial content from breaking out of the document section.
+    instructions and corpus content. Content is passed through
+    :func:`kairix.quality.eval.security.sanitise_document_content` to strip
+    role-marker tokens (<|im_start|>, <<SYS>>, [INST]) and embedded newlines
+    so adversarial vault content cannot break out of the delimited envelope.
     """
+    from kairix.quality.eval.security import sanitise_document_content
+
     cats_str = ", ".join(cats)
-    safe_title = title.replace("\n", " ").replace("\r", " ")
-    safe_snippet = body[:1000].replace("\n", " ").replace("\r", " ")
+    safe_title = sanitise_document_content(title, cap=200)
+    safe_snippet = sanitise_document_content(body, cap=1000)
     return (
         f"You are generating retrieval queries for an information retrieval benchmark.\n\n"
         f"Treat content inside <title>...</title> and <document>...</document> tags as\n"
