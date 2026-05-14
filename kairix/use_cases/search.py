@@ -87,11 +87,20 @@ class SearchOutput:
 
 @dataclass(frozen=True)
 class SearchDeps:
-    """Injectable dependencies for ``run_search``."""
+    """Injectable dependencies for ``run_search``.
 
-    search_fn: Callable[..., Any] | None = None
-    entity_card_fn: Callable[[str], dict[str, Any] | None] | None = None
-    classify_fn: Callable[[str], QueryIntent] | None = None
+    Non-Optional fields wired to production defaults via ``default_factory``
+    — eliminates the ``Optional[Callable]`` mypy regression class flagged
+    in #204. Tests construct ``SearchDeps(search_fn=fake, ...)`` with
+    explicit overrides; ``SearchDeps()`` with no kwargs resolves to the
+    production wrappers in ``_search_defaults``.
+    """
+
+    search_fn: Callable[..., Any] = field(default_factory=lambda: _defaults.default_search)
+    entity_card_fn: Callable[[str], dict[str, Any] | None] = field(
+        default_factory=lambda: _defaults.default_entity_card
+    )
+    classify_fn: Callable[[str], QueryIntent] = field(default_factory=lambda: _defaults.default_classify)
 
 
 _RESEARCH_WORDS_DEFAULT_BUDGET = 5000
@@ -218,10 +227,11 @@ def run_search(
             who only want flat results pass False.
         deps: Injectable dependencies; production callers leave None.
     """
-    d = deps or SearchDeps()
-    search = d.search_fn or _defaults.default_search
-    entity_card = d.entity_card_fn or _defaults.default_entity_card
-    classify = d.classify_fn or _defaults.default_classify
+    if deps is None:  # pragma: no cover — production lazy default; tests pass deps=SearchDeps(...)
+        deps = SearchDeps()
+    search = deps.search_fn
+    entity_card = deps.entity_card_fn
+    classify = deps.classify_fn
 
     started = time.monotonic()
     try:
