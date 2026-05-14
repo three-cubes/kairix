@@ -229,8 +229,12 @@ def _audit_cmd(argv: list[str], *, paths: KairixPaths) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _status_cmd(argv: list[str]) -> None:
-    """Handle `kairix wikilinks status`."""
+def _status_cmd(_argv: list[str]) -> None:
+    """Handle `kairix wikilinks status`.
+
+    ``_argv`` is accepted for sub-handler signature uniformity with the
+    inject/audit handlers; status takes no per-invocation options.
+    """
     entities = get_entities()
     last_run = _read_last_run()
     log_entries = _read_log_entries()

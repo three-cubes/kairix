@@ -41,7 +41,7 @@ class RolePhraseFilter:
     # Words after the article must be alphabetic; allows uppercase acronyms.
     # IGNORECASE is set, so character classes use `[a-z]` only — adding `A-Z`
     # would duplicate every range under IGNORECASE (Sonar python:S5869).
-    _ARTICLE_PATTERN = re.compile(r"^the\s+[a-z][a-z]*(?:\s+[a-z][a-z]*)+$", re.IGNORECASE)
+    _ARTICLE_PATTERN = re.compile(r"^the\s+[a-z]+(?:\s+[a-z]+)+$", re.IGNORECASE)
 
     # Plain-role: capitalised word + role noun (no further words — that would
     # imply a person's full title, e.g. "John Smith Director" is unusual; we

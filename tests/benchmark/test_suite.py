@@ -835,7 +835,7 @@ def test_duplicate_gold_titles_detected(tmp_path: Path, in_memory_db: sqlite3.Co
             ),
         ],
     )
-    errors = validate_suite(suite, in_memory_db, strict=True)
+    errors = validate_suite(suite, in_memory_db)
     assert any("Duplicate gold_title" in e for e in errors)
 
 

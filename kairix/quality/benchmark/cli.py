@@ -208,7 +208,7 @@ def cmd_run(args: argparse.Namespace, deps: BenchmarkCLIDeps | None = None) -> i
         _db_path = None
     if _db_path is not None:
         db = open_db(Path(_db_path))
-        errors = validate_suite(suite, db, strict=False)
+        errors = validate_suite(suite, db)
         db.close()
         if errors:
             print(f"⚠️  Suite warnings ({len(errors)}):")
@@ -275,7 +275,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         return 0
 
     db = open_db(Path(_db_path))
-    errors = validate_suite(suite, db, strict=True)
+    errors = validate_suite(suite, db)
     db.close()
 
     if errors:

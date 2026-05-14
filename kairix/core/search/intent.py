@@ -105,8 +105,27 @@ _FILE_PATH_RE = re.compile(r"[/\\][a-zA-Z0-9_.\-]+[/\\][a-zA-Z0-9_.\-/\\]+")
 # Version string — e.g. v1.2.3, 3.12.0, 1.1.2, 2024-02-01
 _VERSION_RE = re.compile(r"\bv?\d+\.\d+(\.\d+)?\b")
 
-# Error code — HTTP codes (4xx/5xx), exception names, ALLCAPS codes, hexadecimal
-_ERROR_CODE_RE = re.compile(r"\b([A-Z]{2,}(?:Error|Exception)|[45]\d{2}|0x[0-9a-fA-F]+|[A-Z]{3,}[-_][A-Z0-9]{2,})\b")
+# Error code — HTTP codes (4xx/5xx), exception names, ALLCAPS codes, hexadecimal.
+# Split into independent compiled patterns to keep each one under the Sonar
+# python:S5843 regex-complexity threshold (≤20). Match semantics unchanged:
+# a query is treated as carrying an error code when any one of the four
+# patterns matches.
+_ERROR_CODE_EXCEPTION_RE = re.compile(r"\b[A-Z]{2,}(?:Error|Exception)\b")
+_ERROR_CODE_HTTP_RE = re.compile(r"\b[45]\d{2}\b")
+_ERROR_CODE_HEX_RE = re.compile(r"\b0x[0-9a-fA-F]+\b")
+_ERROR_CODE_ALLCAPS_RE = re.compile(r"\b[A-Z]{3,}[-_][A-Z0-9]{2,}\b")
+_ERROR_CODE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    _ERROR_CODE_EXCEPTION_RE,
+    _ERROR_CODE_HTTP_RE,
+    _ERROR_CODE_HEX_RE,
+    _ERROR_CODE_ALLCAPS_RE,
+)
+
+
+def _has_error_code(query: str) -> bool:
+    """Return True when ``query`` matches any of the error-code patterns."""
+    return any(p.search(query) for p in _ERROR_CODE_PATTERNS)
+
 
 # Title Case heuristic: 2+ consecutive capitalised words, none of which are
 # common prepositions or stopwords that appear in natural language headings.
@@ -180,7 +199,7 @@ def _is_keyword_query(query: str) -> bool:
         return True
 
     # Error code
-    if _ERROR_CODE_RE.search(query):
+    if _has_error_code(query):
         return True
 
     # Version string
