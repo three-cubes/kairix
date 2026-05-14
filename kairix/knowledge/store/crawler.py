@@ -19,11 +19,15 @@ Never raises — logs failures and continues. Returns a CrawlReport on completio
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kairix.knowledge.entities.filters import KnownEntityAllowlist, OverrideMatchCounter
+from kairix.knowledge.entities.overrides import EntityOverrides
 from kairix.knowledge.wikilinks import WIKILINK_RE
 from kairix.utils import display_name, slugify
 
@@ -37,6 +41,25 @@ _WIKILINK_PATTERN = WIKILINK_RE
 
 # Directory names under 02-Areas to search for People-Notes
 _PEOPLE_DIRS = {"People-Notes", "people-notes"}
+
+
+@dataclass
+class OverrideCoverage:
+    """Per-crawl override-coverage summary.
+
+    Closes #263. Records which entries in the
+    ``_entity-overrides.md`` allowlist were matched (at least once)
+    against the crawled text and which never fired. The crawl orchestrator
+    serialises this to ``${KAIRIX_DATA_DIR}/entity-override-coverage.json``
+    so curators can spot dead allowlist entries without an O(N) shell loop
+    over ``kairix entity get``.
+    """
+
+    crawl_started_at: str
+    total_overrides: int = 0
+    matched: int = 0
+    never_matched: list[str] = field(default_factory=list)
+    match_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -54,6 +77,12 @@ class CrawlReport:
     outcomes_upserted: int = 0
     edges_upserted: int = 0
     errors: list[str] = field(default_factory=list)
+    # #262 — reset path summary; None when --reset was not requested.
+    reset_nodes_deleted: int | None = None
+    reset_relationships_deleted: int | None = None
+    # #263 — override coverage; None when no overrides file was supplied.
+    override_coverage: OverrideCoverage | None = None
+    override_coverage_path: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -277,8 +306,16 @@ def crawl_wikilink_edges(
     report: CrawlReport,
     neo4j_client: Any,
     dry_run: bool,
+    *,
+    allowlist_filter: KnownEntityAllowlist | None = None,
 ) -> None:
-    """Extract wikilinks from all .md files and create MENTIONS edges."""
+    """Extract wikilinks from all .md files and create MENTIONS edges.
+
+    When ``allowlist_filter`` is supplied, each file's text is also fed to
+    the filter so its shared :class:`OverrideMatchCounter` records which
+    allowlist entries fired during the crawl (#263). The filter return
+    value is discarded — we only need the side-effect on the counter.
+    """
     for md_file in root.rglob("*.md"):
         try:
             text = md_file.read_text(encoding="utf-8", errors="ignore")
@@ -286,6 +323,11 @@ def crawl_wikilink_edges(
             continue
         source_path = str(md_file.relative_to(root))
         _emit_mentions_edges(md_file, text, source_path, orgs, persons, report, neo4j_client, dry_run)
+        if allowlist_filter is not None:
+            # ``apply`` is the public surface; we pass an empty suggestion
+            # list because the crawler does not run NER — the goal here is
+            # purely to record per-override match counts.
+            allowlist_filter.apply([], context=text)
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +339,10 @@ def crawl(
     document_root: str | Path,
     neo4j_client: Any,
     dry_run: bool = False,
+    *,
+    reset: bool = False,
+    overrides: EntityOverrides | None = None,
+    coverage_path: Path | None = None,
 ) -> CrawlReport:
     """
     Crawl the document store and upsert entity nodes + edges into Neo4j.
@@ -305,23 +351,138 @@ def crawl(
         document_root: Absolute path to the Obsidian document store root.
         neo4j_client: An open Neo4jClient instance. Pass a mock for testing.
         dry_run: When True, discover and log entities without writing to Neo4j.
+        reset: When True, DETACH DELETE everything in the graph before walking
+            the document root. Closes #262. ``dry_run=True`` short-circuits
+            the destructive call — the report still records the operator's
+            intent but the graph is untouched.
+        overrides: When supplied, the loader-resolved ``EntityOverrides``
+            are scanned against every .md file's text during the wikilink
+            pass. Match counts populate ``report.override_coverage`` and are
+            written to ``coverage_path`` (sidecar JSON) so curators can spot
+            dead allowlist entries (#263).
+        coverage_path: Sidecar JSON destination for the coverage report.
+            Defaults to ``${KAIRIX_DATA_DIR}/entity-override-coverage.json``
+            when ``overrides`` is supplied but the path is omitted.
 
     Returns:
-        CrawlReport describing nodes found and upserted.
+        CrawlReport describing nodes found, upserted, optionally reset, and
+        override coverage when an overrides file was provided.
     """
     root = Path(document_root)
     report = CrawlReport(document_root=str(root), dry_run=dry_run)
+
+    if reset:
+        _apply_reset(neo4j_client, report, dry_run=dry_run)
 
     if not root.exists():
         report.errors.append(f"document_root does not exist: {root}")
         return report
 
+    counter, allowlist_filter = _build_coverage_tracker(overrides)
+    started_at = datetime.now(timezone.utc).isoformat()
+
     orgs = crawl_organisations(root, report, neo4j_client, dry_run)
     persons = crawl_persons(root, orgs, report, neo4j_client, dry_run)
     crawl_outcomes(root, report, neo4j_client, dry_run)
-    crawl_wikilink_edges(root, orgs, persons, report, neo4j_client, dry_run)
+    crawl_wikilink_edges(
+        root,
+        orgs,
+        persons,
+        report,
+        neo4j_client,
+        dry_run,
+        allowlist_filter=allowlist_filter,
+    )
+
+    if overrides is not None and counter is not None:
+        _finalise_override_coverage(
+            overrides=overrides,
+            counter=counter,
+            started_at=started_at,
+            coverage_path=coverage_path,
+            report=report,
+        )
 
     return report
+
+
+def _apply_reset(neo4j_client: Any, report: CrawlReport, *, dry_run: bool) -> None:
+    """Run ``DETACH DELETE`` against the live graph and record counts on ``report``.
+
+    Dry-run mode records zero counts without invoking the destructive
+    Cypher path — the CLI surfaces this to the operator so the intent is
+    visible even when nothing is written.
+    """
+    if dry_run:
+        report.reset_nodes_deleted = 0
+        report.reset_relationships_deleted = 0
+        return
+    nodes, rels = neo4j_client.reset_graph()
+    report.reset_nodes_deleted = int(nodes)
+    report.reset_relationships_deleted = int(rels)
+
+
+def _build_coverage_tracker(
+    overrides: EntityOverrides | None,
+) -> tuple[OverrideMatchCounter | None, KnownEntityAllowlist | None]:
+    """Wire a shared ``OverrideMatchCounter`` into a filter, or return ``(None, None)``.
+
+    Returning a tuple keeps the crawl call-site explicit: when no overrides
+    are supplied we don't pay the per-file regex cost in the wikilink pass.
+    """
+    if overrides is None or not overrides.allowlist:
+        return None, None
+    counter = OverrideMatchCounter()
+    allowlist_filter = KnownEntityAllowlist(overrides.allowlist, match_counter=counter)
+    return counter, allowlist_filter
+
+
+def _finalise_override_coverage(
+    *,
+    overrides: EntityOverrides,
+    counter: OverrideMatchCounter,
+    started_at: str,
+    coverage_path: Path | None,
+    report: CrawlReport,
+) -> None:
+    """Build the coverage summary, attach it to the report, and write the sidecar JSON."""
+    override_texts = sorted({str(entry.get("text", "")) for entry in overrides.allowlist if entry.get("text")})
+    match_counts = {text: counter.get(text) for text in override_texts if counter.get(text) > 0}
+    never_matched = sorted(text for text in override_texts if counter.get(text) == 0)
+    coverage = OverrideCoverage(
+        crawl_started_at=started_at,
+        total_overrides=len(override_texts),
+        matched=len(match_counts),
+        never_matched=never_matched,
+        match_counts=match_counts,
+    )
+    report.override_coverage = coverage
+
+    destination = coverage_path
+    if destination is None:
+        from kairix.paths import data_dir
+
+        destination = data_dir() / "entity-override-coverage.json"
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            json.dumps(
+                {
+                    "crawl_started_at": coverage.crawl_started_at,
+                    "total_overrides": coverage.total_overrides,
+                    "matched": coverage.matched,
+                    "never_matched": coverage.never_matched,
+                    "match_counts": coverage.match_counts,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        report.override_coverage_path = str(destination)
+    except OSError as exc:
+        logger.warning("override-coverage: cannot write %s — %s", destination, exc)
+        report.override_coverage_path = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

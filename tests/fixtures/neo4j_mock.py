@@ -51,6 +51,13 @@ class FakeNeo4jClient:
         # upsert_node call recorder + return-value knob.
         self.upsert_node_calls: list[dict] = []
         self.upsert_node_returns: bool = True
+        # reset_graph recorder — tests assert the reset path is exercised and
+        # the configured (nodes, rels) tuple is returned. ``_rels_count`` is
+        # a synthetic edge count that the default tuple advertises so callers
+        # have something realistic to print without a separate fixture knob.
+        self.reset_graph_calls: int = 0
+        self._rels_count: int = max(0, len(self._entities) - 1)
+        self.reset_graph_returns: tuple[int, int] = (len(self._entities), self._rels_count)
 
     def cypher(self, query: str, params: dict | None = None) -> list[dict]:
         """Pattern-match query string and return appropriate fake results."""
@@ -109,3 +116,11 @@ class FakeNeo4jClient:
         """Stub — record the call and return ``self.upsert_node_returns``."""
         self.upsert_node_calls.append({"args": args, "kwargs": kwargs})
         return self.upsert_node_returns
+
+    def reset_graph(self) -> tuple[int, int]:
+        """Stub — record the call, drop in-memory entities, return configured tuple."""
+        self.reset_graph_calls += 1
+        nodes, rels = self.reset_graph_returns
+        # Simulate the destruction so subsequent ``cypher()`` calls reflect it.
+        self._entities = []
+        return (nodes, rels)

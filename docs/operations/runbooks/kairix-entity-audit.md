@@ -1,12 +1,12 @@
 # How-to — Audit the Kairix entity graph
 
-**When to use:** the entity graph is drifting from what the document store says — `kairix entity suggest` returns garbage, agents report "X not found" for entities you know exist, or the reflib benchmark regresses on entity-heavy queries. This runbook walks two purposeful commands: `kairix entity audit` (read-only) then `kairix entity purge` (destructive, dry-run gated).
+**When to use:** the entity graph is drifting from what the document store says — `kairix entity suggest` returns garbage, agents report "X not found" for entities you know exist, or the reflib benchmark regresses on entity-heavy queries. This runbook walks four audit modes in order of safety: detect, repair-paths, check-enrichment, then (only after evidence) safe-purge.
 
 **Time:** 5-15 minutes for detection + repair on a typical knowledge store (≤ 5k entity nodes). Add the crawl time if you escalate to a full rebuild.
 
-**Warning:** Step 3 (safe purge) is destructive. It runs in dry-run mode by default and the runbook keeps it that way until the captured report has been reviewed. Never skip the dry-run.
+**Warning:** Step 4 (safe purge) is destructive. It runs in dry-run mode by default and the runbook keeps it that way until the captured report has been reviewed. Never skip the dry-run.
 
-**Replaces:** the retired Mnemosyne `entity-audit.py` practice and Kairix's earlier six-command stitched workflow that mixed `kairix curator health`, `kairix store health`, and `scripts/prune-entities.py` outputs. The new surface is two commands sharing a single report shape.
+**Replaces:** the retired Mnemosyne `entity-audit.py` practice. Kairix's surfaces are different — primarily `kairix curator health`, `kairix store health`, and `scripts/prune-entities.py` — so the procedure is rebuilt from those, not ported.
 
 ---
 
@@ -43,128 +43,191 @@ Snapshot the graph before you touch it so you can compare after.
 kairix onboard check --json > /tmp/kairix-onboard-pre.json
 jq '{ok, neo4j, vector_index, document_root}' /tmp/kairix-onboard-pre.json
 
-# Entity counts by type
+# Entity counts by type (the closest surface kairix exposes today to a
+# pure ``kairix entity count`` command; see "Gaps" at the bottom)
 kairix store health --json > /tmp/kairix-store-pre.json
 jq '{ok, total_entities, entities_by_type, errors}' /tmp/kairix-store-pre.json
+
+# Curator-level health: synthesis failures + stale + missing vault_path
+kairix curator health --format json --output /tmp/kairix-curator-pre.json
+jq '{ok, total_entities, issue_count: (.synthesis_failures|length + (.stale_entities|length) + (.missing_vault_path|length))}' /tmp/kairix-curator-pre.json
 ```
 
-Keep both files. The post-audit step compares against this baseline.
+Keep all three files. Each later audit step compares against this baseline.
 
 If `kairix onboard check` reports Neo4j unreachable, stop. Resolve connectivity first — every step below queries Neo4j.
 
-## Step 1 — Run the one-shot audit (read-only)
+## Step 1 — Junk-entity detection (read-only)
 
-`kairix entity audit` covers three lenses in one command:
+"Junk" entities are nodes that exist in Neo4j but reference nothing real: no source document, no enrichment, suspicious name.
 
-- `junk` — entities with no `vault_path` AND no `summary` (never enriched, never anchored to a stub).
-- `paths` — entities whose `vault_path` no longer exists on disk (source note was renamed, moved, or deleted).
-- `enrichment` — entities missing `summary`, `wikidata_qid`, or label (incomplete enrichment).
-- `all` (default) — the deduplicated union.
+Kairix exposes this view through `kairix curator health` — specifically its `missing_vault_path` and `synthesis_failures` lists. Both are non-destructive: the command only reads.
 
 ```bash
-# Quick look — text report to stdout
-kairix entity audit --mode all
+# Run the curator health check in text mode for human review
+kairix curator health --format text
 
-# Capture the JSON report — this is what `kairix entity purge` consumes
-kairix entity audit --mode all --format json --output /tmp/audit.json
+# Or write the structured report to a file for diff-ing
+kairix curator health --format json --output /tmp/kairix-curator-now.json
 
-# Inspect the report shape
-jq '{mode, generated_at, total, rows: .rows[:3]}' /tmp/audit.json
+# Surface only the junk-candidate lists
+jq '{
+  no_vault_path: .missing_vault_path | map({name, entity_type, entity_id}),
+  no_summary:    .synthesis_failures | map({name, entity_type, entity_id})
+}' /tmp/kairix-curator-now.json
 ```
 
-The JSON shape is:
+What each list means:
 
-```json
-{
-  "mode": "all",
-  "generated_at": "2026-05-14T00:00:00Z",
-  "total": 12,
-  "rows": [
-    {
-      "id": "ghost-1",
-      "name": "Ghost One",
-      "type": "Concept",
-      "mode": "junk",
-      "reason": "no vault_path and no summary"
-    }
-  ]
-}
-```
+- `missing_vault_path` — entity has no `vault_path` property, so no canonical document stub anchors it. Either the stub never got created or the property never got written. These are seed-only entities and the most common form of junk.
+- `synthesis_failures` — entity has no `summary` property. Either enrichment never ran or it errored out. Some of these are real entities awaiting enrichment — do not purge until you've cross-checked.
+- `stale_entities` — entity not touched in `--staleness-days N` (default 90). Use `--staleness-days 30` for tighter scrutiny on a high-churn store. Staleness alone is not a purge signal; combine with missing vault_path.
 
-Every row carries the `mode` lens that flagged it so you can filter the report before purging. Useful slices:
+**Remediation when junk is small (< 20 nodes):** prefer manual cleanup. Open each `vault_path` candidate in the document store, decide whether it's a legitimate entity awaiting a stub or a noise node from a failed crawl. Add legitimate ones to `${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md`. Drop the rest in Step 4.
+
+**Remediation when junk is large (≥ 20 nodes):** proceed to Step 2 (path repair) first — many "junk" nodes are actually entities whose source file moved or was renamed, not entities that should be deleted.
+
+## Step 2 — Path repair (find entities whose source path is gone)
+
+The crawler writes a `vault_path` property on every entity it creates. If the underlying file is later renamed, moved, or deleted, the property goes stale — the node still exists, but its source is gone.
+
+`scripts/prune-entities.py` classifies this case as `file_missing` and is dry-run by default.
 
 ```bash
-# Only junk candidates
-jq '.rows[] | select(.mode == "junk")' /tmp/audit.json
+# Dry-run — read-only, prints to stdout
+python scripts/prune-entities.py --vault-root "${KAIRIX_DOCUMENT_ROOT}"
 
-# Only path candidates — these are the safest to delete
-jq '.rows[] | select(.mode == "paths") | {name, reason}' /tmp/audit.json
+# Capture the report for evidence
+python scripts/prune-entities.py --vault-root "${KAIRIX_DOCUMENT_ROOT}" \
+  > /tmp/kairix-prune-dryrun.txt
 
-# Only enrichment gaps — these usually want repair, not delete
-jq '.rows[] | select(.mode == "enrichment")' /tmp/audit.json
+# Count just the file_missing candidates
+grep -c "file_missing" /tmp/kairix-prune-dryrun.txt
 ```
 
-**Remediation when the report is small (< 20 rows):** prefer manual cleanup. For `enrichment` rows, run `kairix entity validate "<Name>" --update` to add `wikidata_qid` where Wikidata has a confident match. For `junk` and `paths` rows you've confirmed by hand, edit the audit JSON to keep only those rows and proceed to Step 2.
-
-**Remediation when the report is large (≥ 20 rows):** filter first. The most common pattern is "purge `paths` rows in batch, then rerun audit for the remaining junk/enrichment work":
+The report has two sections: `NODES TO DELETE` (file_missing + no_stub_no_summary) and `NODES TO KEEP`. Read the delete list. Every `file_missing` row should correspond to a `vault_path` you can confirm is gone from `${KAIRIX_DOCUMENT_ROOT}` by hand:
 
 ```bash
-# Filter to paths-only rows
-jq '. + {rows: [.rows[] | select(.mode == "paths")]} | .total = (.rows | length)' \
-   /tmp/audit.json > /tmp/audit-paths-only.json
-```
-
-## Step 2 — Review the audit JSON
-
-Before purging, walk the rows by name. The audit report records *what* and *why*; you confirm *yes, delete*. For any row you're unsure about, look at the source document store path:
-
-```bash
-# Spot-check one row from the paths lens
-jq -r '.rows[] | select(.mode == "paths") | .reason' /tmp/audit.json | head -3
-
-# Confirm the file is really gone
-test -f "${KAIRIX_DOCUMENT_ROOT}/<vault_path-from-reason>" \
-  && echo "STILL EXISTS — remove this row from the audit before purge" \
+# Spot-check one or two paths from the dry-run report
+test -f "${KAIRIX_DOCUMENT_ROOT}/<vault_path-from-report>" \
+  && echo "STILL EXISTS — do not purge" \
   || echo "missing — purge candidate confirmed"
 ```
 
-If you find rows that should not be purged, edit `/tmp/audit.json` to remove them. The purge command consumes the file verbatim.
+If a `file_missing` entry corresponds to a file that *does* still exist, the script has read a different vault root than your live document store. Re-run with `--vault-root` set explicitly and re-check.
 
-## Step 3 — Purge with `kairix entity purge`
+**Affordance:** when `file_missing` count > 0, the next concrete step is Step 4 (safe purge with `--execute`). Do not run `--execute` until you've completed Step 3 too — enrichment audit may surface entities that should be enriched, not deleted.
 
-`kairix entity purge` requires either `--dry-run` or `--execute`. There is no default — you always declare intent.
+## Step 3 — Enrichment audit (missing label, summary, source attribution)
 
-```bash
-# Always preview first
-kairix entity purge --audit-report /tmp/audit.json --dry-run
-```
+Kairix entities ship with a small expected fact set: a `name`, a Neo4j label (e.g. `Organisation`, `Person`, `Concept`), a `summary`, and a `vault_path`. Anything missing is an enrichment gap.
 
-The dry-run prints the Cypher template (`MATCH (n {id: $id}) DETACH DELETE n`) and every candidate row. No Cypher actually runs. When the preview looks right:
+Two surfaces tell you what's enriched:
 
 ```bash
-# Apply, capturing the audit log
-kairix entity purge --audit-report /tmp/audit.json --execute \
-  2>&1 | tee /tmp/kairix-purge-execute.log
+# Surface 1: curator health — synthesis_failures = no summary written
+kairix curator health --format json --output /tmp/kairix-curator-enrich.json
+jq '.synthesis_failures | map({name, entity_type, entity_id})' \
+   /tmp/kairix-curator-enrich.json
+
+# Surface 2: store health — entities with no edges, no source attribution
+kairix store health --json | jq '{
+  ok,
+  total_entities,
+  by_type: .entities_by_type
+}'
 ```
 
-The execute log records, per row: `id`, `name`, `type`, `mode`, `reason`, and `status` (one of `deleted`, `skipped: no id`, or `error: <Class>: <msg>`). The summary line shows `Deleted: <n> / <total>`.
-
-Keep `/tmp/kairix-purge-execute.log` with your operator records — it's the only retrievable record of which nodes were removed and why.
-
-**JSON output for automation:**
+For entities flagged in `synthesis_failures` that you want to keep, run validation against Wikidata:
 
 ```bash
-kairix entity purge --audit-report /tmp/audit.json --execute --format json \
-  > /tmp/kairix-purge.json
-jq '{dry_run, deleted_count, candidate_count, errors: [.audit_log[] | select(.status | startswith("error"))]}' \
-   /tmp/kairix-purge.json
+# Per-entity validation — adds wikidata_qid if a high/medium-confidence match exists
+kairix entity validate "<Name>" --update
+
+# JSON form for automation
+kairix entity validate "<Name>" --format json
 ```
 
-**Atomicity:** each `DETACH DELETE n` is one Cypher statement, atomic at the Neo4j level. If the executor crashes mid-run, previously-deleted nodes stay deleted and the remaining list is unaffected. Re-running `audit` regenerates the report against the live graph; pointing the next purge at the new file picks up the work.
+For batch enrichment, re-run the crawler against the document store so the latest `vault_path` and any wikilink-derived attribution get written:
+
+```bash
+# Full crawl — picks up renamed files, new wikilinks, refreshes vault_path
+kairix store crawl --document-root "${KAIRIX_DOCUMENT_ROOT}"
+```
+
+**Affordance:** an entity that's missing both `summary` and `vault_path` after a fresh crawl + a Wikidata validation pass is junk. Move it to the Step 4 purge list.
+
+## Step 4 — Override coverage (allowlisted but never matched)
+
+The vault-driven override loader at `${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md` (see [entity-overrides user guide](../../user-guide/entity-overrides.md)) lets curators force-add or force-block entity terms. An override that's allowlisted but never matches in a crawl is dead weight — the term is wrong, the spelling drifted, or the source content was removed.
+
+Closes #263. Every `kairix store crawl` now scans each markdown file's text against the allowlist and records per-override match counts. At end of crawl the summary prints:
+
+```
+Override coverage: N/M overrides matched (K never used)
+Never-matched: ['foo', 'bar', ...]  (first 10 shown)
+Coverage report written: ${KAIRIX_DATA_DIR}/entity-override-coverage.json
+```
+
+The sidecar JSON lets you inspect drift over multiple crawls without re-running the crawler:
+
+```bash
+# Inspect the latest coverage report
+jq . "${KAIRIX_DATA_DIR}/entity-override-coverage.json"
+
+# Surface only the never-matched names
+jq -r '.never_matched[]' "${KAIRIX_DATA_DIR}/entity-override-coverage.json"
+
+# Surface match counts (which overrides fired the most)
+jq -r '.match_counts | to_entries | sort_by(-.value) | .[] | "\(.value)\t\(.key)"' \
+   "${KAIRIX_DATA_DIR}/entity-override-coverage.json"
+```
+
+Entries in `never_matched` are either:
+- A new override the next crawl will pick up (run `kairix store crawl` and re-check the sidecar).
+- A drift-prone name (the canonical form in the document store changed). Edit the override.
+- Genuinely unused. Remove the line from `_entity-overrides.md`.
+
+If you also need to know whether a never-matched override has a stale Neo4j node, fall back to the per-name graph check:
+
+```bash
+jq -r '.never_matched[]' "${KAIRIX_DATA_DIR}/entity-override-coverage.json" \
+  | while read -r name; do
+      result=$(kairix entity get "$name" --format json 2>/dev/null | jq -r '.id // "missing"')
+      printf "%-40s %s\n" "$name" "$result"
+    done
+```
+
+## Step 5 — Safe purge (destructive, dry-run gated)
+
+Only run this step after Steps 1-4 have produced a delete list you've reviewed by name.
+
+```bash
+# Re-run the dry-run as your final check (capture the report you'll act on)
+python scripts/prune-entities.py --vault-root "${KAIRIX_DOCUMENT_ROOT}" \
+  > /tmp/kairix-prune-final-dryrun.txt
+
+# Diff against the earlier dry-run to confirm nothing surprising changed
+diff /tmp/kairix-prune-dryrun.txt /tmp/kairix-prune-final-dryrun.txt \
+  || echo "delete list changed — investigate before --execute"
+
+# Apply, capturing the audit log of every deletion
+python scripts/prune-entities.py \
+  --vault-root "${KAIRIX_DOCUMENT_ROOT}" \
+  --execute \
+  2>&1 | tee /tmp/kairix-prune-execute.log
+
+# The log records: NAME, TYPE, REASON for every node deleted, plus the
+# total deleted / total scanned summary.
+```
+
+The execute log is the audit trail. Keep it with your operator records — it's the only retrievable record of which nodes were removed and why.
+
+**Atomicity:** each `DETACH DELETE n` is one Cypher statement, atomic at the Neo4j level. The script does not batch; if it crashes mid-run, previously-deleted nodes stay deleted and the remaining list is unaffected. Re-running the script picks up where it stopped because the dry-run report regenerates against the live graph.
 
 **Rollback:** Neo4j has no built-in undo for `DETACH DELETE`. If you need to roll back, the recovery path is a full graph rebuild from the document store — see [how-to-rebuild-entity-graph](how-to-rebuild-entity-graph.md). Snapshot Neo4j before any large `--execute` run if your deployment supports it.
 
-## Step 4 — Validate post-audit
+## Step 6 — Validate post-audit
 
 Re-run the baseline captures from Step 0 and diff:
 
@@ -172,13 +235,22 @@ Re-run the baseline captures from Step 0 and diff:
 # Capture the post-audit state
 kairix onboard check --json > /tmp/kairix-onboard-post.json
 kairix store health --json > /tmp/kairix-store-post.json
-kairix entity audit --mode all --format json --output /tmp/audit-post.json
+kairix curator health --format json --output /tmp/kairix-curator-post.json
 
-# Compare entity totals — total should drop by exactly the purge count
+# Compare entity totals — total should drop by exactly the prune count
 jq '.total_entities' /tmp/kairix-store-pre.json /tmp/kairix-store-post.json
 
-# Compare audit row counts — should drop, never rise
-jq '.total' /tmp/audit.json /tmp/audit-post.json
+# Compare issue counts — should drop, never rise
+jq '{
+  synth: (.synthesis_failures|length),
+  stale: (.stale_entities|length),
+  no_path: (.missing_vault_path|length)
+}' /tmp/kairix-curator-pre.json
+jq '{
+  synth: (.synthesis_failures|length),
+  stale: (.stale_entities|length),
+  no_path: (.missing_vault_path|length)
+}' /tmp/kairix-curator-post.json
 
 # Recall regression check — reflib benchmark on the live system
 kairix benchmark run --suite reflib --system hybrid \
@@ -187,44 +259,46 @@ kairix benchmark run --suite reflib --system hybrid \
 
 Compare the post-audit reflib NDCG@10 against your last green run. If recall regressed, the purge took out a legitimate entity. Recovery path: [how-to-rebuild-entity-graph](how-to-rebuild-entity-graph.md) restores from the document store.
 
-## Step 5 — Override coverage (optional, when overrides are in use)
-
-The vault-driven override loader at `${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md` lets curators force-add or force-block entity terms. An override that's allowlisted but never matches in a crawl is dead weight.
-
-```bash
-# List every allowlisted name in the overrides file
-grep -E "^- " "${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md" \
-  | sed 's/^- //' \
-  | sort -u > /tmp/kairix-overrides-names.txt
-
-# For each name, check whether it exists as a Neo4j entity
-while read -r name; do
-  result=$(kairix entity get "$name" --format json 2>/dev/null | jq -r '.id // "missing"')
-  printf "%-40s %s\n" "$name" "$result"
-done < /tmp/kairix-overrides-names.txt
-```
-
-Entries with `missing` are either a new override the next crawl will pick up (run `kairix store crawl` and re-check), a drift-prone name (canonical form changed — edit the override), or genuinely unused (remove the line).
-
 ## Escalation — graph state is too broken to repair
 
-When the audit report shows > 50% of entities flagged, or repeated audit+purge cycles surface different sets of orphans, the underlying problem is graph state, not audit. Stop running purge cycles and rebuild from scratch — see [how-to-rebuild-entity-graph](how-to-rebuild-entity-graph.md).
+When the audit report shows > 50% of entities flagged as junk, or repeated path-repair runs surface different sets of orphans, the underlying problem is graph state, not audit. Stop running prune cycles and rebuild from scratch.
+
+Single command (closes #262): `kairix store crawl --reset` drops the graph and rebuilds in one step. Pair with `--confirm` interactively or `KAIRIX_NONINTERACTIVE=1` in pipelines.
+
+```bash
+# Drop + rebuild — destructive, requires --confirm
+kairix store crawl --reset --confirm --document-root "${KAIRIX_DOCUMENT_ROOT}"
+
+# Scripted equivalent (e.g. cron / CI)
+KAIRIX_NONINTERACTIVE=1 kairix store crawl --reset --document-root "${KAIRIX_DOCUMENT_ROOT}"
+
+# Preview the destruction without writing
+kairix store crawl --reset --confirm --dry-run --document-root "${KAIRIX_DOCUMENT_ROOT}"
+
+# Verify
+kairix store health
+kairix curator health --format text
+```
+
+The full sequence — including pre-checks, content checks, and post-rebuild verification — is documented in [how-to-rebuild-entity-graph](how-to-rebuild-entity-graph.md). Use that runbook for any rebuild, not the three commands above.
 
 ## Gaps and follow-up work
 
-| Wanted surface | Status |
-|---|---|
-| `kairix entity audit` (one-shot audit) | landed (#260) |
-| `kairix entity purge --dry-run / --execute` | landed (#261) |
-| `kairix entity count` (just the number) | `kairix store health --json \| jq '.total_entities'` |
-| `kairix store crawl --reset` (drop-and-rebuild in one command) | manual `MATCH (n) DETACH DELETE n` + `kairix store crawl` |
-| Override-coverage stats (matched N times in last crawl) | shell loop over `_entity-overrides.md` + `kairix entity get` |
+Some surfaces this runbook would benefit from do not exist today. Where the runbook calls a primitive that's missing, it routes through the closest available command. These gaps are tracked as follow-up issues:
 
-The retired `scripts/prune-entities.py` is kept as a deprecated shim for now and will be removed in a future release. New automation should call `kairix entity audit` + `kairix entity purge`.
+| Wanted surface | Closest substitute today | Gap issue |
+|---|---|---|
+| `kairix entity count` (just the number, no extra) | `kairix store health --json \| jq '.total_entities'` | filed |
+| `kairix entity audit` (one-shot audit covering Steps 1-4) | curator health + prune-entities.py + entity get loop | filed |
+| `kairix entity purge --dry-run / --execute` (proper CLI, not a script) | `scripts/prune-entities.py` | filed |
+| `kairix store crawl --reset` (drop-and-rebuild in one command) | landed (#262) — see Escalation section | done |
+| Override-coverage stats (matched N times in last crawl) | landed (#263) — see Step 4 | done |
+
+Until those land, the steps above are the operational practice.
 
 ## See also
 
-- [how-to-rebuild-entity-graph](how-to-rebuild-entity-graph.md) — full rebuild when audit + purge isn't enough.
+- [how-to-rebuild-entity-graph](how-to-rebuild-entity-graph.md) — full rebuild when audit + repair isn't enough.
 - [entity-overrides user guide](../../user-guide/entity-overrides.md) — vault-driven allowlist/blocklist.
-- `kairix entity audit --help` — flag reference for the audit surface.
-- `kairix entity purge --help` — flag reference for the purge surface.
+- `kairix curator health --help` — flags for the health surface this runbook leans on.
+- `scripts/prune-entities.py --help` — the safe-purge primitive.

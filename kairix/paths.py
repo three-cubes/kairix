@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 # resolves a cache location.
 _USER_CACHE_DIR = ".cache"
 
+# Canonical agent-knowledge directory under the document root.
+# Hosts agent memory subtrees and curator-managed config files (notably
+# ``_entity-overrides.md``). Extracted to satisfy F17 — three resolvers
+# below need to compose this segment and the literal string is otherwise
+# duplicated across them.
+_AGENT_KNOWLEDGE_DIR = "04-Agent-Knowledge"
+
 
 def is_docker_runtime_check() -> bool:
     """Detect if running inside a Docker container."""
@@ -534,7 +541,23 @@ def env_file_override() -> str | None:
     return value if value else None
 
 
-def entity_overrides_path() -> Path:
+def noninteractive_mode() -> bool:
+    """Return True when ``KAIRIX_NONINTERACTIVE=1`` is set in the environment.
+
+    Centralised here so destructive CLI surfaces (``kairix store crawl
+    --reset``, future bulk-delete primitives) read one canonical boundary
+    instead of each scattering an ``os.environ.get`` (F4). Operators set
+    this in pipelines / containers where prompting is impossible and the
+    ``--confirm`` interlock would otherwise block automation.
+
+    Accepted truthy values: ``1``, ``true``, ``yes`` (case-insensitive).
+    Anything else — including unset — is False.
+    """
+    raw = os.environ.get("KAIRIX_NONINTERACTIVE", "").strip().lower()
+    return raw in {"1", "true", "yes"}
+
+
+def entity_overrides_path(*, document_root_arg: str | Path | None = None) -> Path:
     """Path to the operator-edited entity overrides file.
 
     Default: ``{document_root}/04-Agent-Knowledge/_entity-overrides.md``.
@@ -546,11 +569,17 @@ def entity_overrides_path() -> Path:
 
     Override via ``KAIRIX_ENTITY_OVERRIDES_PATH`` for tests and custom
     deployments. The env read stays in this module (F4).
+
+    ``document_root_arg`` lets callers (e.g. the store CLI) pin the path
+    against a per-invocation document root that does not necessarily
+    match the cached default. When supplied, the env-var override still
+    wins so operators retain the documented escape hatch.
     """
     raw = os.environ.get("KAIRIX_ENTITY_OVERRIDES_PATH")
     if raw:
         return Path(raw).expanduser()
-    return document_root() / "04-Agent-Knowledge" / "_entity-overrides.md"
+    base = Path(document_root_arg) if document_root_arg is not None else document_root()
+    return base / _AGENT_KNOWLEDGE_DIR / "_entity-overrides.md"
 
 
 def agent_memory_path(agent: str, *, root: Path | str | None = None) -> Path:
@@ -585,4 +614,4 @@ def agent_memory_path(agent: str, *, root: Path | str | None = None) -> Path:
             )
             return override_path
         return override_path / agent / "memory"
-    return document_root() / "04-Agent-Knowledge" / agent / "memory"
+    return document_root() / _AGENT_KNOWLEDGE_DIR / agent / "memory"

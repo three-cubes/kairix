@@ -3,6 +3,7 @@ kairix.knowledge.store.cli — CLI entry point for document store operations.
 
 Usage:
     kairix store crawl [--document-root PATH] [--dry-run] [--verbose]
+                       [--reset [--confirm]]
     kairix store health [--document-root PATH] [--json]
 """
 
@@ -14,12 +15,24 @@ import sys
 from typing import Any
 
 
-def main(argv: list[str] | None = None, *, neo4j_client: Any = None) -> None:
+def main(
+    argv: list[str] | None = None,
+    *,
+    neo4j_client: Any = None,
+    noninteractive: bool | None = None,
+) -> None:
     """Entry point for `kairix store`.
 
     The ``neo4j_client`` keyword lets BDD/integration tests inject a
     ``FakeNeo4jClient`` instead of letting the CLI call ``get_client()``
     at the module boundary. Production callers leave it ``None``.
+
+    ``noninteractive`` is the F2-clean seam for the ``--reset`` safety
+    interlock. When ``None`` (production), the env var
+    ``KAIRIX_NONINTERACTIVE`` is consulted via :func:`kairix.paths.noninteractive_mode`
+    so operators can bypass the ``--confirm`` requirement in scripted
+    pipelines. Tests pass an explicit bool to exercise both paths without
+    monkeypatching the environment.
     """
     parser = argparse.ArgumentParser(
         prog="kairix store",
@@ -40,6 +53,16 @@ def main(argv: list[str] | None = None, *, neo4j_client: Any = None) -> None:
         help="Print what would be written without writing",
     )
     crawl_p.add_argument("--verbose", action="store_true", help="Log each entity discovered")
+    crawl_p.add_argument(
+        "--reset",
+        action="store_true",
+        help="DETACH DELETE every node + relationship before crawling (destructive). Requires --confirm or KAIRIX_NONINTERACTIVE=1.",
+    )
+    crawl_p.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Required interlock for --reset — without it (or KAIRIX_NONINTERACTIVE=1) the reset is refused.",
+    )
 
     # ── health ───────────────────────────────────────────────────────────────
     health_p = sub.add_parser("health", help="Document store and entity graph health summary")
@@ -49,7 +72,7 @@ def main(argv: list[str] | None = None, *, neo4j_client: Any = None) -> None:
     args = parser.parse_args(argv)
 
     if args.subcommand == "crawl":
-        _cmd_crawl(args, neo4j_client=neo4j_client)
+        _cmd_crawl(args, neo4j_client=neo4j_client, noninteractive=noninteractive)
     elif args.subcommand == "health":
         _cmd_health(args, neo4j_client=neo4j_client)
     else:
@@ -82,18 +105,102 @@ def _print_count_line(label: str, found: int, upserted: int, dry_run: bool) -> N
 def _print_crawl_report(report: Any, document_root: str) -> None:
     """Print the human-readable summary block for a crawl report."""
     mode = "[DRY RUN] " if report.dry_run else ""
+    if getattr(report, "reset_nodes_deleted", None) is not None:
+        nodes = report.reset_nodes_deleted
+        rels = report.reset_relationships_deleted
+        if report.dry_run:
+            print(f"{mode}Reset: would DETACH DELETE every node + relationship (dry run — graph untouched)")
+        else:
+            print(f"{mode}Reset: deleted {nodes} entities, {rels} relationships before crawl")
     print(f"{mode}Document store crawl complete: {document_root}")
     _print_count_line("Organisations: ", report.organisations_found, report.organisations_upserted, report.dry_run)
     _print_count_line("Persons:       ", report.persons_found, report.persons_upserted, report.dry_run)
     _print_count_line("Outcomes:      ", report.outcomes_found, report.outcomes_upserted, report.dry_run)
     _print_count_line("Edges:         ", report.edges_found, report.edges_upserted, report.dry_run)
+    _print_override_coverage(report)
 
 
-def _cmd_crawl(args: argparse.Namespace, *, neo4j_client: Any = None) -> None:
+def _print_override_coverage(report: Any) -> None:
+    """Print the override-coverage summary lines (#263) when a report carries one."""
+    coverage = getattr(report, "override_coverage", None)
+    if coverage is None:
+        return
+    never = coverage.never_matched
+    print(
+        f"  Override coverage: {coverage.matched}/{coverage.total_overrides} overrides matched "
+        f"({len(never)} never used)"
+    )
+    if never:
+        sample = never[:10]
+        suffix = "" if len(never) <= 10 else f", +{len(never) - 10} more"
+        print(f"  Never-matched: {sample}{suffix}")
+    path = getattr(report, "override_coverage_path", None)
+    if path:
+        print(f"  Coverage report written: {path}")
+
+
+def _resolve_noninteractive(flag: bool | None) -> bool:
+    """Resolve the noninteractive flag: explicit caller wins, env var falls back."""
+    if flag is not None:
+        return flag
+    from kairix.paths import noninteractive_mode
+
+    return noninteractive_mode()
+
+
+def _guard_reset_interlock(args: argparse.Namespace, *, noninteractive: bool) -> None:
+    """Block --reset unless --confirm is set or noninteractive mode is in effect.
+
+    Exits 2 with an actionable message on refusal — never silent. The
+    exit code is distinct from the standard "errors during crawl" exit 1
+    so wrappers can distinguish "we refused to run" from "we ran and
+    something inside failed."
+    """
+    if not getattr(args, "reset", False):
+        return
+    if args.confirm or noninteractive:
+        return
+    print(
+        "Error: --reset is destructive. Pass --confirm to acknowledge or set "
+        "KAIRIX_NONINTERACTIVE=1 in non-interactive pipelines.",
+        file=sys.stderr,
+    )
+    print(
+        "  run: kairix store crawl --reset --confirm  (or: KAIRIX_NONINTERACTIVE=1 kairix store crawl --reset)",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def _resolve_overrides(document_root: str) -> Any:
+    """Resolve and load the entity-overrides file rooted at the crawl document_root.
+
+    Returns ``EntityOverrides`` (possibly empty when the file is absent).
+    Path resolution lives in :func:`kairix.paths.entity_overrides_path`
+    (F4: env reads stay in ``paths.py``) — the CLI passes its resolved
+    ``document_root`` so the overrides file is anchored to the same root
+    the crawl is about to walk.
+    """
+    from kairix.knowledge.entities.overrides import load_entity_overrides
+    from kairix.paths import entity_overrides_path
+
+    path = entity_overrides_path(document_root_arg=document_root)
+    return load_entity_overrides(path)
+
+
+def _cmd_crawl(
+    args: argparse.Namespace,
+    *,
+    neo4j_client: Any = None,
+    noninteractive: bool | None = None,
+) -> None:
     import logging
 
     level = logging.DEBUG if args.verbose else logging.WARNING
     logging.basicConfig(level=level, format="%(levelname)s %(message)s")
+
+    resolved_noninteractive = _resolve_noninteractive(noninteractive)
+    _guard_reset_interlock(args, noninteractive=resolved_noninteractive)
 
     document_root = _resolve_document_root(args.document_root)
 
@@ -108,7 +215,15 @@ def _cmd_crawl(args: argparse.Namespace, *, neo4j_client: Any = None) -> None:
         print("Warning: Neo4j unavailable — running in dry-run mode", file=sys.stderr)
         args.dry_run = True
 
-    report = crawl(document_root=document_root, neo4j_client=neo4j_client, dry_run=args.dry_run)
+    overrides = _resolve_overrides(document_root)
+
+    report = crawl(
+        document_root=document_root,
+        neo4j_client=neo4j_client,
+        dry_run=args.dry_run,
+        reset=args.reset,
+        overrides=overrides,
+    )
     _print_crawl_report(report, document_root)
 
     if report.errors:
