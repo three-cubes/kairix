@@ -8,6 +8,7 @@ from typing import Any
 
 # F17 — argparse 'store_true' action name. Centralised so adding new
 # boolean flags doesn't push the literal over the duplicated-string limit.
+# Every site is "this is a boolean flag with no value"; the coupling is real.
 _STORE_TRUE = "store_true"
 
 
@@ -260,6 +261,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_count.add_argument("--json", action=_STORE_TRUE, help="Emit JSON envelope")
     p_count.set_defaults(func=cmd_count)
 
+    # audit subcommand — one-shot junk/paths/enrichment audit (#260)
+    from kairix.use_cases.entity_audit import EntityAuditMode as _AuditMode
+
+    p_audit = sub.add_parser("audit", help="Audit entity graph (junk/paths/enrichment)")
+    p_audit.add_argument(
+        "--mode",
+        choices=[m.value for m in _AuditMode],
+        default="all",
+        help="Audit lens (default: all = union of junk, paths, enrichment)",
+    )
+    p_audit.add_argument("--format", choices=["text", "json"], default="text")
+    p_audit.add_argument("--output", default=None, help="Write report to FILE instead of stdout")
+    p_audit.set_defaults(func=cmd_audit)
+
+    # purge subcommand — DETACH DELETE rows from an audit report (#261)
+    p_purge = sub.add_parser("purge", help="Purge entities from a saved audit report")
+    p_purge.add_argument(
+        "--audit-report",
+        required=True,
+        help="Path to JSON audit report (from `kairix entity audit --format json --output FILE`)",
+    )
+    p_purge.add_argument("--format", choices=["text", "json"], default="text")
+    purge_action = p_purge.add_mutually_exclusive_group(required=True)
+    purge_action.add_argument("--dry-run", action=_STORE_TRUE, help="Preview deletions, run no Cypher")
+    purge_action.add_argument("--execute", action=_STORE_TRUE, help="Apply DETACH DELETE for each row")
+    p_purge.set_defaults(func=cmd_purge)
+
     return parser
 
 
@@ -369,6 +397,97 @@ def cmd_count(
     return 0
 
 
+def cmd_audit(
+    args: argparse.Namespace,
+    *,
+    deps: Any = None,
+    neo4j_client: Any = None,
+) -> int:
+    """kairix entity audit — one-shot junk/paths/enrichment audit (#260).
+
+    Thin adapter around ``kairix.use_cases.entity_audit.run_entity_audit``.
+    ``deps`` is the test DI seam; production callers leave it ``None`` and
+    the CLI builds an ``EntityAuditDeps`` from the live Neo4j client + the
+    configured document root.
+    """
+    from kairix.use_cases.entity_audit import (
+        EntityAuditDeps,
+        EntityAuditMode,
+        format_report_json,
+        format_report_text,
+        run_entity_audit,
+    )
+
+    if deps is None:
+        client = neo4j_client if neo4j_client is not None else _resolve_neo4j_client()
+        document_root = _resolve_document_root()
+        deps = EntityAuditDeps(neo4j_client=client, document_root=document_root)
+
+    mode = EntityAuditMode(args.mode)
+    report = run_entity_audit(mode, deps=deps)
+
+    rendered = format_report_json(report) if args.format == "json" else format_report_text(report)
+    if args.output:
+        try:
+            from pathlib import Path
+
+            Path(args.output).write_text(rendered, encoding="utf-8")
+        except OSError as exc:
+            print(f"ERROR: could not write output file: {exc}", file=sys.stderr)
+            return 1
+        print(f"Wrote {report.total} row(s) to {args.output}")
+    else:
+        print(rendered, end="" if rendered.endswith("\n") else "\n")
+    return 0
+
+
+def cmd_purge(
+    args: argparse.Namespace,
+    *,
+    deps: Any = None,
+    neo4j_client: Any = None,
+) -> int:
+    """kairix entity purge — DETACH DELETE rows from an audit report (#261).
+
+    Reads the JSON audit report ``run_entity_audit`` emits and either
+    previews (``--dry-run``) or executes (``--execute``) the deletes.
+    """
+    from kairix.use_cases.entity_purge import (
+        EntityPurgeDeps,
+        format_purge_json,
+        format_purge_text,
+        run_entity_purge,
+    )
+
+    if deps is None:
+        client = neo4j_client if neo4j_client is not None else _resolve_neo4j_client()
+        deps = EntityPurgeDeps(neo4j_client=client)
+
+    result = run_entity_purge(args.audit_report, dry_run=args.dry_run, deps=deps)
+    rendered = format_purge_json(result) if args.format == "json" else format_purge_text(result)
+    print(rendered, end="" if rendered.endswith("\n") else "\n")
+    if result.error:
+        return 1
+    return 0
+
+
+def _resolve_neo4j_client() -> Any:
+    """Return the production Neo4j client. Isolated so tests can leave it untouched."""
+    from kairix.knowledge.graph.client import get_client
+
+    return get_client()
+
+
+def _resolve_document_root() -> str:
+    """Return the configured document root path as a string."""
+    try:
+        from kairix.paths import document_root
+
+        return str(document_root())
+    except Exception:
+        return ""
+
+
 def main(argv: list[str] | None = None, *, db_path: Any = None, neo4j_client: Any = None) -> int:
     """Entry point for `kairix entity`.
 
@@ -388,4 +507,8 @@ def main(argv: list[str] | None = None, *, db_path: Any = None, neo4j_client: An
         return cmd_get(args)
     if args.command == "count":
         return cmd_count(args, neo4j_client=neo4j_client)
+    if args.command == "audit":
+        return cmd_audit(args, neo4j_client=neo4j_client)
+    if args.command == "purge":
+        return cmd_purge(args, neo4j_client=neo4j_client)
     return 1  # pragma: no cover — unreachable; subparsers required=True

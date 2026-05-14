@@ -5,7 +5,7 @@ Subcommands:
   bootstrap   Agent orientation envelope: role, board, recent memory, goals, health
   embed       Embed documents into the kairix vector index
   search      Hybrid search: BM25 + vector via RRF
-  entity      Entity management: suggest (NER), validate (Wikidata)
+  entity      Entity management: suggest (NER), validate (Wikidata), audit, purge
   curator     Curator agent: entity health monitoring and enrichment (CA-1)
   contradict  Contradiction detection: check new content against existing knowledge
   store       Document store operations: crawl entities into Neo4j, health check
