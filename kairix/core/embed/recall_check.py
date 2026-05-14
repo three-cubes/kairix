@@ -77,7 +77,7 @@ class VectorSearcher(Protocol):
     def search_vectors(self, vector: np.ndarray, *, limit: int) -> list[str]: ...
 
 
-def _get_recall_queries(
+def get_recall_queries(
     db: sqlite3.Connection | None = None,
     *,
     cache_path: Path | None = CANARY_CACHE,
@@ -102,7 +102,7 @@ def _get_recall_queries(
             return cached
 
     if db is not None:
-        adaptive = _build_adaptive_queries(db)
+        adaptive = build_adaptive_queries(db)
         if adaptive:
             if cache_path is not None:
                 save_canary_cache(adaptive, cache_path)
@@ -111,7 +111,7 @@ def _get_recall_queries(
     return list(DEFAULT_RECALL_QUERIES)
 
 
-def _build_adaptive_queries(db: sqlite3.Connection) -> list[tuple[str, str, str]]:
+def build_adaptive_queries(db: sqlite3.Connection) -> list[tuple[str, str, str]]:
     """Build recall queries from a random sample of indexed document titles.
 
     Called once per canary cache lifetime. The randomness here is fine
@@ -420,7 +420,7 @@ class RecallChecker:
         if recall_queries is not None:
             queries = recall_queries
         else:
-            queries = _get_recall_queries(db, cache_path=canary_cache_path, rebuild=rebuild_canaries)
+            queries = get_recall_queries(db, cache_path=canary_cache_path, rebuild=rebuild_canaries)
         passed = 0
         detail: list[dict[str, Any]] = []
 
@@ -526,7 +526,7 @@ def run_recall_gate(
     and ``alert_callback`` is invoked with a human-readable message.
 
     The canary suite is sourced from a persistent on-disk cache so the
-    same queries fire on every run — see ``_get_recall_queries``. Pass
+    same queries fire on every run — see ``get_recall_queries``. Pass
     ``rebuild_canaries=True`` (or run ``kairix embed --rebuild-canaries``)
     to discard the cache and re-sample.
 

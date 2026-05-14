@@ -1,3 +1,2 @@
-tests/bdd/steps/recall_steps.py
 tests/search/test_config_loader.py
 tests/test_paths.py
