@@ -471,6 +471,25 @@ def env_file_override() -> str | None:
     return value if value else None
 
 
+def entity_overrides_path() -> Path:
+    """Path to the operator-edited entity overrides file.
+
+    Default: ``{document_root}/04-Agent-Knowledge/_entity-overrides.md``.
+
+    Operators add terms the NER model misses or mistypes (e.g. company
+    acronyms, project codenames) so ``kairix entity suggest`` picks them
+    up. The file format is documented in
+    ``docs/user-guide/entity-overrides.md`` — closes #166.
+
+    Override via ``KAIRIX_ENTITY_OVERRIDES_PATH`` for tests and custom
+    deployments. The env read stays in this module (F4).
+    """
+    raw = os.environ.get("KAIRIX_ENTITY_OVERRIDES_PATH")
+    if raw:
+        return Path(raw).expanduser()
+    return document_root() / "04-Agent-Knowledge" / "_entity-overrides.md"
+
+
 def agent_memory_path(agent: str, *, root: Path | str | None = None) -> Path:
     """Get the memory directory for an agent.
 

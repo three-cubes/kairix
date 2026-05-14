@@ -483,3 +483,40 @@ class TestMaintenanceSkipNoopThreshold:
         assert any("not an int" in rec.message for rec in caplog.records), (
             "expected a warning about the invalid int value"
         )
+
+
+# ---------------------------------------------------------------------------
+# entity_overrides_path — #166: vault-driven entity-overrides file location.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestEntityOverridesPath:
+    @pytest.mark.unit
+    def test_explicit_env_override_wins(self, monkeypatch, tmp_path) -> None:
+        """``KAIRIX_ENTITY_OVERRIDES_PATH`` takes precedence over the default."""
+        from kairix.paths import entity_overrides_path
+
+        custom = tmp_path / "custom-overrides.md"
+        monkeypatch.setenv("KAIRIX_ENTITY_OVERRIDES_PATH", str(custom))
+        assert entity_overrides_path() == custom
+
+    @pytest.mark.unit
+    def test_default_lives_under_document_root(self, monkeypatch, tmp_path) -> None:
+        """Without the override env var, the path sits under
+        ``{document_root}/04-Agent-Knowledge/_entity-overrides.md``."""
+        from kairix.paths import entity_overrides_path
+
+        monkeypatch.delenv("KAIRIX_ENTITY_OVERRIDES_PATH", raising=False)
+        monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", str(tmp_path))
+        assert entity_overrides_path() == tmp_path / "04-Agent-Knowledge" / "_entity-overrides.md"
+
+    @pytest.mark.unit
+    def test_explicit_env_expands_user(self, monkeypatch) -> None:
+        """A ``~``-prefixed override path is expanded to the home directory."""
+        from kairix.paths import entity_overrides_path
+
+        monkeypatch.setenv("KAIRIX_ENTITY_OVERRIDES_PATH", "~/overrides.md")
+        result = entity_overrides_path()
+        assert "~" not in str(result)
+        assert str(result).endswith("overrides.md")

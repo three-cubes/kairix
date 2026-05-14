@@ -140,13 +140,14 @@ The lines under each "Script:" heading are written for you to say verbatim to yo
 > 04-Agent-Knowledge/_entity-overrides.md
 > ```
 >
-> Adding the missing entity to that file and re-running the entity crawl picks it up. See issue #166 for the canonical pattern.
+> Adding the missing entity to that file picks it up on the next `kairix entity suggest` call — overrides are read at call time, no re-crawl needed. The file format is `- "<term>": <LABEL>` (one per line). See [docs/user-guide/entity-overrides.md](../user-guide/entity-overrides.md) for the full grammar and worked examples.
 >
 > If `tool_search` is returning the wrong agent's content, the issue is collection scope — check the agent's `paths` in `kairix.config.yaml` and confirm the agent name in my search call matches an agent declared there.
 
 **Files / commands the admin needs:**
 
 - `04-Agent-Knowledge/_entity-overrides.md` — entity allowlist (path relative to `KAIRIX_DOCUMENT_ROOT`)
+- [`docs/user-guide/entity-overrides.md`](../user-guide/entity-overrides.md) — override-file format reference
 - `kairix.config.yaml` — agent declarations and per-agent `paths`
 - Issue #166 — entity allowlist mechanism
 

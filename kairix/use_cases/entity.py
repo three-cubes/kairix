@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -23,10 +24,39 @@ def _default_neo4j_client() -> Any:
     return get_client()
 
 
-def _default_suggest(text: str, neo4j_client: Any) -> list[Any]:
-    from kairix.knowledge.entities.suggest import suggest_entities
+def production_suggest(
+    text: str,
+    neo4j_client: Any,
+    *,
+    overrides_path: Path | None = None,
+) -> list[Any]:
+    """Production suggest wrapper — loads the vault override file once.
 
-    return suggest_entities(text, neo4j_client)
+    Reads ``${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md``
+    (or the ``KAIRIX_ENTITY_OVERRIDES_PATH`` operator override), builds
+    the filter chain with the resulting allowlist + label overrides,
+    and hands it to ``suggest_entities``. Missing / malformed override
+    file falls back to the default chain — never blocks. Closes #166.
+
+    ``overrides_path`` is a deployment-time seam: operators or callers
+    that resolve the override file themselves (CLI flag, in-memory
+    config) pass it in here. Production callers leave it ``None`` and
+    the canonical path resolves from ``kairix.paths.entity_overrides_path``.
+    F6-clean — the kwarg has a production use, not just test ergonomics.
+    """
+    from kairix.knowledge.entities.filters import default_suggestion_filter_chain
+    from kairix.knowledge.entities.overrides import load_entity_overrides
+    from kairix.knowledge.entities.suggest import suggest_entities
+    from kairix.paths import entity_overrides_path
+
+    path = overrides_path if overrides_path is not None else entity_overrides_path()
+    overrides = load_entity_overrides(path)
+    chain = default_suggestion_filter_chain(
+        allowlist=overrides.allowlist,
+        person_overrides=overrides.person_overrides,
+        org_overrides=overrides.org_overrides,
+    )
+    return suggest_entities(text, neo4j_client, filter_chain=chain)
 
 
 def _default_validate(name: str, neo4j_client: Any, update: bool) -> dict[str, Any]:
@@ -71,7 +101,7 @@ class EntitySuggestDeps:
     ``deps=None``.
     """
 
-    suggest_fn: Callable[..., list[Any]] = field(default_factory=lambda: _default_suggest)
+    suggest_fn: Callable[..., list[Any]] = field(default_factory=lambda: production_suggest)
     neo4j_client_fn: Callable[[], Any] = field(default_factory=lambda: _default_neo4j_client)
 
 
