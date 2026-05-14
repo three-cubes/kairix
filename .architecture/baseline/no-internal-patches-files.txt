@@ -1,3 +1,7 @@
+tests/entities/test_suggest.py
 tests/graph/test_upsert_edge.py
-tests/integration/test_eval_auto_gold_cli.py
 tests/integration/test_mcp_tool_contracts.py
+tests/research/test_graph.py
+tests/search/test_config_loader.py
+tests/setup/test_onboarding_agent.py
+tests/test_paths.py

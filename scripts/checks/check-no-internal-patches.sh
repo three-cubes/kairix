@@ -17,7 +17,6 @@ fakes from tests/fakes.py, not patch kairix internals. If the
 production class lacks a constructor seam, add one (same shape as
 GoldBuilder(llm_judge=, retriever=))."
 
-# Match both double-quoted "kairix..." and single-quoted 'kairix...' forms.
-# (`grep -E` doesn't have non-capturing groups but `(["'])` is fine.)
-grep -rEl "(@patch|with patch)\\([\"']kairix\\." tests/ --include='*.py' 2>/dev/null \
+# Delegate to AST-based detector (resolves #214 — grep missed multi-line patch()).
+python3 "${SCRIPT_DIR}/check_no_internal_patches.py" \
     | arch_gate "no-internal-patches" "$REMEDIATION"

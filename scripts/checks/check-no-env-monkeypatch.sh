@@ -16,5 +16,6 @@ REMEDIATION="Refactor: pass paths as a constructor argument or use FakePaths
 from tests/fakes.py. The production code must not require process-env
 mutation to be testable — that's the test-shaped-API smell #139 reverted."
 
-grep -rEl 'monkeypatch\.(setenv|setattr|delenv).*KAIRIX_' tests/ --include='*.py' 2>/dev/null \
+# Delegate to AST-based detector (resolves #217 — grep matched docstring text).
+python3 "${SCRIPT_DIR}/check_no_env_monkeypatch.py" \
     | arch_gate "no-env-monkeypatch" "$REMEDIATION"

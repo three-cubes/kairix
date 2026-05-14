@@ -1,9 +1,8 @@
 tests/conftest.py
 tests/eval/test_retrieval_config_resolution.py
-tests/fakes.py
 tests/integration/conftest.py
-tests/search/test_config_loader_contracts.py
 tests/search/test_config_loader.py
+tests/search/test_config_loader_contracts.py
 tests/test_agent_memory_path_regression.py
 tests/test_paths.py
 tests/test_secrets.py
