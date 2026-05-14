@@ -12,6 +12,7 @@ Registry:
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from kairix.quality.eval.metrics import ndcg_graded
@@ -69,16 +70,20 @@ class NDCGScorer:
         return ndcg_graded(retrieved, gold, k=self._k)
 
 
+@dataclass
 class LLMJudgeScorer:
     """LLM-based relevance scoring (gpt-4o-mini rates 0.0-1.0).
 
-    Args:
-        chat_backend: ``ChatBackend`` protocol implementation. Defaults to
-                      ``AzureChatBackend`` constructed lazily inside ``llm_judge``.
+    Refactored per #204: chat_backend is a non-Optional ``ChatBackend``
+    field with a ``default_factory`` wiring the production
+    ``AzureChatBackend``. Tests inject ``LLMJudgeScorer(chat_backend=fake)``;
+    production callers leave the kwarg unset and get the live backend.
+
+    Attributes:
+        chat_backend: ``ChatBackend`` protocol implementation.
     """
 
-    def __init__(self, chat_backend: ChatBackend | None = None) -> None:
-        self._chat_backend = chat_backend
+    chat_backend: ChatBackend = field(default_factory=lambda: _default_chat_backend())
 
     def score(self, retrieved: list[str], gold: list[dict[str, Any]]) -> float:
         from kairix.quality.benchmark.runner import llm_judge
@@ -91,8 +96,20 @@ class LLMJudgeScorer:
             query=query,
             paths=retrieved,
             snippets=[],
-            chat_backend=self._chat_backend,
+            chat_backend=self.chat_backend,
         )
+
+
+def _default_chat_backend() -> ChatBackend:  # pragma: no cover — prod wrapper; tests pass chat_backend=fake
+    """Production ``ChatBackend`` factory — wraps ``AzureChatBackend``.
+
+    Kept as a separate function so the lambda in ``LLMJudgeScorer.chat_backend``
+    has a stable, typed default that doesn't import ``kairix._azure`` at
+    module-import time.
+    """
+    from kairix._azure import AzureChatBackend
+
+    return AzureChatBackend()
 
 
 # ---------------------------------------------------------------------------
