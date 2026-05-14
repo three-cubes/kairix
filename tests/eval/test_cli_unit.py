@@ -84,6 +84,7 @@ def test_generate_success_path(monkeypatch, tmp_path: Path) -> None:
     assert code == 0
     assert "Accepted: 10" in stdout
     assert "Rejected (no grade-2 doc): 2" in stdout
+    assert len(fake_gen.generate_calls) >= 1, "expected generate to be called at least once"
     assert fake_gen.generate_calls[0]["n_cases"] == 5
     assert fake_gen.generate_calls[0]["categories"] == ["recall", "entity"]
 

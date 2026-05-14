@@ -101,7 +101,7 @@ def test_search_result_import_failure_swallowed() -> None:
         sys.modules["kairix.core.search.pipeline"] = _BrokenModule("kairix.core.search.pipeline")
 
         kairix_reloaded = importlib.import_module("kairix")
-        assert kairix_reloaded is not None
+        assert kairix_reloaded.__name__ == "kairix"
     finally:
         _restore_kairix_modules(snapshot)
 
@@ -121,7 +121,7 @@ def test_retrieval_config_import_failure_swallowed() -> None:
         sys.modules["kairix.core.search.config"] = _BrokenModule("kairix.core.search.config")
 
         kairix_reloaded = importlib.import_module("kairix")
-        assert kairix_reloaded is not None
+        assert kairix_reloaded.__name__ == "kairix"
     finally:
         _restore_kairix_modules(snapshot)
 
@@ -141,6 +141,6 @@ def test_query_intent_import_failure_swallowed() -> None:
         sys.modules["kairix.core.search.intent"] = _BrokenModule("kairix.core.search.intent")
 
         kairix_reloaded = importlib.import_module("kairix")
-        assert kairix_reloaded is not None
+        assert kairix_reloaded.__name__ == "kairix"
     finally:
         _restore_kairix_modules(snapshot)

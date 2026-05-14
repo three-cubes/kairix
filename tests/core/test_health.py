@@ -228,7 +228,7 @@ def test_probe_time_cap_marks_slow_probe_offline_and_returns_within_budget() -> 
 def test_default_budget_constant_is_two_seconds() -> None:
     # The contract calls for a 2-second cap; this test pins the default
     # so a future refactor can't silently raise the cap.
-    assert HEALTH_PROBE_BUDGET_S == 2.0
+    assert HEALTH_PROBE_BUDGET_S == pytest.approx(2.0)
 
 
 def test_secrets_probe_timeout_reports_budget_in_degraded_reason() -> None:
