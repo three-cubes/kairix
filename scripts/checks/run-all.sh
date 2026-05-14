@@ -58,6 +58,9 @@ python3 "${SCRIPT_DIR}/check_bdd_happy_path.py" || overall=1
 # F13 — BDD no implementation symbols
 python3 "${SCRIPT_DIR}/check_bdd_no_implementation_leaks.py" || overall=1
 
+# F14 — sonar.issue.ignore entries require rationale
+python3 "${SCRIPT_DIR}/check_sonar_ignore_rationale.py" || overall=1
+
 # F7 — needs coverage.xml. Skip if not present or skip flag set.
 if [ "$skip_coverage" -eq 0 ]; then
     if [ -f "${REPO_ROOT}/coverage.xml" ]; then
