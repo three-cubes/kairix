@@ -97,6 +97,9 @@ python3 "${SCRIPT_DIR}/check_go_readme_coverage.py" || overall=1
 # G1 — every Go binary exposes --version
 python3 "${SCRIPT_DIR}/check_go_version_flag.py" || overall=1
 
+# G10 — every direct Go dependency carries a rationale in DEPENDENCIES.md
+python3 "${SCRIPT_DIR}/check_go_dependency_rationale.py" || overall=1
+
 # F7 — needs coverage.xml. Skip if not present or skip flag set.
 if [[ "$skip_coverage" -eq 0 ]]; then
     if [[ -f "${REPO_ROOT}/coverage.xml" ]]; then
