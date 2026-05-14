@@ -100,7 +100,7 @@ def _call_chat(
     endpoint: str,
     deployment: str,
     max_tokens: int,
-    deps: SummariesDeps | None = None,
+    deps: SummariesDeps,
 ) -> tuple[str, int]:
     """
     Call Azure OpenAI chat completions via the shared SDK client.
@@ -109,9 +109,12 @@ def _call_chat(
 
     The api_key, endpoint, and deployment parameters are accepted for backwards
     compatibility but ignored — credentials are resolved by ``kairix._azure``.
+
+    ``deps`` is required (non-Optional). Public callers
+    (``generate_l0``/``generate_l1``/``generate_summaries``) resolve the
+    production-default at their boundary so this internal helper has no
+    lazy-init branch — eliminates an uncovered code path per #204.
     """
-    if deps is None:  # pragma: no cover — production lazy default; tests pass deps=SummariesDeps(chat=fake)
-        deps = SummariesDeps()
     content = deps.chat(messages, max_tokens=max_tokens)
     # Token usage is not available from the shared client; estimate from output length.
     tokens_est = estimate_tokens(content)
@@ -138,6 +141,8 @@ def generate_l0(
     Uses the first 800 words of content. Returns the abstract string.
     Raises on API failure.
     """
+    if deps is None:  # pragma: no cover — production lazy default; tests pass deps=SummariesDeps(chat=fake)
+        deps = SummariesDeps()
     truncated = _first_n_words(content, 800)
     messages = [
         {"role": "system", "content": _L0_SYSTEM},
@@ -162,6 +167,8 @@ def generate_l1(
     Uses the first 2000 words of content. Returns the overview string.
     Raises on API failure.
     """
+    if deps is None:  # pragma: no cover — production lazy default; tests pass deps=SummariesDeps(chat=fake)
+        deps = SummariesDeps()
     truncated = _first_n_words(content, 2000)
     messages = [
         {"role": "system", "content": _L1_SYSTEM},
