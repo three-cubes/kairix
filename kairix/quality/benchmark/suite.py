@@ -48,6 +48,87 @@ class BenchmarkSuite:
 # ---------------------------------------------------------------------------
 
 
+def resolve_suite_path(suite_arg: str, root: Path | None = None) -> Path:
+    """Resolve a `--suite` argument to a concrete YAML path.
+
+    ``suite_arg`` may be:
+      - An explicit filesystem path (used directly when it exists).
+      - A bundle name (e.g. ``reflib``) — searches ``root`` for the
+        highest gold version matching ``<name>-gold-v*.yaml``, then
+        falls back to ``<name>.yaml``.
+
+    ``root`` defaults to ``kairix.paths.bundled_suites_root()`` for
+    production callers; tests pass an explicit ``tmp_path`` to avoid
+    env-var monkeypatching (F2).
+
+    The bundle-name shortcut is the user-facing UX from #222 — running
+    ``kairix benchmark run reflib`` no longer requires hunting for the
+    in-image suite path.
+    """
+    p = Path(suite_arg)
+    if p.exists():
+        return p
+
+    if root is None:
+        from kairix.paths import bundled_suites_root
+
+        root = bundled_suites_root()
+
+    if root.is_dir():
+        gold = sorted(
+            root.glob(f"{suite_arg}-gold-v*.yaml"),
+            key=lambda x: x.name,
+            reverse=True,
+        )
+        if gold:
+            return gold[0]
+
+        fallback = root / f"{suite_arg}.yaml"
+        if fallback.exists():
+            return fallback
+
+    raise FileNotFoundError(
+        f"Suite '{suite_arg}' not found. Tried path lookup and bundled "
+        f"resolution in {root}. Run 'kairix benchmark list' to see available bundled suites."
+    )
+
+
+def list_bundled_suites(root: Path | None = None) -> list[dict]:
+    """Return metadata for each bundled suite for the ``list`` subcommand.
+
+    Returns: list of dicts with keys ``name``, ``path``, ``default_collection``,
+    ``n_cases``, ``description``. Missing fields are ``None``.
+
+    ``root`` defaults to ``kairix.paths.bundled_suites_root()``; tests
+    pass an explicit path for hermetic resolution.
+    """
+    if root is None:
+        from kairix.paths import bundled_suites_root
+
+        root = bundled_suites_root()
+
+    if not root.is_dir():
+        return []
+
+    out: list[dict] = []
+    for yaml_path in sorted(root.glob("*.yaml")):
+        try:
+            raw = load_yaml_file(yaml_path)
+        except (FileNotFoundError, ValueError):
+            continue
+        meta = raw.get("meta", {}) if isinstance(raw, dict) else {}
+        out.append(
+            {
+                "name": meta.get("name") or yaml_path.stem,
+                "path": str(yaml_path),
+                "default_collection": meta.get("default_collection"),
+                "n_cases": len(raw.get("cases", [])) if isinstance(raw, dict) else 0,
+                "description": meta.get("description"),
+            }
+        )
+    return out
+
+
 def load_yaml_file(path: Path) -> dict:
     """Read a YAML file, raise on parse error or unexpected type."""
     if not path.exists():

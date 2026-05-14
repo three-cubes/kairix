@@ -30,7 +30,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # run
     run_p = sub.add_parser("run", help="Run a benchmark suite")
-    run_p.add_argument("--suite", required=True, help="Path to suite YAML file")
+    run_p.add_argument(
+        "--suite",
+        required=True,
+        help="Suite to run — either a bundled name (e.g. 'reflib') or a path to a YAML file. "
+        "Run 'kairix benchmark list' for the bundled set.",
+    )
     run_p.add_argument(
         "--system",
         default="hybrid",
@@ -53,12 +58,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # validate
     val_p = sub.add_parser("validate", help="Validate suite YAML against kairix index")
-    val_p.add_argument("--suite", required=True, help="Path to suite YAML file")
+    val_p.add_argument(
+        "--suite",
+        required=True,
+        help="Suite to validate — bundled name or path (same resolution as 'run').",
+    )
 
     # compare
     cmp_p = sub.add_parser("compare", help="Compare two benchmark result JSON files")
     cmp_p.add_argument("result_a", help="Path to first result JSON")
     cmp_p.add_argument("result_b", help="Path to second result JSON")
+
+    # list
+    sub.add_parser("list", help="List bundled suites (resolved from kairix.paths.bundled_suites_root)")
 
     # init
     init_p = sub.add_parser("init", help="Scaffold a new suite YAML file")
@@ -84,10 +96,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def cmd_run(args: argparse.Namespace) -> int:
     from kairix.quality.benchmark.runner import format_interpretation, run_benchmark
-    from kairix.quality.benchmark.suite import load_suite, validate_suite
+    from kairix.quality.benchmark.suite import load_suite, resolve_suite_path, validate_suite
 
-    suite = load_suite(args.suite)
-    print(f"Suite: {suite.meta.get('name', args.suite)}  ({len(suite.cases)} cases)")
+    suite_path = resolve_suite_path(args.suite)
+    suite = load_suite(str(suite_path))
+    print(f"Suite: {suite.meta.get('name', args.suite)}  ({len(suite.cases)} cases)  [{suite_path}]")
+
+    # Auto-scope to suite.meta.default_collection when --collection not provided.
+    # Resolves #222: bundled reflib suite ships with default_collection=reference-library
+    # so users don't need to know that collection has in_default: false.
+    collection = getattr(args, "collection", None)
+    default_collection = suite.meta.get("default_collection")
+    if collection is None and default_collection:
+        collection = default_collection
+        print(f"  auto-scoping to collection '{collection}' (from suite.meta.default_collection)")
 
     # Lightweight validation — warn but don't block on missing gold paths
     try:
@@ -108,11 +130,31 @@ def cmd_run(args: argparse.Namespace) -> int:
         system=args.system,
         agent=args.agent,
         output_dir=args.output,
-        collection=getattr(args, "collection", None),
+        collection=collection,
         fusion_override=getattr(args, "fusion", None),
     )
 
     print(format_interpretation(result))
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    """List bundled benchmark suites (resolves #222)."""
+    del args  # unused — list takes no flags
+    from kairix.quality.benchmark.suite import list_bundled_suites
+
+    suites = list_bundled_suites()
+    if not suites:
+        print("No bundled suites found. Set KAIRIX_SUITES_ROOT or cd to a directory containing 'suites/'.")
+        return 1
+
+    print(f"{'name':<24}  {'cases':>6}  {'default collection':<24}  description")
+    print("-" * 100)
+    for s in suites:
+        desc = s["description"] or ""
+        print(f"{s['name']:<24}  {s['n_cases']:>6}  {(s['default_collection'] or '—'):<24}  {desc[:48]}")
+    print()
+    print("Run with: kairix benchmark run --suite <name>")
     return 0
 
 
@@ -122,10 +164,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    from kairix.quality.benchmark.suite import load_suite, validate_suite
+    from kairix.quality.benchmark.suite import load_suite, resolve_suite_path, validate_suite
 
     try:
-        suite = load_suite(args.suite)
+        suite_path = resolve_suite_path(args.suite)
+        suite = load_suite(str(suite_path))
     except (ValueError, FileNotFoundError) as exc:
         print(f"❌ Load error: {exc}", file=sys.stderr)
         return 1
@@ -316,6 +359,7 @@ def main(argv: list[str] | None = None) -> None:
         "validate": cmd_validate,
         "compare": cmd_compare,
         "init": cmd_init,
+        "list": cmd_list,
     }
     handler = handlers.get(args.subcommand)
     if handler:

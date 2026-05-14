@@ -195,6 +195,11 @@ def reference_library_root() -> Path:
     return Path(os.environ.get("KAIRIX_REFLIB_ROOT", "reference-library"))
 
 
+def bundled_suites_root() -> Path:
+    """Bundled benchmark suites — ships inside the container at /opt/kairix/suites."""
+    return Path(os.environ.get("KAIRIX_SUITES_ROOT", "suites"))
+
+
 def db_path() -> Path:
     """Get the database path."""
     return KairixPaths.resolve().db_path
