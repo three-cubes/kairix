@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from kairix.use_cases import _entity_get_defaults as _defaults
-
 logger = logging.getLogger(__name__)
+
+
+def _default_fetch_card(name: str, *, neo4j_client: Any | None = None) -> dict[str, Any] | None:
+    from kairix.agents.mcp.server import _fetch_entity_card
+
+    return _fetch_entity_card(name, neo4j_client=neo4j_client)
 
 
 @dataclass(frozen=True)
@@ -49,9 +53,15 @@ class EntityGetOutput:
 
 @dataclass(frozen=True)
 class EntityGetDeps:
-    """Injectable dependencies for ``run_entity_get``."""
+    """Injectable dependencies for ``run_entity_get``.
 
-    fetch_fn: Callable[..., dict[str, Any] | None] | None = None
+    Mirrors ``WorkerDeps`` (kairix/worker.py): ``fetch_fn`` is
+    non-Optional with a ``default_factory`` returning the production
+    helper. Tests pass ``EntityGetDeps(fetch_fn=fake)``; production
+    callers leave ``deps=None``.
+    """
+
+    fetch_fn: Callable[..., dict[str, Any] | None] = field(default_factory=lambda: _default_fetch_card)
 
 
 def run_entity_get(
@@ -68,10 +78,9 @@ def run_entity_get(
         deps: Injectable dependencies; production callers leave None.
     """
     d = deps or EntityGetDeps()
-    fetch = d.fetch_fn or _defaults.default_fetch_card
 
     try:
-        card = fetch(name)
+        card = d.fetch_fn(name)
     except Exception as exc:
         logger.warning("run_entity_get failed: %s", exc, exc_info=True)
         return EntityGetOutput(name=name, error=f"{type(exc).__name__}: {exc}")

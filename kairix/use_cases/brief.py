@@ -12,15 +12,25 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-from kairix.use_cases import _brief_defaults as _defaults
 
 logger = logging.getLogger(__name__)
 
 _VALID_AGENTS = {"builder", "shape", "growth", "consultant"}
+
+
+def _default_generate(agent: str, **kwargs: Any) -> str:
+    from kairix.agents.briefing.pipeline import generate_briefing
+
+    return generate_briefing(agent, **kwargs)
+
+
+def _default_briefing_dir() -> Path:
+    from kairix.agents.briefing.writer import BRIEFING_DIR
+
+    return BRIEFING_DIR
 
 
 @dataclass(frozen=True)
@@ -50,10 +60,17 @@ class BriefOutput:
 
 @dataclass(frozen=True)
 class BriefDeps:
-    """Injectable dependencies for ``run_brief``."""
+    """Injectable dependencies for ``run_brief``.
 
-    generate_fn: Callable[..., str] | None = None
-    briefing_dir_fn: Callable[[], Path] | None = None
+    Mirrors ``WorkerDeps`` (kairix/worker.py): each callable is
+    non-Optional with a ``default_factory`` returning the production
+    helper. Tests construct ``BriefDeps(generate_fn=fake, ...)``;
+    production callers leave ``deps=None`` and the run_brief default
+    factory wires the real helpers.
+    """
+
+    generate_fn: Callable[..., str] = field(default_factory=lambda: _default_generate)
+    briefing_dir_fn: Callable[[], Path] = field(default_factory=lambda: _default_briefing_dir)
 
 
 def run_brief(
@@ -77,12 +94,10 @@ def run_brief(
         )
 
     d = deps or BriefDeps()
-    generate = d.generate_fn or _defaults.default_generate
-    briefing_dir = d.briefing_dir_fn or _defaults.default_briefing_dir
 
     try:
-        content = generate(normalised)
-        out_dir = briefing_dir()
+        content = d.generate_fn(normalised)
+        out_dir = d.briefing_dir_fn()
         path = str(out_dir / f"{normalised}-latest.md") if out_dir else ""
         preview = "\n".join(content.splitlines()[:30])
         return BriefOutput(
