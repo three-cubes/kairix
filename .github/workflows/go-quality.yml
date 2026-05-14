@@ -161,7 +161,7 @@ jobs:
           set -euo pipefail
           cd "$MODULE_DIR"
           # GOOS/GOARCH come from the matrix via TARGET_GOOS / TARGET_GOARCH
-          # (env-bound; never expanded as ${{ }} inside the script body).
+          # (env-bound; the matrix values never expand inline in the script body).
           export GOOS="$TARGET_GOOS"
           export GOARCH="$TARGET_GOARCH"
           export CGO_ENABLED=0
