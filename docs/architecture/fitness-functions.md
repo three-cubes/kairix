@@ -165,6 +165,7 @@ fully enforced; new violations anywhere in the codebase block.
 | F12 | Every BDD feature has at least one happy-path scenario | structural | Python (Gherkin parser) | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
 | F13 | BDD scenarios reject implementation symbols | line pattern | Python (regex) | pre-commit, safe-commit, CI Stage 0 | `bdd-no-implementation-leaks-files.txt` |
 | F14 | `sonar.issue.ignore` entries in `sonar-project.properties` require rationale comment | line pattern | Python (regex) | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
+| F15 | No logging of secret-named variables in plaintext | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-logging-secrets-files.txt` (empty — clean) |
 
 ---
 

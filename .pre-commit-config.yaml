@@ -114,3 +114,17 @@ repos:
         language: system
         pass_filenames: false
         files: ^tests/bdd/features/.*\.feature$
+
+      - id: arch-sonar-ignore-rationale
+        name: "arch F14: sonar.issue.ignore entries require rationale"
+        entry: python3 scripts/checks/check_sonar_ignore_rationale.py
+        language: system
+        pass_filenames: false
+        files: ^sonar-project\.properties$
+
+      - id: arch-no-logging-secrets
+        name: "arch F15: no logging secret-named variables in plaintext"
+        entry: python3 scripts/checks/check_no_logging_secrets.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
