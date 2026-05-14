@@ -116,7 +116,7 @@ def _default_scan_documents(db: Any, diagnostics: list[str]) -> tuple[int, int, 
     corpus and is not load-bearing for the worker fix.
     """
     from kairix.core.db.scanner import CollectionConfig, DocumentScanner
-    from kairix.core.search.config_loader import _resolve_config_path, load_collections
+    from kairix.core.search.config_loader import load_collections, resolve_config_path
     from kairix.core.search.registry import build_agent_owner_resolver, parse_agent_registry
     from kairix.paths import document_root, reference_library_root
 
@@ -124,7 +124,7 @@ def _default_scan_documents(db: Any, diagnostics: list[str]) -> tuple[int, int, 
 
     agent_resolver = None
     try:
-        config_path = _resolve_config_path()
+        config_path = resolve_config_path()
         if config_path is not None:
             import yaml as _yaml
 

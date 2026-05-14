@@ -177,9 +177,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.path:
         config_path = Path(args.path)
     else:
-        from kairix.core.search.config_loader import _resolve_config_path
+        from kairix.core.search.config_loader import resolve_config_path
 
-        resolved = _resolve_config_path()
+        resolved = resolve_config_path()
         if resolved is None:
             print("No config file found. Set KAIRIX_CONFIG_PATH or place kairix.config.yaml in the cwd.")
             return 1

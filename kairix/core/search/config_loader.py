@@ -56,7 +56,7 @@ _VALID_RANGES: dict[str, tuple[float, float]] = {
 }
 
 
-def _resolve_config_path(explicit: Path | str | None = None) -> Path | None:
+def resolve_config_path(explicit: Path | str | None = None) -> Path | None:
     """Find the config file path.
 
     Resolution order:
@@ -84,7 +84,7 @@ def _resolve_config_path(explicit: Path | str | None = None) -> Path | None:
     return None
 
 
-def _validate_config(cfg: RetrievalConfig) -> None:
+def validate_config(cfg: RetrievalConfig) -> None:
     """Raise ConfigValidationError if any field is outside its valid range.
 
     Called after parsing, before caching. Does NOT fall back to defaults —
@@ -110,7 +110,7 @@ def _validate_config(cfg: RetrievalConfig) -> None:
 
 
 @lru_cache(maxsize=1)
-def _load_cached(config_path: Path | None) -> RetrievalConfig:
+def load_cached(config_path: Path | None) -> RetrievalConfig:
     """Load and cache RetrievalConfig from path. Returns defaults if path is None."""
     if config_path is None:
         return RetrievalConfig.defaults()
@@ -130,8 +130,8 @@ def _load_cached(config_path: Path | None) -> RetrievalConfig:
         return RetrievalConfig.defaults()
 
     try:
-        cfg = _parse_config(data)
-        _validate_config(cfg)
+        cfg = parse_config(data)
+        validate_config(cfg)
         return cfg
     except ConfigValidationError:
         raise  # propagate — never fall back silently on invalid config
@@ -154,13 +154,13 @@ def load_config(config_path: Path | str | None = None) -> RetrievalConfig:
     Raises:
         ConfigValidationError: if the config file contains out-of-range values.
     """
-    path = _resolve_config_path(config_path)
+    path = resolve_config_path(config_path)
     if path is not None:
         logger.info("config_loader: loading config from %s", path)
-    return _load_cached(path)
+    return load_cached(path)
 
 
-def _parse_config(data: dict) -> RetrievalConfig:
+def parse_config(data: dict) -> RetrievalConfig:
     """Parse YAML dict into RetrievalConfig. Returns defaults for any missing/invalid section."""
     retrieval = data.get("retrieval", {}) or {}
     boosts = retrieval.get("boosts", {}) or {}
@@ -321,7 +321,7 @@ def parse_collections(data: dict) -> CollectionsConfig | None:
 
 def load_collections() -> CollectionsConfig | None:
     """Load collections config from YAML. Returns None if not configured."""
-    path = _resolve_config_path()
+    path = resolve_config_path()
     if path is None:
         return None
     try:

@@ -43,8 +43,8 @@ class CheckResult:
 
 
 def _default_is_docker() -> bool:
-    """Production ``is_docker`` — defers to ``kairix.paths._is_docker``."""
-    from kairix.paths import _is_docker as _impl
+    """Production ``is_docker`` — defers to ``kairix.paths.is_docker_runtime_check``."""
+    from kairix.paths import is_docker_runtime_check as _impl
 
     return _impl()
 
@@ -95,7 +95,7 @@ def check_wrapper_installed(deps: OnboardChecksDeps | None = None) -> CheckResul
     """The kairix symlink points to a shell wrapper, not the raw Python binary.
 
     ``deps.is_docker`` and ``deps.which`` are the DI seams; production
-    callers leave ``deps=None`` and defaults wire to ``kairix.paths._is_docker``
+    callers leave ``deps=None`` and defaults wire to ``kairix.paths.is_docker_runtime_check``
     and ``shutil.which``.
     """
     d = deps if deps is not None else OnboardChecksDeps()

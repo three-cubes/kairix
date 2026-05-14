@@ -483,7 +483,7 @@ agents:
 
     monkeypatch.chdir(tmp_path)
 
-    # Force the cwd-fallback path in ``_resolve_config_path`` by ensuring
+    # Force the cwd-fallback path in ``resolve_config_path`` by ensuring
     # KAIRIX_CONFIG_PATH is absent. F2 forbids ``monkeypatch.delenv`` for
     # KAIRIX_*, so we mutate-and-restore ``os.environ`` directly with a
     # ``finally`` cleanup — stdlib state, not a kairix-internal patch.
@@ -492,13 +492,13 @@ agents:
     from kairix.core.search import config_loader
 
     saved = os.environ.pop("KAIRIX_CONFIG_PATH", None)
-    config_loader._load_cached.cache_clear()
+    config_loader.load_cached.cache_clear()
     try:
         pipeline = build_search_pipeline(config=None)
     finally:
         if saved is not None:
             os.environ["KAIRIX_CONFIG_PATH"] = saved
-        config_loader._load_cached.cache_clear()
+        config_loader.load_cached.cache_clear()
 
     # The resolver was constructed with an agent_registry parsed from YAML.
     registry = getattr(pipeline.resolver, "_registry", None)
@@ -558,7 +558,7 @@ def test_build_search_pipeline_tolerates_agent_registry_parse_exception(
     from kairix.core.search import registry as registry_mod
 
     saved = os.environ.pop("KAIRIX_CONFIG_PATH", None)
-    config_loader._load_cached.cache_clear()
+    config_loader.load_cached.cache_clear()
 
     real_parse = registry_mod.parse_agent_registry
 
@@ -577,7 +577,7 @@ def test_build_search_pipeline_tolerates_agent_registry_parse_exception(
         registry_mod.parse_agent_registry = real_parse
         if saved is not None:
             os.environ["KAIRIX_CONFIG_PATH"] = saved
-        config_loader._load_cached.cache_clear()
+        config_loader.load_cached.cache_clear()
 
     # Pipeline still constructed; resolver has no agent_registry.
     assert getattr(pipeline.resolver, "_registry", "sentinel") is None

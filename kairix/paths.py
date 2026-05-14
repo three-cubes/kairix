@@ -22,7 +22,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _is_docker() -> bool:
+def is_docker_runtime_check() -> bool:
     """Detect if running inside a Docker container."""
     return (
         os.path.exists("/.dockerenv")
@@ -31,38 +31,42 @@ def _is_docker() -> bool:
     )
 
 
-def _is_service_install() -> bool:
+def is_service_install() -> bool:
     """Detect if kairix was installed as a system service (/opt/kairix)."""
     return Path("/opt/kairix/.venv").exists()
 
 
-def _default_document_root() -> Path:
+def default_document_root() -> Path:
     """Platform-appropriate default document store location.
 
     Docker: /data/documents (bind mount from host)
     Server: /var/lib/kairix/documents (admin configures)
     User (all platforms): ~/Documents (most common document location)
     """
-    if _is_docker():
+    if is_docker_runtime_check():
         return Path("/data/documents")
-    if _is_service_install():
+    if is_service_install():
         return Path("/var/lib/kairix/documents")
     return Path.home() / "Documents"
 
 
-def _default_data_dir() -> Path:
+def default_data_dir(platform: str = sys.platform) -> Path:
     """Platform-appropriate data directory for DB, vectors, and state.
 
     Docker: /data/kairix
     Server: /var/lib/kairix
     Linux/macOS user: ~/.local/share/kairix (XDG_DATA_HOME)
     Windows user: %LOCALAPPDATA%/kairix
+
+    ``platform`` defaults to ``sys.platform`` and is exposed as a
+    parameter so unit tests can drive the Windows branch on any host
+    without patching ``kairix.paths.sys``.
     """
-    if _is_docker():
+    if is_docker_runtime_check():
         return Path("/data/kairix")
-    if _is_service_install():
+    if is_service_install():
         return Path("/var/lib/kairix")
-    if sys.platform == "win32":
+    if platform == "win32":
         local = os.environ.get("LOCALAPPDATA")
         if local:
             return Path(local) / "kairix"
@@ -72,19 +76,22 @@ def _default_data_dir() -> Path:
     return Path.home() / ".local" / "share" / "kairix"
 
 
-def _default_cache_dir() -> Path:
+def default_cache_dir(platform: str = sys.platform) -> Path:
     """Platform-appropriate cache directory for temporary data.
 
     Docker: /data/kairix (same as data dir)
     Server: /var/cache/kairix
     Linux/macOS user: ~/.cache/kairix (XDG_CACHE_HOME)
     Windows user: %LOCALAPPDATA%/kairix/cache
+
+    ``platform`` defaults to ``sys.platform``; injectable for the same
+    reason as ``default_data_dir``.
     """
-    if _is_docker():
+    if is_docker_runtime_check():
         return Path("/data/kairix")
-    if _is_service_install():
+    if is_service_install():
         return Path("/var/cache/kairix")
-    if sys.platform == "win32":
+    if platform == "win32":
         local = os.environ.get("LOCALAPPDATA")
         if local:
             return Path(local) / "kairix" / "cache"
@@ -94,11 +101,11 @@ def _default_cache_dir() -> Path:
     return Path.home() / ".cache" / "kairix"
 
 
-def _default_workspace_root() -> Path:
+def default_workspace_root() -> Path:
     """Platform-appropriate workspace root for agent memory logs."""
-    if _is_docker():
+    if is_docker_runtime_check():
         return Path("/data/workspaces")
-    if _is_service_install():
+    if is_service_install():
         return Path("/data/workspaces")
     return Path.home() / ".kairix" / "workspaces"
 
@@ -128,13 +135,13 @@ class KairixPaths:
 @lru_cache(maxsize=1)
 def _resolve_cached() -> KairixPaths:
     """Internal cached resolution — called by KairixPaths.resolve()."""
-    cache_dir = _default_cache_dir()
+    cache_dir = default_cache_dir()
 
     # Try loading paths from config file
-    config_paths = _load_paths_from_config()
+    config_paths = load_paths_from_config()
 
     document_root = Path(
-        os.environ.get("KAIRIX_DOCUMENT_ROOT") or config_paths.get("document_root") or str(_default_document_root())
+        os.environ.get("KAIRIX_DOCUMENT_ROOT") or config_paths.get("document_root") or str(default_document_root())
     ).expanduser()
 
     db_path = Path(
@@ -149,7 +156,7 @@ def _resolve_cached() -> KairixPaths:
     ).expanduser()
 
     workspace_root = Path(
-        os.environ.get("KAIRIX_WORKSPACE_ROOT") or config_paths.get("workspace_root") or str(_default_workspace_root())
+        os.environ.get("KAIRIX_WORKSPACE_ROOT") or config_paths.get("workspace_root") or str(default_workspace_root())
     ).expanduser()
 
     return KairixPaths(
@@ -160,7 +167,7 @@ def _resolve_cached() -> KairixPaths:
     )
 
 
-def _load_paths_from_config() -> dict[str, str]:
+def load_paths_from_config() -> dict[str, str]:
     """Load the paths: section from kairix.config.yaml if it exists."""
     config_path = os.environ.get("KAIRIX_CONFIG_PATH") or "kairix.config.yaml"
     try:
@@ -203,7 +210,7 @@ def bundled_suites_root() -> Path:
 def worker_state_path() -> Path:
     """Path to the worker state JSON (#224). Sits in the kairix data dir so
     ``docker compose down/up`` preserves restart_count across worker restarts."""
-    return _default_data_dir() / "worker-state.json"
+    return default_data_dir() / "worker-state.json"
 
 
 def worker_pause_flag_path() -> Path:
@@ -212,7 +219,7 @@ def worker_pause_flag_path() -> Path:
     When present, the worker enters WorkerPhase.PAUSED until the flag is
     removed. ``kairix worker pause/resume`` toggles the file's existence.
     """
-    return _default_data_dir() / ".worker-paused"
+    return default_data_dir() / ".worker-paused"
 
 
 def maintenance_skip_noop_threshold() -> int:
@@ -309,7 +316,7 @@ def is_docker_env() -> bool:
     ``container`` env var is set. Used by factories that want to swap log
     paths between container and host layouts.
     """
-    return _is_docker()
+    return is_docker_runtime_check()
 
 
 def log_queries_enabled() -> bool:
@@ -331,8 +338,8 @@ def config_path_override() -> str | None:
     """Explicit config path from ``KAIRIX_CONFIG_PATH``, or ``None`` when unset.
 
     The single source of truth for the env-var override consumed by
-    ``kairix.core.search.config_loader._resolve_config_path`` and
-    ``_load_paths_from_config`` (which still reads via ``os.environ`` to
+    ``kairix.core.search.config_loader.resolve_config_path`` and
+    ``load_paths_from_config`` (which still reads via ``os.environ`` to
     avoid a circular import inside this module).
     """
     value = os.environ.get("KAIRIX_CONFIG_PATH")
@@ -407,7 +414,7 @@ def document_root_override() -> str | None:
 def data_dir() -> Path:
     """Public accessor for the platform-aware data dir.
 
-    Wraps the previously-private ``_default_data_dir`` so other modules can
+    Wraps the previously-private ``default_data_dir`` so other modules can
     centralise their "log / cache under the kairix data dir" path resolution
     without re-reading ``KAIRIX_DATA_DIR`` (or its legacy fallback) themselves.
     Honours ``KAIRIX_DATA_DIR`` when set — operators occasionally pin the
@@ -416,7 +423,7 @@ def data_dir() -> Path:
     raw = os.environ.get("KAIRIX_DATA_DIR")
     if raw:
         return Path(raw)
-    return _default_data_dir()
+    return default_data_dir()
 
 
 def monitor_log_path() -> Path:

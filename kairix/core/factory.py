@@ -181,7 +181,7 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
     # CollectionResolver + AgentRegistry — load YAML once at the boundary,
     # pass typed Adapters through. KAIRIX_EXTRA_COLLECTIONS still honoured
     # for ad-hoc deployments without a full config file.
-    from kairix.core.search.config_loader import _resolve_config_path, load_collections
+    from kairix.core.search.config_loader import load_collections, resolve_config_path
     from kairix.core.search.registry import parse_agent_registry
     from kairix.core.search.resolver import DefaultCollectionResolver
 
@@ -192,7 +192,7 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
     except Exception as e:
         logger.warning("factory: load_collections failed — %s", e)
 
-    config_path = _resolve_config_path()
+    config_path = resolve_config_path()
     if config_path is not None:
         try:
             import yaml

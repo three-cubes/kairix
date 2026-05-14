@@ -214,7 +214,7 @@ def test_main_with_invalid_yaml(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_main_without_path_resolves_via_cwd(tmp_path: Path, monkeypatch) -> None:
-    """When no path arg, main calls _resolve_config_path which falls back to
+    """When no path arg, main calls resolve_config_path which falls back to
     looking for ``kairix.config.yaml`` in cwd. Empty cwd → 'No config file'."""
     monkeypatch.chdir(tmp_path)
     stdout = io.StringIO()
