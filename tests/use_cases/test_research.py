@@ -106,7 +106,8 @@ def test_orchestrator_failure_yields_error_envelope() -> None:
     out = run_research_use_case("q", deps=deps)
     assert out.error.startswith("RuntimeError:")
     assert out.synthesis == ""
-    assert out.confidence == 0.0
+    # Failure envelope pins confidence to 0.0; use approx for float-comparison safety (S1244).
+    assert out.confidence == pytest.approx(0.0)
 
 
 def test_payload_error_field_propagates() -> None:

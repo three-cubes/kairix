@@ -65,8 +65,11 @@ def tmp_db():
 class TestSchemaValidation:
     @pytest.mark.unit
     def test_valid_schema_passes(self, tmp_db):
-        validate_schema(tmp_db)  # Should not raise
-        assert True, "smoke: valid schema accepted without error"
+        # Contract: validate_schema returns None and does not raise on a
+        # well-formed schema. Pin the documented return type so a future
+        # refactor can't silently change the contract (replaces a
+        # tautological ``assert True``; S5914).
+        assert validate_schema(tmp_db) is None
 
     @pytest.mark.unit
     def test_missing_content_vectors_column_raises(self, tmp_db):

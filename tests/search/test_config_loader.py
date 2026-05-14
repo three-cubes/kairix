@@ -98,8 +98,11 @@ class TestValidateConfig:
     @pytest.mark.unit
     def test_valid_defaults_pass(self):
         cfg = parse_config({})
-        validate_config(cfg)  # should not raise
-        assert True, "smoke: default config accepted without error"
+        # Contract: validate_config returns None and does not raise on a
+        # well-formed default config. Pin the documented return type so a
+        # future refactor that adds a return-value contract can't silently
+        # change behaviour (replaces a tautological ``assert True``; S5914).
+        assert validate_config(cfg) is None
 
     @pytest.mark.unit
     def test_entity_factor_out_of_range_raises(self):

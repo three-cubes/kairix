@@ -206,4 +206,7 @@ def test_write_summary_stores_zero_mtime_when_source_missing(db: sqlite3.Connect
 
     row = db.execute("SELECT source_mtime FROM summaries WHERE path = ?", (missing_path,)).fetchone()
     assert row is not None, "summary row should be persisted even when source is missing"
-    assert row[0] == 0.0, f"expected source_mtime=0.0 fallback for missing source, got {row[0]!r}"
+    # source_mtime=0.0 is the documented sentinel; use approx so a later
+    # implementation tweak that produces 1e-12 doesn't silently regress on
+    # platforms with subtly different float representations (S1244).
+    assert row[0] == pytest.approx(0.0), f"expected source_mtime=0.0 fallback for missing source, got {row[0]!r}"
