@@ -80,7 +80,9 @@ def _is_abstract_or_overload(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bo
             return True
         if isinstance(d, ast.Call):
             inner = d.func
-            inner_name = inner.attr if isinstance(inner, ast.Attribute) else (inner.id if isinstance(inner, ast.Name) else None)
+            inner_name = (
+                inner.attr if isinstance(inner, ast.Attribute) else (inner.id if isinstance(inner, ast.Name) else None)
+            )
             if inner_name in {"abstractmethod", "abstractproperty", "overload"}:
                 return True
     return False
@@ -90,11 +92,7 @@ def _has_docstring(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     if not func.body:
         return False
     first = func.body[0]
-    return (
-        isinstance(first, ast.Expr)
-        and isinstance(first.value, ast.Constant)
-        and isinstance(first.value.value, str)
-    )
+    return isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str)
 
 
 def _is_empty_body(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
@@ -106,20 +104,12 @@ def _is_empty_body(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         only = body[0]
         if isinstance(only, ast.Pass):
             return True
-        if (
-            isinstance(only, ast.Expr)
-            and isinstance(only.value, ast.Constant)
-            and only.value.value is Ellipsis
-        ):
+        if isinstance(only, ast.Expr) and isinstance(only.value, ast.Constant) and only.value.value is Ellipsis:
             return True
         return False
     if len(body) == 2:
         first, second = body
-        if (
-            isinstance(first, ast.Expr)
-            and isinstance(first.value, ast.Constant)
-            and isinstance(first.value.value, str)
-        ):
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
             # docstring + pass / ...
             if isinstance(second, ast.Pass):
                 return True
@@ -137,9 +127,9 @@ def _has_intent_comment(func: ast.FunctionDef | ast.AsyncFunctionDef, source_lin
     the function span or on the line immediately preceding ``def``.
     """
     start = (func.lineno or 1) - 1
-    end = (func.end_lineno or func.lineno or 1)
+    end = func.end_lineno or func.lineno or 1
     # Check span (lines start..end inclusive, 1-indexed → list slice)
-    snippet = "\n".join(source_lines[max(start - 1, 0):end])
+    snippet = "\n".join(source_lines[max(start - 1, 0) : end])
     return "Intentionally empty" in snippet
 
 

@@ -84,7 +84,9 @@ def _is_abstract_or_overload(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bo
             return True
         if isinstance(d, ast.Call):
             inner = d.func
-            inner_name = inner.attr if isinstance(inner, ast.Attribute) else (inner.id if isinstance(inner, ast.Name) else None)
+            inner_name = (
+                inner.attr if isinstance(inner, ast.Attribute) else (inner.id if isinstance(inner, ast.Name) else None)
+            )
             if inner_name in {"abstractmethod", "abstractproperty", "overload"}:
                 return True
     if len(func.body) == 1:
