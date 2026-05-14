@@ -520,6 +520,12 @@ jobs:
 
   # ── Code quality: SonarCloud ───────────────────────────────────────────────
   # Catches duplication, code smells, complexity, maintainability debt.
+  # This job uploads coverage.xml + test-result XML so Sonar sees richer
+  # signal than Automatic Analysis can derive from source alone. **Disable
+  # Automatic Analysis in the SonarCloud UI** (Administration → Analysis
+  # Method → "CI-based analysis") or this job conflicts with it and
+  # SonarCloud fails the analysis with "You are running CI analysis while
+  # Automatic Analysis is enabled."
   sonarcloud:
     name: "SonarCloud analysis"
     runs-on: ubuntu-latest
