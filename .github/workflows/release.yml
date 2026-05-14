@@ -29,8 +29,54 @@ permissions:
   actions: write   # required to dispatch downstream publish workflows (#230)
 
 jobs:
+  check-alpha-gate:
+    # #272 Phase 5: refuse to tag stable unless an alpha tag exists for the
+    # same compute-version. Catches the v2026.5.15 → .15.1 → .15.2 same-day
+    # patch class — those three tags would all have required matching
+    # v2026.5.15a1 / v2026.5.15.1a1 / v2026.5.15.2a1 alphas validated first.
+    #
+    # NOTE: this gate currently verifies only tag-existence. The
+    # vm-reflib-regression commit-status check (per the architect plan in
+    # #272) lands when Phase 4 (the VM webhook handler) ships. Until then
+    # the gate proves an operator at least cut an alpha for this version
+    # — it doesn't yet prove the alpha PASSED its VM gate.
+    name: "5a · Alpha-gate (must precede stable)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Verify alpha tag exists for this stable version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # Strip the leading "v" then look for any v${stripped}a* alpha tag.
+          # e.g. v2026.5.15 → looks for v2026.5.15a1, v2026.5.15a2, ...
+          #      v2026.5.15.1 → looks for v2026.5.15.1a1, v2026.5.15.1a2, ...
+          stripped="${VERSION#v}"
+          git fetch --tags origin
+          matches=$(git tag --list "v${stripped}a*" | sort -V)
+          if [ -z "$matches" ]; then
+            echo "::error::No alpha tag found for $VERSION. Run release-alpha.yml first."
+            echo ""
+            echo "fix: dispatch the '2a · Release (alpha tag from develop)' workflow with date_version=${stripped} and alpha_n=1."
+            echo "  Or, if this is a documented emergency / one-off, set ALPHA_GATE_BYPASS=intentional in the workflow inputs."
+            echo "  next: re-run this workflow once the alpha tag exists on origin."
+            echo "  run:  gh workflow run release-alpha.yml --ref develop -f date_version=${stripped} -f alpha_n=1"
+            exit 1
+          fi
+          # Pick the most-recent alpha tag (highest aN suffix) for the
+          # downstream commit-status check (planned for Phase 4).
+          latest_alpha=$(echo "$matches" | tail -1)
+          echo "alpha-gate: stable $VERSION requires alpha — found $latest_alpha"
+          echo "::notice::Alpha tag $latest_alpha satisfies the existence gate. Phase 4 will additionally verify the VM regression check status on its SHA."
+
   release:
     name: Tag main + create GitHub Release
+    needs: check-alpha-gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
