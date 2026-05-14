@@ -201,3 +201,133 @@ def test_format_results_collapses_newlines_in_preview() -> None:
     assert "line one line two line three" in rendered
     # No raw newlines from the snippet itself appear in the line
     assert "line one\n     line two" not in rendered
+
+
+# ---------------------------------------------------------------------------
+# main() — drives the adapter end-to-end with run_timeline swapped to a stub.
+# ---------------------------------------------------------------------------
+
+
+def _run_main(argv: list[str]) -> tuple[str, str, int]:
+    """Drive ``kairix.core.temporal.cli.main(argv)`` and capture stdio + exit."""
+    from contextlib import redirect_stdout
+
+    from kairix.core.temporal.cli import main as timeline_main
+
+    out, err = io.StringIO(), io.StringIO()
+    code = 0
+    try:
+        with redirect_stdout(out), redirect_stderr(err):
+            timeline_main(argv)
+    except SystemExit as e:
+        code = int(e.code) if e.code is not None else 0
+    return out.getvalue(), err.getvalue(), code
+
+
+@pytest.mark.unit
+def test_main_renders_header_and_results_when_use_case_returns_hits(monkeypatch) -> None:
+    """main() prints header + results when run_timeline returns a non-empty TimelineResult."""
+    import kairix.use_cases.timeline as use_case
+
+    def _fake_run_timeline(query: str, **kw) -> TimelineResult:
+        return TimelineResult(
+            original_query=query,
+            rewritten_query=query + " rewritten",
+            is_temporal=True,
+            fell_back=False,
+            time_window={"start": "2026-04-01", "end": "2026-04-30"},
+            results=[
+                TimelineHit(
+                    path="boards/sprint.md",
+                    title="Done card",
+                    snippet="some work",
+                    score=1.0,
+                    date="2026-04-15",
+                    chunk_type="board_card",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(use_case, "run_timeline", _fake_run_timeline)
+
+    stdout, _stderr, code = _run_main(["any query"])
+    assert code == 0
+    assert "Query:    any query" in stdout
+    assert "Found 1 result(s):" in stdout
+    assert "Done card" in stdout
+
+
+@pytest.mark.unit
+def test_main_exits_1_when_use_case_reports_error(monkeypatch) -> None:
+    """main() exits 1 and prints the error to stderr when use case returns an error."""
+    import kairix.use_cases.timeline as use_case
+
+    def _fake_run_timeline(query: str, **kw) -> TimelineResult:
+        return TimelineResult(
+            original_query=query,
+            rewritten_query=query,
+            is_temporal=False,
+            fell_back=True,
+            time_window={},
+            error="index missing",
+        )
+
+    monkeypatch.setattr(use_case, "run_timeline", _fake_run_timeline)
+    _stdout, stderr, code = _run_main(["topic"])
+    assert code == 1
+    assert "error: index missing" in stderr
+
+
+@pytest.mark.unit
+def test_main_passes_overrides_to_use_case(monkeypatch) -> None:
+    """The --since / --until / --type / --limit flags reach run_timeline."""
+    from datetime import date as _date
+
+    import kairix.use_cases.timeline as use_case
+
+    captured: dict = {}
+
+    def _fake_run_timeline(query: str, **kw) -> TimelineResult:
+        captured["query"] = query
+        captured["since"] = kw.get("since")
+        captured["until"] = kw.get("until")
+        captured["chunk_types"] = kw.get("chunk_types")
+        captured["limit"] = kw.get("limit")
+        return TimelineResult(
+            original_query=query,
+            rewritten_query=query,
+            is_temporal=True,
+            fell_back=False,
+            time_window={},
+        )
+
+    monkeypatch.setattr(use_case, "run_timeline", _fake_run_timeline)
+    _stdout, _stderr, code = _run_main(
+        ["topic", "--since", "2026-04-01", "--until", "2026-04-30", "--type", "board_card", "--limit", "5"]
+    )
+    assert code == 0
+    assert captured == {
+        "query": "topic",
+        "since": _date(2026, 4, 1),
+        "until": _date(2026, 4, 30),
+        "chunk_types": ["board_card"],
+        "limit": 5,
+    }
+
+
+@pytest.mark.unit
+def test_main_passes_none_chunk_types_when_type_all(monkeypatch) -> None:
+    """--type=all (default) translates to chunk_types=None."""
+    import kairix.use_cases.timeline as use_case
+
+    seen: dict = {}
+
+    def _fake_run_timeline(query: str, **kw) -> TimelineResult:
+        seen["chunk_types"] = kw.get("chunk_types")
+        return TimelineResult(
+            original_query=query, rewritten_query=query, is_temporal=False, fell_back=True, time_window={}
+        )
+
+    monkeypatch.setattr(use_case, "run_timeline", _fake_run_timeline)
+    _run_main(["topic"])
+    assert seen["chunk_types"] is None

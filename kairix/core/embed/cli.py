@@ -13,13 +13,37 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from kairix.core.db import get_db_path, open_db
 
 from .embed import DEFAULT_BATCH_SIZE
 from .recall_check import run_recall_gate
+
+
+def _default_pipeline_runner() -> Callable[..., Any]:
+    """Lazy-import the pipeline runner so cmd_embed stays cheap to import."""
+    from kairix.core.embed.use_cases import run_incremental_embed_pipeline
+
+    return run_incremental_embed_pipeline
+
+
+@dataclass
+class EmbedCliDeps:
+    """Injection seam for the embed CLI.
+
+    Production callers leave this as the default — the use case runner is
+    lazily imported on first call. Tests pass a Deps with a stand-in
+    runner so cmd_embed's exit-code mapping can be exercised without
+    touching the real DB / Azure / lockfile.
+    """
+
+    pipeline_runner_factory: Callable[[], Callable[..., Any]] = field(default_factory=lambda: _default_pipeline_runner)
+    post_embed_summarise: Callable[[], None] = field(default_factory=lambda: _run_post_embed_summarise)
+
 
 LOG_FILE = Path(
     os.environ.get(
@@ -94,7 +118,7 @@ def release_lock(lock_fh: IO[str]) -> None:
         pass
 
 
-def cmd_embed(args: argparse.Namespace) -> int:
+def cmd_embed(args: argparse.Namespace, *, deps: EmbedCliDeps | None = None) -> int:
     """Run the embedding pipeline.
 
     Thin shim over ``run_incremental_embed_pipeline``. The use case
@@ -107,7 +131,8 @@ def cmd_embed(args: argparse.Namespace) -> int:
       1  — embed had failed chunks OR recall gate fired an alert
       2  — pipeline raised (DB unreachable, schema migration, etc.)
     """
-    from kairix.core.embed.use_cases import run_incremental_embed_pipeline
+    deps = deps or EmbedCliDeps()
+    run_incremental_embed_pipeline = deps.pipeline_runner_factory()
 
     try:
         result = run_incremental_embed_pipeline(
@@ -141,7 +166,7 @@ def cmd_embed(args: argparse.Namespace) -> int:
 
     # Post-embed summarise — non-critical; failures only logged
     if not args.skip_summarise:
-        _run_post_embed_summarise()
+        deps.post_embed_summarise()
 
     if not result.success:
         return 1
@@ -281,7 +306,7 @@ def cmd_rebuild_fts(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, *, deps: EmbedCliDeps | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="kairix embed",
         description="Embed documents into the kairix vector index",
@@ -342,7 +367,7 @@ def main(argv: list[str] | None = None) -> None:
             args.skip_recall_check = False
             args.rebuild_canaries = False
             args.skip_summarise = False
-        sys.exit(cmd_embed(args))
+        sys.exit(cmd_embed(args, deps=deps))
     elif args.command == "recall-check":
         sys.exit(cmd_recall(args))
     elif args.command == "status":

@@ -18,9 +18,40 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
 
-def main(argv: list[str] | None = None) -> None:
+def _default_build_server() -> Callable[..., Any]:
+    """Default factory: lazy-import build_server so it isn't loaded at module import."""
+    from kairix.agents.mcp.server import build_server
+
+    return build_server
+
+
+def _default_uvicorn_run() -> Callable[..., Any]:
+    """Default factory: lazy-import uvicorn.run so it isn't loaded at module import."""
+    import uvicorn
+
+    return uvicorn.run
+
+
+@dataclass
+class McpCliDeps:
+    """Injection seam for the MCP CLI so tests can drive it without binding ports.
+
+    Production callers leave this None — ``main()`` constructs the default
+    Deps which lazily resolves the real ``build_server`` and ``uvicorn.run``.
+    Tests pass a Deps with fakes that record their invocations instead of
+    starting servers.
+    """
+
+    build_server_factory: Callable[[], Callable[..., Any]] = field(default_factory=lambda: _default_build_server)
+    uvicorn_runner_factory: Callable[[], Callable[..., Any]] = field(default_factory=lambda: _default_uvicorn_run)
+
+
+def main(argv: list[str] | None = None, *, deps: McpCliDeps | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="kairix mcp",
         description="MCP server: expose search/entity/prep/timeline as MCP tools",
@@ -57,7 +88,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.subcommand == "serve":
-        _cmd_serve(args)
+        _cmd_serve(args, deps=deps or McpCliDeps())
     else:
         parser.print_help()
         sys.exit(1)
@@ -92,9 +123,9 @@ def _resolve_port(args: argparse.Namespace) -> int:
     return suggested
 
 
-def _cmd_serve(args: argparse.Namespace) -> None:
+def _cmd_serve(args: argparse.Namespace, *, deps: McpCliDeps) -> None:
     try:
-        from kairix.agents.mcp.server import build_server
+        build_server = deps.build_server_factory()
     except ImportError:
         print(
             "Error: MCP dependencies not installed. Run: pip install 'kairix[agents]'",
@@ -144,6 +175,5 @@ def _cmd_serve(args: argparse.Namespace) -> None:
         file=sys.stderr,
     )
 
-    import uvicorn
-
-    uvicorn.run(app, host=args.host, port=port, log_level="info")
+    uvicorn_run = deps.uvicorn_runner_factory()
+    uvicorn_run(app, host=args.host, port=port, log_level="info")
