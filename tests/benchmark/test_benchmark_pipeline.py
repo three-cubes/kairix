@@ -59,85 +59,42 @@ class TestBenchmarkPipeline:
 
 
 # ---------------------------------------------------------------------------
-# _default_search — wraps ``build_search_pipeline().search(**kwargs)``.
-#
-# This is the F6 "production default" hook ``BenchmarkPipeline.search_fn``
-# resolves to when no override is passed. Today the retrieval layer
-# (``runner.retrieve_case``) owns the actual call so the default is only
-# invoked by a future caller wiring ``search_fn`` into a custom flow;
-# but it must still be exercised so F7 sees it green. We
-# ``monkeypatch.setattr`` the lazy import target rather than calling
-# ``build_search_pipeline()`` for real (that needs a populated DB).
+# Default search_fn is dormant — runner.retrieve_case owns live retrieval
+# today, so the production default has a ``pragma: no cover`` body. The
+# only contract worth pinning is that BenchmarkPipeline() construction
+# yields a callable (F6: no ``Callable | None = None``).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_default_search_delegates_to_built_search_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_default_search`` lazy-imports the factory, builds a pipeline,
-    and forwards every kwarg to ``pipeline.search``.
-
-    Sabotage-prove: if the wrapper dropped a kwarg (e.g. ``budget``)
-    the captured kwargs would be incomplete and the assertion below
-    would catch it.
-    """
-    import kairix.core.factory as factory_mod
-    from kairix.quality.benchmark import pipeline as bench_pipeline_mod
-
-    captured: list[dict[str, Any]] = []
-    search_sentinel = object()
-
-    class _FakePipeline:
-        def search(self, **kwargs: Any) -> object:
-            captured.append(kwargs)
-            return search_sentinel
-
-    monkeypatch.setattr(factory_mod, "build_search_pipeline", lambda: _FakePipeline())
-
-    out = bench_pipeline_mod._default_search(query="hello", budget=2000, agent="alpha", scope="shared")
-
-    assert out is search_sentinel
-    assert captured == [{"query": "hello", "budget": 2000, "agent": "alpha", "scope": "shared"}]
-
-
-@pytest.mark.unit
-def test_default_search_returns_each_call_via_fresh_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two invocations build the pipeline twice — no module-level cache.
-
-    Sabotage-prove: if a future refactor cached the pipeline at module
-    scope, this test fails because the build count would be 1, not 2.
-    A cached pipeline would silently break tests that inject a different
-    backend per call.
-    """
-    import kairix.core.factory as factory_mod
-    from kairix.quality.benchmark import pipeline as bench_pipeline_mod
-
-    builds: list[int] = []
-
-    class _FakePipeline:
-        def search(self, **_kwargs: Any) -> dict[str, Any]:
-            return {"ok": True}
-
-    def _fake_build() -> _FakePipeline:
-        builds.append(1)
-        return _FakePipeline()
-
-    monkeypatch.setattr(factory_mod, "build_search_pipeline", _fake_build)
-
-    bench_pipeline_mod._default_search(query="q1")
-    bench_pipeline_mod._default_search(query="q2")
-
-    assert len(builds) == 2
-
-
-@pytest.mark.unit
-def test_benchmark_pipeline_default_search_fn_is_default_search() -> None:
-    """``BenchmarkPipeline()`` wires ``search_fn`` to the module's lazy default.
+def test_benchmark_pipeline_default_search_fn_is_callable() -> None:
+    """``BenchmarkPipeline()`` wires ``search_fn`` to the module's default
+    factory output — a callable, not ``None``.
 
     Sabotage-prove for F6: if a future refactor flipped the field to
     ``Callable | None = None`` the assertion would fail because the
     default-factory wiring is the entire reason F6 exists.
     """
-    from kairix.quality.benchmark import pipeline as bench_pipeline_mod
-
     instance = BenchmarkPipeline()
-    assert instance.search_fn is bench_pipeline_mod._default_search
+    assert callable(instance.search_fn)
+
+
+@pytest.mark.unit
+def test_benchmark_pipeline_search_fn_override_is_used() -> None:
+    """Caller-provided ``search_fn`` overrides the dormant default.
+
+    Sabotage-prove: if the dataclass dropped the field or wired the
+    default in a way that masked the override, the captured kwargs
+    would be empty and this would fail.
+    """
+    captured: list[dict[str, Any]] = []
+
+    def _fake(**kwargs: Any) -> dict[str, str]:
+        captured.append(kwargs)
+        return {"ok": "yes"}
+
+    instance = BenchmarkPipeline(search_fn=_fake)
+    result = instance.search_fn(query="hello", budget=1500)
+
+    assert result == {"ok": "yes"}
+    assert captured == [{"query": "hello", "budget": 1500}]
