@@ -32,7 +32,7 @@ import urllib.parse
 import urllib.request
 
 SONAR_BASE = "https://sonarcloud.io"
-PROJECT_KEY = "quanyeomans_kairix"
+PROJECT_KEY = "three-cubes_kairix"
 
 
 # Triage decisions. Keyed by ``(rule_key, file_path)``; the value is the
