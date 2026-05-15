@@ -270,7 +270,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
                         f"Last run:  {ts.strftime('%Y-%m-%d %H:%M')} — "
                         f"embedded={last.get('embedded')} cost=${last.get('estimated_cost_usd'):.4f}"
                     )
-            except Exception:  # nosec S110 display failure is non-critical, logging not yet initialised
+            except Exception:  # nosec B110 — NOSONAR S110 — status display failure is non-critical, logging not yet initialised
                 pass  # non-critical: status display failed
     finally:
         db.close()

@@ -203,7 +203,7 @@ def _read_secret_from_keyvault(name: str) -> str | None:
         logger.warning("get_secret: KV fetch error for requested key")
         return None
     if result.returncode == 0 and result.stdout.strip():
-        return result.stdout.strip()  # nosec: returns secret value to caller (intended)
+        return result.stdout.strip()
     logger.warning("get_secret: KV fetch failed for requested key")
     return None
 
