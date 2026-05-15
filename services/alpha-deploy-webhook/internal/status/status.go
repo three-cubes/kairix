@@ -109,7 +109,7 @@ func (p *HTTPPoster) Post(ctx context.Context, sha string, state State, descript
 		// have the status code — the body is best-effort context.
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		if readErr != nil {
-			return fmt.Errorf("github status %d (body read failed: %v)", resp.StatusCode, readErr)
+			return fmt.Errorf("github status %d (body read failed: %w)", resp.StatusCode, readErr)
 		}
 		return fmt.Errorf("github status %d: %s", resp.StatusCode, string(respBody))
 	}
