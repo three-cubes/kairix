@@ -8,7 +8,7 @@ live in the Three Cubes vault, not here (see memory:
 - `architecture/` — ENGINEERING.md, fitness-functions.md, ADRs
 - `evaluation/` — EVALUATION.md (benchmark methodology, suite design)
 - `operations/` — OPERATIONS.md (deploy, monitor, secret rotation)
-- `runbooks/` — incident-response playbooks (one per scenario)
+- [`runbooks/`](runbooks/README.md) — incident-response playbooks (one per scenario); see `operations/runbooks/INDEX.md` for the docker-compose how-to set
 - `agents/` — AGENT-SETUP.md, ADMIN-CONVERSATION.md (agent-facing docs)
 - `upgrades/` — per-release upgrade notes referenced from CHANGELOG.md
 - `user-guide/` — end-user task guides
