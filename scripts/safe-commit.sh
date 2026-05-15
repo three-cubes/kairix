@@ -26,6 +26,16 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
+# 0. Empty-stage guard. safe-commit.sh does not auto-stage; running it
+# without `git add` produced silent no-op "commits" that masked real
+# failures (#208 side-finding). Fail loud here instead.
+if git diff --cached --quiet; then
+    echo -e "${RED}FAIL${NC}: nothing staged for commit"
+    echo "fix: stage files with 'git add <paths>' before running safe-commit.sh"
+    echo "next: 'git status' to see what's modified but not yet staged"
+    exit 1
+fi
+
 echo "=== Quality gates ==="
 
 # 1. Lint (includes isort via ruff I rules)
