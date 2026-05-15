@@ -1,0 +1,223 @@
+name: "2b · Release (VM alpha-deploy + reflib gate)"
+
+# Phase 4 of #272. Closes the alpha-validation loop: when an alpha tag
+# is cut, this workflow waits for docker-publish to finish, then POSTs
+# a signed payload to the VM-side alpha-deploy-webhook (configured per
+# `vm-deploy` environment as `vars.KAIRIX_WEBHOOK_URL`). The webhook
+# runs onboard-check + reflib benchmark and posts a
+# `vm-reflib-regression` commit status back on the alpha SHA. This
+# workflow then polls that status and surfaces success/failure into
+# the workflow summary.
+#
+# All untrusted inputs (inputs.tag, github.event.release.tag_name) are
+# bound to env: variables before being used in run: scripts, per the
+# workflow-injection guidance in
+# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Alpha tag to validate (e.g. v2026.5.16a1)'
+        required: true
+        type: string
+  release:
+    types: [prereleased]
+
+permissions:
+  contents: read
+  statuses: read  # poll commit-status for the alpha SHA
+
+env:
+  STATUS_CONTEXT: vm-reflib-regression
+  # Webhook deploy timeout is 10min; add headroom for API roundtrip.
+  POLL_TIMEOUT_SECONDS: 900
+  POLL_INTERVAL_SECONDS: 15
+
+jobs:
+  gate-alpha-tag:
+    name: Gate — alpha tag only
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'release' && github.event.release.prerelease)
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Resolve tag + SHA
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          TAG="${DISPATCH_TAG:-$RELEASE_TAG}"
+          if [ -z "$TAG" ]; then
+            echo "::error::no tag resolved from inputs.tag or release.tag_name"
+            echo "fix: invoke via workflow_dispatch with -f tag=vYYYY.M.DaN, or wait for a real prerelease event"
+            exit 1
+          fi
+          if ! echo "$TAG" | grep -Eq 'a[0-9]+$'; then
+            echo "::error::tag '$TAG' is not an alpha tag (must end with aN). Refusing to deploy."
+            echo "fix: only invoke this workflow for alpha tags (release-alpha.yml output)."
+            exit 1
+          fi
+          SHA=$(gh api "repos/${REPO}/git/refs/tags/$TAG" --jq '.object.sha')
+          if [ -z "$SHA" ]; then
+            echo "::error::could not resolve SHA for tag $TAG"
+            exit 1
+          fi
+          OBJECT_TYPE=$(gh api "repos/${REPO}/git/refs/tags/$TAG" --jq '.object.type')
+          if [ "$OBJECT_TYPE" = "tag" ]; then
+            SHA=$(gh api "repos/${REPO}/git/tags/$SHA" --jq '.object.sha')
+          fi
+          echo "tag=$TAG"  >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"  >> "$GITHUB_OUTPUT"
+          echo "Resolved $TAG -> $SHA"
+
+  wait-for-docker-publish:
+    name: Wait — docker-publish must complete first
+    runs-on: ubuntu-latest
+    needs: gate-alpha-tag
+    steps:
+      - name: Poll docker-publish completion for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.gate-alpha-tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          deadline=$(( $(date +%s) + 1800 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            run_json=$(gh api "repos/${REPO}/actions/workflows/docker-publish.yml/runs?event=workflow_dispatch&per_page=20")
+            run_id=$(echo "$run_json" | TAG="$TAG" python3 -c "
+          import json, sys, os
+          tag = os.environ['TAG']
+          d = json.load(sys.stdin)
+          for r in d.get('workflow_runs', []):
+              if tag in r.get('display_title',''):
+                  print(r['id'])
+                  break
+          ")
+            if [ -z "$run_id" ]; then
+              echo "no docker-publish run yet for $TAG; sleeping 15s"
+              sleep 15
+              continue
+            fi
+            status=$(gh api "repos/${REPO}/actions/runs/$run_id" --jq '.status')
+            conclusion=$(gh api "repos/${REPO}/actions/runs/$run_id" --jq '.conclusion // "pending"')
+            echo "docker-publish run $run_id: status=$status conclusion=$conclusion"
+            case "$status" in
+              completed)
+                if [ "$conclusion" = "success" ]; then
+                  echo "::notice::docker-publish completed successfully for $TAG"
+                  exit 0
+                fi
+                echo "::error::docker-publish for $TAG ended with conclusion=$conclusion — refusing to deploy"
+                echo "fix: investigate the docker-publish run before re-dispatching this workflow"
+                exit 1
+                ;;
+              *)
+                sleep 15
+                ;;
+            esac
+          done
+          echo "::error::timed out waiting for docker-publish on $TAG (30 min)"
+          exit 1
+
+  deploy-vm:
+    name: POST signed payload to webhook
+    runs-on: ubuntu-latest
+    needs: [gate-alpha-tag, wait-for-docker-publish]
+    environment: vm-deploy
+    steps:
+      - name: Sign + POST to webhook
+        env:
+          TAG: ${{ needs.gate-alpha-tag.outputs.tag }}
+          SHA: ${{ needs.gate-alpha-tag.outputs.sha }}
+          RUN_ID: ${{ github.run_id }}
+          # Operator-specific endpoint, configured per `vm-deploy` environment.
+          # Refuses to run if missing — this workflow is operator-deployed,
+          # not a kairix-default URL.
+          WEBHOOK_URL: ${{ vars.KAIRIX_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.VM_WEBHOOK_SECRET }}
+          CF_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "::error::vars.KAIRIX_WEBHOOK_URL is unset for the vm-deploy environment."
+            echo "fix: set it via — gh variable set KAIRIX_WEBHOOK_URL --env vm-deploy --body 'https://<your-webhook-host>/deploy'"
+            exit 1
+          fi
+          BODY=$(jq -n --arg v "$TAG" --arg s "$SHA" --arg r "$RUN_ID" \
+            '{version: $v, sha: $s, callback_run_id: $r}')
+          SIG=$(printf %s "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -hex | awk '{print $NF}')
+          echo "POST $WEBHOOK_URL  version=$TAG sha=$SHA"
+          response=$(curl -sS -w "\n%{http_code}" -X POST "$WEBHOOK_URL" \
+            -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
+            -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET" \
+            -H "Content-Type: application/json" \
+            -H "X-Kairix-Signature: sha256=$SIG" \
+            --data-raw "$BODY")
+          body=$(echo "$response" | head -n -1)
+          code=$(echo "$response" | tail -n 1)
+          echo "response code: $code"
+          echo "response body: $body"
+          if [ "$code" != "202" ]; then
+            echo "::error::webhook did not 202-accept (got $code)"
+            echo "fix: check webhook health on the host running the alpha-deploy webhook —"
+            echo "     journalctl -u kairix-alpha-deploy-webhook.service -n 100"
+            exit 1
+          fi
+          echo "::notice::Webhook accepted alpha deploy for $TAG ($SHA)"
+
+  poll-commit-status:
+    name: Poll vm-reflib-regression commit-status
+    runs-on: ubuntu-latest
+    needs: [gate-alpha-tag, deploy-vm]
+    steps:
+      - name: Poll commit-status until success/failure/timeout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.gate-alpha-tag.outputs.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          deadline=$(( $(date +%s) + POLL_TIMEOUT_SECONDS ))
+          last_state=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            state=$(gh api "repos/${REPO}/commits/${SHA}/statuses" \
+              --jq "[.[] | select(.context == \"${STATUS_CONTEXT}\")] | sort_by(.updated_at) | last | .state // \"missing\"")
+            desc=$(gh api "repos/${REPO}/commits/${SHA}/statuses" \
+              --jq "[.[] | select(.context == \"${STATUS_CONTEXT}\")] | sort_by(.updated_at) | last | .description // \"\"")
+            if [ "$state" != "$last_state" ]; then
+              echo "$(date -u +%H:%M:%SZ)  state=$state  desc=$desc"
+              last_state="$state"
+            fi
+            case "$state" in
+              success)
+                echo "::notice::Alpha gate passed — $desc"
+                {
+                  echo "## vm-reflib-regression: SUCCESS"
+                  echo
+                  echo "- SHA: $SHA"
+                  echo "- Description: $desc"
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+                ;;
+              failure|error)
+                echo "::error::Alpha gate failed — $desc"
+                {
+                  echo "## vm-reflib-regression: $state"
+                  echo
+                  echo "- SHA: $SHA"
+                  echo "- Description: $desc"
+                  echo "- Triage: see VM journal — sudo journalctl -u kairix-alpha-deploy-webhook.service -n 100"
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 1
+                ;;
+              *)
+                sleep "${POLL_INTERVAL_SECONDS}"
+                ;;
+            esac
+          done
+          echo "::error::timed out waiting for vm-reflib-regression status (${POLL_TIMEOUT_SECONDS}s)"
+          exit 1
