@@ -94,7 +94,7 @@ func envOr(key, fallback string) string {
 // (operators sometimes leave a stray newline). Empty file is an error
 // — that's a misconfiguration we want loud, not a silent empty secret.
 func readSecret(path string) ([]byte, error) {
-	raw, err := os.ReadFile(path) // #nosec G304 — path is operator-supplied env var, deliberate
+	raw, err := os.ReadFile(path) // #nosec G304 G703 — path is operator-supplied env var (WEBHOOK_SECRET_PATH / KAIRIX_GITHUB_PAT_PATH), validated upstream; deliberate.
 	if err != nil {
 		return nil, err
 	}

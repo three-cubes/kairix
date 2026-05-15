@@ -21,6 +21,9 @@ import (
 // values are valid; the API rejects everything else with a 422.
 type State string
 
+// GitHub commit-status state values. Renaming any of these silently
+// would break in production at the API call (the 422 response) — the
+// TestStateConstants sabotage-proof in status_test.go pins the strings.
 const (
 	StatePending State = "pending"
 	StateSuccess State = "success"
