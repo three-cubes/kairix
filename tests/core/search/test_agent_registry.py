@@ -325,3 +325,53 @@ def test_parse_agent_registry_logs_warning_when_paths_field_is_not_a_list(
     # guard hadn't fired, ``paths_raw = "not-a-list"`` would have been
     # iterated as ['n','o','t',...], producing single-character entries.
     assert all(len(p) > 1 for p in agent.paths), f"single-char paths leaked from rejected string: {agent.paths}"
+
+
+@pytest.mark.unit
+def test_legacy_collection_deprecation_warning_dedupes_across_invocations(caplog: pytest.LogCaptureFixture) -> None:
+    """#275: parse_agent_registry runs once per benchmark case in the eval path.
+
+    Without dedup, an N-agent suite producing the legacy ``collection:`` field
+    spews N x M warning lines (M cases). That drowns out real benchmark stderr
+    in container logs and (in the alpha-deploy webhook's CombinedOutput) made
+    the JSON-parse step impossible. The warning should fire exactly once per
+    (agent, candidate) per process.
+
+    Sabotage-proof inline: remove the dedup guard in
+    ``_resolve_legacy_collection_name`` and this test will see the warning N
+    times instead of once.
+
+    Uses unique agent names (``dedup-test-*``) so the per-process dedup state
+    is naturally isolated from other tests — no private-name imports needed.
+    """
+    import logging
+    import uuid
+
+    # Unique-per-run names so the per-process dedup set never carries state
+    # from prior tests into this one. (F5: no internal-name imports.)
+    suffix = uuid.uuid4().hex[:8]
+    name_a = f"dedup-test-shape-{suffix}"
+    name_b = f"dedup-test-builder-{suffix}"
+    raw = {
+        "agents": [
+            {"name": name_a, "collection": f"{name_a}-memory", "write_path": f"04-Agent-Knowledge/{name_a}"},
+            {"name": name_b, "collection": f"{name_b}-memory", "write_path": f"04-Agent-Knowledge/{name_b}"},
+        ]
+    }
+
+    with caplog.at_level(logging.WARNING):
+        parse_agent_registry(raw)
+        parse_agent_registry(raw)  # second pass — should NOT re-warn.
+        parse_agent_registry(raw)  # third pass — still no new warnings.
+
+    # Scope to *our* uniquely-named agents only — other tests may emit
+    # deprecation warnings for their own agent names into the same caplog.
+    deprecation_records = [
+        r for r in caplog.records if "is deprecated" in r.message and r.args and r.args[0] in (name_a, name_b)
+    ]
+    assert len(deprecation_records) == 2, (
+        f"expected exactly 2 deprecation warnings (one per agent); got {len(deprecation_records)}: "
+        f"{[r.getMessage() for r in deprecation_records]}"
+    )
+    names_warned = {r.args[0] for r in deprecation_records}
+    assert names_warned == {name_a, name_b}, f"expected warnings for both agents; got {names_warned}"
