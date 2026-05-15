@@ -113,8 +113,11 @@ def _capture(argv: list[str], deps: PrepDeps) -> tuple[int, str]:
     return rc, out_buf.getvalue()
 
 
+_LONG_SNIPPET = "Alpha is a sample document discussing the topic in detail across paragraphs."
+
+
 def test_main_text_format_prints_summary_and_returns_zero() -> None:
-    sr = _FakeSearchResult(results=[_FakeBudgeted(result=_FakeInner(title="doc-a"), content="alpha")])
+    sr = _FakeSearchResult(results=[_FakeBudgeted(result=_FakeInner(title="doc-a"), content=_LONG_SNIPPET)])
     deps = PrepDeps(
         search_fn=lambda **kw: sr,
         chat_fn=lambda **kw: "alpha summary",
@@ -126,7 +129,7 @@ def test_main_text_format_prints_summary_and_returns_zero() -> None:
 
 
 def test_main_json_format_emits_envelope() -> None:
-    sr = _FakeSearchResult(results=[_FakeBudgeted(result=_FakeInner(title="d"), content="s")])
+    sr = _FakeSearchResult(results=[_FakeBudgeted(result=_FakeInner(title="d"), content=_LONG_SNIPPET)])
     deps = PrepDeps(search_fn=lambda **kw: sr, chat_fn=lambda **kw: "summary")
     rc, stdout = _capture(["q", "--json"], deps)
     assert rc == 0

@@ -64,10 +64,11 @@ def _build_deps(
 # ---------------------------------------------------------------------------
 
 
+_LONG_SNIPPET = "Alpha is a sample document discussing the topic in detail across paragraphs."
+
+
 def test_l0_summary_calls_chat_with_concise_system_message() -> None:
-    sr = _FakeSearchResult(
-        results=[_FakeBudgeted(result=_FakeInner(title="doc-a", path="/a"), content="alpha snippet")]
-    )
+    sr = _FakeSearchResult(results=[_FakeBudgeted(result=_FakeInner(title="doc-a", path="/a"), content=_LONG_SNIPPET)])
     deps, captured = _build_deps(sr=sr, summary="brief alpha summary")
     out = run_prep("topic", tier="l0", deps=deps)
 
@@ -85,7 +86,7 @@ def test_l0_summary_calls_chat_with_concise_system_message() -> None:
 
 
 def test_l1_summary_uses_structured_overview_prompt() -> None:
-    sr = _FakeSearchResult(results=[_FakeBudgeted(result=_FakeInner(title="doc-b"), content="bravo snippet")])
+    sr = _FakeSearchResult(results=[_FakeBudgeted(result=_FakeInner(title="doc-b"), content=_LONG_SNIPPET)])
     deps, captured = _build_deps(sr=sr, summary="structured overview")
     out = run_prep("topic", tier="l1", deps=deps)
 
@@ -104,18 +105,62 @@ def test_no_results_returns_no_documents_message_no_chat_call() -> None:
 
 
 def test_sources_use_path_when_title_empty() -> None:
-    sr = _FakeSearchResult(results=[_FakeBudgeted(result=_FakeInner(title="", path="/notes/foo.md"), content="x")])
+    sr = _FakeSearchResult(
+        results=[_FakeBudgeted(result=_FakeInner(title="", path="/notes/foo.md"), content=_LONG_SNIPPET)]
+    )
     deps, _ = _build_deps(sr=sr, summary="ok")
     out = run_prep("topic", deps=deps)
     assert out.sources == ["/notes/foo.md"]
 
 
 def test_only_top_5_results_become_sources() -> None:
-    big = [_FakeBudgeted(result=_FakeInner(title=f"d{i}"), content="x") for i in range(8)]
+    big = [_FakeBudgeted(result=_FakeInner(title=f"d{i}"), content=_LONG_SNIPPET) for i in range(8)]
     sr = _FakeSearchResult(results=big)
     deps, _ = _build_deps(sr=sr, summary="ok")
     out = run_prep("topic", deps=deps)
     assert len(out.sources) == 5
+
+
+def test_thin_snippets_filtered_no_chat_call() -> None:
+    """#254: title-only hits (empty / very short content) must not reach the LLM.
+
+    When search returns matches but every snippet is title-equivalent (e.g.
+    a frontmatter-only doc or stripped index page), prep used to call the
+    LLM with effectively zero grounding and got hallucinated 'generic
+    filler' summaries back. Now those hits are filtered upstream and the
+    use case returns the no-results sentinel.
+    """
+    sr = _FakeSearchResult(
+        results=[
+            _FakeBudgeted(result=_FakeInner(title="doc-a"), content="see ref-001"),
+            _FakeBudgeted(result=_FakeInner(title="doc-b"), content=""),
+            _FakeBudgeted(result=_FakeInner(title="doc-c"), content="x"),
+        ]
+    )
+    deps, captured = _build_deps(sr=sr, summary="should not be called")
+    out = run_prep("topic", deps=deps)
+    assert "No relevant documents" in out.summary
+    assert out.error == ""
+    assert "chat" not in captured, "LLM must not be called when all snippets are thin"
+
+
+def test_thin_snippets_dropped_but_one_useful_snippet_reaches_chat() -> None:
+    """Mixed-quality results: thin hits dropped, real hits forwarded to chat."""
+    sr = _FakeSearchResult(
+        results=[
+            _FakeBudgeted(result=_FakeInner(title="doc-thin"), content="see ref-001"),
+            _FakeBudgeted(result=_FakeInner(title="doc-real"), content=_LONG_SNIPPET),
+        ]
+    )
+    deps, captured = _build_deps(sr=sr, summary="real summary")
+    out = run_prep("topic", deps=deps)
+    assert out.summary == "real summary"
+    # Only the substantive hit is sourced — thin hit was dropped before context-build.
+    assert out.sources == ["doc-real"]
+    # The chat prompt mentions doc-real but not the thin doc.
+    user_msg = captured["chat"]["messages"][1]["content"]
+    assert "doc-real" in user_msg
+    assert "doc-thin" not in user_msg
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +176,7 @@ def test_search_failure_yields_error_envelope() -> None:
 
 
 def test_chat_failure_yields_error_envelope() -> None:
-    sr = _FakeSearchResult(results=[_FakeBudgeted(result=_FakeInner(title="d"), content="snip")])
+    sr = _FakeSearchResult(results=[_FakeBudgeted(result=_FakeInner(title="d"), content=_LONG_SNIPPET)])
     deps, _ = _build_deps(sr=sr, chat_raises=True)
     out = run_prep("topic", deps=deps)
     assert out.error.startswith("RuntimeError:")
@@ -168,7 +213,9 @@ def test_l0_sources_are_prefix_of_l1_when_same_query_and_deps() -> None:
     """
     # Same SearchResult shape returned for both tiers — what differs is
     # how many BudgetedResults survive the budget cap, not their order.
-    full_results = [_FakeBudgeted(result=_FakeInner(title=f"doc-{i}"), content=f"snippet-{i}") for i in range(7)]
+    full_results = [
+        _FakeBudgeted(result=_FakeInner(title=f"doc-{i}"), content=f"{_LONG_SNIPPET} ({i})") for i in range(7)
+    ]
 
     captured: dict[str, Any] = {"l0": None, "l1": None}
 
