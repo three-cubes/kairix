@@ -16,6 +16,16 @@ import (
 	"strings"
 )
 
+// shellQuote wraps a value in single quotes for sh -c, escaping any
+// embedded single quotes via the standard ' "'" ' dance. Used so the
+// version string passed to docker compose can't break out of the
+// KAIRIX_IMAGE_TAG='...' binding even if it contains shell metachars.
+// Version strings are validated upstream (the gate-alpha-tag job rejects
+// anything not matching aN), but defence-in-depth.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
 // Runner runs operator-side commands. Production: ExecRunner.
 // Tests: fake implementation returning fixed stdout/exit.
 type Runner interface {
@@ -97,13 +107,27 @@ func (s *Service) Run(ctx context.Context, version string) Result {
 }
 
 func (s *Service) pullAndUp(ctx context.Context, version string) error {
-	s.Logger.Info("docker compose pull", slog.String("version", version), slog.String("dir", s.ComposeDir))
-	out, err := s.Runner.Run(ctx, s.ComposeDir, "docker", "compose", "pull", "kairix", "kairix-worker")
+	// docker-compose.yml on the VM uses ${KAIRIX_IMAGE_TAG:-latest} for the
+	// kairix and kairix-worker services. The image tag has no leading 'v'
+	// (matches docker-publish.yml's convention — see ${REF_NAME#v}).
+	// Without this env-pass, `docker compose pull` would fetch :latest
+	// regardless of what alpha we're trying to validate.
+	imageTag := strings.TrimPrefix(version, "v")
+	quoted := shellQuote(imageTag)
+
+	s.Logger.Info("docker compose pull",
+		slog.String("version", version),
+		slog.String("image_tag", imageTag),
+		slog.String("dir", s.ComposeDir),
+	)
+	pullCmd := fmt.Sprintf("KAIRIX_IMAGE_TAG=%s docker compose pull kairix kairix-worker", quoted)
+	out, err := s.Runner.Run(ctx, s.ComposeDir, "sh", "-c", pullCmd)
 	if err != nil {
 		return fmt.Errorf("pull: %w (output: %s)", err, truncate(out, 500))
 	}
 	s.Logger.Info("docker compose up -d")
-	out, err = s.Runner.Run(ctx, s.ComposeDir, "docker", "compose", "up", "-d", "kairix", "kairix-worker")
+	upCmd := fmt.Sprintf("KAIRIX_IMAGE_TAG=%s docker compose up -d kairix kairix-worker", quoted)
+	out, err = s.Runner.Run(ctx, s.ComposeDir, "sh", "-c", upCmd)
 	if err != nil {
 		return fmt.Errorf("up: %w (output: %s)", err, truncate(out, 500))
 	}

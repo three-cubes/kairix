@@ -75,59 +75,64 @@ jobs:
           echo "sha=$SHA"  >> "$GITHUB_OUTPUT"
           echo "Resolved $TAG -> $SHA"
 
-  wait-for-docker-publish:
-    name: Wait — docker-publish must complete first
+  wait-for-image:
+    # Probe the actual artifact (the GHCR image manifest for the tag)
+    # rather than tracking the docker-publish workflow run. The run's
+    # display_title doesn't include the tag, and the dispatch-inputs
+    # aren't easily filterable via the API — checking the registry is
+    # both more reliable and self-evident (presence of the image is
+    # what 'docker compose pull' on the VM actually needs).
+    name: Wait — GHCR image manifest published
     runs-on: ubuntu-latest
     needs: gate-alpha-tag
     steps:
-      - name: Poll docker-publish completion for this tag
+      - name: Poll GHCR for the alpha image manifest
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.gate-alpha-tag.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
+          # GHCR anonymous-access pattern: request a token first, then
+          # use it to ask for the manifest. Anonymous pull is allowed for
+          # public packages; we still need the token-handshake step.
+          # The Authorization on the token call is a base64 of the
+          # GH_TOKEN — but for anonymous pull we send no creds.
+          # The image tag has no leading 'v' (see docker-publish.yml — it
+          # strips the 'v' when computing the GHCR tag). The git tag is
+          # vYYYY.M.D[.N]aN; the image tag is YYYY.M.D[.N]aN.
+          IMAGE_TAG="${TAG#v}"
           deadline=$(( $(date +%s) + 1800 ))
+          manifest_url="https://ghcr.io/v2/${REPO}/manifests/${IMAGE_TAG}"
+          token_url="https://ghcr.io/token?scope=repository:${REPO}:pull&service=ghcr.io"
           while [ "$(date +%s)" -lt "$deadline" ]; do
-            run_json=$(gh api "repos/${REPO}/actions/workflows/docker-publish.yml/runs?event=workflow_dispatch&per_page=20")
-            run_id=$(echo "$run_json" | TAG="$TAG" python3 -c "
-          import json, sys, os
-          tag = os.environ['TAG']
-          d = json.load(sys.stdin)
-          for r in d.get('workflow_runs', []):
-              if tag in r.get('display_title',''):
-                  print(r['id'])
-                  break
-          ")
-            if [ -z "$run_id" ]; then
-              echo "no docker-publish run yet for $TAG; sleeping 15s"
+            token=$(curl -fsSL "$token_url" | jq -r '.token // empty')
+            if [ -z "$token" ]; then
+              echo "could not obtain anonymous GHCR token; sleeping 15s"
               sleep 15
               continue
             fi
-            status=$(gh api "repos/${REPO}/actions/runs/$run_id" --jq '.status')
-            conclusion=$(gh api "repos/${REPO}/actions/runs/$run_id" --jq '.conclusion // "pending"')
-            echo "docker-publish run $run_id: status=$status conclusion=$conclusion"
-            case "$status" in
-              completed)
-                if [ "$conclusion" = "success" ]; then
-                  echo "::notice::docker-publish completed successfully for $TAG"
-                  exit 0
-                fi
-                echo "::error::docker-publish for $TAG ended with conclusion=$conclusion — refusing to deploy"
-                echo "fix: investigate the docker-publish run before re-dispatching this workflow"
-                exit 1
-                ;;
-              *)
-                sleep 15
-                ;;
-            esac
+            code=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer $token" \
+              -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+              -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+              -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+              -H "Accept: application/vnd.oci.image.index.v1+json" \
+              "$manifest_url")
+            echo "manifest probe $manifest_url -> HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "::notice::GHCR has $TAG — proceeding to deploy"
+              exit 0
+            fi
+            sleep 15
           done
-          echo "::error::timed out waiting for docker-publish on $TAG (30 min)"
+          echo "::error::timed out waiting for GHCR manifest at $manifest_url (30 min)"
+          echo "fix: check the docker-publish workflow run for $TAG"
           exit 1
 
   deploy-vm:
     name: POST signed payload to webhook
     runs-on: ubuntu-latest
-    needs: [gate-alpha-tag, wait-for-docker-publish]
+    needs: [gate-alpha-tag, wait-for-image]
     environment: vm-deploy
     steps:
       - name: Sign + POST to webhook
