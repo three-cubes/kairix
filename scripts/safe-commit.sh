@@ -48,6 +48,25 @@ echo -n "  ruff format... "
 ruff format --check kairix/ tests/ >/dev/null 2>&1 || { echo -e "${RED}FAIL${NC}"; echo "Run: ruff format kairix/ tests/"; exit 1; }
 echo -e "${GREEN}OK${NC}"
 
+# 2b. gofmt on every Go service (when present). Auto-discovered: any
+# services/<name>/go.mod triggers a gofmt check on that module. Mirrors
+# what the remote 'Go quality' workflow does — keeping this local saves
+# a CI round-trip when a Go change is in the staged diff.
+if command -v gofmt >/dev/null 2>&1; then
+    while IFS= read -r gomod; do
+        svc_dir="$(dirname "$gomod")"
+        echo -n "  gofmt -s ($svc_dir)... "
+        unformatted=$(gofmt -s -l "$svc_dir" 2>&1)
+        if [[ -n "$unformatted" ]]; then
+            echo -e "${RED}FAIL${NC}"
+            echo "$unformatted" | sed 's/^/  /'
+            echo "Run: gofmt -s -w $svc_dir"
+            exit 1
+        fi
+        echo -e "${GREEN}OK${NC}"
+    done < <(find services -mindepth 2 -maxdepth 2 -name go.mod 2>/dev/null)
+fi
+
 # 3. Type checking (strict — matches CI)
 echo -n "  mypy strict... "
 MYPY_OUT=$(mypy kairix/ --strict 2>&1)
