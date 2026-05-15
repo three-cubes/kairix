@@ -87,7 +87,9 @@ jobs:
             --system bm25 \
             --output /tmp/reflib-out
           ls -la /tmp/reflib-out/
-          latest=$(ls -t /tmp/reflib-out/*.json | head -1)
+          # find preferred over 'ls -t' per shellcheck SC2012 — safer with
+          # non-alphanumeric filenames. Timestamp-prefixed JSONs sort newest-first.
+          latest=$(find /tmp/reflib-out -maxdepth 1 -name "*.json" -type f | sort -r | head -1)
           cp "$latest" "$RESULT_JSON"
 
       - name: Archive result + append INDEX.md row
