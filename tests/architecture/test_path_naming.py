@@ -104,13 +104,18 @@ def test_check_script_naming() -> None:
 
 
 def test_runbook_naming() -> None:
-    """Runbooks must be kebab-case or ``INDEX.md``.
+    """Runbooks must be kebab-case, ``INDEX.md``, or ``README.md``.
 
-    Sabotage-proof inline: snake_case runbook fails; kebab-case clears.
+    ``README.md`` is allowed as the per-directory resolver (F23) — landing
+    on ``docs/runbooks/`` from a path mention hits the README first.
+
+    Sabotage-proof inline: snake_case runbook fails; kebab-case clears;
+    INDEX/README clear.
     """
     detector = _load_detector()
     assert detector.file_violates("docs/operations/runbooks/how-to-debug-search-ranking.md") is False
     assert detector.file_violates("docs/operations/runbooks/INDEX.md") is False
+    assert detector.file_violates("docs/runbooks/README.md") is False
     assert detector.file_violates("docs/runbooks/my_runbook.md") is True
     assert detector.file_violates("docs/runbooks/my-runbook.md") is False
 

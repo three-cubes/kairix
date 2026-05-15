@@ -694,6 +694,8 @@ export KAIRIX_LOG_QUERIES=1
 
 ## Troubleshooting
 
+> For cross-cutting retrieval degradation (search wrong/empty, recall canary regressed, multiple `kairix onboard check` failures), use [`../runbooks/kairix-retrieval-health.md`](../runbooks/kairix-retrieval-health.md) — it has the full diagnosis tree and recovery paths. The per-symptom recipes below cover the narrow cases.
+
 ### `kairix: command not found`
 
 kairix is not on PATH for the current session.
