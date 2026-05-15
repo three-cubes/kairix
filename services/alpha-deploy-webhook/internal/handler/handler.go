@@ -140,9 +140,14 @@ func (h *Handler) runDeployAndReport(req DeployRequest) {
 	if result.Success {
 		finalState = status.StateSuccess
 	}
-	h.Logger.Info("deploy complete",
+	logLevel := slog.LevelInfo
+	if !result.Success {
+		logLevel = slog.LevelError
+	}
+	h.Logger.Log(context.Background(), logLevel, "deploy complete",
 		slog.Bool("success", result.Success),
 		slog.String("summary", result.Summary),
+		slog.String("details", result.Details),
 		slog.Float64("weighted_total", result.WeightedTotal),
 	)
 	if err := h.Poster.Post(ctx, req.SHA, finalState, result.Summary); err != nil {

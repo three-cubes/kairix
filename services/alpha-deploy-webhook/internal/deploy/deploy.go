@@ -120,19 +120,26 @@ func (s *Service) pullAndUp(ctx context.Context, version string) error {
 		slog.String("image_tag", imageTag),
 		slog.String("dir", s.ComposeDir),
 	)
-	// '-f docker-compose.yml' is mandatory, not redundant. In auto-discovery
-	// mode (no -f), docker compose v2 doesn't propagate shell-set env vars
-	// into image-tag interpolation when a project .env is also present —
-	// repro'd live on the VM (v5.1.3): KAIRIX_IMAGE_TAG=X docker compose config
-	// resolves :latest, while KAIRIX_IMAGE_TAG=X docker compose -f docker-compose.yml
-	// config resolves :X correctly. With -f, the env var wins.
-	pullCmd := fmt.Sprintf("KAIRIX_IMAGE_TAG=%s docker compose -f docker-compose.yml pull kairix kairix-worker", quoted)
+	// Pass BOTH compose files explicitly. We need '-f' so the shell-set
+	// KAIRIX_IMAGE_TAG env var reaches image-tag interpolation (compose v2
+	// doesn't propagate it in auto-discovery mode when a .env is present).
+	// But '-f' also disables auto-discovery of docker-compose.override.yml,
+	// which contains the VM-specific /run/secrets mount + KAIRIX_SECRETS_FILE
+	// env. So we pass both: the base file for parametrization, the override
+	// for the secrets wiring.
+	pullCmd := fmt.Sprintf(
+		"KAIRIX_IMAGE_TAG=%s docker compose -f docker-compose.yml -f docker-compose.override.yml pull kairix kairix-worker",
+		quoted,
+	)
 	out, err := s.Runner.Run(ctx, s.ComposeDir, "sh", "-c", pullCmd)
 	if err != nil {
 		return fmt.Errorf("pull: %w (output: %s)", err, truncate(out, 500))
 	}
 	s.Logger.Info("docker compose up -d")
-	upCmd := fmt.Sprintf("KAIRIX_IMAGE_TAG=%s docker compose -f docker-compose.yml up -d kairix kairix-worker", quoted)
+	upCmd := fmt.Sprintf(
+		"KAIRIX_IMAGE_TAG=%s docker compose -f docker-compose.yml -f docker-compose.override.yml up -d kairix kairix-worker",
+		quoted,
+	)
 	out, err = s.Runner.Run(ctx, s.ComposeDir, "sh", "-c", upCmd)
 	if err != nil {
 		return fmt.Errorf("up: %w (output: %s)", err, truncate(out, 500))
@@ -142,7 +149,12 @@ func (s *Service) pullAndUp(ctx context.Context, version string) error {
 
 func (s *Service) onboardCheck(ctx context.Context) error {
 	s.Logger.Info("kairix onboard check")
-	out, err := s.Runner.Run(ctx, s.ComposeDir, "docker", "exec", "app-kairix-1", "kairix", "onboard", "check", "--json")
+	// Capture stdout only — kairix's onboard CLI mixes deprecation warnings
+	// onto stderr that bleed through CombinedOutput. Wrapping in sh -c with
+	// 2>/dev/null isolates the JSON payload.
+	out, err := s.Runner.Run(ctx, s.ComposeDir,
+		"docker", "exec", "app-kairix-1",
+		"sh", "-c", "kairix onboard check --json 2>/dev/null")
 	if err != nil {
 		return fmt.Errorf("onboard exec: %w (output: %s)", err, truncate(out, 500))
 	}
