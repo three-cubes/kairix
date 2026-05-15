@@ -88,8 +88,15 @@ def _entity_card_from_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Match order matters: slug-id first (cheapest, most precise), then exact
+# canonical-name match, then alias match. Without the alias check the
+# common "lookup the entity I call X but the crawler stored it as Y"
+# case returned not-found — #253. coalesce() guards against nodes that
+# pre-date the aliases field (older Neo4j upserts didn't always set it).
 _ENTITY_CARD_CYPHER = (
-    "MATCH (n) WHERE n.id = $id OR toLower(n.name) = toLower($name) "
+    "MATCH (n) WHERE n.id = $id "
+    "   OR toLower(n.name) = toLower($name) "
+    "   OR any(alias IN coalesce(n.aliases, []) WHERE toLower(alias) = toLower($name)) "
     "RETURN labels(n)[0] AS type, n.id AS id, n.name AS name, "
     "n.vault_path AS vault_path, "
     "n.role AS role, n.org AS org, "

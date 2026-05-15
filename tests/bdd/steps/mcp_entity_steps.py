@@ -24,7 +24,12 @@ class _EntityAwareFakeNeo4j(FakeNeo4jClient):
             target_id = (params.get("id") or "").lower()
             target_name = (params.get("name") or "").lower()
             for e in self._entities:
-                if e.get("id", "").lower() == target_id or e.get("name", "").lower() == target_name:
+                aliases = [a.lower() for a in (e.get("aliases") or [])]
+                if (
+                    e.get("id", "").lower() == target_id
+                    or e.get("name", "").lower() == target_name
+                    or target_name in aliases
+                ):
                     return [
                         {
                             "type": e.get("label", ""),
