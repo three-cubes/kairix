@@ -56,8 +56,8 @@ func onboardBad() []byte { return []byte(`{"passed":7,"total":9,"fully_passed":f
 
 func TestServiceRunHappyPath(t *testing.T) {
 	r := newFakeRunner(map[string]fakeResponse{
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose pull kairix kairix-worker":         {out: []byte("Pulled")},
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose up -d kairix kairix-worker":        {out: []byte("Started")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml pull kairix kairix-worker":         {out: []byte("Pulled")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml up -d kairix kairix-worker":        {out: []byte("Started")},
 		"docker exec app-kairix-1 kairix onboard check --json":                                 {out: onboardOK()},
 		"docker exec app-kairix-1 sh -c cd /opt/kairix && kairix benchmark run --suite reflib": {out: benchmarkOutput(0.889)},
 	})
@@ -80,8 +80,8 @@ func TestServiceRunHappyPath(t *testing.T) {
 
 func TestServiceRunRegressionExceedsTolerance(t *testing.T) {
 	r := newFakeRunner(map[string]fakeResponse{
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose pull kairix kairix-worker":         {out: []byte("Pulled")},
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose up -d kairix kairix-worker":        {out: []byte("Started")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml pull kairix kairix-worker":         {out: []byte("Pulled")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml up -d kairix kairix-worker":        {out: []byte("Started")},
 		"docker exec app-kairix-1 kairix onboard check --json":                                 {out: onboardOK()},
 		"docker exec app-kairix-1 sh -c cd /opt/kairix && kairix benchmark run --suite reflib": {out: benchmarkOutput(0.800)},
 	})
@@ -104,8 +104,8 @@ func TestServiceRunRegressionExceedsTolerance(t *testing.T) {
 
 func TestServiceRunOnboardFailure(t *testing.T) {
 	r := newFakeRunner(map[string]fakeResponse{
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose pull kairix kairix-worker":  {out: []byte("Pulled")},
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose up -d kairix kairix-worker": {out: []byte("Started")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml pull kairix kairix-worker":  {out: []byte("Pulled")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml up -d kairix kairix-worker": {out: []byte("Started")},
 		"docker exec app-kairix-1 kairix onboard check --json":                           {out: onboardBad()},
 	})
 	s := &Service{Runner: r, ComposeDir: "/opt/kairix/app", BenchmarkSuite: "reflib", Logger: newSilentLogger()}
@@ -120,7 +120,7 @@ func TestServiceRunOnboardFailure(t *testing.T) {
 
 func TestServiceRunPullFailure(t *testing.T) {
 	r := newFakeRunner(map[string]fakeResponse{
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose pull kairix kairix-worker": {out: []byte("error"), err: errors.New("network down")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml pull kairix kairix-worker": {out: []byte("error"), err: errors.New("network down")},
 	})
 	s := &Service{Runner: r, ComposeDir: "/opt/kairix/app", Logger: newSilentLogger()}
 	got := s.Run(context.Background(), "v2026.5.15a1")
@@ -134,8 +134,8 @@ func TestServiceRunPullFailure(t *testing.T) {
 
 func TestServiceRunBenchmarkParseFailure(t *testing.T) {
 	r := newFakeRunner(map[string]fakeResponse{
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose pull kairix kairix-worker":         {out: []byte("Pulled")},
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose up -d kairix kairix-worker":        {out: []byte("Started")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml pull kairix kairix-worker":         {out: []byte("Pulled")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml up -d kairix kairix-worker":        {out: []byte("Started")},
 		"docker exec app-kairix-1 kairix onboard check --json":                                 {out: onboardOK()},
 		"docker exec app-kairix-1 sh -c cd /opt/kairix && kairix benchmark run --suite reflib": {out: []byte("no parseable output")},
 	})
