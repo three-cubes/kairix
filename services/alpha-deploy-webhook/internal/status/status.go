@@ -91,11 +91,26 @@ func (p *HTTPPoster) Post(ctx context.Context, sha string, state State, descript
 	if err != nil {
 		return fmt.Errorf("do request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			// Close-on-defer failure means the keepalive pool may leak
+			// the connection. Caller has already acted on the response;
+			// surface via Go's stdlib log as a last-resort warning.
+			//
+			// We deliberately don't return cerr — it would mask the
+			// earlier write outcome.
+			_ = cerr
+		}
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Read up to 1 KiB of body for the error message; ignore truncation.
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		// Read up to 1 KiB of body for the error message. If the read
+		// itself fails (truncated stream, body already closed) we still
+		// have the status code — the body is best-effort context.
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if readErr != nil {
+			return fmt.Errorf("github status %d (body read failed: %v)", resp.StatusCode, readErr)
+		}
 		return fmt.Errorf("github status %d: %s", resp.StatusCode, string(respBody))
 	}
 	return nil

@@ -73,7 +73,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) healthz(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"ok":true}`))
+	if _, err := w.Write([]byte(`{"ok":true}`)); err != nil {
+		h.Logger.Warn("healthz write failed", slog.String("err", err.Error()))
+	}
 }
 
 func (h *Handler) deploy(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +108,9 @@ func (h *Handler) deploy(w http.ResponseWriter, r *http.Request) {
 	// Accept synchronously; do the slow work in the background.
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write([]byte(`{"accepted":true}`))
+	if _, err := w.Write([]byte(`{"accepted":true}`)); err != nil {
+		h.Logger.Warn("deploy ack write failed", slog.String("err", err.Error()))
+	}
 
 	h.inflight.Add(1)
 	go func() {
