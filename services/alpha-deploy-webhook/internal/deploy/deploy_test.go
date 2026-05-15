@@ -56,10 +56,10 @@ func onboardBad() []byte { return []byte(`{"passed":7,"total":9,"fully_passed":f
 
 func TestServiceRunHappyPath(t *testing.T) {
 	r := newFakeRunner(map[string]fakeResponse{
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml pull kairix kairix-worker":         {out: []byte("Pulled")},
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml up -d kairix kairix-worker":        {out: []byte("Started")},
-		"docker exec app-kairix-1 sh -c kairix onboard check --json 2>/dev/null":                                 {out: onboardOK()},
-		"docker exec app-kairix-1 sh -c cd /opt/kairix && kairix benchmark run --suite reflib": {out: benchmarkOutput(0.889)},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml pull kairix kairix-worker":  {out: []byte("Pulled")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml up -d kairix kairix-worker": {out: []byte("Started")},
+		"docker exec app-kairix-1 sh -c kairix onboard check --json 2>/dev/null":                                                              {out: onboardOK()},
+		"docker exec app-kairix-1 sh -c cd /opt/kairix && kairix benchmark run --suite reflib":                                                {out: benchmarkOutput(0.889)},
 	})
 	s := &Service{
 		Runner:                r,
@@ -80,10 +80,10 @@ func TestServiceRunHappyPath(t *testing.T) {
 
 func TestServiceRunRegressionExceedsTolerance(t *testing.T) {
 	r := newFakeRunner(map[string]fakeResponse{
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml pull kairix kairix-worker":         {out: []byte("Pulled")},
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml up -d kairix kairix-worker":        {out: []byte("Started")},
-		"docker exec app-kairix-1 sh -c kairix onboard check --json 2>/dev/null":                                 {out: onboardOK()},
-		"docker exec app-kairix-1 sh -c cd /opt/kairix && kairix benchmark run --suite reflib": {out: benchmarkOutput(0.800)},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml pull kairix kairix-worker":  {out: []byte("Pulled")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml up -d kairix kairix-worker": {out: []byte("Started")},
+		"docker exec app-kairix-1 sh -c kairix onboard check --json 2>/dev/null":                                                              {out: onboardOK()},
+		"docker exec app-kairix-1 sh -c cd /opt/kairix && kairix benchmark run --suite reflib":                                                {out: benchmarkOutput(0.800)},
 	})
 	s := &Service{
 		Runner:                r,
@@ -106,7 +106,7 @@ func TestServiceRunOnboardFailure(t *testing.T) {
 	r := newFakeRunner(map[string]fakeResponse{
 		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml pull kairix kairix-worker":  {out: []byte("Pulled")},
 		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml up -d kairix kairix-worker": {out: []byte("Started")},
-		"docker exec app-kairix-1 sh -c kairix onboard check --json 2>/dev/null":                           {out: onboardBad()},
+		"docker exec app-kairix-1 sh -c kairix onboard check --json 2>/dev/null":                                                              {out: onboardBad()},
 	})
 	s := &Service{Runner: r, ComposeDir: "/opt/kairix/app", BenchmarkSuite: "reflib", Logger: newSilentLogger()}
 	got := s.Run(context.Background(), "v2026.5.15a1")
@@ -134,10 +134,10 @@ func TestServiceRunPullFailure(t *testing.T) {
 
 func TestServiceRunBenchmarkParseFailure(t *testing.T) {
 	r := newFakeRunner(map[string]fakeResponse{
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml pull kairix kairix-worker":         {out: []byte("Pulled")},
-		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml up -d kairix kairix-worker":        {out: []byte("Started")},
-		"docker exec app-kairix-1 sh -c kairix onboard check --json 2>/dev/null":                                 {out: onboardOK()},
-		"docker exec app-kairix-1 sh -c cd /opt/kairix && kairix benchmark run --suite reflib": {out: []byte("no parseable output")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml pull kairix kairix-worker":  {out: []byte("Pulled")},
+		"sh -c KAIRIX_IMAGE_TAG='2026.5.15a1' docker compose -f docker-compose.yml -f docker-compose.override.yml up -d kairix kairix-worker": {out: []byte("Started")},
+		"docker exec app-kairix-1 sh -c kairix onboard check --json 2>/dev/null":                                                              {out: onboardOK()},
+		"docker exec app-kairix-1 sh -c cd /opt/kairix && kairix benchmark run --suite reflib":                                                {out: []byte("no parseable output")},
 	})
 	s := &Service{Runner: r, ComposeDir: "/opt/kairix/app", BenchmarkSuite: "reflib", Logger: newSilentLogger()}
 	got := s.Run(context.Background(), "v2026.5.15a1")
