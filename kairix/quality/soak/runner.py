@@ -104,17 +104,19 @@ class SoakResult:
 def _default_workload_runner(suite: str) -> dict[str, Any]:
     """Default workload — runs the benchmark suite and returns its envelope.
 
+    ``suite`` may be a bundle name (e.g. ``reflib``) or an explicit file path.
+    Mirrors the resolution logic ``kairix benchmark run --suite SUITE`` uses
+    so the operator gets the same name-shortcut UX (#222) here.
+
     Lazy-imports so a soak invocation with an injected runner doesn't pull
     the whole benchmark stack into module load.
     """
     from kairix.quality.benchmark.runner import run_benchmark
-    from kairix.quality.benchmark.suite import load_suite
+    from kairix.quality.benchmark.suite import load_suite, resolve_suite_path
 
-    suite_obj = load_suite(suite)
+    suite_path = resolve_suite_path(suite)
+    suite_obj = load_suite(str(suite_path))
     result = run_benchmark(suite=suite_obj)
-    # Return a minimal envelope that the soak runner can hash to detect
-    # cross-iteration drift. The benchmark's `summary` already carries the
-    # aggregate scores we want pinned.
     return {"summary": result.summary, "case_count": len(result.cases)}
 
 
