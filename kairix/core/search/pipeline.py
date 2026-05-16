@@ -117,9 +117,9 @@ class SearchPipeline:
         if resolve_error is not None:
             return SearchResult(query=query, intent=intent, error=resolve_error, stage_latency_ms=stages)
 
-        # 4. Dispatch BM25 + vector search
+        # 4. Dispatch BM25 + vector search — split into bm25/vector inside the helper
         t = time.monotonic()
-        bm25_results, vec_results, vec_failed = self._dispatch_backends(query, collections)
+        bm25_results, vec_results, vec_failed = self._dispatch_backends(query, collections, stages)
         _stage("dispatch", t)
 
         # 5. Fuse
@@ -197,16 +197,30 @@ class SearchPipeline:
         self,
         query: str,
         collections: list[str] | None,
+        stages: dict[str, float] | None = None,
     ) -> tuple[list[dict], list[dict], bool]:
-        """Run BM25 + vector search; isolate each failure so one can't break the other."""
+        """Run BM25 + vector search; isolate each failure so one can't break the other.
+
+        When ``stages`` is supplied, records ``bm25`` and ``vector`` wall-clock
+        deltas into it so the caller can decompose the ``dispatch`` stage in
+        SearchResult.stage_latency_ms (#282 follow-up: probe data showed the
+        dispatch stage owns 92% of total wall-clock; this split says how much
+        is BM25 vs embed+vector).
+        """
         cfg = self.config
         bm25_results: list[dict] = []
+        t = time.monotonic()
         try:
             bm25_results = self.bm25.search(query, collections=collections, limit=cfg.bm25_limit)
         except Exception as e:
             _logger.warning("pipeline: BM25 search failed — %s", e)
+        if stages is not None:
+            stages["bm25"] = round((time.monotonic() - t) * 1000.0, 2)
 
+        t = time.monotonic()
         vec_results, vec_failed = self._dispatch_vector(query, collections)
+        if stages is not None:
+            stages["vector"] = round((time.monotonic() - t) * 1000.0, 2)
         return bm25_results, vec_results, vec_failed
 
     def _dispatch_vector(
