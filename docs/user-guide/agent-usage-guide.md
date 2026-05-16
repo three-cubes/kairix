@@ -287,6 +287,30 @@ Set with `--budget N`. The budget caps total tokens returned, not the number of 
 
 ---
 
+## Capabilities — which surface to use
+
+Every kairix capability has one Python implementation with one or more bindings (CLI, MCP). This table is the index for agents — search it for "diagnostics", "soak", "health", or any capability you're looking for and it tells you which surface to use.
+
+| capability | when to use | how to invoke | surface |
+|---|---|---|---|
+| `tool_search` / `kairix search` | retrieve content from the knowledge store | MCP — direct | both |
+| `tool_entity` / `kairix entity` | named-entity lookup (person, org, project) | MCP — direct | both |
+| `tool_prep` / `kairix prep` | tiered L0/L1 context summary | MCP — direct | both |
+| `tool_contradict` / `kairix contradict` | check new content for contradictions | MCP — direct | both |
+| `tool_brief` / `kairix brief` | session briefing synthesis | MCP — direct | both |
+| `tool_bootstrap` / `kairix bootstrap` | session-start orientation envelope | MCP — direct | both |
+| `tool_onboard_check` / `kairix onboard check` | "is kairix healthy?" — read-only 9-probe envelope | MCP — direct | both |
+| `tool_worker_status` / `kairix worker status` | "is the worker running?" — state file envelope | MCP — direct | both |
+| `tool_soak_run` / `kairix soak run` | repeat-and-assert (memory, log volume, fd, determinism) | MCP returns escalation envelope; operator runs CLI | CLI |
+| `tool_benchmark_run` / `kairix benchmark run` | retrieval quality measurement | MCP returns escalation envelope; operator runs CLI | CLI |
+| `tool_embed` / `kairix embed` | embed documents into the vector index | MCP returns escalation envelope; operator runs CLI | CLI |
+| `tool_store_crawl` / `kairix store crawl` | rebuild the Neo4j entity graph | MCP returns escalation envelope; operator runs CLI | CLI |
+| `tool_embed_rebuild_fts` / `kairix embed rebuild-fts` | drop + re-create the FTS5 table | MCP returns escalation envelope; operator runs CLI | CLI |
+
+The operator-only rows return an `OperatorOnlyCapability` envelope via MCP — surface the `operator_command` field to your admin if you need the work done.
+
+---
+
 ## Getting help
 
 ```bash

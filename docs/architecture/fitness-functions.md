@@ -175,6 +175,7 @@ fully enforced; new violations anywhere in the codebase block.
 | F22 | Repo paths follow per-tree naming conventions | structural | Python (regex per tree) | pre-commit, safe-commit, CI Stage 0 | `path-naming-files.txt` (empty — clean) |
 | F23 | Every top-level directory has a `README.md` | structural | Python (filesystem walk) | pre-commit, safe-commit, CI Stage 0 | `readme-coverage-files.txt` |
 | F24 | No `from tests.*` / `import tests` imports in `kairix/**/*.py` | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-test-imports-in-prod-files.txt` (empty — clean) |
+| F25 | Every CLI subcommand has an MCP affordance — real `tool_<command>` binding OR `OperatorOnlyCapability` escalation stub | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `capability-affordance-files.txt` (empty — clean) |
 
 ### Go-side rules (G1–G10)
 
