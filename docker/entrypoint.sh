@@ -15,6 +15,13 @@ MODE="${1:-serve}"
 
 case "$MODE" in
     serve)
+        # Pay the factory-init + first-search costs BEFORE the MCP server
+        # binds, so the agent's first tool_search lands on a warm pipeline
+        # rather than ~8s of cold-start latency that gets committed to
+        # agent memory as 'kairix is flaky' (#278). Soft-fail on partial
+        # warm — graph subsystem failure shouldn't block MCP startup.
+        echo "Warming kairix caches before binding MCP..."
+        kairix warm || echo "warm-up partial — proceeding (some subsystems may be cold)"
         echo "Starting kairix MCP server on port 8080..."
         exec kairix mcp serve --transport http --host 0.0.0.0 --port 8080
         ;;
@@ -27,6 +34,10 @@ case "$MODE" in
         exec kairix setup
         ;;
     worker)
+        # Worker is long-running; warm so the first hourly embed cycle
+        # runs against a hot pipeline.
+        echo "Warming kairix caches before worker loop..."
+        kairix warm || echo "warm-up partial — proceeding"
         echo "Starting background worker (embed hourly, entity seed nightly)..."
         exec python -m kairix.worker
         ;;
