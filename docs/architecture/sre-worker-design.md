@@ -1,6 +1,8 @@
 # SRE worker — design (closes #243 design phase)
 
 > **Status**: design-only. No code in this design phase per #243 DoD ("No code yet — design first"). Implementation is split into three phases below; each gets its own implementation issue when this design is accepted.
+>
+> **Companion**: see [`operational-tests-design.md`](operational-tests-design.md) for the CLI primitives this worker invokes. The architectural invariant from that design — *the SRE worker is a scheduler over kairix CLI primitives, not a probe library* — shapes every decision below. Adding a new probe means adding a `kairix <subcommand>`, then wiring it into the worker's rotation; the worker itself doesn't grow.
 
 ## Why a separate worker at all
 
