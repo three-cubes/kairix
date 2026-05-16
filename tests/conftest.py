@@ -73,9 +73,23 @@ pytest_plugins = [
     "tests.bdd.steps.mcp_cli_steps",
     "tests.bdd.steps.embed_cli_steps",
     "tests.bdd.steps.timeline_cli_steps",
-    # PVT placeholder steps — catch-all pytest.skip until #284 harness ships.
-    "tests.pvt.steps.pvt_placeholder_steps",
+    "tests.bdd.steps.soak_steps",
+    "tests.bdd.steps.warm_steps",
+    "tests.bdd.steps.probe_steps",
+    "tests.bdd.steps.worker_steps",
 ]
+
+# PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.
+# Gated on ``KAIRIX_PVT=1`` so the regex-catch-all parser doesn't intercept
+# every Given/When/Then across the layer-2 BDD suite when PVT is off (the
+# default). The tests/pvt/conftest.py autoskip is the primary defence — it
+# skips PVT-marked items at collection time; this catch-all is the secondary
+# defence that the PVT brief reserves for the ``KAIRIX_PVT=1`` mode where
+# the autoskip is intentionally bypassed.
+import os as _os  # noqa: E402 — keep pytest_plugins assembly above other imports
+
+if _os.environ.get("KAIRIX_PVT") == "1":
+    pytest_plugins.append("tests.pvt.steps.pvt_placeholder_steps")
 
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
 from tests.fixtures.neo4j_mock import FakeNeo4jClient  # noqa: E402
