@@ -48,6 +48,12 @@ class SearchResult:
     bm25_count: int = 0
     vec_count: int = 0
     fused_count: int = 0
+    # Per-stage wall-clock latency (ms) — populated by SearchPipeline.search.
+    # Keys: classify, resolve, dispatch (bm25+vec parallel), fuse, enrich,
+    # boost, budget. Sums approximately to total latency_ms minus a few ms
+    # of bookkeeping. Used by ``kairix probe search --json`` to surface
+    # which pipeline stage dominates the wall-clock cost (#282).
+    stage_latency_ms: dict[str, float] = field(default_factory=dict)
     collections: list[str] = field(default_factory=list)
     tiers_used: list[str] = field(default_factory=list)
     total_tokens: int = 0
@@ -89,36 +95,55 @@ class SearchPipeline:
         Never raises — returns SearchResult with empty results on any failure.
         """
         t_start = time.monotonic()
+        stages: dict[str, float] = {}
+
+        def _stage(name: str, start: float) -> None:
+            """Record one stage's wall-clock duration into the stages dict."""
+            stages[name] = round((time.monotonic() - start) * 1000.0, 2)
 
         # 1. Classify intent
+        t = time.monotonic()
         intent = self._classify(query)
+        _stage("classify", t)
 
         # 2. Entity intent requires graph
         if intent == QueryIntent.ENTITY and not self.graph.available:
-            return SearchResult(query=query, intent=intent, error=_ENTITY_GRAPH_UNAVAILABLE)
+            return SearchResult(query=query, intent=intent, error=_ENTITY_GRAPH_UNAVAILABLE, stage_latency_ms=stages)
 
         # 3. Resolve collections via the injected CollectionResolver
+        t = time.monotonic()
         collections, resolve_error = self._resolve_collections(collections, agent, scope)
+        _stage("resolve", t)
         if resolve_error is not None:
-            return SearchResult(query=query, intent=intent, error=resolve_error)
+            return SearchResult(query=query, intent=intent, error=resolve_error, stage_latency_ms=stages)
 
         # 4. Dispatch BM25 + vector search
+        t = time.monotonic()
         bm25_results, vec_results, vec_failed = self._dispatch_backends(query, collections)
+        _stage("dispatch", t)
 
         # 5. Fuse
+        t = time.monotonic()
         fused = self._fuse(bm25_results, vec_results)
+        _stage("fuse", t)
 
         # 5b. Enrich each fused result with chunk_date metadata so the boost
         # chain (specifically ChunkDateBoost) can score by recency. Source
         # of truth is DocumentRepository.get_chunk_dates, exposed here via
         # the BM25 backend — boost adapters never reach into the repo.
+        t = time.monotonic()
         self._enrich_chunk_dates(fused)
+        _stage("enrich", t)
 
         # 6. Boost chain
+        t = time.monotonic()
         fused = self._apply_boosts(fused, query, intent)
+        _stage("boost", t)
 
         # 7. Budget
+        t = time.monotonic()
         budgeted = apply_budget(fused, budget=budget)
+        _stage("budget", t)
         total_tokens = sum(getattr(r, "token_estimate", 0) for r in budgeted)
         tiers_used = sorted({getattr(r, "tier", "L2") for r in budgeted})
 
@@ -137,6 +162,7 @@ class SearchPipeline:
             latency_ms=latency_ms,
             vec_failed=vec_failed,
             fallback_used=not bm25_results and bool(vec_results),
+            stage_latency_ms=stages,
         )
 
         # 8. Log

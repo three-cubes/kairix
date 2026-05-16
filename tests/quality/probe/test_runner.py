@@ -202,6 +202,7 @@ def test_envelope_round_trip_contains_required_keys() -> None:
         "p95_threshold_ms",
         "passed",
         "bottleneck",
+        "stage_means_ms",
     }
     assert required.issubset(env.keys())
     assert env["bottleneck"] is None  # fast path → healthy → no recommendation
@@ -245,3 +246,61 @@ def test_errors_in_search_fn_are_counted_not_raised() -> None:
     )
     assert result.errors == 5
     assert result.passed is False  # any error blocks passing
+
+
+def test_stage_means_aggregated_from_search_result_stage_latencies() -> None:
+    """Closes #282: per-stage wall-clock means surface in the probe envelope.
+
+    When the searcher returns objects carrying ``stage_latency_ms`` (as the
+    real kairix SearchPipeline does post-#282), the probe aggregates a
+    per-stage mean across successful queries. With known per-call stage
+    values (10, 20, 30 ms across 3 calls), the mean is deterministically 20.
+
+    Sabotage-proof: drop the ``_stage_means`` call in run_probe_search and
+    result.stage_means_ms stays empty, breaking the assertion.
+    """
+
+    class _FakeStagedResult:
+        def __init__(self, classify_ms: float, dispatch_ms: float) -> None:
+            self.stage_latency_ms = {"classify": classify_ms, "dispatch": dispatch_ms}
+
+    call = {"i": 0}
+    samples = [(10.0, 100.0), (20.0, 200.0), (30.0, 300.0)]
+
+    def staged_searcher(_q: SampledQuery) -> _FakeStagedResult:
+        idx = call["i"] % len(samples)
+        call["i"] += 1
+        return _FakeStagedResult(*samples[idx])
+
+    result = run_probe_search(
+        suite="x",
+        queries=3,
+        concurrency=1,
+        suite_loader=_suite_loader,
+        searcher=staged_searcher,
+    )
+    assert result.stage_means_ms.get("classify") == 20.0
+    assert result.stage_means_ms.get("dispatch") == 200.0
+    # to_envelope round-trips the stage means as a top-level key.
+    assert result.to_envelope()["stage_means_ms"] == {"classify": 20.0, "dispatch": 200.0}
+
+
+def test_stage_means_empty_when_searcher_omits_stage_latency() -> None:
+    """Searchers that don't return SearchResult-shaped objects yield empty means.
+
+    The probe must still produce a valid envelope when stage_latency_ms is
+    absent (e.g. tests using a bare dict-returning fake, or a hypothetical
+    transport client that doesn't surface stage data).
+
+    Sabotage-proof: change the ``isinstance(stage_map, dict)`` guard to
+    ``stage_map is None`` and a dict-returning fake (which has no
+    ``stage_latency_ms`` attribute at all) starts blowing up.
+    """
+    result = run_probe_search(
+        suite="x",
+        queries=5,
+        concurrency=2,
+        suite_loader=_suite_loader,
+        searcher=_fast_client.search,
+    )
+    assert result.stage_means_ms == {}

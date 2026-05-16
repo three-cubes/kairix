@@ -79,6 +79,11 @@ class ProbeResult:
     p95_threshold_ms: float = DEFAULT_P95_THRESHOLD_MS
     passed: bool = True
     bottleneck: tuple[str, str] | None = None
+    # Mean per-stage wall-clock (ms) across every successful query (#282).
+    # Keys: classify, resolve, dispatch, fuse, enrich, boost, budget.
+    # Empty when no stage data was returned (e.g. fake searcher that doesn't
+    # populate stage_latency_ms). Reads with .get(stage, 0.0).
+    stage_means_ms: dict[str, float] = field(default_factory=dict)
 
     def to_envelope(self) -> dict[str, Any]:
         """Project to the JSON envelope CLI ``--json`` + MCP would emit."""
@@ -98,6 +103,7 @@ class ProbeResult:
             "bottleneck": (
                 {"kind": self.bottleneck[0], "recommended_action": self.bottleneck[1]} if self.bottleneck else None
             ),
+            "stage_means_ms": self.stage_means_ms,
         }
 
 
@@ -162,6 +168,28 @@ def _per_category_stats(
     return {cat: latency_stats(durs) for cat, durs in by_cat.items()}
 
 
+def _stage_means(results: list[Any]) -> dict[str, float]:
+    """Average per-stage wall-clock across successful results.
+
+    Reads ``stage_latency_ms`` off each result's ``.result`` attribute (when
+    the searcher returned a kairix SearchResult). Other searcher shapes
+    (e.g. fakes that return dicts without stage timings) contribute nothing
+    and yield an empty dict, which is a valid envelope shape.
+    """
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for r in results:
+        if not r.succeeded or r.result is None:
+            continue
+        stage_map = getattr(r.result, "stage_latency_ms", None)
+        if not isinstance(stage_map, dict):
+            continue
+        for stage, ms in stage_map.items():
+            sums[stage] = sums.get(stage, 0.0) + float(ms)
+            counts[stage] = counts.get(stage, 0) + 1
+    return {stage: round(sums[stage] / counts[stage], 2) for stage in sums if counts[stage] > 0}
+
+
 def run_probe_search(
     suite: str,
     queries: int = 100,
@@ -208,6 +236,7 @@ def run_probe_search(
     durations_ms = [r.duration_ms for r in run.results]
     overall = latency_stats(durations_ms)
     per_category = _per_category_stats(sampled, durations_ms)
+    stage_means_ms = _stage_means(run.results)
 
     azure_429_count = 0  # See ProbeResult.azure_429_count docstring for wire-up status.
     bottleneck = suggest_bottleneck(
@@ -233,4 +262,5 @@ def run_probe_search(
         p95_threshold_ms=p95_threshold_ms,
         passed=passed,
         bottleneck=bottleneck,
+        stage_means_ms=stage_means_ms,
     )
