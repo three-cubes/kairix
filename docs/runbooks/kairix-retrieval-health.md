@@ -283,7 +283,41 @@ If `kairix benchmark run` passes once but `kairix soak run --repeat 2` fails:
 
 ---
 
-## 6. Recall canary regression
+## 6. Concurrent-load probe — does p95 hold under teaming load?
+
+Symptom branch for "individual queries feel fine but the team session goes flaky around 5+ active agents". The probe is the decision instrument for the Tier 1 tuning levers (Azure embed pool, query-result LRU cache, connection-pool sizes) laid out in [`docs/architecture/teaming-concurrency-strategy.md`](../architecture/teaming-concurrency-strategy.md) — run it *before* you commit to a tuning change so you pull the right lever, not the loudest one.
+
+```bash
+kairix probe search --suite reflib --queries 100 --concurrency 5 --recommend --json | jq .
+```
+
+Read three fields, in order: `overall.p95_ms` (gate is ≤ 500 ms — matches the ADR's agent-perceived-performance target; above it agents commit "kairix is flaky" to memory), `mean_concurrency` (Little's-Law `sum(durations)/wallclock`; approaches `--concurrency` when work overlaps, far below requested means a hidden lock, not a load problem), and `bottleneck.kind` / `bottleneck.recommended_action` (populated by `--recommend`; names the suspect subsystem and the lever).
+
+| Observable signal | Suspected bottleneck | Next action |
+|---|---|---|
+| p95 climbs sharply at concurrency 2-5 | Azure embed pool exhausted | Tune `KAIRIX_EMBED_POOL_SIZE` + retry/backoff in `kairix/_azure.py` |
+| p95 stays flat until concurrency 10-15 | Pool sizing fine; repeated-query overhead dominates | Add query-result LRU cache (Tier 1 lever 2) |
+| `mean_concurrency` far below requested | Hidden lock contention — tasks serialised in-process | Investigate with `py-spy dump` against the live MCP process *before* pulling any lever |
+| `bottleneck.kind == "azure_embed_rate_limit"` (429s) | Azure embed rate limit hit | Tune `KAIRIX_EMBED_POOL_SIZE` + backoff; do not raise pool past the Azure quota |
+| `bottleneck.kind == "deployment_or_network"` (p95 high at concurrency=1) | Not a load problem | Check Azure endpoint health, cold-start latency, vault size |
+
+On a fresh deployment or after a tuning change, sweep first rather than fixing a single concurrency — this is the recommended first run:
+
+```bash
+kairix probe search --suite reflib --queries 100 --concurrency-sweep 1,2,5,10,20 --recommend --json | jq .
+```
+
+The inflection where p95 starts to climb is the operating headroom; the level *at* the climb names the lever (≤5 → Azure pool; 10-15 → query cache). Pass/fail thresholds: `p95_ms` ≤ 500 ms (ADR gate), `p99_ms` ≤ 2000 ms, zero errors (any non-zero invalidates the reading). Agents can call `tool_probe_search` MCP for healthcheck-shaped probes up to `queries ≤ 20` / `concurrency ≤ 3`; above-cap calls return an `OperatorOnlyCapability` envelope with the exact CLI pre-filled — full load runs are operator-only by design.
+
+```
+fix: identify the bottleneck — re-run with --recommend, then apply the lever named in bottleneck.recommended_action
+next: if recommendation is `worker_contention`, run py-spy against the live MCP process before pulling any tuning lever — the symptom is upstream of the levers
+run: kairix probe search --suite reflib --queries 100 --concurrency 5 --recommend --json | jq .
+```
+
+---
+
+## 7. Recall canary regression
 
 This is a distinct symptom branch — your subsystem health checks pass, but the recall benchmark has dropped. Search is "working" in the sense that all probes pass; it's just returning worse results than it used to.
 
@@ -318,7 +352,7 @@ The historical contract baseline carries `weighted_total: 0.9585` and `ndcg_at_1
 
 ---
 
-## 7. Full reset — last resort
+## 8. Full reset — last resort
 
 Use this when individual fixes don't work, when three or more `onboard check` failures arrive at once, or after a botched migration. The full reset rebuilds every retrieval surface from the document store.
 
@@ -357,7 +391,7 @@ kairix benchmark run --suite reflib | tail -20
 
 ---
 
-## 8. Escalation
+## 9. Escalation
 
 File an issue at https://github.com/three-cubes/kairix/issues with the title `retrieval health: <symptom>` when:
 
@@ -392,6 +426,8 @@ Tag the issue with whichever dogfood agent reported the symptom — that's the p
 
 ## See also
 
+- [`teaming-concurrency-strategy.md`](../architecture/teaming-concurrency-strategy.md) — ADR for the concurrency model and the Tier 1 tuning levers the probe (§6) selects between.
+- `kairix probe search --help` — full CLI surface for the concurrent-load probe, including `--concurrency-sweep`, `--p95-threshold-ms`, `--seed`, and `--recommend`.
 - [`runbook-vector-search-failure.md`](../operations/runbooks/runbook-vector-search-failure.md) — deep dive on `vec=0, vec_failed=True` (vector leg only).
 - [`runbook-embedding-lag.md`](../operations/runbooks/runbook-embedding-lag.md) — new content not searchable after the expected embed cycle.
 - [`runbook-benchmark-regression.md`](../operations/runbooks/runbook-benchmark-regression.md) — NDCG dropped after a config or index change.
