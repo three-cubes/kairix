@@ -440,6 +440,157 @@ def tool_bootstrap(
 
 
 # ---------------------------------------------------------------------------
+# Diagnostic capabilities — read-only kairix state for agents to introspect
+# ---------------------------------------------------------------------------
+
+
+def tool_onboard_check() -> dict[str, Any]:
+    """Run the kairix deployment health probes and return the structured envelope.
+
+    Mirrors ``kairix onboard check --json`` — the same Python API
+    (``run_onboard_check``) backs both surfaces, so CLI and MCP return
+    byte-identical envelopes for the same kairix state.
+
+    Read-only, bounded runtime (a few seconds at the worst case).
+    """
+    from dataclasses import asdict
+
+    from kairix.platform.onboard.check import run_onboard_check
+
+    try:
+        outcome = run_onboard_check()
+        return {
+            "passed": outcome.passed,
+            "total": outcome.total,
+            "fully_passed": outcome.fully_passed,
+            "failures": [asdict(f) for f in outcome.failures],
+            "error": "",
+        }
+    except Exception as exc:
+        logger.warning("tool_onboard_check failed: %s", exc, exc_info=True)
+        return {
+            "passed": 0,
+            "total": 0,
+            "fully_passed": False,
+            "failures": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def tool_worker_status() -> dict[str, Any]:
+    """Read the kairix-worker state file and return its current envelope.
+
+    Mirrors ``kairix worker status`` — read-only, sub-second. Returns
+    phase, counters, last-run timestamp, last-error string when present.
+    """
+    from dataclasses import asdict
+
+    try:
+        from kairix.paths import worker_state_path
+        from kairix.worker_state import read_state
+
+        state = read_state(worker_state_path())
+        if state is None:
+            return {
+                "phase": "unknown",
+                "available": False,
+                "error": "worker state file not found",
+            }
+        return {"available": True, "error": "", **asdict(state)}
+    except Exception as exc:
+        logger.warning("tool_worker_status failed: %s", exc, exc_info=True)
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# Operator-only capability stubs — agents that call these get a structured
+# escalation envelope naming the exact CLI command to ask their admin to run.
+# ---------------------------------------------------------------------------
+
+# Canonical runbook reference for every operator-only escalation envelope.
+_RETRIEVAL_RUNBOOK = "docs/runbooks/kairix-retrieval-health.md"
+
+
+def _operator_only_envelope(
+    capability: str,
+    operator_command: str,
+    reason: str,
+    expected_runtime_seconds: int,
+    see_also: list[str] | None = None,
+) -> dict[str, Any]:
+    """Canonical envelope shape for capabilities that can't be safely agent-invoked."""
+    return {
+        "error": "OperatorOnlyCapability",
+        "capability": capability,
+        "reason": reason,
+        "operator_command": operator_command,
+        "expected_runtime_seconds": expected_runtime_seconds,
+        "see_also": see_also or [],
+    }
+
+
+def tool_soak_run(suite: str = "reflib", repeat: int = 3) -> dict[str, Any]:
+    """Stub for the soak capability — operator-only, escalation envelope.
+
+    Soak runs take minutes and stress the system under sustained load.
+    Agents that hit this tool receive the exact CLI command and
+    runbook pointer so they can escalate to an operator.
+    """
+    return _operator_only_envelope(
+        capability="soak run",
+        operator_command=f"kairix soak run --suite {suite} --repeat {repeat}",
+        reason="Soak runs take minutes and stress the system under sustained load. Agents must escalate.",
+        expected_runtime_seconds=60 * repeat,
+        see_also=[_RETRIEVAL_RUNBOOK],
+    )
+
+
+def tool_benchmark_run(suite: str = "reflib") -> dict[str, Any]:
+    """Stub for the benchmark capability — operator-only, escalation envelope."""
+    return _operator_only_envelope(
+        capability="benchmark run",
+        operator_command=f"kairix benchmark run --suite {suite}",
+        reason="Benchmark runs take minutes and load the system; agents must escalate.",
+        expected_runtime_seconds=120,
+        see_also=[_RETRIEVAL_RUNBOOK],
+    )
+
+
+def tool_embed(limit: int = 0) -> dict[str, Any]:
+    """Stub for the embed capability — operator-only, mutates state."""
+    flag = "" if limit == 0 else f" --limit {limit}"
+    return _operator_only_envelope(
+        capability="embed",
+        operator_command=f"kairix embed{flag}",
+        reason="Embed mutates the vector index and is metered against an Azure quota; agents must escalate.",
+        expected_runtime_seconds=300,
+        see_also=[_RETRIEVAL_RUNBOOK],
+    )
+
+
+def tool_store_crawl() -> dict[str, Any]:
+    """Stub for the store-crawl capability — operator-only, mutates Neo4j."""
+    return _operator_only_envelope(
+        capability="store crawl",
+        operator_command="kairix store crawl",
+        reason="Crawl mutates Neo4j entity graph and takes minutes; agents must escalate.",
+        expected_runtime_seconds=300,
+        see_also=[_RETRIEVAL_RUNBOOK],
+    )
+
+
+def tool_embed_rebuild_fts() -> dict[str, Any]:
+    """Stub for the FTS-rebuild capability — operator-only, destructive recovery action."""
+    return _operator_only_envelope(
+        capability="embed rebuild-fts",
+        operator_command="kairix embed rebuild-fts",
+        reason="rebuild-fts drops and re-creates the documents_fts table; agents must escalate.",
+        expected_runtime_seconds=60,
+        see_also=[_RETRIEVAL_RUNBOOK],
+    )
+
+
+# ---------------------------------------------------------------------------
 # FastMCP server — only constructed when mcp package is available
 # ---------------------------------------------------------------------------
 
@@ -590,5 +741,89 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     def entity_validate(name: str, update: bool = False) -> dict[str, Any]:
         """Validate a named entity against Wikidata and optionally write the qid to Neo4j."""
         return tool_entity_validate(name=name, update=update)
+
+    @server.tool(
+        description=(
+            "Run the kairix deployment health probes. Call when search seems degraded, "
+            "before triaging 'I expected more results', or after a config change. "
+            "Returns {passed, total, fully_passed, failures[]} — same shape as `kairix onboard check --json`."
+        )
+    )
+    @async_tool_handler
+    def onboard_check() -> dict[str, Any]:
+        """Health-probe envelope. Read-only. Identical to `kairix onboard check --json`."""
+        return tool_onboard_check()
+
+    @server.tool(
+        description=(
+            "Read the kairix-worker state file. Call to verify the embed/maintenance loop is running. "
+            "Returns the worker's phase, counters, last-run timestamp, and last-error string."
+        )
+    )
+    @async_tool_handler
+    def worker_status() -> dict[str, Any]:
+        """Worker state envelope. Read-only. Identical to `kairix worker status`."""
+        return tool_worker_status()
+
+    # ---- Operator-only escalation stubs ----
+    # These capabilities take minutes, mutate state, or are destructive
+    # recovery actions. Agents that call them receive a structured
+    # OperatorOnlyCapability envelope with the exact CLI command to
+    # surface to their admin.
+
+    @server.tool(
+        description=(
+            "Soak test escalation — soak runs are multi-minute load tests. Returns the "
+            "OperatorOnlyCapability envelope with the exact `kairix soak run` command."
+        )
+    )
+    @async_tool_handler
+    def soak_run(suite: str = "reflib", repeat: int = 3) -> dict[str, Any]:
+        """Operator-only soak test. Returns escalation envelope for the agent's admin."""
+        return tool_soak_run(suite=suite, repeat=repeat)
+
+    @server.tool(
+        description=(
+            "Benchmark escalation — benchmark runs take minutes and load the system. "
+            "Returns the OperatorOnlyCapability envelope with the exact `kairix benchmark run` command."
+        )
+    )
+    @async_tool_handler
+    def benchmark_run(suite: str = "reflib") -> dict[str, Any]:
+        """Operator-only benchmark run. Returns escalation envelope."""
+        return tool_benchmark_run(suite=suite)
+
+    @server.tool(
+        description=(
+            "Embed escalation — embed mutates the vector index against an Azure quota. "
+            "Returns the OperatorOnlyCapability envelope with the exact `kairix embed` command."
+        )
+    )
+    @async_tool_handler
+    def embed(limit: int = 0) -> dict[str, Any]:
+        """Operator-only embed. Returns escalation envelope."""
+        return tool_embed(limit=limit)
+
+    @server.tool(
+        description=(
+            "Store-crawl escalation — mutates Neo4j entity graph. Returns the "
+            "OperatorOnlyCapability envelope with the exact `kairix store crawl` command."
+        )
+    )
+    @async_tool_handler
+    def store_crawl() -> dict[str, Any]:
+        """Operator-only graph crawl. Returns escalation envelope."""
+        return tool_store_crawl()
+
+    @server.tool(
+        description=(
+            "FTS-rebuild escalation — drops + re-creates the documents_fts table. "
+            "Returns the OperatorOnlyCapability envelope with the exact recovery command."
+        )
+    )
+    @async_tool_handler
+    def embed_rebuild_fts() -> dict[str, Any]:
+        """Operator-only FTS recovery. Returns escalation envelope."""
+        return tool_embed_rebuild_fts()
 
     return server

@@ -95,6 +95,7 @@ def test_build_server_constructs_fastmcp_with_all_tools_registered_under_unit() 
     tools = asyncio.run(server.list_tools())
     names = {t.name for t in tools}
     assert {
+        # Retrieval / synthesis
         "search",
         "entity",
         "prep",
@@ -106,6 +107,15 @@ def test_build_server_constructs_fastmcp_with_all_tools_registered_under_unit() 
         "entity_suggest",
         "entity_validate",
         "bootstrap",
+        # Diagnostic capabilities (read-only)
+        "onboard_check",
+        "worker_status",
+        # Operator-only escalation stubs
+        "soak_run",
+        "benchmark_run",
+        "embed",
+        "store_crawl",
+        "embed_rebuild_fts",
     } == names
 
 

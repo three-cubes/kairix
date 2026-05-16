@@ -25,6 +25,7 @@ pytestmark = pytest.mark.integration
 
 
 _EXPECTED_TOOLS = {
+    # Retrieval / synthesis
     "search",
     "entity",
     "prep",
@@ -36,6 +37,15 @@ _EXPECTED_TOOLS = {
     "entity_suggest",
     "entity_validate",
     "bootstrap",
+    # Diagnostic capabilities
+    "onboard_check",
+    "worker_status",
+    # Operator-only escalation stubs
+    "soak_run",
+    "benchmark_run",
+    "embed",
+    "store_crawl",
+    "embed_rebuild_fts",
 }
 
 
