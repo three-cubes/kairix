@@ -160,6 +160,45 @@ def test_log_volume_quiet_workload_passes() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Memory growth — iter-0 warmup exemption
+# ---------------------------------------------------------------------------
+
+
+def test_iter_0_warmup_memory_growth_is_exempt() -> None:
+    """Iteration 0's RSS delta does not fail memory_growth even when over cap.
+
+    The first benchmark iteration captures the warm-up cost (lazy imports,
+    model load, cache population). On the live VM this is ~1 GB on the
+    reflib suite. The soak signal worth catching is *compounding* growth
+    in iter-1+ where the warm-up is amortised.
+
+    Sabotage-proof inline: remove the ``it.index >= 1`` guard in
+    _check_memory_growth and this test breaks because the held bytearray
+    drives iter-0's RSS delta over the tight 1 MB cap.
+    """
+    # Holding a 5 MB bytearray across iter-0 so RSS grows visibly. The
+    # default workload runner is a no-op closure so iter-1+ shouldn't
+    # allocate further.
+    held: list[bytearray] = []
+
+    def alloc_then_idle(_suite: str) -> dict[str, Any]:
+        if not held:
+            held.append(bytearray(5 * 1024 * 1024))  # warm up: 5 MB
+        return {"summary": {"weighted_total": 0.9}, "case_count": 1}
+
+    result = run_soak(
+        suite="fake",
+        repeat=3,
+        max_memory_growth_mb=1.0,
+        workload_runner=alloc_then_idle,
+    )
+
+    mem_failures = [f for f in result.failures if f.kind == "memory_growth"]
+    iter_0_failures = [f for f in mem_failures if f.iteration == 0]
+    assert iter_0_failures == [], f"iter-0 warmup memory should be exempt; got: {[f.detail for f in iter_0_failures]}"
+
+
+# ---------------------------------------------------------------------------
 # Top-level error handling
 # ---------------------------------------------------------------------------
 

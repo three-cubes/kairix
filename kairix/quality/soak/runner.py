@@ -191,10 +191,14 @@ def _per_iter_failure(kind: str, iteration: int, body: str) -> SoakFailure:
 
 
 def _check_memory_growth(its: list[SoakIteration], max_mb: float) -> list[SoakFailure]:
-    """One failure per iteration whose memory delta exceeds the cap.
+    """Flag iterations past iter-0 whose memory delta exceeds the cap.
 
-    The cap is per-iteration delta, not cumulative — a small leak that compounds
-    across runs would surface as one failure on each iteration past the first.
+    Iteration 0 is the warm-up — model loading, SQLite cache hydration,
+    spaCy NLP-pipeline lazy-init, FAISS / usearch index open all happen
+    on the first benchmark case and produce a large legitimate delta
+    (~1 GB on the reflib suite). The signal worth catching is compounding
+    growth in iter-1 onwards, where the warm-up cost is amortised and
+    any further growth points at a leak.
     """
     return [
         _per_iter_failure(
@@ -203,7 +207,7 @@ def _check_memory_growth(its: list[SoakIteration], max_mb: float) -> list[SoakFa
             body=f"grew RSS by {it.memory_mb:.1f} MB (cap {max_mb:.1f} MB)",
         )
         for it in its
-        if it.memory_mb > max_mb
+        if it.index >= 1 and it.memory_mb > max_mb
     ]
 
 
