@@ -5,6 +5,15 @@ implementations, and composes them into a SearchPipeline instance.
 
 Tests construct SearchPipeline directly with fakes — this factory is
 only for production wiring.
+
+Process-lifetime memoisation: ``build_search_pipeline()`` caches its
+result keyed by the resolved retrieval-config identity, so repeat calls
+within the same process return instantly. Live profiling on the v2026.5.16a3
+alpha showed each rebuild costs ~2.3s + ~120 MB; memoising drops the second
+call to <1ms (#279).
+
+Tests that need fresh state call ``reset_search_pipeline_cache()`` to clear
+the cache between cases.
 """
 
 from __future__ import annotations
@@ -16,6 +25,17 @@ from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.pipeline import SearchPipeline
 
 logger = logging.getLogger(__name__)
+
+
+# Process-lifetime cache for build_search_pipeline. Key: the canonical
+# repr of the RetrievalConfig — different config → different pipeline.
+# A single None key handles the common "load YAML from disk" path.
+_PIPELINE_CACHE: dict[Any, SearchPipeline] = {}
+
+
+def reset_search_pipeline_cache() -> None:
+    """Clear the memoised pipeline cache. Tests use this between cases."""
+    _PIPELINE_CACHE.clear()
 
 
 def select_boosts(cfg: RetrievalConfig, graph: Any) -> list[Any]:
@@ -220,6 +240,11 @@ def _build_collection_resolver() -> Any:
 def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeline:
     """Construct the production search pipeline.
 
+    Memoised per-config for the process lifetime. The first call pays the
+    factory cost (~2.3s, ~120 MB); subsequent calls with the same config
+    return the cached instance instantly. Tests that need fresh state call
+    ``reset_search_pipeline_cache()``.
+
     Resolves all dependencies from the environment (DB paths, Azure credentials,
     Neo4j connection, usearch index). Each dependency is imported lazily to avoid
     hard dependency at module load.
@@ -233,6 +258,15 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
     Returns:
         A fully wired SearchPipeline ready for search() calls.
     """
+    # Cache key uses id(config) when supplied; otherwise the None sentinel.
+    # This means callers with different RetrievalConfig instances get
+    # different cached pipelines, while the common "load YAML from disk"
+    # path (config=None) shares one instance across the whole process.
+    cache_key: Any = None if config is None else id(config)
+    cached = _PIPELINE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     cfg = _resolve_retrieval_config(config)
 
     from kairix.core.search.intent import classify as _classify_fn
@@ -254,7 +288,7 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
     vector = VectorSearchBackend(AzureEmbeddingService(), _build_vector_repo())
     graph = _build_graph()
 
-    return SearchPipeline(
+    pipeline = SearchPipeline(
         classifier=_RuleClassifier(),
         bm25=bm25,
         vector=vector,
@@ -265,3 +299,5 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
         resolver=_build_collection_resolver(),
         config=cfg,
     )
+    _PIPELINE_CACHE[cache_key] = pipeline
+    return pipeline
