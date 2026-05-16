@@ -826,6 +826,13 @@ def tool_capabilities() -> dict[str, Any]:
                 category=CAP_CATEGORY_DIAGNOSTIC_OPERATOR_ONLY,
                 escalate_via="benchmark_run",
             ),
+            _cap(
+                name="probe_burst",
+                mcp_tool=None,
+                cli="kairix probe burst",
+                category=CAP_CATEGORY_DIAGNOSTIC_OPERATOR_ONLY,
+                escalate_via="probe_burst",
+            ),
             # Knowledge-write operator-only
             _cap(
                 name="embed",
