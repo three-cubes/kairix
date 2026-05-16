@@ -285,6 +285,8 @@ If `kairix benchmark run` passes once but `kairix soak run --repeat 2` fails:
 
 ## 6. Concurrent-load probe — does p95 hold under teaming load?
 
+> ⚠ **Measurement-shape caveat.** `kairix probe search` and `kairix probe burst` measure the **Python-pipeline regression surface** — they run as a CLI subprocess that pays a cold factory-build tax (~4-5 s) and call the pipeline in-process. That's NOT what an agent over MCP experiences (agents talk to a long-running warm server). The probes are still the right tool for "is the Python pipeline regressing under concurrency?" — they correctly surface which Tier 1 lever to pull. They are NOT the right tool for "what latency do agents actually see in production?" — for that, use the **PVT layer** ([`docs/architecture/performance-testing-approach.md`](../architecture/performance-testing-approach.md)). PVT scenarios run against the live MCP server (#284 ships the harness).
+
 Symptom branch for "individual queries feel fine but the team session goes flaky around 5+ active agents". The probe is the decision instrument for the Tier 1 tuning levers (Azure embed pool, query-result LRU cache, connection-pool sizes) laid out in [`docs/architecture/teaming-concurrency-strategy.md`](../architecture/teaming-concurrency-strategy.md) — run it *before* you commit to a tuning change so you pull the right lever, not the loudest one.
 
 ```bash

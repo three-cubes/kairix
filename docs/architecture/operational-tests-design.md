@@ -304,9 +304,25 @@ Ships:
 ### Phase 3 — burst + failure-injection + capability introspection
 
 Ships:
-- `kairix probe burst` (CLI-only)
-- `kairix probe stability` (long soak, CLI-only)
-- `tool_capabilities()` programmatic introspection (pattern 4)
+- `kairix probe burst` (CLI-only) ✅ landed
+- `tool_capabilities()` programmatic introspection (pattern 4) ✅ landed
+- `kairix probe stability` (long soak, CLI-only) — **deferred** until burst surfaces fault-shape regressions worth catching (see #276 Phase 3 closure)
+
+### Phase 4 — PVT layer (production-truth measurement)
+
+Phase 2 + 3 live verification on `v2026.5.16a4/a5` surfaced that the in-process probe CLI measures the **Python-pipeline regression surface** — cold subprocess + in-process call — not what an agent over MCP actually experiences. The probes still surface the right Tier 1 lever recommendation; they just over-report magnitude.
+
+Phase 4 redefines the layer that owns "what do agents see":
+
+- **`docs/architecture/performance-testing-approach.md`** — four-layer ADR (unit / bdd / integration / **PVT**), explicit framing that PVT is opt-in (`KAIRIX_PVT=1`), never CI-blocking.
+- **`tests/pvt/`** — five Gherkin scenarios describing agent-experienced behaviours: cold-start envelope timing, warm-server baseline, teaming-load latency, session-start storm, in-session stability.
+- **`kairix.quality.probe.clients.SearchClient` Protocol** — the seam between the probe runner and the transport. `InProcessSearchClient` is the current implementation; `MCPHttpSearchClient` is the future drop-in.
+- **#284** — the harness build (server fixture + MCPHttpSearchClient). Until it lands, PVT scenarios are inert (catch-all skip).
+
+When #284 ships:
+- The PVT scenarios fire against the live VM (and optionally an in-CI fake-server fixture).
+- `kairix probe search/burst` keep working — they're now explicitly the Python-pipeline regression gate, not the production-latency gate.
+- The runbook §6 measurement-shape caveat goes away (PVT layer is the production-truth answer).
 
 ## Out of scope (deliberately)
 
