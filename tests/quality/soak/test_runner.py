@@ -199,6 +199,44 @@ def test_iter_0_warmup_memory_growth_is_exempt() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Time drift — slow iterations past iter-0 fail
+# ---------------------------------------------------------------------------
+
+
+def test_time_drift_fails_when_later_iteration_exceeds_pct() -> None:
+    """A later iteration that takes much longer than iter-0 fails the soak.
+
+    Sabotage: remove _check_time_drift and the result reports no time_drift
+    failure even though iter-1 is 5x the baseline duration.
+    """
+    import time
+
+    call_count = [0]
+
+    def variable_duration(_suite: str) -> dict[str, Any]:
+        # Iter-0: ~150ms (above the 100ms floor so the check is active).
+        # Iter-1: ~750ms (5x drift).
+        call_count[0] += 1
+        if call_count[0] == 1:
+            time.sleep(0.15)
+        else:
+            time.sleep(0.75)
+        return {"summary": {"weighted_total": 0.9}, "case_count": 1}
+
+    result = run_soak(
+        suite="fake",
+        repeat=2,
+        max_time_drift_pct=50.0,
+        workload_runner=variable_duration,
+    )
+    drift_failures = [f for f in result.failures if f.kind == "time_drift"]
+    assert len(drift_failures) == 1, (
+        f"expected 1 time_drift failure on iter-1; got {[(f.kind, f.detail) for f in result.failures]}"
+    )
+    assert "drifted" in drift_failures[0].detail
+
+
+# ---------------------------------------------------------------------------
 # Top-level error handling
 # ---------------------------------------------------------------------------
 

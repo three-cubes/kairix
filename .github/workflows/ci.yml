@@ -130,7 +130,7 @@ jobs:
           echo "::notice::paths-DI: ${COUNT} test files still call monkeypatch.setenv(KAIRIX_*) -- see docs/architecture/paths-di-refactor.md"
           if [ "$COUNT" -gt 0 ]; then
             echo "Files using monkeypatch.setenv(KAIRIX_*):"
-            printf '  %s\n' $MATCHES
+            printf '  %s\n' "$MATCHES"
           fi
           # WARN-ONLY in Phase 0 -- exit 0 regardless. Phase 4 will switch to:
           #   if [ "$COUNT" -gt 0 ]; then exit 1; fi
@@ -159,7 +159,7 @@ jobs:
   unit-and-type:
     name: "Stage 2 -- Unit + Type (${{ matrix.python-version }})"
     runs-on: ubuntu-latest
-    needs: contracts
+    needs: [changes, contracts]
     if: needs.changes.outputs.python == 'true'
     permissions:
       contents: read
@@ -308,7 +308,7 @@ jobs:
   integration:
     name: "Stage 3 -- Integration"
     runs-on: ubuntu-latest
-    needs: unit-and-type
+    needs: [changes, unit-and-type]
     if: needs.changes.outputs.python == 'true'
     permissions:
       contents: read
@@ -403,7 +403,7 @@ jobs:
   union-coverage:
     name: "Stage 5 -- Union coverage floor (F9)"
     runs-on: ubuntu-latest
-    needs: [unit-and-type, integration]
+    needs: [changes, unit-and-type, integration]
     if: needs.changes.outputs.python == 'true'
     permissions:
       contents: read
@@ -451,7 +451,7 @@ jobs:
   security:
     name: "Stage 4 -- Security"
     runs-on: ubuntu-latest
-    needs: unit-and-type
+    needs: [changes, unit-and-type]
     if: needs.changes.outputs.python == 'true'
     # Run in parallel with integration -- both depend on unit passing
     permissions:
@@ -529,7 +529,7 @@ jobs:
   sonarcloud:
     name: "SonarCloud analysis"
     runs-on: ubuntu-latest
-    needs: unit-and-type
+    needs: [changes, unit-and-type]
     if: needs.changes.outputs.python == 'true'
     permissions:
       contents: read

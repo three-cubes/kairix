@@ -43,7 +43,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _arch_lib import REPO_ROOT, gate  # noqa: E402
+from _arch_lib import REPO_ROOT, gate
 
 CLI_FILE = REPO_ROOT / "kairix" / "cli.py"
 MCP_SERVER_FILE = REPO_ROOT / "kairix" / "agents" / "mcp" / "server.py"

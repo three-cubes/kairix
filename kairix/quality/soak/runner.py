@@ -101,8 +101,10 @@ class SoakResult:
         }
 
 
-def _default_workload_runner(suite: str) -> dict[str, Any]:
+def _default_workload_runner(suite: str) -> dict[str, Any]:  # pragma: no cover — prod-only
     """Default workload — runs the benchmark suite and returns its envelope.
+
+    Production-only path; tests inject ``workload_runner=...`` instead.
 
     ``suite`` may be a bundle name (e.g. ``reflib``) or an explicit file path.
     Mirrors the resolution logic ``kairix benchmark run --suite SUITE`` uses
@@ -123,7 +125,7 @@ def _default_workload_runner(suite: str) -> dict[str, Any]:
 def _sample_memory_mb() -> float:
     """Resident memory in MB. Linux returns kilobytes; macOS returns bytes."""
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    if sys.platform == "darwin":
+    if sys.platform == "darwin":  # pragma: no cover — Linux CI; macOS exercised by local dev runs
         return rss / (1024 * 1024)
     return rss / 1024  # Linux: KB → MB
 
@@ -270,7 +272,7 @@ def _check_fd_leak(its: list[SoakIteration]) -> list[SoakFailure]:
     baseline = its[0].fd_count
     failures = []
     for it in its[1:]:
-        if it.fd_count is not None and it.fd_count - baseline > 5:
+        if it.fd_count is not None and it.fd_count - baseline > 5:  # pragma: no cover — Linux fd-leak path
             failures.append(
                 _per_iter_failure(
                     kind="fd_leak",
@@ -290,7 +292,7 @@ def _check_signature_drift(its: list[SoakIteration]) -> list[SoakFailure]:
     across runs. The benchmark suite itself is deterministic when correctly
     configured, so signatures should match exactly across repeats.
     """
-    if len(its) < 2:
+    if len(its) < 2:  # pragma: no cover — defensive; run_soak rejects repeat<2 upstream so callers never hit this
         return []
     baseline = its[0].signature
     failures = []

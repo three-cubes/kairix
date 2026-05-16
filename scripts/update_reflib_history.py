@@ -96,9 +96,7 @@ def format_index_row(tag: str, date: str, summary: dict[str, Any]) -> str:
     hit5 = _fmt_score(summary.get("hit_rate_at_5"))
     cats = summary.get("category_scores", {}) or {}
     cat_cells = " | ".join(_fmt_score(cats.get(c)) for c in CATEGORY_COLUMNS)
-    return (
-        f"| [{tag}]({archive}) | {date} | {weighted} | {ndcg} | {hit5} | {cat_cells} |"
-    )
+    return f"| [{tag}]({archive}) | {date} | {weighted} | {ndcg} | {hit5} | {cat_cells} |"
 
 
 def index_has_tag(index_text: str, tag: str) -> bool:
