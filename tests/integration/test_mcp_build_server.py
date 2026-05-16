@@ -41,6 +41,8 @@ _EXPECTED_TOOLS = {
     "onboard_check",
     "worker_status",
     "warm",
+    # Agent-safe capped surface (escalates above queries<=20 / concurrency<=3)
+    "probe_search",
     # Operator-only escalation stubs
     "soak_run",
     "benchmark_run",

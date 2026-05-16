@@ -567,6 +567,56 @@ def tool_soak_run(suite: str = "reflib", repeat: int = 3) -> dict[str, Any]:
     )
 
 
+# Agent-safe caps for the probe surface — exceeding either dimension routes
+# the call into the operator-only escalation envelope instead of running.
+# Rationale: 20 queries at ~300 ms with concurrency 3 stays under ~6 s
+# wallclock and matches typical teaming load. Anything bigger stresses the
+# system enough that an operator should be in the loop.
+MCP_PROBE_QUERIES_CAP = 20
+MCP_PROBE_CONCURRENCY_CAP = 3
+
+
+def tool_probe_search(
+    suite: str = "reflib",
+    queries: int = 20,
+    concurrency: int = 3,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Concurrent-load latency probe — capped for agent safety.
+
+    Below the cap (queries<=20 AND concurrency<=3) runs the probe and returns
+    the ProbeResult envelope. Above the cap, returns an OperatorOnlyCapability
+    envelope pointing the agent at the CLI command for the operator.
+
+    Reason this isn't escalation-only: a small probe is the only way for an
+    agent to confirm retrieval is healthy before committing to a long task.
+    Larger probes stress the system and must be operator-driven.
+    """
+    if queries > MCP_PROBE_QUERIES_CAP or concurrency > MCP_PROBE_CONCURRENCY_CAP:
+        return _operator_only_envelope(
+            capability="probe search (above cap)",
+            operator_command=(
+                f"kairix probe search --suite {suite} --queries {queries} --concurrency {concurrency} --seed {seed}"
+            ),
+            reason=(
+                f"Probe above the agent-safe cap (queries<={MCP_PROBE_QUERIES_CAP}, "
+                f"concurrency<={MCP_PROBE_CONCURRENCY_CAP}) stresses the system; agents must escalate."
+            ),
+            expected_runtime_seconds=max(30, queries * 2),
+            see_also=[_RETRIEVAL_RUNBOOK],
+        )
+
+    from kairix.quality.probe import run_probe_search
+
+    result = run_probe_search(
+        suite=suite,
+        queries=queries,
+        concurrency=concurrency,
+        seed=seed,
+    )
+    return result.to_envelope()
+
+
 def tool_benchmark_run(suite: str = "reflib") -> dict[str, Any]:
     """Stub for the benchmark capability — operator-only, escalation envelope."""
     return _operator_only_envelope(
@@ -826,6 +876,24 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     def warm() -> dict[str, Any]:
         """Warm kairix caches. Identical to `kairix warm`."""
         return tool_warm()
+
+    @server.tool(
+        description=(
+            "Concurrent-load latency probe — capped agent-safe surface "
+            f"(queries<={MCP_PROBE_QUERIES_CAP}, concurrency<={MCP_PROBE_CONCURRENCY_CAP}). "
+            "Returns probe envelope below cap; OperatorOnlyCapability envelope above. "
+            "Use to confirm retrieval is healthy before a long task."
+        )
+    )
+    @async_tool_handler
+    def probe_search(
+        suite: str = "reflib",
+        queries: int = 20,
+        concurrency: int = 3,
+        seed: int = 0,
+    ) -> dict[str, Any]:
+        """Agent-safe capped probe. Returns ProbeResult envelope or escalation envelope."""
+        return tool_probe_search(suite=suite, queries=queries, concurrency=concurrency, seed=seed)
 
     # ---- Operator-only escalation stubs ----
     # These capabilities take minutes, mutate state, or are destructive
