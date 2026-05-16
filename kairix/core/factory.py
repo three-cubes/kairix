@@ -27,10 +27,10 @@ from kairix.core.search.pipeline import SearchPipeline
 logger = logging.getLogger(__name__)
 
 
-# Process-lifetime cache for build_search_pipeline. Key: the canonical
-# repr of the RetrievalConfig — different config → different pipeline.
-# A single None key handles the common "load YAML from disk" path.
-_PIPELINE_CACHE: dict[Any, SearchPipeline] = {}
+# Process-lifetime cache for build_search_pipeline. Key: the resolved
+# RetrievalConfig (frozen dataclass → hashable by field values), so
+# distinct callers passing equal config values share one pipeline.
+_PIPELINE_CACHE: dict[RetrievalConfig, SearchPipeline] = {}
 
 
 def reset_search_pipeline_cache() -> None:
@@ -242,8 +242,14 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
 
     Memoised per-config for the process lifetime. The first call pays the
     factory cost (~2.3s, ~120 MB); subsequent calls with the same config
-    return the cached instance instantly. Tests that need fresh state call
-    ``reset_search_pipeline_cache()``.
+    *value* return the cached instance instantly. Tests that need fresh state
+    call ``reset_search_pipeline_cache()``.
+
+    Cache key is the resolved RetrievalConfig itself (frozen dataclass →
+    hashable by field values), not Python object identity. Two callers
+    passing freshly-constructed RetrievalConfig instances with the same
+    field values share one cached pipeline — the case the benchmark path
+    hits when ``_retrieve_hybrid`` constructs a new config object per case.
 
     Resolves all dependencies from the environment (DB paths, Azure credentials,
     Neo4j connection, usearch index). Each dependency is imported lazily to avoid
@@ -258,16 +264,15 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
     Returns:
         A fully wired SearchPipeline ready for search() calls.
     """
-    # Cache key uses id(config) when supplied; otherwise the None sentinel.
-    # This means callers with different RetrievalConfig instances get
-    # different cached pipelines, while the common "load YAML from disk"
-    # path (config=None) shares one instance across the whole process.
-    cache_key: Any = None if config is None else id(config)
-    cached = _PIPELINE_CACHE.get(cache_key)
+    cfg = _resolve_retrieval_config(config)
+
+    # Cache key is the resolved config value (frozen dataclass → hashable by
+    # field values). Critical that the key is the RESOLVED config, not the
+    # raw arg: when config=None is passed, every call resolves to the same
+    # default config object, so the cache hits.
+    cached = _PIPELINE_CACHE.get(cfg)
     if cached is not None:
         return cached
-
-    cfg = _resolve_retrieval_config(config)
 
     from kairix.core.search.intent import classify as _classify_fn
 
@@ -299,5 +304,5 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
         resolver=_build_collection_resolver(),
         config=cfg,
     )
-    _PIPELINE_CACHE[cache_key] = pipeline
+    _PIPELINE_CACHE[cfg] = pipeline
     return pipeline

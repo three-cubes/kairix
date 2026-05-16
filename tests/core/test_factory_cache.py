@@ -42,19 +42,41 @@ def test_reset_clears_the_cache() -> None:
     assert p1 is not p2, "after reset, the next call should build a fresh pipeline"
 
 
-def test_different_config_objects_cache_separately() -> None:
-    """Two distinct RetrievalConfig instances get distinct cached pipelines.
+def test_equal_config_values_share_cache_across_distinct_instances() -> None:
+    """Two RetrievalConfig instances with identical field values share one pipeline.
 
-    A caller that overrides config is explicitly opting out of the shared
-    default-config cache entry.
+    Critical for the benchmark path: ``_retrieve_hybrid`` constructs a fresh
+    config via ``resolve_retrieval_config`` per case. With object-identity
+    cache keys, this would miss the cache on every call and rebuild the
+    pipeline 200 times per benchmark run. With value-based hashing (frozen
+    dataclass), equal configs collapse to one cached pipeline.
+
+    Sabotage-proof: change the cache key back to ``id(config)`` and this test
+    fails because the two equal configs get distinct pipelines.
     """
     from kairix.core.search.config import RetrievalConfig
 
     cfg_a = RetrievalConfig.defaults()
     cfg_b = RetrievalConfig.defaults()
+    assert cfg_a == cfg_b, "test premise: defaults() returns equal values"
     p_a = build_search_pipeline(config=cfg_a)
     p_b = build_search_pipeline(config=cfg_b)
-    assert p_a is not p_b, "different config instances must not share a cached pipeline"
-    # But the SAME config instance hits the cache.
-    p_a_again = build_search_pipeline(config=cfg_a)
-    assert p_a_again is p_a, "same config instance should re-use the cached pipeline"
+    assert p_a is p_b, "equal configs from distinct instances should share the cached pipeline"
+
+
+def test_different_config_values_cache_separately() -> None:
+    """Two RetrievalConfig instances with different field values DON'T share.
+
+    Caller that overrides a setting (e.g. fusion_strategy) gets its own
+    cache entry so the override actually takes effect.
+    """
+    from dataclasses import replace
+
+    from kairix.core.search.config import RetrievalConfig
+
+    cfg_default = RetrievalConfig.defaults()
+    cfg_no_vector = replace(cfg_default, skip_vector=True)
+    assert cfg_default != cfg_no_vector, "test premise: differing field → unequal configs"
+    p_default = build_search_pipeline(config=cfg_default)
+    p_no_vector = build_search_pipeline(config=cfg_no_vector)
+    assert p_default is not p_no_vector, "different configs must get different cached pipelines"
