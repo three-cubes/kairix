@@ -639,6 +639,25 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
 
     server = FastMCP("kairix", host=host, port=port)
 
+    def _check_warm_or_return_envelope(tool_name: str) -> dict[str, Any] | None:
+        """If kairix isn't warm, kick off a background warm-up and return
+        the ColdStart affordance envelope. Returns None when warm — the
+        caller proceeds to the real tool body.
+
+        Agents calling against a cold container receive a structured
+        next-step ('retry in N seconds') instead of an opaque 8s wait.
+        """
+        from kairix.platform.warm.state import (
+            cold_start_envelope,
+            is_warm,
+            trigger_background_warm,
+        )
+
+        if is_warm():
+            return None
+        trigger_background_warm()
+        return cold_start_envelope(tool_name)
+
     @server.tool(
         description=(
             "Call before answering any factual question about prior work, decisions, or context — "
@@ -655,6 +674,9 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         limit: int = 10,
     ) -> dict[str, Any]:
         """Search your knowledge store — finds the best answers to any question."""
+        cold = _check_warm_or_return_envelope("search")
+        if cold is not None:
+            return cold
         return tool_search(query=query, agent=agent, scope=scope, budget=budget, limit=limit)
 
     @server.tool(
@@ -666,6 +688,9 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     @async_tool_handler
     def entity(name: str) -> dict[str, Any]:
         """Entity lookup from Neo4j."""
+        cold = _check_warm_or_return_envelope("entity")
+        if cold is not None:
+            return cold
         return tool_entity(name=name)
 
     @server.tool()
@@ -677,6 +702,9 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Context preparation: tiered L0/L1 summary generation."""
+        cold = _check_warm_or_return_envelope("prep")
+        if cold is not None:
+            return cold
         return tool_prep(query=query, agent=agent, tier=tier, scope=scope)
 
     @server.tool()

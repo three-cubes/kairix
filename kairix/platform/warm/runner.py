@@ -27,6 +27,13 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# Step names — extracted as constants so the same literal isn't repeated
+# across dispatch + skip + post-check sites.
+_STEP_BUILD = "build_search_pipeline"
+_STEP_PROBE = "probe_search"
+_STEP_GRAPH = "open_graph_client"
+
+
 # Workload signature used for the no-op probe — short, lowercase, ASCII,
 # unlikely to match real content in any vault. Tests assert this exact
 # string is what the warm-up sends so a regression that changes the probe
@@ -149,38 +156,46 @@ def run_warm(
         WarmResult. Never raises — top-level errors populate the
         per-step ``detail`` and ``ok=False``.
     """
+    from kairix.platform.warm.state import mark_warm, mark_warming
+
     build = pipeline_builder or _step_build_pipeline
     probe = search_probe or _step_probe_search
     open_graph = graph_client_opener or _step_open_graph_client
 
+    mark_warming()
     t_total_start = time.perf_counter()
     steps: list[WarmStep] = []
 
-    step_build, pipeline = _time_step("build_search_pipeline", build)
+    step_build, pipeline = _time_step(_STEP_BUILD, build)
     steps.append(step_build)
 
     if pipeline is not None:
-        step_probe, _ = _time_step("probe_search", lambda: probe(pipeline))
+        step_probe, _ = _time_step(_STEP_PROBE, lambda: probe(pipeline))
         steps.append(step_probe)
     else:
         steps.append(
             WarmStep(
-                name="probe_search",
+                name=_STEP_PROBE,
                 ok=False,
                 duration_s=0.0,
                 detail="skipped because build_search_pipeline failed",
             )
         )
 
-    step_graph, _ = _time_step("open_graph_client", open_graph)
+    step_graph, _ = _time_step(_STEP_GRAPH, open_graph)
     steps.append(step_graph)
 
     total_duration = round(time.perf_counter() - t_total_start, 3)
     failures = [WarmFailure(step=s.name, detail=s.detail) for s in steps if not s.ok]
 
-    return WarmResult(
+    result = WarmResult(
         steps=steps,
         failures=failures,
         ok=not failures,
         total_duration_s=total_duration,
     )
+    # The graph step soft-fails so we accept warm without it — the
+    # load-bearing path is search + probe.
+    if result.steps[0].ok and any(s.ok for s in result.steps if s.name == _STEP_PROBE):
+        mark_warm()
+    return result
