@@ -157,6 +157,19 @@ def test_build_server_each_wrapper_dispatches_to_tool_function_under_unit() -> N
         ("entity_suggest", {"text": "x"}),
         ("entity_validate", {"name": "x"}),
         ("bootstrap", {"agent": "alpha", "max_memory_days": 0}),
+        # Diagnostic capabilities — read-only wrappers around their kairix CLI equivalents.
+        ("onboard_check", {}),
+        ("worker_status", {}),
+        ("warm", {}),
+        # Capped agent-safe probe — over-cap so the closure returns the escalation
+        # envelope without spinning up a real probe in unit context.
+        ("probe_search", {"queries": 1000, "concurrency": 10}),
+        # Operator-only escalation stubs — fixed envelope responses.
+        ("soak_run", {}),
+        ("benchmark_run", {}),
+        ("embed", {}),
+        ("store_crawl", {}),
+        ("embed_rebuild_fts", {}),
     ]:
         payload = _call_tool(server, tool_name, args)
         assert isinstance(payload, dict), f"tool {tool_name!r} returned non-dict: {payload!r}"
