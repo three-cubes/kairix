@@ -113,6 +113,8 @@ def test_build_server_constructs_fastmcp_with_all_tools_registered_under_unit() 
         "warm",
         # Agent-safe capped surface (escalates above queries<=20 / concurrency<=3)
         "probe_search",
+        # Programmatic introspection (affordance pattern 4)
+        "capabilities",
         # Operator-only escalation stubs
         "soak_run",
         "benchmark_run",
@@ -164,6 +166,8 @@ def test_build_server_each_wrapper_dispatches_to_tool_function_under_unit() -> N
         # Capped agent-safe probe — over-cap so the closure returns the escalation
         # envelope without spinning up a real probe in unit context.
         ("probe_search", {"queries": 1000, "concurrency": 10}),
+        # Programmatic introspection (affordance pattern 4).
+        ("capabilities", {}),
         # Operator-only escalation stubs — fixed envelope responses.
         ("soak_run", {}),
         ("benchmark_run", {}),

@@ -662,6 +662,173 @@ def tool_embed_rebuild_fts() -> dict[str, Any]:
     )
 
 
+# Capability catalogue constants.
+#
+# CAPABILITIES_TOOL_NAME is the canonical MCP / catalogue name for the
+# introspection tool itself; pinned here so the catalogue entry's `name` and
+# `mcp_tool` fields stay in sync without literal duplication.
+CAPABILITIES_TOOL_NAME = "capabilities"
+
+# Capability category labels — used by tool_capabilities and the usage-guide
+# capabilities table. F25 cross-checks these for sync.
+CAP_CATEGORY_RETRIEVAL = "retrieval"
+CAP_CATEGORY_SYNTHESIS = "synthesis"
+CAP_CATEGORY_DIAGNOSTIC = "diagnostic"
+CAP_CATEGORY_DIAGNOSTIC_OPERATOR_ONLY = "diagnostic-operator-only"
+CAP_CATEGORY_KNOWLEDGE_WRITE = "knowledge-write"
+CAP_CATEGORY_AGENT = "agent"
+
+
+def _cap(
+    *,
+    name: str,
+    mcp_tool: str | None,
+    cli: str,
+    category: str,
+    mcp_caps: dict[str, Any] | None = None,
+    escalate_via: str | None = None,
+) -> dict[str, Any]:
+    """Build a single capability-catalogue entry with consistent key order.
+
+    Keeps tool_capabilities() readable and pins the entry shape — only the
+    listed kwargs may appear in a catalogue entry. Optional keys are omitted
+    when None so dict equality stays clean for round-trip tests.
+    """
+    entry: dict[str, Any] = {
+        "name": name,
+        "mcp_tool": mcp_tool,
+        "cli": cli,
+        "category": category,
+    }
+    if mcp_caps is not None:
+        entry["mcp_caps"] = mcp_caps
+    if escalate_via is not None:
+        entry["escalate_via"] = escalate_via
+    return entry
+
+
+def tool_capabilities() -> dict[str, Any]:
+    """Return the full kairix capability catalogue for programmatic introspection.
+
+    Per affordance pattern 4 (docs/architecture/operational-tests-design.md):
+    AI-driven SRE agents call this to discover bindings rather than guess. Each
+    entry tells the caller (a) the canonical name, (b) the MCP tool name if
+    callable (None when CLI-only or escalation-only), (c) the CLI invocation,
+    (d) the category, and (e) any MCP caps or escalation pointer.
+
+    The catalogue is hand-maintained — F25 (capability-affordance) keeps it in
+    sync with the actual CLI dispatch + MCP registry.
+    """
+    return {
+        "capabilities": [
+            # Retrieval
+            _cap(name="search", mcp_tool="search", cli="kairix search", category=CAP_CATEGORY_RETRIEVAL),
+            _cap(name="entity", mcp_tool="entity", cli="kairix entity", category=CAP_CATEGORY_RETRIEVAL),
+            _cap(name="timeline", mcp_tool="timeline", cli="kairix timeline", category=CAP_CATEGORY_RETRIEVAL),
+            # Synthesis
+            _cap(name="prep", mcp_tool="prep", cli="kairix prep", category=CAP_CATEGORY_SYNTHESIS),
+            _cap(name="research", mcp_tool="research", cli="kairix research", category=CAP_CATEGORY_SYNTHESIS),
+            _cap(
+                name="contradict",
+                mcp_tool="contradict",
+                cli="kairix contradict",
+                category=CAP_CATEGORY_SYNTHESIS,
+            ),
+            _cap(name="brief", mcp_tool="brief", cli="kairix brief", category=CAP_CATEGORY_SYNTHESIS),
+            # Agent infra
+            _cap(
+                name="usage_guide",
+                mcp_tool="usage_guide",
+                cli="kairix usage-guide",
+                category=CAP_CATEGORY_AGENT,
+            ),
+            _cap(
+                name=CAPABILITIES_TOOL_NAME,
+                mcp_tool=CAPABILITIES_TOOL_NAME,
+                cli="kairix capabilities",
+                category=CAP_CATEGORY_AGENT,
+            ),
+            _cap(name="bootstrap", mcp_tool="bootstrap", cli="kairix bootstrap", category=CAP_CATEGORY_AGENT),
+            _cap(
+                name="entity_suggest",
+                mcp_tool="entity_suggest",
+                cli="kairix entity suggest",
+                category=CAP_CATEGORY_AGENT,
+            ),
+            _cap(
+                name="entity_validate",
+                mcp_tool="entity_validate",
+                cli="kairix entity validate",
+                category=CAP_CATEGORY_AGENT,
+            ),
+            # Diagnostic (agent-callable)
+            _cap(
+                name="onboard_check",
+                mcp_tool="onboard_check",
+                cli="kairix onboard check",
+                category=CAP_CATEGORY_DIAGNOSTIC,
+            ),
+            _cap(
+                name="worker_status",
+                mcp_tool="worker_status",
+                cli="kairix worker status",
+                category=CAP_CATEGORY_DIAGNOSTIC,
+            ),
+            _cap(name="warm", mcp_tool="warm", cli="kairix warm", category=CAP_CATEGORY_DIAGNOSTIC),
+            # Probe search — capped MCP variant
+            _cap(
+                name="probe_search",
+                mcp_tool="probe_search",
+                cli="kairix probe search",
+                category=CAP_CATEGORY_DIAGNOSTIC,
+                mcp_caps={
+                    "queries_max": MCP_PROBE_QUERIES_CAP,
+                    "concurrency_max": MCP_PROBE_CONCURRENCY_CAP,
+                },
+            ),
+            # Diagnostic operator-only (escalation stubs)
+            _cap(
+                name="soak_run",
+                mcp_tool=None,
+                cli="kairix soak run",
+                category=CAP_CATEGORY_DIAGNOSTIC_OPERATOR_ONLY,
+                escalate_via="soak_run",
+            ),
+            _cap(
+                name="benchmark_run",
+                mcp_tool=None,
+                cli="kairix benchmark run",
+                category=CAP_CATEGORY_DIAGNOSTIC_OPERATOR_ONLY,
+                escalate_via="benchmark_run",
+            ),
+            # Knowledge-write operator-only
+            _cap(
+                name="embed",
+                mcp_tool=None,
+                cli="kairix embed",
+                category=CAP_CATEGORY_KNOWLEDGE_WRITE,
+                escalate_via="embed",
+            ),
+            _cap(
+                name="store_crawl",
+                mcp_tool=None,
+                cli="kairix store crawl",
+                category=CAP_CATEGORY_KNOWLEDGE_WRITE,
+                escalate_via="store_crawl",
+            ),
+            _cap(
+                name="embed_rebuild_fts",
+                mcp_tool=None,
+                cli="kairix embed rebuild-fts",
+                category=CAP_CATEGORY_KNOWLEDGE_WRITE,
+                escalate_via="embed_rebuild_fts",
+            ),
+        ],
+        "schema_version": "1",
+        "see_also": [_RETRIEVAL_RUNBOOK, "docs/architecture/operational-tests-design.md"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # FastMCP server — only constructed when mcp package is available
 # ---------------------------------------------------------------------------
@@ -894,6 +1061,19 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     ) -> dict[str, Any]:
         """Agent-safe capped probe. Returns ProbeResult envelope or escalation envelope."""
         return tool_probe_search(suite=suite, queries=queries, concurrency=concurrency, seed=seed)
+
+    @server.tool(
+        description=(
+            "Programmatic capability catalogue — every kairix capability with its "
+            "MCP tool name, CLI command, category, and (for capped MCP variants) "
+            "the agent-safe caps. AI-driven SRE agents call this to discover the "
+            "surface instead of guessing. See affordance pattern 4."
+        )
+    )
+    @async_tool_handler
+    def capabilities() -> dict[str, Any]:
+        """Full kairix capability catalogue. Read-only. Identical to tool_capabilities()."""
+        return tool_capabilities()
 
     # ---- Operator-only escalation stubs ----
     # These capabilities take minutes, mutate state, or are destructive

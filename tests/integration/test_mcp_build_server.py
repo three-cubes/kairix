@@ -43,6 +43,8 @@ _EXPECTED_TOOLS = {
     "warm",
     # Agent-safe capped surface (escalates above queries<=20 / concurrency<=3)
     "probe_search",
+    # Programmatic introspection (affordance pattern 4)
+    "capabilities",
     # Operator-only escalation stubs
     "soak_run",
     "benchmark_run",
