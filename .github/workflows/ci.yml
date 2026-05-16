@@ -6,8 +6,20 @@ name: "1 · Quality gate"
 on:
   push:
     branches: [main, develop]
+    # Skip the workflow entirely on docs-only commits — saves ~15s of
+    # 'changes' job runner allocation that would otherwise just confirm
+    # nothing else needs to run. The internal dorny/paths-filter still
+    # operates for partial cases where some-but-not-all paths changed.
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "!CLAUDE.md"
   pull_request:
     branches: [main, develop]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "!CLAUDE.md"
   workflow_dispatch:
 
 # Deny all permissions by default. Each job declares its own minimum.

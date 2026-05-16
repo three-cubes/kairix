@@ -5,6 +5,13 @@ name: "3 · Docker publish (release)"
 # - Alpha pre-release (is_alpha=true OR GitHub prerelease): pushes :vX.Y.ZaN ONLY (no :latest)
 # - Develop push: pushes :develop tag (pre-release for VM testing)
 
+# Only one build at a time per ref. Cancel in-progress on develop
+# (saves minutes on rapid pushes), but never cancel a release build
+# mid-tag-push.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
 on:
   release:
     types: [created]
