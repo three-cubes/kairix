@@ -77,6 +77,9 @@ pytest_plugins = [
     "tests.bdd.steps.warm_steps",
     "tests.bdd.steps.probe_steps",
     "tests.bdd.steps.worker_steps",
+    "tests.bdd.steps.bootstrap_steps",
+    "tests.bdd.steps.usage_guide_steps",
+    "tests.bdd.steps.classify_steps",
 ]
 
 # PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.
