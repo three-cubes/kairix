@@ -1,23 +1,24 @@
-# Operational tests as CLI primitives — design (closes #276 design phase)
+# Operational tests as kairix capabilities — design (closes #276 design phase)
 
 > **Status**: design-only. No code in this phase. Implementation issues file separately per Tier once accepted.
 >
 > **Companion**: this design is the test-tooling complement to [`sre-worker-design.md`](sre-worker-design.md). The SRE worker doesn't implement health checks itself — it invokes the primitives defined here.
 
-## Why the separation
+## Why this design
 
-Today's alpha-validation work (#272 Phase 4) and the regression it caught (#275) made the rule explicit: **a test that exists only to manage versioned change belongs in CI; a test that has any operational use — periodic health, on-demand diagnostic, post-incident probe — must be a kairix CLI primitive shipped in the binary.** The principle:
+Two architectural rules emerged from today's alpha-validation work (#272 Phase 4) and the regression it caught (#275):
 
-> If the only valid use case for a test is to manage versioned change as part of the SDLC, it stays in `tests/` and runs only in CI. If it has any operational use, it ships as a `kairix <subcommand>` and is invokable identically by the SRE worker, CI workflows, and ad-hoc operator commands.
+**Rule 1 — SDLC vs operational separation.** A test that exists only to manage versioned change belongs in CI. A test with any operational use — periodic health, on-demand diagnostic, post-incident probe — is a first-class kairix capability.
 
-This is the natural extension of the existing pattern (`kairix benchmark run`, `kairix onboard check`, `kairix store crawl`) which are already operational primitives reused across surfaces — they didn't grow into tests *after* they were CLI commands; they were CLI commands *because* they're operational.
+**Rule 2 — Capabilities, not bindings.** Every kairix capability is implemented once as a Python API. CLI, MCP, and (future) HTTP are *bindings* over that API. Which bindings get exposed is a per-capability decision based on safety + cost + invoker, not implicit pattern.
 
-The previous draft of #276 conflated these. This design separates them.
+The previous draft of #276 made Rule 1 explicit but stopped short on Rule 2 — it treated "CLI primitive" as the synonym for "operational capability". That conflation matters: it would have left the SRE worker shelling out to subprocesses even when calling the Python API directly (or MCP) would have been cleaner, and it left agents with no path to invoke diagnostic capabilities they have a legitimate reason to use.
 
-## What goes where
+## The two rules in practice
 
-### SDLC-only (stays in `tests/`, CI-only)
+### Rule 1 — what stays in `tests/` vs what becomes a capability
 
+**Stays in `tests/`** (CI-only):
 - `tests/unit/`, `tests/integration/`, `tests/contracts/`, `tests/bdd/` — correctness
 - `mypy --strict` — type correctness
 - Architecture fitness functions (F1-F24, G1-G10) — design correctness
@@ -26,29 +27,63 @@ The previous draft of #276 conflated these. This design separates them.
 
 These never run in production, never need to be invoked by the SRE worker, never give meaningful signal at runtime. They gate code into develop. That's their entire job.
 
-### Operationally-relevant (CLI primitive in the kairix binary)
+**Becomes a kairix capability** (Python API + bindings):
+- Health probes (`onboard check`)
+- Quality benchmarks (`benchmark run`)
+- Operational maintenance (`store crawl`, `embed`, `worker pause/resume`)
+- **New**: soak / load / log-volume probes (this design's Phase 1+2)
 
-Existing examples:
-- `kairix onboard check` — health probes; SRE worker calls this on a cadence
-- `kairix benchmark run --suite reflib` — retrieval quality; alpha gate calls this
-- `kairix store crawl` — graph rebuild; operator calls this after corpus changes
-- `kairix worker status` — runtime state inspection
-- `kairix embed --limit N` — incremental embed; operator calls this for triage
-- `kairix embed rebuild-fts` — FTS recovery; runbook routes operators to this
+A capability earns its slot by being needed in *more than one place*. If only CI would invoke it, it stays in `tests/`.
 
-New commands proposed below — each one earns its CLI slot by being needed in *more than one place*. If a test is only valuable in CI, it stays in `tests/`.
+### Rule 2 — Python API → binding decision matrix
 
-## The new operational test commands
+Every capability has one Python implementation. Each binding is a thin shell:
 
-Each command:
-1. Is a `kairix <subcommand>` (dispatch entry in `kairix/cli.py`).
-2. Accepts `--json` for machine output; defaults to human-readable.
-3. Exits `0` on pass, `1` on fail, `2` on indeterminate (e.g., couldn't read baseline).
-4. Respects `--timeout` (operator can cap long-running probes).
-5. Reads config from `KAIRIX_CONFIG_PATH` like every other command (no hidden state).
-6. Has a dedicated runbook section so a failure has a triage path.
+```
+kairix.quality.soak.run_soak(...)         # Python API — the source of truth
+  ↑                ↑                ↑
+  CLI binding      MCP binding      HTTP binding (future)
+  kairix soak run  tool_soak_run    POST /v1/soak/run
+```
 
-### `kairix soak run`
+Which bindings get exposed per capability:
+
+| factor | impact on MCP exposure |
+|---|---|
+| Read-only / measurement-only | ✅ MCP-safe |
+| Mutates state (e.g., embed, store crawl) | ⚠️ MCP only if mutation is bounded and idempotent |
+| Load-generating (concurrent burst, sustained soak) | ❌ CLI-only unless scope-limited (e.g., `tool_probe_search` with hard concurrency cap = 3) |
+| Runtime > 30s | ❌ MCP impractical (RPC timeout); CLI + async pattern |
+| Has dangerous failure mode if agent invokes accidentally | ❌ CLI-only with operator confirmation |
+| Has obvious agentic use case (agent self-diagnosing) | ✅ MCP exposure mandatory |
+
+The decision per capability lives in the capability's design — it is NOT implicit.
+
+## Capabilities catalogue (this design's scope)
+
+### Existing capabilities — current binding posture
+
+| capability | Python API | CLI | MCP | rationale for current posture |
+|---|---|---|---|---|
+| `onboard check` | ✅ `kairix.core.health.run_all_checks` | ✅ `kairix onboard check` | ❌ | read-only, agent-useful — **MCP exposure proposed in follow-up** |
+| `worker status` | ✅ | ✅ `kairix worker status` | ❌ | read-only, agent-useful — **MCP exposure proposed in follow-up** |
+| `benchmark run` | ✅ | ✅ `kairix benchmark run` | ❌ | minutes-long, load-generating — **stays CLI-only** |
+| `embed --limit N` | ✅ | ✅ `kairix embed` | ❌ | mutates state, expensive — **stays CLI-only** |
+| `store crawl` | ✅ | ✅ `kairix store crawl` | ❌ | mutates Neo4j, minutes-long — **stays CLI-only** |
+| `embed rebuild-fts` | ✅ | ✅ | ❌ | destructive recovery action — **stays CLI-only with operator confirmation** |
+
+The follow-up issue (filed alongside this design) captures the retroactive MCP exposure of the two safe read-only capabilities.
+
+### New capabilities — proposed binding posture
+
+| capability | CLI | MCP | rationale |
+|---|---|---|---|
+| `soak run` | ✅ `kairix soak run` | ❌ | minutes-long; load-generating; gate behind operator/SRE-worker explicit invocation |
+| `probe search` (low-concurrency) | ✅ `kairix probe search --concurrency N` | ✅ `tool_probe_search` with hard cap concurrency≤3, queries≤20 | hard-capped variant is read-only; full variant is load-generating (CLI flag opens the range) |
+| `probe log-volume` | ✅ `kairix probe log-volume` | ❌ | requires running a benchmark; long; better as CLI/scheduled |
+| `probe factory-calls` (future) | ✅ | ❌ | development/debugging tool, not a runtime signal |
+
+### `kairix soak run` — full spec
 
 Repeats a workload and asserts the system holds together across iterations. Catches the #275 class of bug — work that's individually fine but degrades when repeated.
 
@@ -69,196 +104,233 @@ JSON envelope:
   "suite": "reflib",
   "repeat": 3,
   "iterations": [
-    {"weighted_total": 0.907, "duration_s": 142, "memory_mb": 312, "stderr_bytes": 4096, "fds": 23},
-    ...
+    {"weighted_total": 0.907, "duration_s": 142, "memory_mb": 312, "stderr_bytes": 4096, "fds": 23}
   ],
   "passed": true,
   "failures": []
 }
 ```
 
-Invokers:
-- **SRE worker**: nightly soak run on the reflib suite; alerts if any iteration fails the assertions even when individual benchmark runs would pass.
-- **alpha-deploy webhook**: optional second-line check after `benchmark run`. If `benchmark run` passes but `soak run --repeat 2` fails, the alpha has a degradation-under-load bug — exactly the symptom that broke `v2026.5.16a1`.
-- **CI**: a "Tier 1 soak" job that runs against a representative subset (`--suite reflib --repeat 2`) for every release-alpha dispatch.
-- **Operator**: post-incident "is this actually fixed under repeat?" check.
+**MCP posture**: not exposed. Soak runs take minutes and stress the system — agents have no legitimate reason to trigger them ad-hoc. Invoked by the SRE worker via subprocess and by alpha-deploy webhook on its deploy chain.
 
-### `kairix probe search`
+### `kairix probe search` / `tool_probe_search` — full spec
 
-Concurrent-load + latency probe. The kairix-side analogue of HTTP load testing.
-
+CLI surface — full range available:
 ```
 kairix probe search --concurrency 10 --queries 100 [--query-mix builtin|file:path] [--json]
 ```
 
-Assertions:
+MCP surface — hard-capped safe subset:
+```
+tool_probe_search(query_mix="builtin", concurrency=3, queries=20)
+# concurrency clamped to [1, 3]; queries clamped to [1, 20]
+```
+
+Assertions (both surfaces):
 - p99 latency < threshold (default 5s; configurable in `kairix.config.yaml`)
-- Zero exceptions (any unhandled `Exception` fails the probe)
-- No deadlocks (5min hard timeout per invocation)
+- Zero exceptions
+- No deadlocks (per-invocation timeout)
 
-Invokers:
-- **SRE worker**: every 6 hours, smoke-test that retrieval is responsive under modest concurrency.
-- **CI integration suite**: at PR time, against the fakes — proves the search code path doesn't have a regression that surfaces only under concurrency.
-- **Operator**: when a dogfood agent reports "kairix is slow", run this and see if latency degraded or if the agent's client is the bottleneck.
+**MCP posture**: exposed at hard-capped variant. An agent seeing slow searches can verify whether kairix-side latency is the cause without imposing meaningful load. Operator running the CLI for full diagnostic gets the unrestricted form.
 
-### `kairix probe log-volume`
-
-Asserts that running a workload doesn't produce more than X bytes of stderr per N cases. The kairix-side encoding of the #275 lesson.
+### `kairix probe log-volume` — full spec
 
 ```
 kairix probe log-volume --suite reflib [--max-bytes-per-case 100] [--json]
 ```
 
-Invokers:
-- **CI** (Tier-1 soak job) — assertion fails when a future warn-per-case sneaks in.
-- **alpha-deploy webhook** — optionally chained after `benchmark run` so the gate fails on log-spam regressions BEFORE the operator gets paged.
+**MCP posture**: not exposed. Requires running a full benchmark; multi-minute; better as scheduled/CI invocation.
 
-### `kairix probe factory-calls` (lower priority, possibly future)
+## Affordance — every surface guides agents to the right surface
 
-Counts how many times `build_search_pipeline` (or other expensive factory) is called during a workload. Catches O(N) hidden costs.
+This is the discoverability layer. Without it, an agent looking for "run a soak test" hits a dead end (MCP doesn't expose `tool_soak_run`) and has no way to know the CLI does. The fix is mandatory cross-surface affordance.
 
-```
-kairix probe factory-calls --suite reflib --max-calls 1
-```
+### Affordance pattern 1 — MCP stub tools with operator-handoff messages
 
-Lower priority because the underlying #275 deeper fix (cache the pipeline across cases) is what this tests for — pin it once the fix lands, but not before.
-
-## How the SRE worker (#243) uses these
-
-The SRE worker design specifies probe runs every 60 seconds and remediation actions on a whitelist. The probes ARE these CLI commands:
+For capabilities that are **CLI-only**, register a thin MCP stub that returns a structured envelope pointing the agent to the right escalation:
 
 ```python
-# Inside SRE worker (proposed phase 1)
-class ProbeRunner:
-    def liveness(self) -> ProbeResult:
-        # kairix --version + 200 on /healthz
-        ...
-
-    def readiness(self) -> ProbeResult:
-        # kairix onboard check --json
-        return self._run_cli(["kairix", "onboard", "check", "--json"], expect_json=True)
-
-    def soak(self) -> ProbeResult:  # Phase 2 — added when the soak primitive ships
-        return self._run_cli(["kairix", "soak", "run", "--suite", "reflib", "--repeat", "2", "--json"])
-
-    def latency(self) -> ProbeResult:  # Phase 2
-        return self._run_cli(["kairix", "probe", "search", "--concurrency", "5", "--queries", "50", "--json"])
+@server.tool()
+def tool_soak_run(suite: str = "reflib", repeat: int = 3) -> dict:
+    """Run a kairix soak test. Operator-only — agents must escalate."""
+    return {
+        "error": "OperatorOnlyCapability",
+        "capability": "soak run",
+        "reason": "Soak runs take minutes and stress the system. Agents should escalate to their admin.",
+        "operator_command": f"kairix soak run --suite {suite} --repeat {repeat}",
+        "expected_runtime_seconds": 60 * repeat,
+        "see_also": ["docs/runbooks/kairix-retrieval-health.md#soak"],
+    }
 ```
 
-The SRE worker doesn't ship its own probe library. It composes the CLI primitives via subprocess (matching the existing pattern in the alpha-deploy webhook). When a new probe is needed:
+The agent gets a *structured failure with the exact escalation command*. That's the F21 affordance pattern (`fix:` / `next:` / `run:`) applied to capability discoverability — every dead end has a marked next step.
 
-1. Build it as a kairix subcommand first (it lands in the binary, becomes operator-invokable, gets a runbook section).
-2. Wire it into the SRE worker's rotation second.
+### Affordance pattern 2 — `tool_usage_guide` capability index
 
-This is the architectural invariant: **the SRE worker is a scheduler over CLI primitives, not a library**. Adding a probe doesn't require redeploying the SRE worker — it ships with the next kairix image release.
+The existing `tool_usage_guide` (already MCP-exposed) gets a `capabilities` topic listing every kairix capability with its binding posture. An agent searching the guide for "diagnostics", "soak", "probe", "health" lands on:
 
-## How CI uses these
+```markdown
+## Diagnostic capabilities
 
-The alpha-validation chain is the proving ground. After this design lands:
-
-```yaml
-# .github/workflows/release-vm-deploy.yml — extended (Phase 2)
-jobs:
-  deploy-vm: { ... }
-  poll-alpha-gate:        # existing — checks vm-reflib-regression status
-    needs: deploy-vm
-
-  poll-alpha-soak:        # new — adds Tier-1 soak as a separate gate
-    needs: deploy-vm
-    steps:
-      - run: |
-          # Webhook posts a second commit-status: vm-reflib-soak
-          # Poll for it the same way poll-alpha-gate does, with
-          # a separate context name so the two failure modes are
-          # diagnosable independently.
+| capability | when to use | how to invoke |
+|---|---|---|
+| `tool_search` | retrieving content | MCP — direct |
+| `tool_probe_search` | "is search slow?" | MCP — direct (hard-capped) |
+| Full latency probe | full diagnostic | escalate: `kairix probe search --concurrency 10 --queries 100` |
+| Soak test | "does this hold under load?" | escalate: `kairix soak run --suite reflib --repeat 3` |
+| Onboard check | "is kairix healthy?" | MCP — `tool_onboard_check` (when shipped) |
+| Worker state | "is the worker running?" | MCP — `tool_worker_status` (when shipped) |
 ```
 
-The webhook's `deploy.Service` orchestrates:
-```go
-benchmark()   // existing, posts vm-reflib-regression
-soak()        // new, posts vm-reflib-soak
+The guide is the index; the stubs are the per-capability handoffs. Both must ship — an agent that knows to call `tool_probe_search` doesn't need the guide; an agent who doesn't know what's available finds it via the guide.
+
+### Affordance pattern 3 — CLI `--help` cross-references MCP
+
+CLI help text on each command's first line includes the MCP equivalent (or its absence):
+
+```
+$ kairix soak run --help
+usage: kairix soak run --suite SUITE [--repeat N] [...]
+
+Operational soak test — repeat a workload and assert it holds together
+across iterations. Catches "unit-fine, scale-fragile" regressions.
+
+MCP equivalent: none (operator-only — soaks are multi-minute load runs).
+                Agents that need to verify load behaviour should escalate
+                via `tool_soak_run`, which returns the escalation command.
+
+Bindings: CLI only. See docs/architecture/operational-tests-design.md
+                    for the per-capability binding decision.
 ```
 
-Both must be green for the alpha to clear. `check-alpha-gate` in `release.yml` becomes a two-context check.
+```
+$ kairix probe search --help
+usage: kairix probe search --concurrency N --queries M [...]
 
-## How ad-hoc operator invocation works
+Concurrent-load search probe — measures p50/p95/p99 latency.
 
-Operator runs `kairix soak run --suite reflib --repeat 3` on the VM (or in any kairix container) to:
-- Confirm a fix actually fixed the load-fragility, not just the unit case
-- Reproduce a dogfood-reported regression locally
-- Validate a config change (e.g., new fusion strategy) doesn't degrade under repeat
+MCP equivalent: tool_probe_search (hard-capped: concurrency≤3, queries≤20).
+                For unrestricted concurrency, use this CLI form.
+```
 
-Output is human-readable by default with a structured `--json` mode for piping into a triage tool. Every failure includes a `next:` line per the F21 affordance rule (already enforced for `scripts/checks/check_*`).
+The help text *is* the affordance. An operator looking at `--help` learns whether to run from terminal or escalate to the agent surface.
 
-## Architectural invariants
+### Affordance pattern 4 — `tool_capabilities()` introspection (optional, Phase 3)
 
-These keep the CLI surface from rotting into a kitchen sink:
+A future capability for agents to discover the surface programmatically:
 
-1. **Operationally-relevant test → CLI primitive**. No exceptions. If the SRE worker would want to invoke it, it's a `kairix <subcommand>`. If only CI wants it, it stays in `tests/`.
-2. **Stateless invocations**. Each command runs in a fresh process; no shared state across calls. The SRE worker can call them concurrently without coordination.
-3. **Single config source**. All commands read `KAIRIX_CONFIG_PATH` (or its defaults). No hidden env-var configs.
-4. **JSON-or-text duality**. `--json` for SRE worker / CI / scripting; default text for humans.
-5. **Exit-code semantics**. `0` pass, `1` fail, `2` indeterminate. Matches existing kairix conventions.
-6. **Timeouts mandatory on long-running probes**. The SRE worker enforces its own, but every command must respect `--timeout` so a hung probe doesn't poison its scheduler.
-7. **Runbook section per command**. Every new CLI primitive lands with a triage section in `docs/runbooks/`. Failure-modes-without-triage are the bug class this whole design exists to prevent.
+```python
+@server.tool()
+def tool_capabilities() -> dict:
+    """Return the full catalogue of kairix capabilities and bindings."""
+    return {
+        "capabilities": [
+            {"name": "search", "mcp_tool": "tool_search", "cli": "kairix search", "category": "retrieval"},
+            {"name": "soak_run", "mcp_tool": None, "cli": "kairix soak run", "category": "diagnostic-operator-only", "escalate_via": "tool_soak_run"},
+            {"name": "probe_search", "mcp_tool": "tool_probe_search", "cli": "kairix probe search", "category": "diagnostic", "mcp_caps": {"concurrency_max": 3, "queries_max": 20}},
+        ]
+    }
+```
 
-## Phased rollout
+This is optional because the stub-tools + usage-guide pattern already gives agents working discoverability. `tool_capabilities` is for AI-driven SRE agents that want to introspect rather than guess. Ship if/when there's demand.
 
-### Phase 1 — soak primitive (closes the immediate #275 gap)
+### Affordance enforcement — fitness function `F25`
+
+To prevent the affordance layer rotting:
+
+```python
+# scripts/checks/check_capability_affordance.py — proposed
+# For every CLI subcommand:
+#   - either MCP-binds with the same name (tool_<subcommand>) OR
+#   - MCP stub exists with operator-handoff envelope
+# Sabotage-proof: introducing a new CLI command without an MCP binding
+# or stub fails the gate.
+```
+
+This becomes F25 in the fitness-function rule list. New CLI capability without affordance → block at pre-commit.
+
+## How invokers use the catalogue
+
+### The SRE worker (#243) — schedule + dispatch
+
+The SRE worker rotates over capability invocations on a cadence. For each capability:
+- Prefer Python API (in-process call) where the SRE worker is a Python process AND the call is short
+- Subprocess CLI where the worker is Go OR the operation is long-running OR isolation is desired
+- MCP where the worker is itself an AI-orchestrator (future shape)
+
+The architectural invariant stands: **the SRE worker is a scheduler over capabilities, not a probe library**. Phase 1 of the SRE worker uses subprocess for everything. Phase 2 onwards may use Python API directly when both processes are Python.
+
+### CI workflows — release-vm-deploy + alpha-gate
+
+The alpha-deploy webhook (Go, on the VM) already shells out to `kairix benchmark run`. Phase 1 adds `kairix soak run` to the same chain. Both are CLI subprocess invocations.
+
+### Ad-hoc operator commands — terminal
+
+`kairix soak run`, `kairix probe search`, etc. invoked directly. Standard CLI experience with `--help`, `--json`, and exit-code semantics.
+
+### Agents via MCP
+
+For capabilities exposed via MCP, agents call directly. For CLI-only capabilities, agents call the MCP stub and receive a structured escalation envelope.
+
+## Phased rollout (unchanged from previous draft + affordance integrated)
+
+### Phase 1 — soak primitive + affordance scaffolding
 
 Ships:
-- `kairix soak run --suite <name> --repeat N` CLI command in `kairix/quality/soak/cli.py`.
-- Wired into the CI Tier-1 job — runs against a 20-case reflib subset for every alpha cut.
-- Runbook section in `docs/runbooks/kairix-retrieval-health.md`.
-- Integration with the alpha-deploy webhook as a separate `vm-reflib-soak` commit-status.
+- `kairix.quality.soak.run_soak()` Python API
+- `kairix soak run` CLI binding
+- `tool_soak_run` MCP **stub** with operator-handoff envelope (pattern 1)
+- `tool_usage_guide` updated with the capabilities table (pattern 2)
+- CLI `--help` cross-references MCP / absence (pattern 3)
+- `scripts/checks/check_capability_affordance.py` (F25)
+- Runbook section in `docs/runbooks/kairix-retrieval-health.md`
+- Wired into CI / alpha-deploy webhook
 
 Acceptance:
-- Reproducing #275 (pre-dedup state): `kairix soak run --suite reflib --repeat 2` fails with `log_volume_exceeded`, exit 1.
-- Post-dedup state: same command passes.
-- Sabotage-proof test in `tests/quality/soak/test_cli_unit.py` mutates the dedup back to per-call and confirms the soak assertion fails.
+- `kairix soak run --suite reflib --repeat 2` against pre-#275-fix state fails with `log_volume_exceeded`, exit 1.
+- Same command against post-#275-fix state passes.
+- `tool_soak_run` returns the expected operator-handoff envelope.
+- Agent searching `tool_usage_guide("diagnostics")` gets the capabilities table.
+- F25 fitness check blocks a hand-rolled new CLI command without affordance.
 
-### Phase 2 — probe primitives (latency + log-volume)
-
-Ships:
-- `kairix probe search` (concurrent load)
-- `kairix probe log-volume` (stderr-per-case assertion)
-- Wired into the SRE worker's 6-hourly probe rotation (when SRE worker Phase 1 ships).
-- Wired into CI integration suite.
-
-Acceptance:
-- `kairix probe search --concurrency 10 --queries 100` produces a JSON report with p50/p95/p99 latencies, exit 0 when under threshold.
-- Loading a synthetic 50× slower fake fails the threshold assertion.
-
-### Phase 3 — burst + failure-injection (defensive)
+### Phase 2 — probe primitives + read-only MCP retroactives
 
 Ships:
-- `kairix probe burst --qps 100 --duration 30s` (sustained-burst behaviour)
-- `kairix probe stability --duration 1h` (long soak)
-- Failure-injection harness in `tests/soak/` for Azure-embed-503, neo4j-restart, disk-pressure scenarios.
+- `kairix probe search` CLI + `tool_probe_search` MCP (hard-capped)
+- `kairix probe log-volume` CLI + MCP stub
+- **Retroactive MCP exposures** (per follow-up issue): `tool_onboard_check`, `tool_worker_status`
+- Tier-2 integration in CI suite
 
-These ship after Phase 1 and 2 have a quarter of telemetry. Mirrors the SRE worker's "earn the right to act" principle: prove the framework works at smaller scope before adding load that costs real money to run.
+### Phase 3 — burst + failure-injection + capability introspection
+
+Ships:
+- `kairix probe burst` (CLI-only)
+- `kairix probe stability` (long soak, CLI-only)
+- `tool_capabilities()` programmatic introspection (pattern 4)
 
 ## Out of scope (deliberately)
 
-- **Pure micro-benchmarks** (pytest-benchmark style). Useful but solve a different problem. Maybe later.
-- **Replacement for the existing `kairix benchmark run`**. That measures retrieval *quality*; soak/probe measure system *health*. Both stay; they're complements, not substitutes.
-- **Distributed load**. Single-host first; cross-host is a separate concern that depends on the SRE worker design's "remote-mode" extension.
-- **A separate test framework**. The CLI commands ARE the test framework. They reuse the existing test fixtures from `tests/fakes.py` where helpful, but the production code path runs through the CLI just like any other operator-invoked command.
+- **Pure micro-benchmarks** (pytest-benchmark style). Solve a different problem.
+- **Replacement for `kairix benchmark run`**. That measures retrieval *quality*; soak/probe measure system *health*. Complements, not substitutes.
+- **Distributed load**. Single-host first.
+- **Auto-remediation triggered by probes**. The SRE worker design covers this; the probes themselves are observation-only.
+- **Universal MCP exposure of every CLI**. Per-capability decision via Rule 2 — explicit, not blanket.
 
-## Risks and how this design addresses each
+## Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
-| CLI surface bloats with operational-test commands | Invariant 1 (must be reused by SRE worker AND CI AND operator); single-use CI-only tests stay in `tests/` |
-| Soak/probe commands accidentally hammer production | Default to safe parameters (low concurrency, small repeat); operator must opt into heavier load via flags |
-| SRE worker depends on a specific kairix version's CLI surface | Each probe command versions its JSON output schema (`schema_version: 1`); SRE worker pins the version it expects |
-| New probe primitive ships before its runbook section | F23-style gate in CI: every new `kairix <subcommand>` requires a `docs/runbooks/kairix-<subcommand>.md` section |
-| Probe assertion thresholds drift without anyone noticing | Phase 2 ships a baseline file (`benchmark-results/probe-baselines.json`) like the existing benchmark baselines, with the same per-release versioning (#271) |
+| MCP surface bloats to mirror every CLI | Rule 2: explicit per-capability decision; F25 enforces affordance not exposure |
+| Agent triggers expensive operations via MCP | MCP variants are hard-capped (concurrency, queries, runtime); full surface is CLI-only |
+| Stub tools mislead agents into thinking the operation isn't supported | Stub returns structured envelope with `operator_command` and `expected_runtime_seconds` — clear path to escalation |
+| `tool_usage_guide` capabilities table drifts from reality | F25 cross-checks the table against the actual CLI dispatch + MCP registry; new capability without table entry fails the gate |
+| Phase 2 retroactive MCP exposure breaks existing agents | New MCP tools are additive; existing tool surface unchanged |
 
 ## Related
 
 - [#276](https://github.com/three-cubes/kairix/issues/276) — this issue
 - [#275](https://github.com/three-cubes/kairix/issues/275) — the regression that motivated this design
-- [#243](https://github.com/three-cubes/kairix/issues/243) — SRE worker (the primary consumer of these primitives)
-- [`sre-worker-design.md`](sre-worker-design.md) — companion design; specifies the SRE worker as a scheduler over the CLI primitives defined here
-- [#272](https://github.com/three-cubes/kairix/issues/272) — alpha-validation chain (the proving ground for Phase 1)
+- [#243](https://github.com/three-cubes/kairix/issues/243) — SRE worker (primary capability consumer)
+- [`sre-worker-design.md`](sre-worker-design.md) — companion; specifies the worker as a scheduler over the capabilities defined here
+- [#272](https://github.com/three-cubes/kairix/issues/272) — alpha-validation chain (Phase 1 proving ground)
+- Follow-up issue (filed alongside this design) — retroactive MCP exposure of `onboard check` + `worker status`
