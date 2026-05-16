@@ -47,9 +47,18 @@ def _suite_loader(_suite: str) -> list[_Case]:
     return _build_cases()
 
 
-def _fast_search_fn(_q: SampledQuery) -> dict[str, str]:
-    """A search that returns immediately — keeps tests fast."""
-    return {"results": "fake"}
+class FakeFastSearchClient:
+    """Implements the :class:`SearchClient` Protocol; returns immediately.
+
+    Bound-method ``.search`` is callable-compatible with the ``searcher=`` kwarg
+    so the same fake class shape applies across the probe tests.
+    """
+
+    def search(self, _q: SampledQuery) -> dict[str, str]:
+        return {"results": "fake"}
+
+
+_fast_client = FakeFastSearchClient()
 
 
 def test_zero_queries_rejected() -> None:
@@ -63,7 +72,7 @@ def test_zero_queries_rejected() -> None:
             suite="x",
             total_queries=0,
             suite_loader=_suite_loader,
-            searcher=_fast_search_fn,
+            searcher=_fast_client.search,
         )
 
 
@@ -79,7 +88,7 @@ def test_zero_peak_concurrency_rejected() -> None:
             total_queries=5,
             peak_concurrency=0,
             suite_loader=_suite_loader,
-            searcher=_fast_search_fn,
+            searcher=_fast_client.search,
         )
 
 
@@ -94,7 +103,7 @@ def test_zero_bucket_ms_rejected() -> None:
             total_queries=5,
             bucket_ms=0,
             suite_loader=_suite_loader,
-            searcher=_fast_search_fn,
+            searcher=_fast_client.search,
         )
 
 
@@ -109,7 +118,7 @@ def test_happy_path_runs_and_buckets() -> None:
         peak_concurrency=10,
         bucket_ms=200,
         suite_loader=_suite_loader,
-        searcher=_fast_search_fn,
+        searcher=_fast_client.search,
     )
     assert isinstance(result, BurstResult)
     assert result.total_queries == 50
@@ -232,7 +241,7 @@ def test_envelope_round_trip_contains_required_keys() -> None:
         peak_concurrency=2,
         bucket_ms=100,
         suite_loader=_suite_loader,
-        searcher=_fast_search_fn,
+        searcher=_fast_client.search,
     )
     env = result.to_envelope()
     required = {

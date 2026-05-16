@@ -123,11 +123,14 @@ def _default_suite_loader(suite: str) -> list[Any]:  # pragma: no cover — prod
 
 
 def _default_search_fn(q: SampledQuery) -> Any:  # pragma: no cover — production path
-    """Run one search via the production pipeline. Production-only seam."""
-    from kairix.core.factory import build_search_pipeline
+    """Thin shim over :class:`InProcessSearchClient`.
 
-    pipeline = build_search_pipeline()
-    return pipeline.search(query=q.query, agent=q.agent)
+    See :mod:`kairix.quality.probe.clients` for the Protocol contract +
+    future MCPHttpSearchClient drop-in (#284).
+    """
+    from kairix.quality.probe.clients import InProcessSearchClient
+
+    return InProcessSearchClient().search(q)
 
 
 def _build_sampled_queries(cases: list[Any], total_queries: int, seed: int) -> list[SampledQuery]:

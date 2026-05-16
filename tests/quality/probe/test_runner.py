@@ -46,15 +46,32 @@ def _suite_loader(_suite: str) -> list[_Case]:
     return _build_cases()
 
 
-def _fast_search_fn(_q: SampledQuery) -> dict[str, str]:
-    """A search that returns immediately — keeps tests under 1s."""
-    return {"results": "fake"}
+class FakeFastSearchClient:
+    """Implements the :class:`SearchClient` Protocol; returns immediately.
+
+    Used as the ``searcher=`` injection for tests that need the probe to
+    return quickly so the assertion target is the latency-stats / passed-
+    flag logic, not the simulated search time.
+    """
+
+    def search(self, _q: SampledQuery) -> dict[str, str]:
+        return {"results": "fake"}
 
 
-def _slow_search_fn(_q: SampledQuery) -> dict[str, str]:
-    """A search that always exceeds the default p95 threshold."""
-    time.sleep(0.55)  # > 500ms threshold
-    return {"results": "slow"}
+class FakeSlowSearchClient:
+    """Implements the :class:`SearchClient` Protocol; always exceeds p95 threshold.
+
+    Used to verify the failure path of the gate. The 0.55s sleep is just
+    above the 0.5s default threshold so the assertion fires deterministically.
+    """
+
+    def search(self, _q: SampledQuery) -> dict[str, str]:
+        time.sleep(0.55)  # > 500ms threshold
+        return {"results": "slow"}
+
+
+_fast_client = FakeFastSearchClient()
+_slow_client = FakeSlowSearchClient()
 
 
 def test_queries_less_than_one_rejected() -> None:
@@ -64,7 +81,7 @@ def test_queries_less_than_one_rejected() -> None:
     latency_stats silently passes 0-stats through.
     """
     with pytest.raises(ValueError, match="queries must be >= 1"):
-        run_probe_search(suite="x", queries=0, suite_loader=_suite_loader, searcher=_fast_search_fn)
+        run_probe_search(suite="x", queries=0, suite_loader=_suite_loader, searcher=_fast_client.search)
 
 
 def test_concurrency_less_than_one_rejected() -> None:
@@ -74,7 +91,7 @@ def test_concurrency_less_than_one_rejected() -> None:
     deeper in the stack as an executor ValueError instead.
     """
     with pytest.raises(ValueError, match="concurrency must be >= 1"):
-        run_probe_search(suite="x", queries=5, concurrency=0, suite_loader=_suite_loader, searcher=_fast_search_fn)
+        run_probe_search(suite="x", queries=5, concurrency=0, suite_loader=_suite_loader, searcher=_fast_client.search)
 
 
 def test_passes_when_fast_search_under_threshold() -> None:
@@ -88,7 +105,7 @@ def test_passes_when_fast_search_under_threshold() -> None:
         queries=20,
         concurrency=2,
         suite_loader=_suite_loader,
-        searcher=_fast_search_fn,
+        searcher=_fast_client.search,
     )
     assert isinstance(result, ProbeResult)
     assert result.queries == 20
@@ -108,7 +125,7 @@ def test_fails_when_p95_exceeds_threshold() -> None:
         queries=4,
         concurrency=4,
         suite_loader=_suite_loader,
-        searcher=_slow_search_fn,
+        searcher=_slow_client.search,
     )
     assert result.passed is False
     assert result.overall.p95_ms >= DEFAULT_P95_THRESHOLD_MS
@@ -125,7 +142,7 @@ def test_per_category_stats_populated() -> None:
         queries=60,  # large enough that every default-weight category lands at least one
         concurrency=4,
         suite_loader=_suite_loader,
-        searcher=_fast_search_fn,
+        searcher=_fast_client.search,
     )
     expected_cats = {"recall", "temporal", "entity", "conceptual", "multi_hop", "procedural"}
     assert set(result.per_category.keys()) == expected_cats
@@ -168,7 +185,7 @@ def test_envelope_round_trip_contains_required_keys() -> None:
         queries=5,
         concurrency=2,
         suite_loader=_suite_loader,
-        searcher=_fast_search_fn,
+        searcher=_fast_client.search,
     )
     env = result.to_envelope()
     required = {
@@ -201,7 +218,7 @@ def test_envelope_serialises_bottleneck_as_dict_when_present() -> None:
         queries=4,
         concurrency=4,
         suite_loader=_suite_loader,
-        searcher=_slow_search_fn,
+        searcher=_slow_client.search,
     )
     env = result.to_envelope()
     assert env["bottleneck"] is not None
