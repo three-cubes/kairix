@@ -40,6 +40,7 @@ _EXPECTED_TOOLS = {
     # Diagnostic capabilities
     "onboard_check",
     "worker_status",
+    "warm",
     # Operator-only escalation stubs
     "soak_run",
     "benchmark_run",

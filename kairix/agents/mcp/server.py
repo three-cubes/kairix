@@ -477,6 +477,28 @@ def tool_onboard_check() -> dict[str, Any]:
         }
 
 
+def tool_warm() -> dict[str, Any]:
+    """Pre-load kairix caches + pay factory-init costs.
+
+    Mirrors ``kairix warm`` — calls the same Python API. Idempotent and
+    fast once warm, so agents can call this as a health probe ('is
+    kairix warm?'); the first invocation costs ~200 MB and a few hundred
+    ms, every subsequent call is sub-millisecond.
+    """
+    try:
+        from kairix.platform.warm import run_warm
+
+        return run_warm().to_envelope()
+    except Exception as exc:
+        logger.warning("tool_warm failed: %s", exc, exc_info=True)
+        return {
+            "ok": False,
+            "total_duration_s": 0.0,
+            "steps": [],
+            "failures": [{"step": "tool_warm", "detail": f"{type(exc).__name__}: {exc}"}],
+        }
+
+
 def tool_worker_status() -> dict[str, Any]:
     """Read the kairix-worker state file and return its current envelope.
 
@@ -764,6 +786,18 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     def worker_status() -> dict[str, Any]:
         """Worker state envelope. Read-only. Identical to `kairix worker status`."""
         return tool_worker_status()
+
+    @server.tool(
+        description=(
+            "Warm kairix caches + pay factory-init costs. Idempotent — first call costs ~200 MB and "
+            "a few hundred ms; every subsequent call is sub-ms. Agents call this as a 'is kairix warm?' "
+            "probe; container entrypoints call it before /healthz/ready flips to 200."
+        )
+    )
+    @async_tool_handler
+    def warm() -> dict[str, Any]:
+        """Warm kairix caches. Identical to `kairix warm`."""
+        return tool_warm()
 
     # ---- Operator-only escalation stubs ----
     # These capabilities take minutes, mutate state, or are destructive

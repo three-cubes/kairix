@@ -110,6 +110,7 @@ def test_build_server_constructs_fastmcp_with_all_tools_registered_under_unit() 
         # Diagnostic capabilities (read-only)
         "onboard_check",
         "worker_status",
+        "warm",
         # Operator-only escalation stubs
         "soak_run",
         "benchmark_run",
