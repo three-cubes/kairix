@@ -256,7 +256,34 @@ Use after a major index rebuild — the persisted canary suite gets discarded an
 
 ---
 
-## 5. Recall canary regression
+## 5. Soak — does retrieval hold together under repeated load?
+
+Symptom branch for "the gate passes but agents report degradation". Run a soak test — repeat the workload N times and assert no degradation across iterations.
+
+```bash
+kairix soak run --suite reflib --repeat 3 --json
+```
+
+Assertions (any failure exits 1, with a structured envelope in the JSON output):
+- per-iteration RSS growth < 50 MB
+- per-iteration wall time within 20% of iteration 0 (skipped on sub-100ms baselines)
+- total stderr volume < 5 MB × repeat (catches the warning-spam regression class)
+- no new file descriptors held at exit
+- byte-identical `BenchmarkResult` signature across iterations (catches non-determinism)
+
+If `kairix benchmark run` passes once but `kairix soak run --repeat 2` fails:
+- **log_volume** failure → a per-call code path is spamming stderr. Common cause: deprecation warning fired on every call instead of once per process. Check the warning's surrounding code for missing dedup.
+- **memory_growth** → an O(N) cache is growing without bound, or a closure is holding a reference past its iteration.
+- **signature_mismatch** → the workload isn't deterministic. Look for clock-derived ordering, random sampling, or non-deterministic map iteration.
+- **fd_leak** → a file/socket isn't being closed across iterations. Often a temp-file or HTTP client that's not in a `with` block.
+
+`kairix soak run` is the operational complement to `kairix benchmark run` — same workload, but the assertion target is *system health*, not retrieval quality.
+
+**MCP**: `tool_soak_run` returns an `OperatorOnlyCapability` envelope (soak is a multi-minute load test; agents must escalate). The envelope carries the exact `kairix soak run` command for the operator to invoke.
+
+---
+
+## 6. Recall canary regression
 
 This is a distinct symptom branch — your subsystem health checks pass, but the recall benchmark has dropped. Search is "working" in the sense that all probes pass; it's just returning worse results than it used to.
 
@@ -291,7 +318,7 @@ The historical contract baseline carries `weighted_total: 0.9585` and `ndcg_at_1
 
 ---
 
-## 6. Full reset — last resort
+## 7. Full reset — last resort
 
 Use this when individual fixes don't work, when three or more `onboard check` failures arrive at once, or after a botched migration. The full reset rebuilds every retrieval surface from the document store.
 
@@ -330,7 +357,7 @@ kairix benchmark run --suite reflib | tail -20
 
 ---
 
-## 7. Escalation
+## 8. Escalation
 
 File an issue at https://github.com/three-cubes/kairix/issues with the title `retrieval health: <symptom>` when:
 
