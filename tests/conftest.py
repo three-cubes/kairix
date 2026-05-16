@@ -73,6 +73,8 @@ pytest_plugins = [
     "tests.bdd.steps.mcp_cli_steps",
     "tests.bdd.steps.embed_cli_steps",
     "tests.bdd.steps.timeline_cli_steps",
+    # PVT placeholder steps — catch-all pytest.skip until #284 harness ships.
+    "tests.pvt.steps.pvt_placeholder_steps",
 ]
 
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402

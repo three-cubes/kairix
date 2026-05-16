@@ -87,6 +87,7 @@ markers = [
     "integration: multi-component with real database and usearch index",
     "e2e: full pipeline against live Azure API (requires KAIRIX_E2E=1)",
     "bdd: behaviour-driven acceptance tests (pytest-bdd feature files)",
+    "pvt: production-verification scenarios against a live MCP server (requires KAIRIX_PVT=1; see docs/architecture/performance-testing-approach.md)",
     "slow: tests taking >5s",
 ]
 timeout = 60  # Per-test timeout default (seconds)
