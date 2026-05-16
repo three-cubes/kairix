@@ -257,6 +257,18 @@ def neo4j_uri(default: str = "bolt://localhost:7687") -> str:
     return os.environ.get("KAIRIX_NEO4J_URI", default)
 
 
+def neo4j_uri_configured() -> bool:
+    """True when an operator has explicitly set ``KAIRIX_NEO4J_URI``.
+
+    Distinct from ``neo4j_uri()`` which falls back to a localhost default —
+    that default is indistinguishable from "operator wants localhost".
+    Callers who need to know whether the operator wants Neo4j at all
+    (e.g. to skip a 22 MB driver import on deployments without it) use
+    this helper instead.
+    """
+    return bool(os.environ.get("KAIRIX_NEO4J_URI"))
+
+
 def neo4j_user(default: str = "neo4j") -> str:
     """Resolve the Neo4j username from ``KAIRIX_NEO4J_USER``."""
     return os.environ.get("KAIRIX_NEO4J_USER", default)

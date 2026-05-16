@@ -108,7 +108,17 @@ def _step_open_graph_client() -> Any:
 
     Returns the client whether or not Neo4j is reachable — soft-fail
     semantics so the warm-up doesn't block on an optional subsystem.
+
+    Importing neo4j costs ~22 MB on the Python heap, so when no Neo4j URI
+    is configured we skip the load entirely — the entity-graph subsystem
+    is auxiliary and gracefully degrades when absent. Operators who have
+    Neo4j configured pay the cost (and get a warmed driver); operators
+    who don't save the heap.
     """
+    from kairix.secrets import neo4j_uri_configured
+
+    if not neo4j_uri_configured():
+        return None
     from kairix.knowledge.graph.client import get_client
 
     client = get_client()
