@@ -19,6 +19,7 @@ Subcommands:
   research    Iterative research over the knowledge store with LLM synthesis
   usage-guide Read the kairix agent usage guide (full text or topic-filtered)
   benchmark   Run retrieval quality benchmark
+  soak        Repeat a workload and assert it holds together (memory, log volume, fd, determinism)
   wikilinks   Inject [[wikilinks]] on first mention in agent-written document store files
   reference-library  Reference library: install entities, check status, run extraction
   eval        Evaluation harness: gold suite build, judge, sweep, monitor, gate
@@ -40,6 +41,7 @@ COMMANDS: dict[str, tuple[str, str, bool]] = {
     "curator": ("kairix.agents.curator.cli", "main", True),
     "search": ("kairix.core.search.cli", "main", True),
     "benchmark": ("kairix.quality.benchmark.cli", "main", True),
+    "soak": ("kairix.quality.soak.cli", "main", True),
     "summarise": ("kairix.knowledge.summaries.cli", "main", True),
     "timeline": ("kairix.core.temporal.cli", "main", True),
     "wikilinks": ("kairix.knowledge.wikilinks.cli", "main", True),

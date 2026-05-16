@@ -31,8 +31,6 @@ logger = logging.getLogger(__name__)
 
 
 # Conservative defaults — operator can tighten via CLI flags or kairix.config.yaml.
-# These are the thresholds that would have caught #275 (1400 warn lines on a
-# 200-case reflib suite = ~140 KB stderr, well above the 5 MB / 3 repeat cap).
 DEFAULT_MAX_MEMORY_GROWTH_MB = 50.0
 DEFAULT_MAX_LOG_VOLUME_MB_PER_REPEAT = 5.0
 DEFAULT_MAX_TIME_DRIFT_PCT = 20.0
@@ -155,8 +153,7 @@ def _run_one_iteration(
     """Execute one iteration of the workload and return measurements.
 
     stderr is captured via redirect_stderr into a BytesIO so the soak run
-    can assert on total stderr volume — that's the property that pinned
-    #275 (warning spam through CombinedOutput).
+    can assert on total stderr volume.
     """
     mem_before = _sample_memory_mb()
     fd_before = _sample_fd_count()
@@ -181,19 +178,13 @@ def _run_one_iteration(
     )
 
 
-# Absolute floor below which percent-drift is meaningless — measuring 100% drift
-# on a 10ms baseline is sampling noise, not a real signal. Only enforce time
-# drift on workloads that take at least this long in iteration 0.
+# Workloads with sub-100ms baselines have too much measurement noise for
+# percent-drift to mean anything. Above this floor the comparison is signal.
 _TIME_DRIFT_BASELINE_FLOOR_S = 0.1
 
 
 def _per_iter_failure(kind: str, iteration: int, body: str) -> SoakFailure:
-    """Construct a per-iteration assertion failure with consistent shape.
-
-    The "iteration N " prefix is added here so the four call sites below
-    don't each repeat the literal (F17). Callers pass only the variable
-    description fragment.
-    """
+    """Construct a per-iteration assertion failure with the canonical prefix."""
     return SoakFailure(kind=kind, iteration=iteration, detail=f"iteration {iteration} {body}")
 
 
@@ -244,8 +235,8 @@ def _check_time_drift(its: list[SoakIteration], max_pct: float) -> list[SoakFail
 def _check_log_volume(its: list[SoakIteration], max_total_mb: float) -> list[SoakFailure]:
     """One failure when total stderr across all iterations exceeds the cap.
 
-    Aggregate — a single noisy iteration is fine if others are quiet; what we
-    catch is *systematic* log growth across iterations (the #275 symptom).
+    Aggregate across iterations — a single noisy iteration is fine if others
+    are quiet; the check fires only on systematic log growth.
     """
     total = sum(it.stderr_bytes for it in its)
     cap_bytes = int(max_total_mb * 1024 * 1024)
