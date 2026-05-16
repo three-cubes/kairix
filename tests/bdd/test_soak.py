@@ -15,8 +15,8 @@ def test_soak_passes_on_deterministic_workload():
     """Body populated by @scenario from the .feature file."""
 
 
-@scenario(FEATURE, "Soak fires the memory_growth gate when RSS climbs past iter-0")
-def test_soak_fires_memory_growth_gate():
+@scenario(FEATURE, "Soak fires the time_drift gate when iterations slow past baseline")
+def test_soak_fires_time_drift_gate():
     """Body populated by @scenario from the .feature file."""
 
 

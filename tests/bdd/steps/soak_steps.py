@@ -13,6 +13,7 @@ returned :class:`SoakResult` or the CLI's stdout/stderr output.
 from __future__ import annotations
 
 import io
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 from unittest import mock
@@ -30,11 +31,11 @@ pytestmark = pytest.mark.bdd
 # Step-phrase fragments lifted to constants so the same literal isn't
 # duplicated across given/when/then sites (F17: no >=10-char string
 # repeated >=3 times in a module).
-_PHRASE_MEMORY_GROWTH = "memory_growth"
+_PHRASE_TIME_DRIFT = "time_drift"
 _PHRASE_SAME_ENVELOPE = "a workload that returns the same envelope on every call"
 _PHRASE_DIFFERENT_ENVELOPES = "a workload that returns different envelopes on each call"
-_PHRASE_GROWS_RSS = "a workload that grows RSS by 200 MB on every iteration after the first"
-_PHRASE_FIRES_MEM_GATE = "a workload that fires the memory_growth gate"
+_PHRASE_SLOWS_DOWN = "a workload that runs progressively slower on each iteration"
+_PHRASE_FIRES_A_GATE = "a workload that fires a soak gate"
 
 
 @pytest.fixture
@@ -46,9 +47,6 @@ def _soak_state() -> dict[str, Any]:
         "cli_stdout": "",
         "cli_stderr": "",
         "cli_exit_code": 0,
-        # Held allocations so iter-1+ RSS growth can be simulated without
-        # the GC reclaiming them between iterations.
-        "held": [],
     }
 
 
@@ -77,27 +75,30 @@ def _given_drifting_workload(_soak_state: dict[str, Any]) -> None:
     _soak_state["workload_runner"] = _runner
 
 
-@given(_PHRASE_GROWS_RSS)
-@given(_PHRASE_FIRES_MEM_GATE)
-def _given_memory_growth_workload(_soak_state: dict[str, Any]) -> None:
-    """Workload that allocates a held buffer on iter-1+ (iter-0 is exempt).
+@given(_PHRASE_SLOWS_DOWN)
+@given(_PHRASE_FIRES_A_GATE)
+def _given_slowing_workload(_soak_state: dict[str, Any]) -> None:
+    """Workload that runs progressively slower → fires the time_drift gate.
 
-    The runner exempts iter-0 from the memory_growth check (warm-up cost),
-    so to trigger the gate the workload must hold extra bytes on iter-1+.
-    Holding 200 MB on iter-1 visibly exceeds the default 50 MB cap.
+    The soak runner's time_drift check skips a baseline below 100 ms (noise
+    floor) and fires when a later iteration exceeds ``max_time_drift_pct``
+    of iter-0. We give iter-0 a 200 ms baseline (above the floor) and have
+    iter-1+ sleep 600 ms, which is +200% — well over the default 20% cap.
+
+    Pure workload-level injection — no internals touched, no env vars.
+    Deterministic across Python versions because ``time.sleep`` is portable.
     """
-    state = _soak_state
     call_index = {"i": -1}
 
     def _runner(_suite: str) -> dict[str, Any]:
         call_index["i"] += 1
-        if call_index["i"] >= 1:
-            # 200 MB of bytes retained between calls forces RSS growth
-            # the soak runner observes via getrusage between iterations.
-            state["held"].append(bytearray(200 * 1024 * 1024))
+        if call_index["i"] == 0:
+            time.sleep(0.2)  # 200 ms baseline (above the 100 ms drift-check floor)
+        else:
+            time.sleep(0.6)  # 600 ms → +200% drift, gate FIRES
         return {"summary": {"weighted_total": 0.9}, "case_count": 1}
 
-    state["workload_runner"] = _runner
+    _soak_state["workload_runner"] = _runner
 
 
 # ---------------------------------------------------------------------------
@@ -187,13 +188,13 @@ def _then_failure_kind(_soak_state: dict[str, Any], kind: str) -> None:
 @then("the failure mentions the iteration that breached the cap")
 def _then_failure_mentions_iter(_soak_state: dict[str, Any]) -> None:
     result: SoakResult = _soak_state["result"]
-    mem_failures = [f for f in result.failures if f.kind == _PHRASE_MEMORY_GROWTH]
+    drift_failures = [f for f in result.failures if f.kind == _PHRASE_TIME_DRIFT]
     # Sabotage: stop populating ``iteration=`` on _per_iter_failure and the
     # iteration attribute stays None, breaking this assertion.
-    assert mem_failures, f"expected at least one memory_growth failure; got {result.failures}"
-    for f in mem_failures:
+    assert drift_failures, f"expected at least one time_drift failure; got {result.failures}"
+    for f in drift_failures:
         assert isinstance(f, SoakFailure)
-        assert f.iteration is not None and f.iteration >= 1, f"memory_growth failure missing iteration index: {f}"
+        assert f.iteration is not None and f.iteration >= 1, f"time_drift failure missing iteration index: {f}"
 
 
 @then(parsers.parse('the stderr or stdout contains "{marker}"'))
