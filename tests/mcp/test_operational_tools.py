@@ -17,6 +17,7 @@ from kairix.agents.mcp.server import (
     tool_embed,
     tool_embed_rebuild_fts,
     tool_onboard_check,
+    tool_probe_burst,
     tool_soak_run,
     tool_store_crawl,
     tool_worker_status,
@@ -62,6 +63,12 @@ _STUB_CASES = [
     (tool_embed, {"limit": 100}, "embed", "kairix embed --limit 100"),
     (tool_store_crawl, {}, "store crawl", "kairix store crawl"),
     (tool_embed_rebuild_fts, {}, "embed rebuild-fts", "kairix embed rebuild-fts"),
+    (
+        tool_probe_burst,
+        {"suite": "reflib", "total_queries": 200, "peak_concurrency": 20},
+        "probe burst",
+        "kairix probe burst --suite reflib --total-queries 200 --peak-concurrency 20",
+    ),
 ]
 
 

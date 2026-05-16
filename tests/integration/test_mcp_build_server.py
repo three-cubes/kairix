@@ -46,6 +46,7 @@ _EXPECTED_TOOLS = {
     # Programmatic introspection (affordance pattern 4)
     "capabilities",
     # Operator-only escalation stubs
+    "probe_burst",
     "soak_run",
     "benchmark_run",
     "embed",

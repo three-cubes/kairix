@@ -315,6 +315,22 @@ next: if recommendation is `worker_contention`, run py-spy against the live MCP 
 run: kairix probe search --suite reflib --queries 100 --concurrency 5 --recommend --json | jq .
 ```
 
+### 6a. Burst-load probe — does throughput hold after warm-up?
+
+Complementary to `probe search`. Search measures p50/p95/p99 latency at sustained concurrency; burst measures queries-per-second over time-bucketed windows after rapid injection. Use search when you suspect a latency-curve inflection; use burst when latency looks fine yet *sustained* throughput drops after warm-up (cache eviction, fd leak, connection-pool churn). The signal burst catches that search misses: a system can hold p95 yet collapse sustained QPS once caches evict — burst surfaces that as `qps_drop_pct` above the 30% gate.
+
+```bash
+kairix probe burst --suite reflib --total-queries 200 --peak-concurrency 20 --json | jq .
+```
+
+Read three fields: `peak_qps`, `sustained_qps` (mean of post-warmup buckets, skipping the first 2), and `qps_drop_pct`. Pass = drop within 30% AND zero errors.
+
+```
+fix: investigate sustained QPS degradation — likely cache eviction or resource leak under burst
+next: re-run with --bucket-ms 250 to see finer-grained throughput trend; cross-check with kairix soak run --repeat 3
+run: kairix probe burst --suite reflib --total-queries 200 --peak-concurrency 20 --json | jq .
+```
+
 ---
 
 ## 7. Recall canary regression

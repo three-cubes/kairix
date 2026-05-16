@@ -617,6 +617,31 @@ def tool_probe_search(
     return result.to_envelope()
 
 
+def tool_probe_burst(
+    suite: str = "reflib",
+    total_queries: int = 200,
+    peak_concurrency: int = 20,
+) -> dict[str, Any]:
+    """Stub for the burst-probe capability — operator-only, escalation envelope.
+
+    Burst is load-generating by design (rapid query injection to measure
+    post-warmup throughput drop). Agents calling this tool receive the
+    OperatorOnlyCapability envelope with the exact CLI command for the operator.
+    """
+    return _operator_only_envelope(
+        capability="probe burst",
+        operator_command=(
+            f"kairix probe burst --suite {suite} --total-queries {total_queries} --peak-concurrency {peak_concurrency}"
+        ),
+        reason=(
+            "Probe burst injects queries as fast as possible against the "
+            "production retrieval pipeline; load-generating by design. Agents must escalate."
+        ),
+        expected_runtime_seconds=max(30, total_queries // 5),
+        see_also=[_RETRIEVAL_RUNBOOK],
+    )
+
+
 def tool_benchmark_run(suite: str = "reflib") -> dict[str, Any]:
     """Stub for the benchmark capability — operator-only, escalation envelope."""
     return _operator_only_envelope(
@@ -1091,6 +1116,21 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     def soak_run(suite: str = "reflib", repeat: int = 3) -> dict[str, Any]:
         """Operator-only soak test. Returns escalation envelope for the agent's admin."""
         return tool_soak_run(suite=suite, repeat=repeat)
+
+    @server.tool(
+        description=(
+            "Burst-probe escalation — load-generating throughput-drop probe. Returns the "
+            "OperatorOnlyCapability envelope with the exact `kairix probe burst` command."
+        )
+    )
+    @async_tool_handler
+    def probe_burst(
+        suite: str = "reflib",
+        total_queries: int = 200,
+        peak_concurrency: int = 20,
+    ) -> dict[str, Any]:
+        """Operator-only burst probe. Returns escalation envelope."""
+        return tool_probe_burst(suite=suite, total_queries=total_queries, peak_concurrency=peak_concurrency)
 
     @server.tool(
         description=(

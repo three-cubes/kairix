@@ -17,12 +17,15 @@ Bindings (CLI + MCP land in subsequent chunks):
     MCP:  tool_probe_search (hard-capped: queries<=20, concurrency<=3)
 """
 
+from kairix.quality.probe.burst import BurstBucket, BurstResult, run_probe_burst
 from kairix.quality.probe.executor import ConcurrentRun, TimedResult, run_concurrent
 from kairix.quality.probe.runner import ProbeResult, SampledQuery, run_probe_search
 from kairix.quality.probe.sampler import sample_weighted
 from kairix.quality.probe.stats import LatencyStats, latency_stats, suggest_bottleneck
 
 __all__ = [
+    "BurstBucket",
+    "BurstResult",
     "ConcurrentRun",
     "LatencyStats",
     "ProbeResult",
@@ -30,6 +33,7 @@ __all__ = [
     "TimedResult",
     "latency_stats",
     "run_concurrent",
+    "run_probe_burst",
     "run_probe_search",
     "sample_weighted",
     "suggest_bottleneck",

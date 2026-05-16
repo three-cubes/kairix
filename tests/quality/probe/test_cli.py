@@ -22,6 +22,7 @@ from unittest import mock
 import pytest
 
 from kairix.quality.probe import cli as probe_cli
+from kairix.quality.probe.burst import BurstBucket, BurstResult
 from kairix.quality.probe.runner import ProbeResult
 from kairix.quality.probe.stats import LatencyStats
 
@@ -337,3 +338,151 @@ def test_top_level_cli_dispatches_probe() -> None:
     assert module_path == "kairix.quality.probe.cli"
     assert fn_name == "main"
     assert accepts_args is True
+
+
+# ---------------------------------------------------------------------------
+# Burst subcommand — Phase 3 chunk A
+# ---------------------------------------------------------------------------
+
+
+def _bucket(start: float, end: float, n: int, qps: float, errors: int = 0) -> BurstBucket:
+    return BurstBucket(
+        window_start_s=start,
+        window_end_s=end,
+        queries_completed=n,
+        errors=errors,
+        qps=qps,
+    )
+
+
+def _pass_burst_result() -> BurstResult:
+    return BurstResult(
+        suite="reflib",
+        total_queries=200,
+        peak_concurrency=20,
+        bucket_ms=500,
+        seed=0,
+        wallclock_s=5.24,
+        buckets=[
+            _bucket(0.0, 0.5, 20, 40.0),
+            _bucket(0.5, 1.0, 22, 44.0),
+            _bucket(1.0, 1.5, 21, 42.0),
+        ],
+        peak_qps=44.0,
+        sustained_qps=42.0,
+        qps_drop_pct=4.5,
+        errors=0,
+        qps_drop_threshold_pct=30.0,
+        passed=True,
+    )
+
+
+def _fail_burst_result() -> BurstResult:
+    return BurstResult(
+        suite="reflib",
+        total_queries=200,
+        peak_concurrency=20,
+        bucket_ms=500,
+        seed=0,
+        wallclock_s=8.0,
+        buckets=[
+            _bucket(0.0, 0.5, 22, 44.0),
+            _bucket(0.5, 1.0, 21, 42.0),
+            _bucket(1.0, 1.5, 13, 26.0),
+            _bucket(1.5, 2.0, 12, 24.0),
+            _bucket(2.0, 2.5, 13, 26.0),
+        ],
+        peak_qps=44.0,
+        sustained_qps=25.3,
+        qps_drop_pct=42.5,
+        errors=0,
+        qps_drop_threshold_pct=30.0,
+        passed=False,
+    )
+
+
+def test_burst_help_exits_zero() -> None:
+    # Sabotage: drop the burst subparser registration and --help under
+    # `burst` raises SystemExit(2) (unknown subcommand) instead of 0.
+    out_buf, err_buf = io.StringIO(), io.StringIO()
+    with redirect_stdout(out_buf), redirect_stderr(err_buf), pytest.raises(SystemExit) as exc:
+        probe_cli.main(["burst", "--help"])
+    assert exc.value.code == 0
+    stdout = out_buf.getvalue()
+    assert stdout, "burst --help should print to stdout"
+
+
+def test_burst_passing_run_exits_zero_with_pass_marker() -> None:
+    # Sabotage: invert the burst passed/exit-code mapping and exit 0 vs 1 flips.
+    with mock.patch.object(probe_cli, "run_probe_burst", return_value=_pass_burst_result()):
+        rc, stdout, _stderr = _capture(["burst", "--suite", "reflib"])
+    assert rc == 0
+    assert "PASS" in stdout
+    assert "peak_qps=44.0" in stdout
+    assert "sustained_qps=42.0" in stdout
+
+
+def test_burst_failing_run_exits_one_with_f21_affordances() -> None:
+    # Sabotage: remove the fix:/next:/run: lines from the burst FAIL formatter
+    # and the gate output stops naming a corrective action, violating F21 intent.
+    with mock.patch.object(probe_cli, "run_probe_burst", return_value=_fail_burst_result()):
+        rc, stdout, _stderr = _capture(["burst", "--suite", "reflib"])
+    assert rc == 1
+    assert "FAIL" in stdout
+    assert "42.5%" in stdout
+    assert "30.0%" in stdout
+    assert "fix:" in stdout
+    assert "next:" in stdout
+    assert "run:" in stdout
+
+
+def test_burst_json_emits_valid_envelope_with_required_keys() -> None:
+    # Sabotage: drop `to_envelope` from the JSON path and json.loads raises
+    # or the required keys disappear.
+    with mock.patch.object(probe_cli, "run_probe_burst", return_value=_pass_burst_result()):
+        rc, stdout, _ = _capture(["burst", "--suite", "reflib", "--json"])
+    assert rc == 0
+    payload = json.loads(stdout)
+    assert isinstance(payload, dict)
+    for key in ("suite", "total_queries", "peak_concurrency", "bucket_ms", "buckets", "peak_qps", "passed"):
+        assert key in payload, f"envelope missing key {key!r}"
+    assert payload["suite"] == "reflib"
+    assert payload["passed"] is True
+
+
+def test_burst_total_queries_zero_exits_two_with_affordance() -> None:
+    # Sabotage: remove the `args.total_queries < 1` guard in _run_burst and
+    # the CLI forwards to run_probe_burst, losing the structured exit-2 affordance.
+    rc, _stdout, stderr = _capture(["burst", "--suite", "reflib", "--total-queries", "0"])
+    assert rc == 2
+    assert "--total-queries" in stderr
+    assert "fix:" in stderr
+    assert "next:" in stderr
+
+
+def test_burst_peak_concurrency_zero_exits_two() -> None:
+    # Sabotage: remove the peak-concurrency guard and the CLI forwards to the
+    # runner instead of failing fast with the affordance.
+    rc, _stdout, stderr = _capture(["burst", "--suite", "reflib", "--peak-concurrency", "0"])
+    assert rc == 2
+    assert "--peak-concurrency" in stderr
+    assert "fix:" in stderr
+
+
+def test_burst_bucket_ms_zero_exits_two() -> None:
+    # Sabotage: remove the bucket-ms guard and zero-width buckets would
+    # divide-by-zero inside the runner.
+    rc, _stdout, stderr = _capture(["burst", "--suite", "reflib", "--bucket-ms", "0"])
+    assert rc == 2
+    assert "--bucket-ms" in stderr
+    assert "fix:" in stderr
+
+
+def test_search_subcommand_still_dispatches_after_refactor() -> None:
+    # Sabotage: collapse the subparsers refactor and the search dispatch
+    # breaks — call_count drops to zero.
+    with mock.patch.object(probe_cli, "run_probe_search", return_value=_pass_result(concurrency=5)) as m:
+        rc, stdout, _ = _capture(["search", "--suite", "reflib", "--concurrency", "5"])
+    assert rc == 0
+    assert m.call_count == 1
+    assert "PASS" in stdout

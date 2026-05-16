@@ -116,6 +116,7 @@ def test_build_server_constructs_fastmcp_with_all_tools_registered_under_unit() 
         # Programmatic introspection (affordance pattern 4)
         "capabilities",
         # Operator-only escalation stubs
+        "probe_burst",
         "soak_run",
         "benchmark_run",
         "embed",
@@ -169,6 +170,7 @@ def test_build_server_each_wrapper_dispatches_to_tool_function_under_unit() -> N
         # Programmatic introspection (affordance pattern 4).
         ("capabilities", {}),
         # Operator-only escalation stubs — fixed envelope responses.
+        ("probe_burst", {}),
         ("soak_run", {}),
         ("benchmark_run", {}),
         ("embed", {}),
