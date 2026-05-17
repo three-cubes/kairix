@@ -16,9 +16,9 @@ from typing import Any
 
 import pytest
 
-from kairix.core.embed import embed_cache as embed_cache_mod
 from kairix.core.embed import embed_text
-from kairix.core.embed.embed_cache import EmbedCache, reset_embed_cache
+from kairix.transport.cache import embed_cache as embed_cache_mod
+from kairix.transport.cache.embed_cache import EmbedCache, reset_embed_cache
 
 pytestmark = pytest.mark.integration
 
@@ -165,7 +165,7 @@ def test_cache_age_expiry_triggers_re_embed(
 ) -> None:
     """An entry older than max_age_s causes a re-embed on next access.
 
-    Stdlib monkeypatch on ``kairix.core.embed.embed_cache.time.time``
+    Stdlib monkeypatch on ``kairix.transport.cache.embed_cache.time.time``
     (stdlib is not a kairix internal - F1 prohibits patching kairix
     internals, not stdlib through the import bridge).
     Sabotage: drop the age check in EmbedCache.get and the second
@@ -186,7 +186,7 @@ def test_cache_age_expiry_triggers_re_embed(
 
     real_now = _time.time()
     monkeypatch.setattr(
-        "kairix.core.embed.embed_cache.time.time",
+        "kairix.transport.cache.embed_cache.time.time",
         lambda: real_now + 5.0,
     )
 

@@ -1,4 +1,4 @@
-"""Unit tests for kairix.core.embed.embed_cache.EmbedCache.
+"""Unit tests for kairix.transport.cache.EmbedCache.
 
 Every test is sabotage-proof: each assertion's comment names a
 concrete mutation in production that would break the assertion, so a
@@ -17,7 +17,7 @@ import threading
 
 import pytest
 
-from kairix.core.embed.embed_cache import (
+from kairix.transport.cache.embed_cache import (
     DEFAULT_MAX_AGE_S,
     DEFAULT_MAX_ENTRIES,
     EmbedCache,

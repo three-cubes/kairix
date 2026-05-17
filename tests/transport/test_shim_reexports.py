@@ -1,9 +1,15 @@
-"""Re-export shims for ``kairix.transport.cache`` and
-``kairix.transport.coalesce`` MUST yield the *same class object* as
-the canonical path. ``is`` identity (not just ``==``) is the
-load-bearing assertion: a shim that re-implements or re-defines the
-class would let callers split into two type identities and break
-isinstance checks downstream.
+"""Re-export shim for ``kairix.transport.coalesce`` MUST yield the
+*same class object* as the canonical path. ``is`` identity (not just
+``==``) is the load-bearing assertion: a shim that re-implements or
+re-defines the class would let callers split into two type identities
+and break isinstance checks downstream.
+
+The ``kairix.transport.cache`` package no longer has a shim — its
+canonical implementation moved to :mod:`kairix.transport.cache` in
+IM-3, so there is nothing for an identity test to compare against.
+The package-level re-exports (``EmbedCache``, ``get_embed_cache``)
+are exercised through every consumer's import path; see
+``tests/transport/cache/test_embed_cache.py`` for the unit tests.
 
 Sabotage-proof: each test was verified to fail when the shim's
 import line was broken (e.g. importing a different symbol or a
@@ -19,33 +25,6 @@ from __future__ import annotations
 import pytest
 
 pytestmark = pytest.mark.unit
-
-
-def test_embed_cache_class_is_canonical() -> None:
-    """``kairix.transport.cache.EmbedCache`` is the SAME class object
-    as ``kairix.core.embed.embed_cache.EmbedCache``.
-
-    Sabotage-prove: replace the shim's import with
-    ``from kairix.transport.coalesce import EmbedCoalescer as EmbedCache``
-    → ``is`` comparison fails (different class object).
-    """
-    from kairix.core.embed.embed_cache import EmbedCache as Canonical
-    from kairix.transport.cache import EmbedCache as Shim
-
-    assert Shim is Canonical
-
-
-def test_get_embed_cache_is_canonical() -> None:
-    """``kairix.transport.cache.get_embed_cache`` is the SAME function
-    object as ``kairix.core.embed.embed_cache.get_embed_cache``.
-
-    Sabotage-prove: remove ``get_embed_cache`` from the shim's import
-    line → ``ImportError`` at collection.
-    """
-    from kairix.core.embed.embed_cache import get_embed_cache as canonical
-    from kairix.transport.cache import get_embed_cache as shim
-
-    assert shim is canonical
 
 
 def test_embed_coalescer_class_is_canonical() -> None:

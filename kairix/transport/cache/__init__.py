@@ -1,12 +1,15 @@
-"""Universal endpoint response cache.
+"""kairix.transport.cache — universal embed response cache.
 
-See docs/architecture/provider-plugin-architecture.md. Re-exports the
-current ``EmbedCache`` from ``kairix.core.embed.embed_cache``. Wave 2
-(IM-3) will flip the canonical path; this shim keeps imports working
-during the migration so consumers can opportunistically switch to the
-``kairix.transport.cache`` namespace ahead of the move.
+Canonical home of :class:`EmbedCache`. See
+docs/architecture/provider-plugin-architecture.md for the three-layer
+split (core / transport / providers); the embed cache sits in the
+transport layer in front of every provider's embed call so a single
+implementation services all providers.
+
+Public surface re-exported here so callers import from the package,
+not the implementation module.
 """
 
-from kairix.core.embed.embed_cache import EmbedCache, get_embed_cache
+from kairix.transport.cache.embed_cache import EmbedCache, get_embed_cache, reset_embed_cache
 
-__all__ = ["EmbedCache", "get_embed_cache"]
+__all__ = ["EmbedCache", "get_embed_cache", "reset_embed_cache"]

@@ -1,4 +1,10 @@
-"""In-process embed cache for the Azure embed roundtrip.
+"""In-process embed cache for the embed roundtrip.
+
+Lives in :mod:`kairix.transport.cache` — the universal endpoint
+response cache. See docs/architecture/provider-plugin-architecture.md
+for the three-layer split (core / transport / providers); this module
+is the transport-layer cache that sits in front of every provider's
+embed call, not a domain concern of any single provider.
 
 LRU bounded by entry count + per-entry max age. Thread-safe (kairix
 MCP serves multiple agents concurrently). Cache key is the normalised
@@ -8,7 +14,7 @@ the gap left by the result cache (#281), which keys on the full
 ``(query, scope, agent, collections)`` four-tuple and therefore misses
 when two agents ask the same question from different scopes.
 
-Hit value: ~5 ms memory lookup vs ~250-500 ms Azure roundtrip (and
+Hit value: ~5 ms memory lookup vs ~250-500 ms embed roundtrip (and
 ~1 s at conc=10). Even at conc=10 today's p95 = 3107 ms because
 fresh queries still pay the full embed cost; this cache aims to take
 that cost off the hot path whenever the SAME text has been embedded
@@ -24,8 +30,8 @@ Design notes:
   age at read time so a stale-but-not-yet-evicted entry is reported as
   a miss (operator-facing stats stay honest).
 - A single :class:`threading.RLock` guards all reads + writes. The
-  cost of contention is dwarfed by the cost of the Azure embed
-  roundtrip the cache avoids on a hit.
+  cost of contention is dwarfed by the cost of the embed roundtrip
+  the cache avoids on a hit.
 - Default max-age is 30 min — longer than the result cache's 5 min
   because embed vectors depend only on the model + text, not on
   changing vault state. Two agents asking the same question 20 min
@@ -90,12 +96,12 @@ class EmbedCache:
     Mirrors :class:`kairix.core.search.query_cache.QueryResultCache`
     exactly in shape, but keyed on just the text — so two agents asking
     the same question from different scopes / collections share the
-    expensive Azure embed roundtrip even though they don't share a
-    final search result.
+    expensive embed roundtrip even though they don't share a final
+    search result.
 
     Thread safety: a single :class:`threading.RLock` guards all reads +
-    writes. Contention cost here is negligible vs the Azure embed
-    roundtrip we avoid on every hit.
+    writes. Contention cost here is negligible vs the embed roundtrip
+    we avoid on every hit.
     """
 
     def __init__(

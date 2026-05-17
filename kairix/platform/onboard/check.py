@@ -936,7 +936,7 @@ def check_query_cache_stats(query_cache: Any | None = None) -> CheckResult:
 def check_embed_cache_stats(embed_cache: Any | None = None) -> CheckResult:
     """Diagnostic: report embed-cache stats.
 
-    The embed cache (``kairix.core.embed.embed_cache``) sits in front
+    The embed cache (``kairix.transport.cache``) sits in front
     of the Azure embed roundtrip — same text → same vector regardless
     of which agent / scope asked. This check exists so operators can
     see hit-rate / size in ``kairix onboard check --json`` alongside
@@ -950,7 +950,7 @@ def check_embed_cache_stats(embed_cache: Any | None = None) -> CheckResult:
     """
     try:
         if embed_cache is None:
-            from kairix.core.embed.embed_cache import get_embed_cache
+            from kairix.transport.cache import get_embed_cache
 
             embed_cache = get_embed_cache()
         stats = embed_cache.stats()

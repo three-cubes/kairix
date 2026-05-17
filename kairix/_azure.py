@@ -110,7 +110,7 @@ def embed_text(
     Returns a list of floats (dimension set by KAIRIX_EMBED_DIMS). Returns [] on any failure.
     Never raises. Uses the OpenAI SDK with built-in retry and backoff.
 
-    Hot path goes through :class:`kairix.core.embed.embed_cache.EmbedCache`
+    Hot path goes through :class:`kairix.transport.cache.EmbedCache`
     — same text → same vector, regardless of which agent / scope asked.
     Cache miss falls through to the Azure roundtrip; cache hit returns
     in ~5 ms vs ~250-500 ms on the wire. The cache is keyed on the
@@ -135,7 +135,7 @@ def embed_text(
     if not text or not text.strip():
         return []
 
-    from kairix.core.embed.embed_cache import get_embed_cache
+    from kairix.transport.cache import get_embed_cache
 
     cache = get_embed_cache()
     cached = cache.get(text)

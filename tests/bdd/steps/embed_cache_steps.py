@@ -2,7 +2,7 @@
 
 Drives the real :func:`kairix.core.embed.embed_text` (the public
 re-export) with a counting fake at the Azure-client boundary. The
-cache is a real :class:`kairix.core.embed.embed_cache.EmbedCache`
+cache is a real :class:`kairix.transport.cache.EmbedCache`
 instance; the fake is passed via the public ``client=`` kwarg so the
 test stays on the public surface (F5 - no private-name imports), no
 @patch on internals (F1), no env monkeypatch (F2).
@@ -16,7 +16,7 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 
 from kairix.core.embed import embed_text
-from kairix.core.embed.embed_cache import EmbedCache, reset_embed_cache
+from kairix.transport.cache.embed_cache import EmbedCache, reset_embed_cache
 
 pytestmark = pytest.mark.bdd
 
@@ -72,7 +72,7 @@ def _ec_state(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     reset_embed_cache()
     # Replace the process-shared singleton with a small one we own, so
     # the test's assertions on cache.stats() see ONLY this scenario.
-    from kairix.core.embed import embed_cache as embed_cache_mod
+    from kairix.transport.cache import embed_cache as embed_cache_mod
 
     fresh = EmbedCache(max_entries=10, max_age_s=60.0)
     monkeypatch.setattr(embed_cache_mod, "_EMBED_CACHE", fresh)
