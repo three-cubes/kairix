@@ -602,22 +602,31 @@ def check_agent_knowledge_populated(document_root_path: Path | None = None) -> C
     )
 
 
-def check_chunk_date_populated(db_path: Path | None = None) -> CheckResult:
+def check_chunk_date_populated(
+    db_path: Path | None = None,
+    *,
+    opener: Callable[[Path], Any] | None = None,
+) -> CheckResult:
     """chunk_date is populated in content_vectors (required for TMP-7B temporal boost).
 
     Args:
         db_path: Override for the SQLite DB path. Defaults to
                  ``kairix.core.db.get_db_path()``.
+        opener:  Public DI seam — when ``None`` the production
+                 ``kairix.core.db.open_db`` is used; tests pass a raising
+                 fake to drive the FileNotFoundError / generic-exception
+                 branches without monkey-patching ``open_db``.
     """
     try:
-        from kairix.core.db import open_db
+        if opener is None:
+            from kairix.core.db import open_db as opener  # type: ignore[assignment]
 
         if db_path is None:
             from kairix.core.db import get_db_path
 
             db_path = Path(get_db_path())
 
-        db = open_db(db_path)
+        db = opener(db_path)
         try:
             # Check if the column exists first
             cols = {row[1] for row in db.execute("PRAGMA table_info(content_vectors)")}
@@ -723,11 +732,18 @@ _CLAUDE_DESKTOP_CONFIG_PATHS = (
 _MCP_SSE_PORT = _mcp_port()
 
 
-def _probe_openclaw_harness() -> tuple[bool, str]:
-    """Return (ok, detail) for the OpenClaw stdio harness."""
+def _probe_openclaw_harness(*, config_paths: tuple[Path | str, ...] | None = None) -> tuple[bool, str]:
+    """Return (ok, detail) for the OpenClaw stdio harness.
+
+    ``config_paths`` is the public seam — production callers leave it
+    ``None`` and the function uses module-level ``_OPENCLAW_JSON_PATHS``;
+    tests pass a tmp-path tuple to drive the registered / missing /
+    bad-command branches without monkey-patching the constant.
+    """
     import json as _json
 
-    for candidate in _OPENCLAW_JSON_PATHS:
+    paths = config_paths if config_paths is not None else _OPENCLAW_JSON_PATHS
+    for candidate in paths:
         try:
             p = Path(str(candidate))
             if not p.exists():
@@ -772,11 +788,16 @@ def _probe_openclaw_harness() -> tuple[bool, str]:
     return False, "OpenClaw: not detected"
 
 
-def _probe_claude_desktop_harness() -> tuple[bool, str]:
-    """Return (ok, detail) for the Claude Desktop stdio harness."""
+def _probe_claude_desktop_harness(*, config_paths: tuple[Path, ...] | None = None) -> tuple[bool, str]:
+    """Return (ok, detail) for the Claude Desktop stdio harness.
+
+    ``config_paths`` is the public seam — production callers leave it
+    ``None`` and the function uses module-level ``_CLAUDE_DESKTOP_CONFIG_PATHS``.
+    """
     import json as _json
 
-    for candidate in _CLAUDE_DESKTOP_CONFIG_PATHS:
+    paths = config_paths if config_paths is not None else _CLAUDE_DESKTOP_CONFIG_PATHS
+    for candidate in paths:
         try:
             p = Path(str(candidate))
             if not p.exists():
@@ -831,7 +852,12 @@ def _probe_sse_harness() -> tuple[bool, str]:
     return False, f"SSE/HTTP: not listening on port {_MCP_SSE_PORT}"
 
 
-def check_mcp_service() -> CheckResult:
+def check_mcp_service(
+    *,
+    openclaw_probe: Callable[..., tuple[bool, str]] | None = None,
+    claude_desktop_probe: Callable[..., tuple[bool, str]] | None = None,
+    sse_probe: Callable[..., tuple[bool, str]] | None = None,
+) -> CheckResult:
     """
     kairix MCP server is reachable by at least one configured consumer.
 
@@ -842,10 +868,15 @@ def check_mcp_service() -> CheckResult:
 
     Passes if at least one harness is configured and functional.
     If no harness is detected, reports which harnesses are available to configure.
+
+    The three ``*_probe`` kwargs are the public DI seams — production
+    callers leave them ``None`` and the function uses the module-level
+    ``_probe_*_harness`` defaults; tests inject stubs to drive each
+    harness's outcome without monkey-patching the module attributes.
     """
-    openclaw_ok, openclaw_detail = _probe_openclaw_harness()
-    claude_ok, claude_detail = _probe_claude_desktop_harness()
-    sse_ok, sse_detail = _probe_sse_harness()
+    openclaw_ok, openclaw_detail = (openclaw_probe or _probe_openclaw_harness)()
+    claude_ok, claude_detail = (claude_desktop_probe or _probe_claude_desktop_harness)()
+    sse_ok, sse_detail = (sse_probe or _probe_sse_harness)()
 
     active = [
         d

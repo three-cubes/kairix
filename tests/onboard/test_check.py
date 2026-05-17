@@ -591,10 +591,13 @@ def test_check_mcp_service_handles_invalid_openclaw_json(tmp_path: Path, monkeyp
 
     bogus = tmp_path / "openclaw.json"
     bogus.write_text("not json {{{")
-    monkeypatch.setattr(check_mod, "_OPENCLAW_JSON_PATHS", (str(bogus),))
 
-    # The probe should not raise; check_mcp_service surfaces a CheckResult
-    result = check_mod.check_mcp_service()
+    # Drive the OpenClaw probe through the public ``config_paths`` kwarg
+    # seam — F1-clean. The check_mcp_service public surface accepts a
+    # custom OpenClaw probe.
+    result = check_mod.check_mcp_service(
+        openclaw_probe=lambda: check_mod._probe_openclaw_harness(config_paths=(str(bogus),)),
+    )
     assert isinstance(result, CheckResult)
 
 
@@ -609,9 +612,8 @@ def test_run_all_checks_swallows_individual_failures(monkeypatch) -> None:
 
     _exploding_check.__name__ = "check_test_simulated"
 
-    # Add an exploding check to ALL_CHECKS for this test only
-    monkeypatch.setattr(check_mod, "ALL_CHECKS", [*check_mod.ALL_CHECKS, _exploding_check])
-    results = run_all_checks()
+    # Drive the runner through its public ``checks`` kwarg seam — F1-clean.
+    results = run_all_checks(checks=[*check_mod.ALL_CHECKS, _exploding_check])
     test_results = [r for r in results if r.name == "test_simulated"]
     assert len(test_results) == 1
     assert test_results[0].ok is False
@@ -634,12 +636,11 @@ def test_chunk_date_populated_filenotfound_branch(tmp_path: Path, monkeypatch) -
     def _raise_fnf(_path):
         raise FileNotFoundError("simulated missing index")
 
-    # Substitute open_db on the kairix.core.db module so the check picks it up
-    import kairix.core.db as db_mod
-
-    monkeypatch.setattr(db_mod, "open_db", _raise_fnf)
-
-    result = check_mod.check_chunk_date_populated(db_path=tmp_path / "irrelevant.sqlite")
+    # Drive the open_db seam through the public ``opener`` kwarg on
+    # check_chunk_date_populated — F1-clean.
+    result = check_mod.check_chunk_date_populated(
+        db_path=tmp_path / "irrelevant.sqlite", opener=_raise_fnf
+    )
     assert result.ok is False
     assert "Index not found" in result.detail
 
@@ -648,14 +649,14 @@ def test_chunk_date_populated_filenotfound_branch(tmp_path: Path, monkeypatch) -
 def test_chunk_date_populated_generic_exception(tmp_path: Path, monkeypatch) -> None:
     """When open_db raises a non-FileNotFoundError, the generic exception
     branch fires (line 553-558)."""
-    import kairix.core.db as db_mod
     from kairix.platform.onboard import check as check_mod
 
     def _raise_runtime(_path):
         raise RuntimeError("locked database")
 
-    monkeypatch.setattr(db_mod, "open_db", _raise_runtime)
-    result = check_mod.check_chunk_date_populated(db_path=tmp_path / "irrelevant.sqlite")
+    result = check_mod.check_chunk_date_populated(
+        db_path=tmp_path / "irrelevant.sqlite", opener=_raise_runtime
+    )
     assert result.ok is False
     assert "failed" in result.detail.lower()
 
@@ -693,10 +694,8 @@ def test_probe_openclaw_registered_with_executable_command(tmp_path: Path, monke
         )
     )
 
-    # Override the module-level _OPENCLAW_JSON_PATHS to point at our fake
-    monkeypatch.setattr(check_mod, "_OPENCLAW_JSON_PATHS", (str(config),))
-
-    ok, detail = check_mod._probe_openclaw_harness()
+    # Drive the OpenClaw probe through its public ``config_paths`` kwarg.
+    ok, detail = check_mod._probe_openclaw_harness(config_paths=(str(config),))
     assert ok is True
     assert "OpenClaw" in detail
 
@@ -724,9 +723,7 @@ def test_probe_openclaw_registered_but_command_missing(tmp_path: Path, monkeypat
         )
     )
 
-    monkeypatch.setattr(check_mod, "_OPENCLAW_JSON_PATHS", (str(config),))
-
-    ok, detail = check_mod._probe_openclaw_harness()
+    ok, detail = check_mod._probe_openclaw_harness(config_paths=(str(config),))
     assert ok is False
     assert "missing" in detail.lower() or "not executable" in detail.lower()
 
@@ -741,9 +738,7 @@ def test_probe_claude_desktop_registered(tmp_path: Path, monkeypatch) -> None:
 
     config.write_text(json.dumps({"mcpServers": {"kairix": {"command": "kairix"}}}))
 
-    monkeypatch.setattr(check_mod, "_CLAUDE_DESKTOP_CONFIG_PATHS", (config,))
-
-    ok, detail = check_mod._probe_claude_desktop_harness()
+    ok, detail = check_mod._probe_claude_desktop_harness(config_paths=(config,))
     assert ok is True
     assert "Claude Desktop" in detail
 
@@ -807,11 +802,11 @@ def test_check_mcp_service_active_when_any_harness_passes(monkeypatch) -> None:
     """When at least one harness is configured, check_mcp_service returns ok=True."""
     from kairix.platform.onboard import check as check_mod
 
-    monkeypatch.setattr(check_mod, "_probe_openclaw_harness", lambda: (True, "OpenClaw: configured"))
-    monkeypatch.setattr(check_mod, "_probe_claude_desktop_harness", lambda: (False, "Claude: nope"))
-    monkeypatch.setattr(check_mod, "_probe_sse_harness", lambda: (False, "SSE: nope"))
-
-    result = check_mod.check_mcp_service()
+    result = check_mod.check_mcp_service(
+        openclaw_probe=lambda: (True, "OpenClaw: configured"),
+        claude_desktop_probe=lambda: (False, "Claude: nope"),
+        sse_probe=lambda: (False, "SSE: nope"),
+    )
     assert result.ok is True
     assert "OpenClaw" in result.detail
 
@@ -921,7 +916,7 @@ def test_run_onboard_check_uses_canonical_remediation_strings() -> None:
         for name in check_mod._CANONICAL_REMEDIATIONS
     ]
 
-    def _fake_run_all() -> list[check_mod.CheckResult]:
+    def _fake_run_all(*, checks=None) -> list[check_mod.CheckResult]:
         return fake_results
 
     # Drive run_onboard_check via a one-shot ALL_CHECKS override
@@ -981,7 +976,7 @@ def test_run_onboard_check_unknown_check_falls_back_to_fix() -> None:
     """
     from kairix.platform.onboard import check as check_mod
 
-    def _fake_run_all() -> list[check_mod.CheckResult]:
+    def _fake_run_all(*, checks=None) -> list[check_mod.CheckResult]:
         return [
             check_mod.CheckResult(
                 name="brand_new_check_with_no_canonical_entry",
@@ -1012,7 +1007,7 @@ def test_run_onboard_check_unknown_and_no_fix_surfaces_bug_hint() -> None:
     """
     from kairix.platform.onboard import check as check_mod
 
-    def _fake_run_all() -> list[check_mod.CheckResult]:
+    def _fake_run_all(*, checks=None) -> list[check_mod.CheckResult]:
         return [
             check_mod.CheckResult(
                 name="orphan_check_with_no_remediation",

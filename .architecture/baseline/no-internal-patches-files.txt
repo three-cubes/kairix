@@ -5,7 +5,6 @@ tests/embed/test_use_cases_defaults.py
 tests/eval/test_cli_unit.py
 tests/knowledge/entities/test_cli_unit.py
 tests/knowledge/store/test_cli_unit.py
-tests/onboard/test_check.py
 tests/onboard/test_cli.py
 tests/setup/test_wizard.py
 tests/summaries/test_cli_unit.py
