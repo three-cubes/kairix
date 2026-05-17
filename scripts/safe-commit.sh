@@ -39,13 +39,15 @@ fi
 echo "=== Quality gates ==="
 
 # 1. Lint (includes isort via ruff I rules)
+# Scope kairix/ + tests/ + scripts/ to match what pre-commit's ruff hook
+# scans in CI — local-vs-CI divergence here has cost round-trips already.
 echo -n "  ruff lint... "
-ruff check kairix/ tests/ --quiet 2>&1 || { echo -e "${RED}FAIL${NC}"; echo "Run: ruff check kairix/ tests/ --fix"; exit 1; }
+ruff check kairix/ tests/ scripts/ --quiet 2>&1 || { echo -e "${RED}FAIL${NC}"; echo "Run: ruff check kairix/ tests/ scripts/ --fix"; exit 1; }
 echo -e "${GREEN}OK${NC}"
 
 # 2. Format (black-compatible via ruff format)
 echo -n "  ruff format... "
-ruff format --check kairix/ tests/ >/dev/null 2>&1 || { echo -e "${RED}FAIL${NC}"; echo "Run: ruff format kairix/ tests/"; exit 1; }
+ruff format --check kairix/ tests/ scripts/ >/dev/null 2>&1 || { echo -e "${RED}FAIL${NC}"; echo "Run: ruff format kairix/ tests/ scripts/"; exit 1; }
 echo -e "${GREEN}OK${NC}"
 
 # 2b. gofmt on every Go service (when present). Auto-discovered: any

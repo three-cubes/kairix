@@ -25,22 +25,61 @@ _L0_MAX_TOKENS = 150
 _L1_MAX_TOKENS = 600
 
 
-def _default_search(**kwargs: Any) -> Any:
+def _build_production_search_pipeline() -> Any:
     from kairix.core.factory import build_search_pipeline
 
-    pipeline = build_search_pipeline()
+    return build_search_pipeline()
+
+
+def _resolve_production_provider_name() -> str | None:
+    from kairix.paths import provider_name
+
+    return provider_name()
+
+
+def _resolve_production_provider(name: str) -> Any:
+    from kairix.providers import get_provider
+
+    return get_provider(name)
+
+
+def default_search_callable(
+    *,
+    pipeline_factory: Callable[[], Any] = _build_production_search_pipeline,
+    **kwargs: Any,
+) -> Any:
+    """Production search adapter used by ``PrepDeps`` when no override is passed.
+
+    The ``pipeline_factory`` kwarg is the public DI seam: tests pass a fake
+    factory returning a stub pipeline whose ``.search(**kwargs)`` returns the
+    desired ``SearchResult`` shape, exercising this adapter end-to-end.
+    """
+    pipeline = pipeline_factory()
     return pipeline.search(**kwargs)
 
 
-def _default_chat(**kwargs: Any) -> str:
-    from kairix.paths import provider_name
-    from kairix.providers import get_provider
+def default_chat_callable(
+    *,
+    provider_name_fn: Callable[[], str | None] = _resolve_production_provider_name,
+    provider_resolver: Callable[[str], Any] = _resolve_production_provider,
+    chat_backend_factory: Callable[[Any], Any] | None = None,
+    **kwargs: Any,
+) -> str:
+    """Production chat adapter used by ``PrepDeps`` when no override is passed.
+
+    Resolves the configured plugin via ``provider_name_fn`` + ``provider_resolver``,
+    wraps it in :class:`ProviderChatBackend` (override via ``chat_backend_factory``
+    for tests), and forwards ``**kwargs`` to ``backend.chat``. Raises ``ValueError``
+    when no provider is configured — surfacing a config error at the boundary
+    rather than letting the call vanish into a generic plugin failure.
+    """
     from kairix.transport.embed_service import ProviderChatBackend
 
-    name = provider_name()
+    name = provider_name_fn()
     if name is None:
         raise ValueError("kairix.config.yaml is missing the required 'provider:' field")
-    backend = ProviderChatBackend(get_provider(name))
+    provider = provider_resolver(name)
+    backend = (chat_backend_factory or ProviderChatBackend)(provider)
     return backend.chat(**kwargs)
 
 
@@ -78,8 +117,8 @@ class PrepDeps:
     the production callables defined above.
     """
 
-    search_fn: Callable[..., Any] = field(default_factory=lambda: _default_search)
-    chat_fn: Callable[..., str] = field(default_factory=lambda: _default_chat)
+    search_fn: Callable[..., Any] = field(default_factory=lambda: default_search_callable)
+    chat_fn: Callable[..., str] = field(default_factory=lambda: default_chat_callable)
 
 
 _GROUND_RULES = (
