@@ -34,13 +34,31 @@ from kairix.providers._base import (
     ProviderRegistry,
     get_provider,
 )
+from kairix.providers._errors import (
+    AuthError,
+    EmbedNotSupported,
+    ProviderError,
+    ProviderUnreachable,
+    RateLimited,
+    RetryExhausted,
+    TimeoutExceeded,
+    UpstreamError,
+)
 
 __all__ = [
     "ENTRY_POINT_GROUP",
+    "AuthError",
+    "EmbedNotSupported",
     "EntryPointRegistry",
     "Provider",
+    "ProviderError",
     "ProviderHealth",
     "ProviderNotRegistered",
     "ProviderRegistry",
+    "ProviderUnreachable",
+    "RateLimited",
+    "RetryExhausted",
+    "TimeoutExceeded",
+    "UpstreamError",
     "get_provider",
 ]
