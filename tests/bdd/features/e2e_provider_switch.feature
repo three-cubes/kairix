@@ -10,12 +10,11 @@ Feature: Operator switches provider by config alone
   # tags below acknowledge that the pair-based design intentionally
   # omits azure_legacy / bedrock / anthropic; F28 honours these tags
   # as explicit "not in this journey" markers rather than coverage gaps.
-  @azure_legacy_no_switch @bedrock_no_switch @anthropic_no_switch
 
   Background:
     Given the kairix provider registry is loaded from installed entry points
 
-  @happy_path
+  @happy_path @azure_legacy_no_switch @bedrock_no_switch @anthropic_no_switch
   Scenario Outline: Switching the configured provider with no code change keeps embed working
     Given the operator sets KAIRIX_PROVIDER to "<first_provider>"
     And the credential variable "<first_key_env>" is set to "<first_value_env>"
