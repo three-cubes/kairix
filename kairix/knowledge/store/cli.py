@@ -12,7 +12,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from typing import Any
+
+
+def _default_crawl_fn(**kwargs: Any) -> Any:
+    """Production crawl adapter — defers the heavy crawler import until call time."""
+    from kairix.knowledge.store.crawler import crawl
+
+    return crawl(**kwargs)
 
 
 def main(
@@ -20,6 +28,7 @@ def main(
     *,
     neo4j_client: Any = None,
     noninteractive: bool | None = None,
+    crawl_fn: Callable[..., Any] = _default_crawl_fn,
 ) -> None:
     """Entry point for `kairix store`.
 
@@ -33,6 +42,11 @@ def main(
     so operators can bypass the ``--confirm`` requirement in scripted
     pipelines. Tests pass an explicit bool to exercise both paths without
     monkeypatching the environment.
+
+    ``crawl_fn`` is the public DI seam for the crawl adapter. Production
+    callers leave it at :func:`_default_crawl_fn`; tests pass a stub to
+    drive ``_cmd_crawl`` without monkey-patching
+    ``kairix.knowledge.store.crawler.crawl``.
     """
     parser = argparse.ArgumentParser(
         prog="kairix store",
@@ -72,7 +86,7 @@ def main(
     args = parser.parse_args(argv)
 
     if args.subcommand == "crawl":
-        _cmd_crawl(args, neo4j_client=neo4j_client, noninteractive=noninteractive)
+        _cmd_crawl(args, neo4j_client=neo4j_client, noninteractive=noninteractive, crawl_fn=crawl_fn)
     elif args.subcommand == "health":
         _cmd_health(args, neo4j_client=neo4j_client)
     else:
@@ -193,6 +207,7 @@ def _cmd_crawl(
     *,
     neo4j_client: Any = None,
     noninteractive: bool | None = None,
+    crawl_fn: Callable[..., Any] = _default_crawl_fn,
 ) -> None:
     import logging
 
@@ -203,8 +218,6 @@ def _cmd_crawl(
     _guard_reset_interlock(args, noninteractive=resolved_noninteractive)
 
     document_root = _resolve_document_root(args.document_root)
-
-    from kairix.knowledge.store.crawler import crawl
 
     if neo4j_client is None:
         from kairix.knowledge.graph.client import get_client
@@ -217,7 +230,7 @@ def _cmd_crawl(
 
     overrides = _resolve_overrides(document_root)
 
-    report = crawl(
+    report = crawl_fn(
         document_root=document_root,
         neo4j_client=neo4j_client,
         dry_run=args.dry_run,
