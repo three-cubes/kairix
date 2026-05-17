@@ -1,33 +1,29 @@
-"""F1 detector tests — covers @patch, with patch, and attribute-reassignment shapes.
+"""F1 detector tests — verify all six internal-substitution shapes are caught.
 
-The F1 detector (``scripts/checks/check_no_internal_patches.py``) was
-originally written to catch ``@patch("kairix.X.Y")`` and
-``with patch("kairix.X.Y")``. It missed the equivalent attribute-
-reassignment shapes — ``module.attr = fake``, ``monkeypatch.setattr(
-module, "attr", fake)``, etc. — which are structurally identical
-violations of "don't substitute kairix internals in tests" and which
-proliferated across the test suite while F1 was narrow.
+The F1 detector (``scripts/checks/check_no_internal_patches.py``) flags
+six structurally-identical shapes of internal patching:
 
-Six shapes the detector MUST flag (each exercised below):
-
-1. ``@patch("kairix.X.Y", ...)`` — pre-existing
-2. ``with patch("kairix.X.Y", ...)`` — pre-existing
+1. ``@patch("kairix.X.Y", ...)`` — decorator form
+2. ``with patch("kairix.X.Y", ...)`` — context manager form
 3. ``kairix.X.Y = <expr>`` — full-path attribute assignment
-4. ``<alias>.Y = <expr>`` where alias resolves to a kairix module —
-   `import kairix.paths as paths_mod; paths_mod.fn = ...`
+4. ``<alias>.Y = <expr>`` where alias resolves to a kairix module
 5. ``monkeypatch.setattr("kairix.X.Y", ...)`` — string-target form
 6. ``monkeypatch.setattr(<kairix module ref>, ...)`` — ref-target form
 
-Plus the negative case for each: the same shape against an exempt
-target (stdlib, external SDK) must NOT fire.
+Each shape gets a positive test (kairix target → violation flagged) and
+a negative test (stdlib / external SDK target → ignored). Tests drive
+``file_has_internal_patch`` through the public detector surface; no
+private import.
 
-All tests are exercised via the ``file_has_internal_patch`` import
-from the detector module — driving the public surface.
+To add coverage for a new shape: append a positive/negative pair below
+and extend the detector to satisfy both. Sabotage-prove by commenting
+out the detector branch, running the relevant positive test, confirming
+red, restoring, confirming green.
 """
 
 from __future__ import annotations
 
-# Add the scripts/checks directory to sys.path so we can import the detector.
+# Add scripts/checks to sys.path so the detector module is importable.
 import sys
 from pathlib import Path
 
@@ -51,12 +47,16 @@ def _write_test_module(tmp_path: Path, source: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Shape 1: @patch decorator (pre-existing detection)
+# Shape 1: @patch decorator
 # ---------------------------------------------------------------------------
 
 
 def test_detects_at_patch_decorator_on_kairix_target(tmp_path: Path) -> None:
-    """``@patch("kairix.X.Y")`` is the pre-existing F1 violation."""
+    """A decorator ``@patch("kairix.X.Y")`` is a violation.
+
+    To fix: rewrite the test to construct the unit under test with a
+    Fake* from ``tests/fakes.py``.
+    """
     src = """
 from unittest.mock import patch
 
@@ -68,7 +68,11 @@ def test_something(mock_search):
 
 
 def test_ignores_at_patch_decorator_on_stdlib_target(tmp_path: Path) -> None:
-    """``@patch("os.path.exists")`` is allowed — stdlib boundary."""
+    """A decorator ``@patch("os.path.exists")`` is allowed.
+
+    Stdlib boundaries are exempt — patching at the kairix edge is
+    fixturing genuinely external state.
+    """
     src = """
 from unittest.mock import patch
 
@@ -80,12 +84,16 @@ def test_something(mock_exists):
 
 
 # ---------------------------------------------------------------------------
-# Shape 2: with patch context manager (pre-existing detection)
+# Shape 2: with patch context manager
 # ---------------------------------------------------------------------------
 
 
 def test_detects_with_patch_context_on_kairix_target(tmp_path: Path) -> None:
-    """``with patch("kairix.X.Y")`` is the pre-existing F1 violation."""
+    """A context manager ``with patch("kairix.X.Y")`` is a violation.
+
+    To fix: rewrite the test to construct the unit under test with a
+    Fake* from ``tests/fakes.py``.
+    """
     src = """
 from unittest.mock import patch
 
@@ -97,7 +105,10 @@ def test_something():
 
 
 def test_ignores_with_patch_context_on_external_target(tmp_path: Path) -> None:
-    """``with patch("httpx.Client")`` is allowed — external SDK boundary."""
+    """``with patch("httpx.Client")`` is allowed.
+
+    External SDK boundaries are exempt.
+    """
     src = """
 from unittest.mock import patch
 
@@ -114,12 +125,10 @@ def test_something():
 
 
 def test_detects_full_path_attribute_assignment_on_kairix(tmp_path: Path) -> None:
-    """``kairix.paths.provider_name = lambda: "fake"`` — direct reassignment.
+    """Direct reassignment ``kairix.paths.provider_name = lambda: "fake"`` is a violation.
 
-    NEW DETECTION. This shape doesn't use ``patch`` or ``monkeypatch`` —
-    just rebinds the module attribute. Structurally equivalent to
-    ``@patch("kairix.paths.provider_name", ...)``; semantically the
-    same anti-pattern.
+    To fix: move the dependency to construction-time via a ``*Deps``
+    dataclass and inject a Fake* through that seam.
     """
     src = """
 import kairix.paths
@@ -152,11 +161,10 @@ def test_something():
 
 
 def test_detects_aliased_attribute_assignment_via_import_as(tmp_path: Path) -> None:
-    """``import kairix.paths as paths_mod; paths_mod.fn = ...`` — aliased.
+    """Aliased reassignment via ``import kairix.paths as paths_mod`` is a violation.
 
-    NEW DETECTION. The alias resolves via the file's import map to
-    ``kairix.paths``; reassigning ``paths_mod.fn`` is reassigning
-    ``kairix.paths.fn``.
+    To fix: refactor the production function-local imports to inject
+    through a constructor parameter, then pass a Fake* via that seam.
     """
     src = """
 import kairix.paths as paths_mod
@@ -173,7 +181,11 @@ def test_something():
 
 
 def test_detects_aliased_attribute_assignment_via_from_import_as(tmp_path: Path) -> None:
-    """``from kairix import providers as providers_mod; providers_mod.get_provider = ...``"""
+    """Aliased reassignment via ``from kairix import providers as providers_mod`` is a violation.
+
+    To fix: use the canonical Provider Protocol seam — construct the
+    unit under test with a ``FakeProvider`` from ``tests/fakes.py``.
+    """
     src = """
 from kairix import providers as providers_mod
 
@@ -184,7 +196,11 @@ def test_something():
 
 
 def test_detects_aliased_attribute_assignment_via_from_import(tmp_path: Path) -> None:
-    """``from kairix.providers import _base; _base.Provider = ...`` — no-as form."""
+    """``from kairix.providers import _base; _base.Provider = ...`` is a violation.
+
+    To fix: use the Protocol Fake from ``tests/fakes.py``; the
+    production module's namespace is not a test seam.
+    """
     src = """
 from kairix.providers import _base
 
@@ -211,10 +227,10 @@ def test_something():
 
 
 def test_detects_monkeypatch_setattr_string_target_on_kairix(tmp_path: Path) -> None:
-    """``monkeypatch.setattr("kairix.X.Y", fake)`` — string target.
+    """``monkeypatch.setattr("kairix.X.Y", fake)`` is a violation.
 
-    NEW DETECTION. Same semantic as @patch but via the pytest fixture
-    rather than the decorator.
+    To fix: rewrite to construct the unit under test with a Fake* from
+    ``tests/fakes.py`` via the appropriate DI seam.
     """
     src = """
 def test_something(monkeypatch):
@@ -238,10 +254,10 @@ def test_something(monkeypatch):
 
 
 def test_detects_monkeypatch_setattr_ref_target_on_kairix(tmp_path: Path) -> None:
-    """``monkeypatch.setattr(kairix_module, "attr", fake)`` — ref target.
+    """``monkeypatch.setattr(kairix_module, "attr", fake)`` is a violation.
 
-    NEW DETECTION. First positional is a Name/Attribute resolving to a
-    kairix module rather than a string.
+    To fix: inject a Fake* through the constructor seam; the imported
+    module is not a test seam.
     """
     src = """
 import kairix.paths as paths_mod
@@ -253,7 +269,11 @@ def test_something(monkeypatch):
 
 
 def test_detects_monkeypatch_setattr_ref_target_on_full_path(tmp_path: Path) -> None:
-    """``monkeypatch.setattr(kairix.paths, "attr", fake)`` — full-path ref."""
+    """``monkeypatch.setattr(kairix.paths, "attr", fake)`` is a violation.
+
+    To fix: route the dependency through a Protocol seam and pass the
+    Fake* at construction.
+    """
     src = """
 import kairix.paths
 
@@ -275,12 +295,12 @@ def test_something(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Sanity: clean file is clean
+# Sanity coverage
 # ---------------------------------------------------------------------------
 
 
 def test_clean_file_returns_false(tmp_path: Path) -> None:
-    """A file that uses DI seams (no patching) reports no violation."""
+    """A test that injects a Fake* via DI shows no violation."""
     src = """
 from tests.fakes import FakeProvider
 
@@ -292,7 +312,7 @@ def test_something():
 
 
 def test_empty_file_returns_false(tmp_path: Path) -> None:
-    """An empty file is not a violation."""
+    """An empty file shows no violation."""
     f = tmp_path / "empty.py"
     f.write_text("", encoding="utf-8")
     assert file_has_internal_patch(f) is False

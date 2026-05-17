@@ -1,7 +1,7 @@
-"""F1 detector: no internal-substitution patching of kairix code.
+"""F1 detector: flag tests that substitute kairix-internal implementations.
 
-Catches six shapes that are all the same anti-pattern (reach into a
-production kairix module's namespace and swap an implementation):
+Walks every test file via AST and reports the path of any file that
+matches one of six shapes:
 
 1. ``@patch("kairix.X.Y", ...)`` — decorator
 2. ``with patch("kairix.X.Y", ...):`` — context manager
@@ -10,16 +10,21 @@ production kairix module's namespace and swap an implementation):
 5. ``monkeypatch.setattr("kairix.X.Y", ...)`` — string-target form
 6. ``monkeypatch.setattr(<kairix module ref>, "attr", fake)`` — ref-target form
 
-Stdlib (``os``, ``time``, ``pathlib``, ``sys``, ``importlib``, ``builtins``,
-``threading``, ``functools``, ``re``, ``json``, ``logging``) and external
-SDK targets (``httpx``, ``openai``, ``boto3``, ``anthropic``, ``requests``,
-``unittest``, ``pytest``, ``numpy``, ``yaml``, ``ruamel``, ``neo4j``,
-``usearch``, ``sentence_transformers``, ``spacy``, ``rich``, ``yaml``,
-``click``) are exempt — these are boundary fakes for genuinely external
-state, not internals patching.
+Stdlib roots (``os``, ``time``, ``pathlib``, ``sys``, ``importlib``,
+``builtins``, ``threading``, ``functools``, ``re``, ``json``,
+``logging``, ...) and external SDK roots (``httpx``, ``openai``,
+``boto3``, ``anthropic``, ``requests``, ``numpy``, ``neo4j``,
+``usearch``, ``sentence_transformers``, ``spacy``, ``rich``,
+``click``, ``unittest``, ``pytest``) are exempt — patching these is
+fixturing genuinely external state at the kairix edge.
 
-Output: one violation file path per line on stdout, sorted, deduplicated.
-Pipes into ``arch_gate`` from ``_lib.sh`` for baseline diff.
+To extend with a new shape: add the detection branch to
+``file_has_internal_patch`` and add the matching positive + negative
+tests to ``tests/architecture/test_check_no_internal_patches.py``.
+
+Output: one violation file path per line on stdout, sorted,
+deduplicated. Pipes into ``arch_gate`` from ``_lib.sh`` for baseline
+diff.
 """
 
 from __future__ import annotations
@@ -28,39 +33,37 @@ import ast
 import sys
 from pathlib import Path
 
-REMEDIATION = """Refactor to constructor injection with a fake from tests/fakes.py
-(no @patch / monkeypatch.setattr / attribute-reassignment on kairix.* targets) — to pass.
+REMEDIATION = """Refactor to constructor injection with a fake from tests/fakes.py to pass.
 
 fix: rewrite the test to construct the unit under test with a Fake*
-from tests/fakes.py (e.g. ``SearchPipeline(retriever=FakeRetriever(...))``)
-instead of patching the internal symbol. If the production class
-lacks a constructor seam, add one — same shape as
-``GoldBuilder(llm_judge=, retriever=, db_path=)``.
+from tests/fakes.py (e.g. ``SearchPipeline(retriever=FakeRetriever(...))``).
+If the production class lacks a constructor seam, add one — same shape
+as ``GoldBuilder(llm_judge=, retriever=, db_path=)``.
 
-If production code resolves dependencies via function-local imports
-at call time (the anti-pattern that forces the smell), the fix is to
-move that resolution to construction time via the existing ``*Deps``
-dataclass with ``default_factory`` — see ``EmbedDependencies`` /
-``LLMBackendDeps`` / ``BenchmarkDeps`` for the canonical shape.
+When production resolves dependencies via function-local imports at
+call time, move that resolution to construction time via the existing
+``*Deps`` dataclass with ``default_factory`` — see
+``EmbedDependencies`` / ``LLMBackendDeps`` / ``BenchmarkDeps`` for the
+canonical shape, then inject the Fake* at construction.
 
 next: re-run ``python3 scripts/checks/check_no_internal_patches.py``
 to confirm the gate goes green.
-run: bash scripts/safe-commit.sh "refactor(<area>): inject Fake via DI seam instead of patching internals"
+run: bash scripts/safe-commit.sh "refactor(<area>): inject Fake via DI seam"
 
 Pass example:
   pipeline = SearchPipeline(retriever=FakeRetriever(hits=[...]))
   assert pipeline.run(query='x') == ...
 
-Forbidden examples — ALL of these are the same anti-pattern:
+Shapes that fire the gate (all six are the same anti-pattern):
   @patch('kairix.core.search.bm25.bm25_search')
   with patch('kairix.providers.get_provider'):
   kairix.paths.provider_name = lambda: "fake"
-  paths_mod.provider_name = lambda: "fake"    # aliased
+  paths_mod.provider_name = lambda: "fake"
   monkeypatch.setattr("kairix.paths.provider_name", ...)
   monkeypatch.setattr(kairix.paths, "provider_name", ...)
 
 Stdlib boundaries (os.*, time.*, etc.) and external SDK boundaries
-(httpx.*, openai.*, boto3.*, etc.) remain allowed — F1 only blocks
+(httpx.*, openai.*, boto3.*, etc.) remain allowed — F1 only flags
 kairix.* targets."""
 
 

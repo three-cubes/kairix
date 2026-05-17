@@ -221,9 +221,7 @@ Each rule below is described with: **statement**, **why**,
 #### Statement
 
 Test files MUST NOT reach into a production kairix module's namespace
-to swap an implementation. F1 catches **six structurally identical
-shapes** — all are the same anti-pattern regardless of which API
-expresses it:
+to swap an implementation. F1 flags six structurally-identical shapes:
 
 1. `@patch("kairix.X.Y", ...)` — decorator
 2. `with patch("kairix.X.Y", ...):` — context manager
@@ -234,48 +232,43 @@ expresses it:
 
 Stdlib (`os`, `time`, `pathlib`, `sys`, `importlib`, ...) and external
 SDKs (`httpx`, `openai`, `boto3`, `anthropic`, `requests`, `numpy`,
-`neo4j`, ...) remain allowed — those are boundary fakes for genuinely
-external state, not internals patching.
+`neo4j`, ...) remain allowed — patching at those boundaries fixtures
+genuinely external state at the kairix edge.
 
 #### Why
 
 Patches couple tests to module structure (`patch("kairix.foo._helper")`
 breaks silently when `_helper` is renamed or moved). They also make
-production code grow defensive shims to remain mockable, which is
-exactly the test-shaped-API smell.
-
-The narrow original F1 only matched the `@patch` decorator literal, so
-the same anti-pattern proliferated via `monkeypatch.setattr` and bare
-attribute reassignment with "test seam, restored in finally" comments
-dressing it up. Those are the same violation — the gate now catches
-all six shapes. Comments don't change semantics.
+production code grow defensive shims to remain mockable, which is the
+test-shaped-API smell.
 
 The replacement is **constructor injection** or a **`Protocol` seam**
-from `kairix.core.protocols`. `tests/fakes.py` exists for exactly this:
-canonical Fake* implementations of every domain Protocol. When you
-find yourself wanting one of the six F1-blocked shapes, the production
-code is the problem — it has a hidden dependency (function-local
-imports, at-call-time resolution) that should be moved to construction
-time via a `*Deps` dataclass with `default_factory` (see
-`EmbedDependencies` / `LLMBackendDeps` / `BenchmarkDeps` for the
-canonical shape).
+from `kairix.core.protocols`. `tests/fakes.py` holds canonical Fake*
+implementations of every domain Protocol. When the only way to test
+a function is to reach into its module's namespace, the function is
+the problem: it has a hidden dependency (function-local imports or
+at-call-time resolution) that should be moved to construction time via
+a `*Deps` dataclass with `default_factory`. See `EmbedDependencies`,
+`LLMBackendDeps`, `BenchmarkDeps` for the canonical shape, then inject
+the Fake* at construction.
 
 #### Detection
 
 `scripts/checks/check-no-internal-patches.sh` delegates to
-`scripts/checks/check_no_internal_patches.py` — AST-based, walks every
-test file's imports to resolve aliases, then checks for any of the six
-shapes against the alias-resolved root. Multi-line constructs, aliased
-imports (`import kairix.paths as paths_mod`), from-imports
-(`from kairix import providers as providers_mod`), and full-path forms
-(`kairix.paths.provider_name = ...`) are all caught.
+`scripts/checks/check_no_internal_patches.py`. The detector is
+AST-based, walks each test file's imports to resolve aliases, and
+flags any of the six shapes against the alias-resolved root.
+Multi-line constructs, aliased imports
+(`import kairix.paths as paths_mod`), from-imports
+(`from kairix import providers as providers_mod`), and full-path
+forms (`kairix.paths.provider_name = ...`) are all caught.
 
 The detector's own tests live at
 `tests/architecture/test_check_no_internal_patches.py` — each of the
 six shapes has a positive (kairix target → violation) and negative
-(stdlib/external target → allowed) test. Sabotage-proven: mutate the
-detector branch for any shape, run the corresponding test, confirm it
-goes red, restore, confirm green.
+(stdlib/external target → allowed) test. To verify the gate stays
+honest: comment out the detector branch for a shape, run the matching
+positive test, confirm red, restore, confirm green.
 
 #### Examples
 
