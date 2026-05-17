@@ -17,13 +17,73 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from kairix.paths import azure_api_version as _azure_api_version
+from kairix.paths import (
+    azure_api_version as _azure_api_version,
+)
+from kairix.paths import (
+    embed_pool_expiry_s as _embed_pool_expiry_s,
+)
+from kairix.paths import (
+    embed_pool_keepalive as _embed_pool_keepalive,
+)
+from kairix.paths import (
+    embed_pool_size as _embed_pool_size,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # Env read lives in kairix.paths.azure_api_version (F4 — env reads stay in paths/secrets).
 AZURE_API_VERSION = _azure_api_version()
+
+
+# Pool config - kairix-side knobs that operators can tune via Azure Key
+# Vault secrets. Defaults sized for peak teaming concurrency (20 agents,
+# 5-15 sustained) with headroom. The keep-alive count balances connection
+# reuse against socket churn under burst load. Stage-timing data (probe
+# sweeps in tier-1 lever 1) showed vector latency grows 240 -> 534 ms going
+# from conc=1 -> conc=10 with the openai SDK default httpx Limits - classic
+# pool contention. These knobs let operators tune for their concurrency
+# profile without code changes.
+EMBED_POOL_MAX_CONNECTIONS = 20
+EMBED_POOL_MAX_KEEPALIVE = 10
+EMBED_POOL_KEEPALIVE_EXPIRY_S = 30.0
+
+
+def _build_http_client(
+    max_connections: int,
+    max_keepalive: int,
+    expiry_s: float,
+    timeout: float,
+) -> Any:
+    """Return an ``httpx.Client`` with explicit ``Limits``, sized for kairix's teaming load.
+
+    Local import keeps httpx out of the kairix critical-path imports for
+    code that uses credentials/auth but doesn't issue HTTP calls.
+    """
+    import httpx
+
+    limits = httpx.Limits(
+        max_connections=max_connections,
+        max_keepalive_connections=max_keepalive,
+        keepalive_expiry=expiry_s,
+    )
+    return httpx.Client(limits=limits, timeout=timeout)
+
+
+def _resolve_pool_config() -> tuple[int, int, float]:
+    """Resolve the pool-size triple from kairix.paths (F4 boundary).
+
+    Reads ``KAIRIX_EMBED_POOL_SIZE`` / ``KAIRIX_EMBED_POOL_KEEPALIVE`` /
+    ``KAIRIX_EMBED_POOL_EXPIRY_S`` through the paths helpers — invalid
+    values fall back to the module-level defaults with a logged warning
+    rather than crashing the embed dispatch stage.
+    """
+    return (
+        _embed_pool_size(EMBED_POOL_MAX_CONNECTIONS),
+        _embed_pool_keepalive(EMBED_POOL_MAX_KEEPALIVE),
+        _embed_pool_expiry_s(EMBED_POOL_KEEPALIVE_EXPIRY_S),
+    )
 
 
 # Three endpoint shapes kairix routes through ``make_openai_client``:
@@ -102,6 +162,9 @@ def make_openai_client(
     uses the ``/openai/v1`` alias so the openai SDK can call AI Foundry
     without a Microsoft-specific SDK dependency.
     """
+    max_conns, max_keepalive, expiry_s = _resolve_pool_config()
+    http_client = _build_http_client(max_conns, max_keepalive, expiry_s, timeout)
+
     if _is_foundry_endpoint(endpoint):
         from openai import OpenAI
 
@@ -115,6 +178,7 @@ def make_openai_client(
             base_url=base_url,
             max_retries=max_retries,
             timeout=timeout,
+            http_client=http_client,
         )
 
     if _is_legacy_azure_endpoint(endpoint):
@@ -126,6 +190,7 @@ def make_openai_client(
             api_version=AZURE_API_VERSION,
             max_retries=max_retries,
             timeout=timeout,
+            http_client=http_client,
         )
 
     from openai import OpenAI
@@ -135,6 +200,7 @@ def make_openai_client(
         base_url=endpoint,
         max_retries=max_retries,
         timeout=timeout,
+        http_client=http_client,
     )
 
 

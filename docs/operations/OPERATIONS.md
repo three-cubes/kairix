@@ -33,6 +33,9 @@ Not all environment variables are secrets. Configuration values belong in `servi
 | `kairix-embed-api-key` | `KAIRIX_EMBED_API_KEY` | Embed API key (falls back to LLM) |
 | `kairix-embed-endpoint` | `KAIRIX_EMBED_ENDPOINT` | Embed API endpoint (falls back to LLM) |
 | `kairix-embed-model` | `KAIRIX_EMBED_MODEL` | Embed model name |
+| `kairix-embed-pool-size` | `KAIRIX_EMBED_POOL_SIZE` | int, default 20 — max concurrent HTTP connections to the embed provider |
+| `kairix-embed-pool-keepalive` | `KAIRIX_EMBED_POOL_KEEPALIVE` | int, default 10 — max idle connections kept warm |
+| `kairix-embed-pool-expiry-s` | `KAIRIX_EMBED_POOL_EXPIRY_S` | float, default 30.0 — idle-connection expiry (seconds) |
 | `kairix-neo4j-password` | `KAIRIX_NEO4J_PASSWORD` | Neo4j password |
 
 Resolution order: env var > per-file secret (`/run/secrets/<name>`) > bundle file (`/run/secrets/kairix.env`) > Azure Key Vault CLI (`KAIRIX_KV_NAME`).

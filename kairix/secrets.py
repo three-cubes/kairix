@@ -51,6 +51,9 @@ _SECRET_ENV_MAP = {
     "kairix-embed-api-key": "KAIRIX_EMBED_API_KEY",
     "kairix-embed-endpoint": "KAIRIX_EMBED_ENDPOINT",
     "kairix-embed-model": "KAIRIX_EMBED_MODEL",
+    "kairix-embed-pool-size": "KAIRIX_EMBED_POOL_SIZE",
+    "kairix-embed-pool-keepalive": "KAIRIX_EMBED_POOL_KEEPALIVE",
+    "kairix-embed-pool-expiry-s": "KAIRIX_EMBED_POOL_EXPIRY_S",
     "kairix-neo4j-password": "KAIRIX_NEO4J_PASSWORD",
 }
 

@@ -308,3 +308,120 @@ def test_azure_api_version_constant() -> None:
     """AZURE_API_VERSION is non-empty (read at module import via env or default)."""
     assert AZURE_API_VERSION
     assert isinstance(AZURE_API_VERSION, str)
+
+
+# ---------------------------------------------------------------------------
+# HTTP-pool tuning (#280 — Tier 1 lever 1)
+#
+# These tests pin the operator-tunable pool knobs that resolve Azure embed
+# pool contention at peak teaming concurrency. Probe data showed vector
+# latency growing 240 → 534 ms going conc=1 → conc=10 with the openai SDK's
+# default httpx Limits — these knobs let operators tune for their load.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_make_openai_client_passes_http_client_with_limits() -> None:
+    """Foundry endpoint client carries a custom httpx.Client (not SDK default).
+
+    Sabotage: drop the ``http_client=`` kwarg from the Foundry branch in
+    ``make_openai_client`` and the openai SDK falls back to its internal
+    ``SyncHttpxClientWrapper``; ``type(client._client).__name__`` becomes
+    "SyncHttpxClientWrapper" instead of "Client" and the assertion fails.
+    """
+    import httpx
+
+    client = make_openai_client(
+        api_key="test-key",  # pragma: allowlist secret
+        endpoint="https://example.services.ai.azure.com",
+    )
+    # Plain httpx.Client (our build) vs SyncHttpxClientWrapper (SDK default)
+    assert type(client._client).__name__ == "Client", (
+        f"expected plain httpx.Client; got {type(client._client).__name__}"
+    )
+    assert isinstance(client._client, httpx.Client)
+
+
+@pytest.mark.unit
+def test_http_client_limits_match_configured_pool_size(monkeypatch) -> None:
+    """The httpx pool on the resulting client matches the configured triple.
+
+    Drives through the ``make_openai_client`` public surface — no internal
+    helper imports — by setting all three pool env vars and asserting the
+    resulting transport pool carries those exact values.
+
+    Sabotage: hardcode ``max_connections=5`` in ``_build_http_client`` and
+    the pool ``_max_connections`` no longer matches the requested 20 — the
+    assertion fails.
+    """
+    monkeypatch.setenv("KAIRIX_EMBED_POOL_SIZE", "20")
+    monkeypatch.setenv("KAIRIX_EMBED_POOL_KEEPALIVE", "10")
+    monkeypatch.setenv("KAIRIX_EMBED_POOL_EXPIRY_S", "30.0")
+    client = make_openai_client(
+        api_key="test-key",  # pragma: allowlist secret
+        endpoint="https://api.openai.com/v1",
+    )
+    pool = client._client._transport._pool
+    assert pool._max_connections == 20
+    assert pool._max_keepalive_connections == 10
+    assert pool._keepalive_expiry == 30.0
+
+
+@pytest.mark.unit
+def test_default_pool_size_is_20_when_secret_unset(monkeypatch) -> None:
+    """``KAIRIX_EMBED_POOL_SIZE`` unset → default of 20 is used.
+
+    Drives through the public ``make_openai_client`` surface so the
+    default-resolution path inside ``_resolve_pool_config`` is exercised
+    end-to-end (no internal-name imports).
+
+    Sabotage: change the default constant in ``kairix/credentials.py``
+    from ``EMBED_POOL_MAX_CONNECTIONS = 20`` to another value and the
+    resulting pool no longer reports 20 — the assertion fails.
+    """
+    monkeypatch.delenv("KAIRIX_EMBED_POOL_SIZE", raising=False)
+    client = make_openai_client(
+        api_key="test-key",  # pragma: allowlist secret
+        endpoint="https://api.openai.com/v1",
+    )
+    pool = client._client._transport._pool
+    assert pool._max_connections == 20
+
+
+@pytest.mark.unit
+def test_pool_size_overrides_default_when_secret_set(monkeypatch) -> None:
+    """``KAIRIX_EMBED_POOL_SIZE=50`` → resolved client pool uses 50 connections.
+
+    Sabotage: stop wiring ``_resolve_pool_config()`` into
+    ``make_openai_client`` (revert the http_client to the openai SDK
+    default) and the pool ``_max_connections`` reverts to the SDK default
+    of 1000 — the assertion fails.
+    """
+    monkeypatch.setenv("KAIRIX_EMBED_POOL_SIZE", "50")
+    client = make_openai_client(
+        api_key="test-key",  # pragma: allowlist secret
+        endpoint="https://api.openai.com/v1",
+    )
+    pool = client._client._transport._pool
+    assert pool._max_connections == 50
+
+
+@pytest.mark.unit
+def test_pool_size_invalid_falls_back_to_default(monkeypatch, caplog) -> None:
+    """Non-integer ``KAIRIX_EMBED_POOL_SIZE`` → falls back to default 20 with a logged warning.
+
+    Sabotage: remove the ``try/except ValueError`` in
+    ``kairix.paths.embed_pool_size`` and the int() call raises on "abc",
+    crashing the test instead of asserting the fallback.
+    """
+    import logging
+
+    monkeypatch.setenv("KAIRIX_EMBED_POOL_SIZE", "abc")
+    with caplog.at_level(logging.WARNING):
+        client = make_openai_client(
+            api_key="test-key",  # pragma: allowlist secret
+            endpoint="https://api.openai.com/v1",
+        )
+    pool = client._client._transport._pool
+    assert pool._max_connections == 20
+    assert any("KAIRIX_EMBED_POOL_SIZE" in rec.message for rec in caplog.records)

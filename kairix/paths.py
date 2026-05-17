@@ -465,6 +465,70 @@ def azure_api_version(default: str = "2024-12-01-preview") -> str:
     return os.environ.get("KAIRIX_AZURE_API_VERSION", default)
 
 
+def embed_pool_size(default: int = 20) -> int:
+    """Max concurrent HTTP connections to the embed provider.
+
+    Configurable via ``KAIRIX_EMBED_POOL_SIZE``. Sized for kairix's teaming
+    concurrency profile (20 agents, 5-15 sustained) with headroom. Invalid
+    values fall back to ``default`` with a logged warning so a bad operator
+    secret can't crash the embed dispatch stage. Read at call time so the
+    operator can rotate the value via Key Vault without restarting.
+    """
+    raw = os.environ.get("KAIRIX_EMBED_POOL_SIZE")
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_EMBED_POOL_SIZE=%r is not an int; using default %d",
+            raw,
+            default,
+        )
+        return default
+
+
+def embed_pool_keepalive(default: int = 10) -> int:
+    """Max idle HTTP connections kept warm against the embed provider.
+
+    Configurable via ``KAIRIX_EMBED_POOL_KEEPALIVE``. Balances connection
+    reuse against socket churn under burst load. Invalid values fall back
+    to ``default`` with a logged warning.
+    """
+    raw = os.environ.get("KAIRIX_EMBED_POOL_KEEPALIVE")
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_EMBED_POOL_KEEPALIVE=%r is not an int; using default %d",
+            raw,
+            default,
+        )
+        return default
+
+
+def embed_pool_expiry_s(default: float = 30.0) -> float:
+    """Idle-connection expiry (seconds) for the embed-provider pool.
+
+    Configurable via ``KAIRIX_EMBED_POOL_EXPIRY_S``. Invalid values fall
+    back to ``default`` with a logged warning.
+    """
+    raw = os.environ.get("KAIRIX_EMBED_POOL_EXPIRY_S")
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_EMBED_POOL_EXPIRY_S=%r is not a float; using default %s",
+            raw,
+            default,
+        )
+        return default
+
+
 def mcp_port(default: int = 8080) -> int:
     """Resolve the MCP server port from ``KAIRIX_MCP_PORT``, or ``default``.
 
