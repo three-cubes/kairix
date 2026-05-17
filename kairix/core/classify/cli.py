@@ -14,10 +14,37 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
+from typing import Any
 
 
-def main(args: list[str] | None = None) -> None:
-    """Entry point for `kairix classify`."""
+def _default_rule_classifier(content: str, *, agent: str) -> Any:
+    """Production rule-based classifier — defers the heavy import until call time."""
+    from kairix.core.classify.rules import classify_content
+
+    return classify_content(content, agent=agent)
+
+
+def _default_llm_classifier(content: str, *, agent: str) -> Any:
+    """Production LLM-fallback classifier — defers the heavy import until call time."""
+    from kairix.core.classify.judge import classify_with_llm
+
+    return classify_with_llm(content, agent=agent)
+
+
+def main(
+    args: list[str] | None = None,
+    *,
+    rule_classifier: Callable[..., Any] = _default_rule_classifier,
+    llm_classifier: Callable[..., Any] = _default_llm_classifier,
+) -> None:
+    """Entry point for `kairix classify`.
+
+    ``rule_classifier`` and ``llm_classifier`` are the public DI seams for
+    tests that want to drive error paths through the public CLI surface
+    instead of monkey-patching the classify-module imports. Production
+    callers leave them at the defaults.
+    """
     import argparse
 
     if args is None:
@@ -64,8 +91,7 @@ def main(args: list[str] | None = None) -> None:
 
     # Run classification
     try:
-        from kairix.core.classify.judge import classify_with_llm
-        from kairix.core.classify.rules import VALID_AGENTS, classify_content
+        from kairix.core.classify.rules import VALID_AGENTS
 
         if agent not in VALID_AGENTS:
             print(
@@ -74,11 +100,11 @@ def main(args: list[str] | None = None) -> None:
             )
             sys.exit(1)
 
-        result = classify_content(content, agent=agent)
+        result = rule_classifier(content, agent=agent)
 
         # If rule didn't match, try LLM judge
         if result.type == "unknown" and use_llm:
-            result = classify_with_llm(content, agent=agent)
+            result = llm_classifier(content, agent=agent)
 
         output: dict = {
             "type": result.type,

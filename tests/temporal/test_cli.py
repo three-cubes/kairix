@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 from contextlib import redirect_stderr
+from typing import Any
 
 import pytest
 
@@ -208,27 +209,33 @@ def test_format_results_collapses_newlines_in_preview() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_main(argv: list[str]) -> tuple[str, str, int]:
-    """Drive ``kairix.core.temporal.cli.main(argv)`` and capture stdio + exit."""
+def _run_main(argv: list[str], *, timeline_runner: Any = None) -> tuple[str, str, int]:
+    """Drive ``kairix.core.temporal.cli.main(argv)`` and capture stdio + exit.
+
+    When ``timeline_runner`` is supplied it threads through the public
+    DI kwarg on ``main()``; tests inject a fake runner instead of
+    monkey-patching ``kairix.use_cases.timeline.run_timeline``.
+    """
     from contextlib import redirect_stdout
 
     from kairix.core.temporal.cli import main as timeline_main
 
     out, err = io.StringIO(), io.StringIO()
     code = 0
+    kwargs: dict[str, Any] = {}
+    if timeline_runner is not None:
+        kwargs["timeline_runner"] = timeline_runner
     try:
         with redirect_stdout(out), redirect_stderr(err):
-            timeline_main(argv)
+            timeline_main(argv, **kwargs)
     except SystemExit as e:
         code = int(e.code) if e.code is not None else 0
     return out.getvalue(), err.getvalue(), code
 
 
 @pytest.mark.unit
-def test_main_renders_header_and_results_when_use_case_returns_hits(monkeypatch) -> None:
+def test_main_renders_header_and_results_when_use_case_returns_hits() -> None:
     """main() prints header + results when run_timeline returns a non-empty TimelineResult."""
-    import kairix.use_cases.timeline as use_case
-
     def _fake_run_timeline(query: str, **kw) -> TimelineResult:
         return TimelineResult(
             original_query=query,
@@ -248,9 +255,8 @@ def test_main_renders_header_and_results_when_use_case_returns_hits(monkeypatch)
             ],
         )
 
-    monkeypatch.setattr(use_case, "run_timeline", _fake_run_timeline)
 
-    stdout, _stderr, code = _run_main(["any query"])
+    stdout, _stderr, code = _run_main(["any query"], timeline_runner=_fake_run_timeline)
     assert code == 0
     assert "Query:    any query" in stdout
     assert "Found 1 result(s):" in stdout
@@ -258,10 +264,8 @@ def test_main_renders_header_and_results_when_use_case_returns_hits(monkeypatch)
 
 
 @pytest.mark.unit
-def test_main_exits_1_when_use_case_reports_error(monkeypatch) -> None:
+def test_main_exits_1_when_use_case_reports_error() -> None:
     """main() exits 1 and prints the error to stderr when use case returns an error."""
-    import kairix.use_cases.timeline as use_case
-
     def _fake_run_timeline(query: str, **kw) -> TimelineResult:
         return TimelineResult(
             original_query=query,
@@ -272,18 +276,15 @@ def test_main_exits_1_when_use_case_reports_error(monkeypatch) -> None:
             error="index missing",
         )
 
-    monkeypatch.setattr(use_case, "run_timeline", _fake_run_timeline)
-    _stdout, stderr, code = _run_main(["topic"])
+    _stdout, stderr, code = _run_main(["topic"], timeline_runner=_fake_run_timeline)
     assert code == 1
     assert "error: index missing" in stderr
 
 
 @pytest.mark.unit
-def test_main_passes_overrides_to_use_case(monkeypatch) -> None:
+def test_main_passes_overrides_to_use_case() -> None:
     """The --since / --until / --type / --limit flags reach run_timeline."""
     from datetime import date as _date
-
-    import kairix.use_cases.timeline as use_case
 
     captured: dict = {}
 
@@ -301,9 +302,9 @@ def test_main_passes_overrides_to_use_case(monkeypatch) -> None:
             time_window={},
         )
 
-    monkeypatch.setattr(use_case, "run_timeline", _fake_run_timeline)
     _stdout, _stderr, code = _run_main(
-        ["topic", "--since", "2026-04-01", "--until", "2026-04-30", "--type", "board_card", "--limit", "5"]
+        ["topic", "--since", "2026-04-01", "--until", "2026-04-30", "--type", "board_card", "--limit", "5"],
+        timeline_runner=_fake_run_timeline,
     )
     assert code == 0
     assert captured == {
@@ -316,10 +317,8 @@ def test_main_passes_overrides_to_use_case(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_main_passes_none_chunk_types_when_type_all(monkeypatch) -> None:
+def test_main_passes_none_chunk_types_when_type_all() -> None:
     """--type=all (default) translates to chunk_types=None."""
-    import kairix.use_cases.timeline as use_case
-
     seen: dict = {}
 
     def _fake_run_timeline(query: str, **kw) -> TimelineResult:
@@ -328,6 +327,5 @@ def test_main_passes_none_chunk_types_when_type_all(monkeypatch) -> None:
             original_query=query, rewritten_query=query, is_temporal=False, fell_back=True, time_window={}
         )
 
-    monkeypatch.setattr(use_case, "run_timeline", _fake_run_timeline)
-    _run_main(["topic"])
+    _run_main(["topic"], timeline_runner=_fake_run_timeline)
     assert seen["chunk_types"] is None

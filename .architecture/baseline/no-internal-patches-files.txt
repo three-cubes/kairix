@@ -1,4 +1,3 @@
-tests/classify/test_cli.py
 tests/core/test_factory.py
 tests/db/test_repository.py
 tests/embed/test_cli_unit.py
@@ -16,7 +15,6 @@ tests/onboard/test_cli.py
 tests/platform/warm/test_state.py
 tests/setup/test_wizard.py
 tests/summaries/test_cli_unit.py
-tests/temporal/test_cli.py
 tests/test_top_level_cli_dispatch.py
 tests/transport/test_client_pool.py
 tests/wikilinks/test_audit_unit.py

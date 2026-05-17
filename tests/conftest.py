@@ -81,6 +81,7 @@ pytest_plugins = [
     "tests.bdd.steps.bootstrap_steps",
     "tests.bdd.steps.usage_guide_steps",
     "tests.bdd.steps.classify_steps",
+    "tests.bdd.steps.classify_error_steps",
     "tests.bdd.steps.embed_pool_config_steps",
     "tests.bdd.steps.query_cache_steps",
     "tests.bdd.steps.enrich_cache_steps",

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from datetime import date
+from typing import Any
 
 from kairix.use_cases.timeline import TimelineResult
 
@@ -120,12 +122,28 @@ def format_results(result: TimelineResult) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> None:
+def _default_timeline_runner(*args: Any, **kwargs: Any) -> Any:
+    """Production timeline runner — defers the heavy use-case import until call time."""
+    from kairix.use_cases.timeline import run_timeline
+
+    return run_timeline(*args, **kwargs)
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    timeline_runner: Callable[..., Any] = _default_timeline_runner,
+) -> None:
     """Entry point for ``kairix timeline``.
 
-    Thin adapter: parse argv → call ``run_timeline`` → format the
-    ``TimelineResult`` for stdout. CLI/MCP parity is enforced by the
-    contract test in ``tests/contracts/test_cli_mcp_parity_timeline.py``.
+    Thin adapter: parse argv → call the configured timeline runner →
+    format the ``TimelineResult`` for stdout. CLI/MCP parity is enforced
+    by the contract test in
+    ``tests/contracts/test_cli_mcp_parity_timeline.py``.
+
+    The ``timeline_runner`` kwarg is the public DI seam — tests pass a
+    fake runner to drive the CLI without monkey-patching the
+    ``kairix.use_cases.timeline`` module.
     """
     args = build_parser().parse_args(argv if argv is not None else sys.argv[2:])
 
@@ -133,9 +151,7 @@ def main(argv: list[str] | None = None) -> None:
     until = parse_iso_or_die(args.until, "--until")
     chunk_types: list[str] | None = [args.chunk_type] if args.chunk_type != "all" else None
 
-    from kairix.use_cases.timeline import run_timeline
-
-    result = run_timeline(
+    result = timeline_runner(
         args.query,
         since=since,
         until=until,
