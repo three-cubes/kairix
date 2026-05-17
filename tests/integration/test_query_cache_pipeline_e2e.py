@@ -86,26 +86,26 @@ def test_cache_off_means_no_dedupe() -> None:
 
 
 @pytest.mark.integration
-def test_cache_age_expiry_evicts_stale_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cache_age_expiry_evicts_stale_entries() -> None:
     """An entry older than max_age_s is treated as a miss.
 
-    Drives ``time.time`` forward via stdlib monkeypatch (stdlib is not a
-    kairix internal — this is the right test seam for clock-dependent
-    behaviour; F1 prohibits patching kairix internals, not stdlib).
+    Drives the cache's clock via the public ``clock`` kwarg on
+    QueryResultCache — no monkey-patch of ``time.time``. The clock
+    returns the test-controlled value each time the cache asks; advancing
+    the value past max_age_s makes the next get() see an expired entry.
     Sabotage: drop the age check in QueryResultCache.get and the second
     search returns the stale cached entry, so doc_repo.calls stays at 1
     instead of growing to 2.
     """
-    cache = QueryResultCache(max_entries=10, max_age_s=1.0)
+    fake_now = [time.time()]
+    cache = QueryResultCache(max_entries=10, max_age_s=1.0, clock=lambda: fake_now[0])
     pipeline, doc_repo = _build(cache)
 
     pipeline.search("alpha")
     assert len(doc_repo.calls) == 1
 
     # Advance the clock past max_age_s — entry should be treated as expired.
-    real_time = time.time
-    fake_now = real_time() + 5.0
-    monkeypatch.setattr("kairix.core.search.query_cache.time.time", lambda: fake_now)
+    fake_now[0] += 5.0
 
     pipeline.search("alpha")
     assert len(doc_repo.calls) == 2, "expired entry should not have been served"

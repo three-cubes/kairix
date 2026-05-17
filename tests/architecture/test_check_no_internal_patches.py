@@ -316,3 +316,44 @@ def test_empty_file_returns_false(tmp_path: Path) -> None:
     f = tmp_path / "empty.py"
     f.write_text("", encoding="utf-8")
     assert file_has_internal_patch(f) is False
+
+
+# ---------------------------------------------------------------------------
+# Exemption: attribute assignment inside ``pytest.raises`` is a contract test
+# (verifying that the assignment IS rejected — e.g. frozen-dataclass), not
+# a monkeypatch.
+# ---------------------------------------------------------------------------
+
+
+def test_assign_to_kairix_attr_inside_pytest_raises_is_not_flagged(tmp_path: Path) -> None:
+    """A frozen-dataclass contract test must not trip the F1 detector.
+
+    The assignment is INSIDE ``with pytest.raises(FrozenInstanceError):``
+    — the test is asserting the assignment is BLOCKED, which is the
+    opposite of patching internals.
+    """
+    src = """
+import pytest
+from dataclasses import FrozenInstanceError
+from kairix.core.search import REFLIB_RETRIEVAL_CONFIG
+
+def test_reflib_constant_is_frozen():
+    with pytest.raises(FrozenInstanceError):
+        REFLIB_RETRIEVAL_CONFIG.bm25_limit = 9999
+"""
+    assert file_has_internal_patch(_write_test_module(tmp_path, src)) is False
+
+
+def test_assign_to_kairix_attr_outside_pytest_raises_is_flagged(tmp_path: Path) -> None:
+    """The exemption is narrow: assignment OUTSIDE ``pytest.raises`` still flags.
+
+    Confirms the exemption doesn't accidentally green-light a real
+    monkey-patch by being structurally adjacent to a pytest.raises call.
+    """
+    src = """
+from kairix.core.search import REFLIB_RETRIEVAL_CONFIG
+
+def test_something():
+    REFLIB_RETRIEVAL_CONFIG.bm25_limit = 9999
+"""
+    assert file_has_internal_patch(_write_test_module(tmp_path, src)) is True

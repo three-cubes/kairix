@@ -233,6 +233,31 @@ def _is_monkeypatch_setattr(node: ast.Call) -> bool:
     )
 
 
+def _is_inside_pytest_raises(parent_map: dict[ast.AST, ast.AST], node: ast.AST) -> bool:
+    """Return True iff ``node`` is lexically inside a ``with pytest.raises(...):`` block.
+
+    Assigning to a kairix module attribute *inside* ``pytest.raises`` is a
+    contract test — the test is asserting the assignment raises (e.g.
+    ``FrozenInstanceError`` on a frozen dataclass). That is the opposite
+    of monkey-patching: the test is pinning that the patch path is
+    blocked. Skip those Assigns.
+    """
+    current: ast.AST | None = node
+    while current is not None:
+        if isinstance(current, ast.With):
+            for item in current.items:
+                ctx = item.context_expr
+                if isinstance(ctx, ast.Call):
+                    func = ctx.func
+                    # pytest.raises(...) — match by attribute name; conservative.
+                    if isinstance(func, ast.Attribute) and func.attr == "raises":
+                        return True
+                    if isinstance(func, ast.Name) and func.id == "raises":
+                        return True
+        current = parent_map.get(current)
+    return False
+
+
 def file_has_internal_patch(path: Path) -> bool:
     """Return True iff ``path`` contains any of the six F1 violation shapes."""
     try:
@@ -241,6 +266,13 @@ def file_has_internal_patch(path: Path) -> bool:
         return False
 
     aliases = _resolve_kairix_aliases(tree)
+
+    # Build a child->parent map so we can ask "is this Assign inside a
+    # pytest.raises With block?" without re-traversing the whole tree.
+    parent_map: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parent_map[child] = parent
 
     for node in ast.walk(tree):
         # Shape 1: @patch decorator on kairix target
@@ -257,11 +289,14 @@ def file_has_internal_patch(path: Path) -> bool:
                     return True
 
         # Shape 3 + 4: attribute assignment ``<...>.attr = expr`` where root
-        # resolves to a kairix module
+        # resolves to a kairix module. Skip when the assignment sits inside
+        # a ``with pytest.raises(...):`` — that's a frozen-attribute
+        # contract test, not a patch.
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Attribute) and _resolves_to_kairix(target, aliases):
-                    return True
+                    if not _is_inside_pytest_raises(parent_map, node):
+                        return True
 
         # Shape 5 + 6: monkeypatch.setattr(...) on kairix target
         if isinstance(node, ast.Call) and _is_monkeypatch_setattr(node):

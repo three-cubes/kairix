@@ -90,25 +90,24 @@ def test_eviction_when_max_entries_exceeded() -> None:
     assert cache.stats().evictions == 1
 
 
-def test_age_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_age_expiry() -> None:
     """Past max_age, an entry is treated as missing and counted as a miss.
 
     Sabotage: remove the ``if self._is_expired(...)`` branch in get and
     stale entries are returned as hits — the operator-facing stats
     over-count freshness.
+
+    Drives the cache's clock via the public ``clock`` kwarg — the
+    production DI seam — instead of patching the stdlib ``time``
+    module. Patching ``time.time`` is unreliable across this kind of
+    refactor: the cache captures the production default at import
+    time, so a later ``monkeypatch.setattr(time, "time", fake)`` is
+    silently a no-op. The kwarg seam makes the controlled clock
+    explicit and immune to that capture.
     """
-    # Drive ``time.time`` from a list so we can advance the clock without
-    # mutating any kairix internal. ``time`` is stdlib so F1 isn't engaged.
     fake_now = [1_000_000.0]
+    cache = QueryResultCache(max_age_s=10.0, clock=lambda: fake_now[0])
 
-    def _fake_time() -> float:
-        return fake_now[0]
-
-    import time as _time
-
-    monkeypatch.setattr(_time, "time", _fake_time)
-
-    cache = QueryResultCache(max_age_s=10.0)
     cache.put(_KEY_A, "value-a")
     assert cache.get(_KEY_A) == "value-a"  # fresh
 
