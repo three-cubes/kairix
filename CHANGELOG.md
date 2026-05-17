@@ -9,11 +9,11 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [2026.5.17] - 2026-05-17 — Faster searches under concurrent load + foundation for any LLM provider
 
-> **Upgrading?** Drop-in. No public API breaks. **New for agents**: searches and embeds feel faster when several agents work at the same time — the system now bundles concurrent requests into one network round-trip and keeps the connection to the model warm between calls. **New for operators**: the new `kairix probe-config` command checks your configured endpoint after setup and recommends concrete tuning. **Internal**: a clean three-layer split (domain / transport / providers) lays the groundwork for plug-in support for any LLM/embed endpoint — Bedrock, Ollama, OpenAI direct, LiteLLM proxy, Anthropic — which lands in 2026.5.18.
+> **Upgrading?** Drop-in. No public API breaks. **New for agents**: searches and embeds feel faster when several agents work at the same time — the system now bundles concurrent requests into one network round-trip and keeps the connection to the model warm between calls. **New for operators**: the new `kairix probe-config` command checks your configured endpoint after setup and recommends concrete tuning. **Internal**: a clean three-layer split (domain / transport / providers) lays the groundwork for plug-in support for any LLM/embed endpoint — Bedrock, Ollama, OpenAI direct, LiteLLM proxy, Anthropic — which lands in a forthcoming release.
 
 ### New for agents
 
-- **Searches feel faster under concurrent load.** Probe data on the reference-library suite shows mean latency at concurrency 10 dropped from 1452 ms to 804 ms across the dev cycle, with further headroom from the connection-pool fix in this release. The remaining latency tail is the focus of 2026.5.18. (closes #281, #282, #287, #288)
+- **Searches feel faster under concurrent load.** Probe data on the reference-library suite shows mean latency at concurrency 10 dropped from 1452 ms to 804 ms across the dev cycle, with further headroom from the connection-pool fix in this release. The remaining latency tail is the focus of follow-up work. (closes #281, #282, #287, #288)
 - **Ten agents asking different questions at the same time pay one network round-trip.** Concurrent embed calls in a 50 ms window fold into one batched request. (closes #288)
 - **A second ask for the same text comes back from cache.** Same text → same vector, regardless of which agent or scope asked. (closes #281, #285)
 - **Vector lookups got 13× faster.** One batched database query instead of N+1 per result — `vector_ann` stage dropped from ~440 ms to ~34 ms at concurrency 10. (closes #287)
@@ -29,12 +29,12 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 - **Benchmark resolves bundled suites by name.** `kairix benchmark run reflib` works from any directory. (closes #268)
 - **`kairix --version` works inside Docker.** Build passes the version so reports show the real release. (closes #267)
 
-### Internal (the foundation for 2026.5.18)
+### Internal (the foundation for multi-provider deployments)
 
 - **Three-layer architecture** in [`docs/architecture/provider-plugin-architecture.md`](docs/architecture/provider-plugin-architecture.md). Domain (`kairix/core/`) talks to universal endpoint concerns (`kairix/transport/`: pool / retry / coalesce / cache / timeout) and per-endpoint plugins (`kairix/providers/<name>/`) only via Protocols.
 - **Stops rebuilding the model connection on every batch.** Each concurrent embed batch was setting up a fresh TLS connection (~300-500 ms cold). The new `ClientPool` keeps one warm connection for the container's life.
 - **F26–F29 fitness functions** lock the split: domain can't import transport or providers, no cross-provider imports, every plugin needs BDD coverage, performance code stays in `kairix/quality/probe/`.
-- **Provider plugin discovery via Python entry points.** `KAIRIX_PROVIDER=foo` selects the plugin. Third parties ship `pip install kairix-provider-foo`. Azure Foundry and OpenAI plugins wired against the contract today; Bedrock / Ollama / LiteLLM-proxy / Anthropic ship in 2026.5.18. (partial: #285)
+- **Provider plugin discovery via Python entry points.** Set `provider:` in `kairix.config.yaml` to select your plugin. Third parties ship `pip install kairix-provider-foo` to add their own. Seven first-party plugins available: Azure Foundry, Azure Legacy, OpenAI direct, Bedrock, Ollama, LiteLLM proxy, Anthropic. (closes #285)
 - **F21–F25 quality rules** (actionable-feedback markers, path naming, README resolvers, no `tests.*` imports in production, every CLI has an MCP affordance).
 - **Cognitive-complexity burndown** across chunker / reflib / sweep / entities / contradict / temporal — every flagged function now under 15. (closes #250)
 - **MCP retroactively exposes safe read-only operational capabilities** — onboard check, capability introspection. (closes #277)
@@ -51,11 +51,9 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 - **Retrieval health & recovery runbook** added for operators. (closes #252)
 - **Python 3.14 + numpy + pytest-cov** import-order error worked around. (closes #211)
 
-### Still open / next release
+### Still open
 
-- Multi-provider plugin implementations: Bedrock, Ollama, OpenAI direct, LiteLLM proxy, Anthropic (#285)
 - PVT MCP HTTP test harness (#284)
-- Probe burst warmup detection (#283)
 - SonarCloud check status mismatch (#269)
 - Webhook auto-deploy on release (#286)
 
