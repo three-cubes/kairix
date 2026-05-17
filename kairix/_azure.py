@@ -94,29 +94,69 @@ def _get_client() -> Any:
     return make_openai_client(api_key, endpoint, timeout=float(_EMBED_TIMEOUT_S))
 
 
-def embed_text(text: str) -> list[float]:
+def embed_text(
+    text: str,
+    *,
+    client: Any | None = None,
+    deployment: str | None = None,
+) -> list[float]:
     """
     Embed a text string via Azure OpenAI text-embedding-3-large.
 
     Returns a list of floats (dimension set by KAIRIX_EMBED_DIMS). Returns [] on any failure.
     Never raises. Uses the OpenAI SDK with built-in retry and backoff.
+
+    Hot path goes through :class:`kairix.core.embed.embed_cache.EmbedCache`
+    — same text → same vector, regardless of which agent / scope asked.
+    Cache miss falls through to the Azure roundtrip; cache hit returns
+    in ~5 ms vs ~250-500 ms on the wire. The cache is keyed on the
+    normalised text only, so it fills the gap left by the
+    ``(query, scope, agent, collections)``-keyed result cache (#281)
+    when two callers ask the same question from different scopes.
+
+    Args:
+        text: The text to embed. Empty / whitespace-only returns ``[]``
+            without consulting the cache or the client.
+        client: Optional pre-built OpenAI-compatible client (same shape
+            as ``embed_batch``'s ``client=`` kwarg). Production callers
+            leave this ``None`` and the cached
+            :func:`_get_client` is used. Tests pass a fake to bypass
+            credential resolution and the Azure roundtrip; this keeps
+            integration tests on the public surface (F5 — no private
+            imports needed).
+        deployment: Optional model/deployment name override. Defaults
+            to whatever :func:`_get_secrets` resolves (and ultimately
+            ``text-embedding-3-large``).
     """
     if not text or not text.strip():
         return []
 
+    from kairix.core.embed.embed_cache import get_embed_cache
+
+    cache = get_embed_cache()
+    cached = cache.get(text)
+    if cached is not None:
+        return cached
+
     try:
-        client = _get_client()
-        secrets = _get_secrets()
-        deployment = secrets.get("deployment", _DEFAULT_EMBED_DEPLOYMENT)
-        response = client.embeddings.create(
+        resolved_client = client if client is not None else _get_client()
+        if deployment is None:
+            deployment = _get_secrets().get("deployment", _DEFAULT_EMBED_DEPLOYMENT)
+        response = resolved_client.embeddings.create(
             model=deployment,
             input=[text],
             dimensions=EMBED_DIMS,
         )
-        return list(response.data[0].embedding)
+        embedding = list(response.data[0].embedding)
     except Exception as e:
         logger.warning("embed_text: %s", e)
         return []
+
+    # Only populate on success — caching ``[]`` would lock a transient
+    # outage in front of every same-text caller until the entry ages out.
+    if embedding:
+        cache.put(text, embedding)
+    return embedding
 
 
 def chat_completion(messages: list[dict[str, str]], max_tokens: int = 800) -> str:

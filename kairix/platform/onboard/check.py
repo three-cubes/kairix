@@ -105,6 +105,10 @@ _CANONICAL_REMEDIATIONS: dict[str, str] = {
         "Diagnostic check — no remediation required. Cache hit-rate is informational; "
         "tune `KAIRIX_QUERY_CACHE_MAX_ENTRIES` / `KAIRIX_QUERY_CACHE_MAX_AGE_S` if needed."
     ),
+    "embed_cache_stats": (
+        "Diagnostic check — no remediation required. Cache hit-rate is informational; "
+        "tune `KAIRIX_EMBED_CACHE_MAX_ENTRIES` / `KAIRIX_EMBED_CACHE_MAX_AGE_S` if needed."
+    ),
     "kairix_on_path": (
         "Run `bash scripts/deploy-vm.sh` on the host to install the wrapper + symlink; "
         "or manually export `PATH=/opt/openclaw/bin:$PATH`."
@@ -929,6 +933,45 @@ def check_query_cache_stats(query_cache: Any | None = None) -> CheckResult:
         )
 
 
+def check_embed_cache_stats(embed_cache: Any | None = None) -> CheckResult:
+    """Diagnostic: report embed-cache stats.
+
+    The embed cache (``kairix.core.embed.embed_cache``) sits in front
+    of the Azure embed roundtrip — same text → same vector regardless
+    of which agent / scope asked. This check exists so operators can
+    see hit-rate / size in ``kairix onboard check --json`` alongside
+    the result-cache (#281) stats. A process that has run zero embeds
+    reports size=0, hit_rate=0.0 and still passes.
+
+    Args:
+        embed_cache: Override for the process-shared
+            :class:`EmbedCache`. Tests pass an explicit instance
+            rather than relying on the lazy module-level singleton.
+    """
+    try:
+        if embed_cache is None:
+            from kairix.core.embed.embed_cache import get_embed_cache
+
+            embed_cache = get_embed_cache()
+        stats = embed_cache.stats()
+        detail = (
+            f"embed cache: size={stats.size}, hits={stats.hits}, "
+            f"misses={stats.misses}, hit_rate={stats.hit_rate:.2f}, "
+            f"oldest_age_s={stats.oldest_entry_age_s:.1f}, "
+            f"evictions={stats.evictions}"
+        )
+        return CheckResult(name="embed_cache_stats", ok=True, detail=detail)
+    except Exception as exc:
+        # Diagnostic check must never block onboarding; a missing cache
+        # is reported as a passing check with a degraded detail string
+        # rather than a failure (operators see the warning, not a red).
+        return CheckResult(
+            name="embed_cache_stats",
+            ok=True,
+            detail=f"embed cache: unavailable ({exc})",
+        )
+
+
 ALL_CHECKS: list[Callable[..., CheckResult]] = [
     check_kairix_on_path,
     check_wrapper_installed,
@@ -940,6 +983,7 @@ ALL_CHECKS: list[Callable[..., CheckResult]] = [
     check_chunk_date_populated,
     check_mcp_service,
     check_query_cache_stats,
+    check_embed_cache_stats,
 ]
 
 
