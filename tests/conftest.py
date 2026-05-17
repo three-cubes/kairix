@@ -87,6 +87,7 @@ pytest_plugins = [
     "tests.bdd.steps.embed_cache_steps",
     "tests.bdd.steps.embed_coalescer_steps",
     "tests.bdd.steps.vec_index_batched_metadata_steps",
+    "tests.bdd.steps.transport_pool_steps",
 ]
 
 # PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.
@@ -141,6 +142,25 @@ def _reset_embed_coalescer():
     from kairix.transport.coalesce import reset_embed_coalescer
 
     reset_embed_coalescer()
+
+
+@pytest.fixture(autouse=True)
+def _reset_client_pool():
+    """Drop the process-shared transport client between tests.
+
+    The :mod:`kairix.transport.pool` singleton caches the built
+    OpenAI-compatible client process-wide so coalescer batches reuse
+    one ``httpx.Client`` connection pool. Tests that exercise that
+    path through the production accessor (``_get_client``) would
+    otherwise inherit a client from a previous test — including one
+    built against now-deleted Azure credentials. Resetting on
+    teardown keeps each test's pool state isolated, matching the
+    pattern established by ``_reset_embed_coalescer``.
+    """
+    yield
+    from kairix.transport.pool import reset_client_cache
+
+    reset_client_cache()
 
 
 @pytest.fixture
