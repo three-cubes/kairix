@@ -297,7 +297,7 @@ Read three fields, in order: `overall.p95_ms` (gate is ≤ 500 ms — matches th
 
 | Observable signal | Suspected bottleneck | Next action |
 |---|---|---|
-| p95 climbs sharply at concurrency 2-5 | Azure embed pool exhausted | Tune `KAIRIX_EMBED_POOL_SIZE` + retry/backoff in `kairix/_azure.py` |
+| p95 climbs sharply at concurrency 2-5 | Provider embed pool exhausted | Tune `KAIRIX_EMBED_POOL_SIZE` + retry/backoff in the configured provider plugin under `kairix/providers/<name>/` |
 | p95 stays flat until concurrency 10-15 | Pool sizing fine; repeated-query overhead dominates | Add query-result LRU cache (Tier 1 lever 2) |
 | `mean_concurrency` far below requested | Hidden lock contention — tasks serialised in-process | Investigate with `py-spy dump` against the live MCP process *before* pulling any lever |
 | `bottleneck.kind == "azure_embed_rate_limit"` (429s) | Azure embed rate limit hit | Tune `KAIRIX_EMBED_POOL_SIZE` + backoff; do not raise pool past the Azure quota |

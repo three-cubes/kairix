@@ -3,10 +3,10 @@ Concrete LLMBackend implementations.
 
 ``AzureOpenAIBackend`` is the historical name for the default LLM backend; it
 delegates to the configured provider plugin (resolved from
-``kairix.config.yaml``'s ``provider:`` field) rather than directly importing
-``kairix._azure``. The class name is retained because many callers across
-``kairix.agents``, ``kairix.use_cases`` and ``kairix.platform.setup`` resolve
-it through ``get_default_backend()``; renaming would invade those clusters.
+``kairix.config.yaml``'s ``provider:`` field). The class name is retained
+because many callers across ``kairix.agents``, ``kairix.use_cases`` and
+``kairix.platform.setup`` resolve it through ``get_default_backend()``;
+renaming would invade those clusters.
 
 Tests substitute the chat/embed callables through ``LLMBackendDeps`` rather
 than passing per-method ``*_fn=None`` substitution kwargs.

@@ -1,11 +1,12 @@
 """Step definitions for embed_cache.feature.
 
-Drives the real :func:`kairix.core.embed.embed_text` (the public
-re-export) with a counting fake at the Azure-client boundary. The
-cache is a real :class:`kairix.transport.cache.EmbedCache`
-instance; the fake is passed via the public ``client=`` kwarg so the
-test stays on the public surface (F5 - no private-name imports), no
-@patch on internals (F1), no env monkeypatch (F2).
+Drives the real :class:`kairix.transport.embed_service.ProviderEmbeddingService`
+(the public single-text embed surface) with a counting :class:`FakeProvider`
+from ``tests/fakes.py`` at the plugin boundary. The cache is a real
+:class:`kairix.transport.cache.EmbedCache` instance. F1-clean (no @patch
+on kairix internals), F2-clean (no env monkeypatch — the fresh cache is
+substituted via ``setattr`` on the package-public ``_EMBED_CACHE``
+attribute), F5-clean (only public-surface imports).
 """
 
 from __future__ import annotations
@@ -15,71 +16,42 @@ from typing import Any
 import pytest
 from pytest_bdd import given, parsers, then, when
 
-from kairix.core.embed import embed_text
 from kairix.transport.cache.embed_cache import EmbedCache, reset_embed_cache
+from kairix.transport.coalesce import reset_embed_coalescer
+from kairix.transport.embed_service import ProviderEmbeddingService
+from tests.fakes import FakeProvider
 
 pytestmark = pytest.mark.bdd
 
 # F17: lift repeated phrase fragments to constants.
 _PHRASE_WRAPPER_WITH_CACHE = "an embed-text wrapper backed by an in-process embed cache"
 _PHRASE_COUNTING_BACKEND = "a counting embed backend that records every call"
-_TEST_DEPLOYMENT = "test-deployment"
-
-
-class _EmbedItem:
-    """Stub the openai SDK's response[i] shape - only ``.embedding`` is read."""
-
-    def __init__(self, embedding: list[float]) -> None:
-        self.embedding = embedding
-
-
-class _EmbedResponse:
-    """Stub the openai SDK's create() return shape - only ``.data[0]`` is read."""
-
-    def __init__(self, embedding: list[float]) -> None:
-        self.data = [_EmbedItem(embedding)]
-
-
-class _CountingEmbeddings:
-    """Tracks every embeddings.create() call so the test can pin call counts."""
-
-    def __init__(self, owner: _CountingClient) -> None:
-        self._owner = owner
-
-    def create(self, *, model: str, input: list[str], dimensions: int) -> _EmbedResponse:
-        self._owner.calls.append({"model": model, "input": list(input), "dimensions": dimensions})
-        return _EmbedResponse([0.1, 0.2, 0.3])
-
-
-class _CountingClient:
-    """Fake openai-shaped client. ``.calls`` is the observable counter."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-        self.embeddings = _CountingEmbeddings(self)
 
 
 @pytest.fixture
 def _ec_state(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Per-scenario fresh state.
 
-    Resets the process-shared embed cache between scenarios so cached
-    entries from a previous scenario don't leak. The fresh cache is
-    constructed directly (F2-clean: no env monkeypatch) and swapped
-    into the module singleton via ``monkeypatch.setattr`` on a public
-    attribute.
+    Resets the process-shared embed cache + coalescer between scenarios
+    so cached entries from a previous scenario don't leak. The fresh
+    cache is constructed directly (F2-clean: no env monkeypatch) and
+    swapped into the module singleton via ``monkeypatch.setattr`` on a
+    public attribute. The coalescer is reset to ``None`` so the
+    ProviderEmbeddingService takes its direct-dispatch path (the
+    coalescer's window-based batching adds non-determinism that this
+    feature isn't pinning).
     """
     reset_embed_cache()
-    # Replace the process-shared singleton with a small one we own, so
-    # the test's assertions on cache.stats() see ONLY this scenario.
+    reset_embed_coalescer()
     from kairix.transport.cache import embed_cache as embed_cache_mod
 
     fresh = EmbedCache(max_entries=10, max_age_s=60.0)
     monkeypatch.setattr(embed_cache_mod, "_EMBED_CACHE", fresh)
 
-    state: dict[str, Any] = {"cache": fresh, "client": None}
+    state: dict[str, Any] = {"cache": fresh, "provider": None, "service": None}
     yield state
     reset_embed_cache()
+    reset_embed_coalescer()
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +61,7 @@ def _ec_state(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 @given(_PHRASE_WRAPPER_WITH_CACHE)
 def _given_wrapper(_ec_state: dict[str, Any]) -> None:
-    """No-op - the cache is wired by the fixture above.
+    """No-op — the cache is wired by the fixture above.
 
     The Given exists so the feature reads naturally; the wiring lives
     in :func:`_ec_state` so a single fixture owns lifecycle.
@@ -98,12 +70,16 @@ def _given_wrapper(_ec_state: dict[str, Any]) -> None:
 
 @given(_PHRASE_COUNTING_BACKEND)
 def _given_counting_backend(_ec_state: dict[str, Any]) -> None:
-    """Construct a counting client and stash it in scenario state.
+    """Construct a counting :class:`FakeProvider` and the adapter that
+    wraps it, stashing both in scenario state.
 
-    The client is passed to ``embed_text(client=...)`` by each When step
-    - no module attribute mutation needed (F5-clean).
+    Embeds drive ``ProviderEmbeddingService.embed`` (the public single-text
+    surface used by the search pipeline). The FakeProvider records every
+    ``embed_batch`` call so the When/Then steps can pin call counts.
     """
-    _ec_state["client"] = _CountingClient()
+    provider = FakeProvider(vector=[0.1, 0.2, 0.3])
+    _ec_state["provider"] = provider
+    _ec_state["service"] = ProviderEmbeddingService(provider)
 
 
 # ---------------------------------------------------------------------------
@@ -113,23 +89,23 @@ def _given_counting_backend(_ec_state: dict[str, Any]) -> None:
 
 @when(parsers.parse('agent "{agent}" embeds the text "{text}"'))
 def _when_agent_embeds(_ec_state: dict[str, Any], agent: str, text: str) -> None:
-    """Drive a real embed_text() call.
+    """Drive a real embed() call on the ProviderEmbeddingService.
 
     The embed cache is keyed on text only, so agent identity is
-    irrelevant to the cache key - by design - and the test pins that
+    irrelevant to the cache key — by design — and the test pins that
     by passing two different agents and asserting one backend call.
     The ``agent`` kwarg is accepted from the .feature so the scenario
     reads naturally, but it isn't forwarded anywhere (the embed cache
     intentionally doesn't shard on agent).
     """
-    del agent  # F19: intentionally unused - see docstring
-    embed_text(text, client=_ec_state["client"], deployment=_TEST_DEPLOYMENT)
+    del agent  # F19: intentionally unused — see docstring
+    _ec_state["service"].embed(text)
 
 
 @when(parsers.parse('some caller embeds the text "{text}"'))
 def _when_caller_embeds(_ec_state: dict[str, Any], text: str) -> None:
     """Same as the agent variant, without naming a caller."""
-    embed_text(text, client=_ec_state["client"], deployment=_TEST_DEPLOYMENT)
+    _ec_state["service"].embed(text)
 
 
 @when("some caller embeds an empty text")
@@ -137,13 +113,13 @@ def _when_caller_embeds_empty(_ec_state: dict[str, Any]) -> None:
     """The empty-string case can't be expressed cleanly via parsers.parse
     (which can't match an empty quoted token), so it gets its own step.
     """
-    embed_text("", client=_ec_state["client"], deployment=_TEST_DEPLOYMENT)
+    _ec_state["service"].embed("")
 
 
 @when("some caller embeds a whitespace-only text")
 def _when_caller_embeds_whitespace(_ec_state: dict[str, Any]) -> None:
     """Whitespace-only sibling of the empty-text step."""
-    embed_text("   ", client=_ec_state["client"], deployment=_TEST_DEPLOYMENT)
+    _ec_state["service"].embed("   ")
 
 
 # ---------------------------------------------------------------------------
@@ -153,21 +129,21 @@ def _when_caller_embeds_whitespace(_ec_state: dict[str, Any]) -> None:
 
 @then("the embed backend was called only once")
 def _then_called_once(_ec_state: dict[str, Any]) -> None:
-    """Sabotage: drop the cache.get() short-circuit in embed_text and
-    every call hits the backend - calls grows past 1 and this
-    assertion fires.
+    """Sabotage: drop the cache.get() short-circuit in
+    ProviderEmbeddingService.embed and every call hits the provider —
+    embed_calls grows past 1 and this assertion fires.
     """
-    calls = _ec_state["client"].calls
+    calls = _ec_state["provider"].embed_calls
     assert len(calls) == 1, f"expected 1 embed call after cache hit; got {len(calls)}"
 
 
 @then("the embed backend was not called")
 def _then_not_called(_ec_state: dict[str, Any]) -> None:
     """Sabotage: remove the ``if not text or not text.strip()`` guard
-    at the top of embed_text() and empty strings hit the client - the
-    counter ticks up and the assertion fires.
+    at the top of ProviderEmbeddingService.embed and empty strings hit
+    the provider — the counter ticks up and the assertion fires.
     """
-    calls = _ec_state["client"].calls
+    calls = _ec_state["provider"].embed_calls
     assert len(calls) == 0, f"empty queries should never hit the embed backend; got {len(calls)}"
 
 

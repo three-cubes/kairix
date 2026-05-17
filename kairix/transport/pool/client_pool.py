@@ -118,9 +118,9 @@ def get_client(api_key: str, endpoint: str, timeout: float) -> Any:
     """Return the process-shared OpenAI-compatible client.
 
     Thin module-level wrapper over the production
-    ``_PRODUCTION_CLIENT_POOL`` singleton. Production callers
-    (``kairix/_azure.py`` and the future per-provider plugins) use
-    this; tests that want to inject a fake builder construct their own
+    ``_PRODUCTION_CLIENT_POOL`` singleton. Production callers (the
+    per-provider plugins under ``kairix/providers/<name>/``) use this;
+    tests that want to inject a fake builder construct their own
     ``ClientPool`` instance.
     """
     return _PRODUCTION_CLIENT_POOL.get(api_key, endpoint, timeout)

@@ -333,7 +333,7 @@ def check_secrets_loaded(env: Mapping[str, str] | None = None) -> CheckResult:
         )
 
     # Tier 2 — probe secrets file directly (credentials present but not yet in env;
-    # load_secrets() is called lazily on first kairix._azure import)
+    # load_secrets() is called lazily on first provider plugin construction)
     secrets_file_env = env.get("KAIRIX_SECRETS_FILE", "")
     probe_paths: tuple[str, ...] = (
         (secrets_file_env, *_SECRETS_FILE_PROBE_PATHS) if secrets_file_env else _SECRETS_FILE_PROBE_PATHS

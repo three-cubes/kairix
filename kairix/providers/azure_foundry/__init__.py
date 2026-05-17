@@ -16,9 +16,9 @@ The plugin is discovered by ``EntryPointRegistry`` through the
    provider = get_provider("azure_foundry")
    vectors = provider.embed_batch(["hello world"])
 
-Until IM-1 rewires :mod:`kairix._azure` to delegate here, the legacy
-module stays the production caller; this plugin is reachable but not
-yet on the hot path.
+This plugin is on the hot path — the factory wires
+``ProviderEmbeddingService(get_provider("azure_foundry"))`` whenever
+``provider: azure_foundry`` is set in ``kairix.config.yaml``.
 
 See ``docs/architecture/provider-plugin-architecture.md`` for the
 ADR and ``tests/bdd/features/provider_azure_foundry.feature`` for the

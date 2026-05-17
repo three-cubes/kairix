@@ -81,7 +81,11 @@ def suggest_bottleneck(
     if azure_429_count > 0:
         return (
             "azure_embed_rate_limit",
-            "Azure embed returned 429 — pull lever 1: tune KAIRIX_EMBED_POOL_SIZE + retry/backoff in kairix._azure",
+            (
+                "Provider embed returned 429 — pull lever 1: tune "
+                "KAIRIX_EMBED_POOL_SIZE + retry/backoff in the configured "
+                "provider plugin under kairix/providers/<name>/"
+            ),
         )
 
     # 2. Mean concurrency far below requested → workers are blocking on

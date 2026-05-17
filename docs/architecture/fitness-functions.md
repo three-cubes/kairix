@@ -1633,7 +1633,7 @@ Allowed:
 
 ```
 kairix/core/search/pipeline.py
-kairix/_azure.py                          # leading-underscore private
+kairix/providers/_base.py                 # leading-underscore private
 tests/search/test_pipeline.py
 tests/bdd/features/search_returns_hits.feature
 scripts/checks/check_path_naming.py

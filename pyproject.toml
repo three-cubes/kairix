@@ -122,9 +122,6 @@ source = ["kairix"]
 relative_files = true
 omit = [
     "tests/*",
-    # External I/O adapter — Azure API client; uncovered branches are
-    # error paths only reachable with a live Azure endpoint.
-    "kairix/_azure.py",
     # Neo4j driver wrapper — connection/session paths require a live
     # Neo4j instance; the testable surface (FakeNeo4jClient-driven repo
     # methods) has its own coverage in kairix.knowledge.graph.repository.
@@ -214,7 +211,6 @@ ignore = [
 "tests/e2e/*" = ["S", "T20", "I001"]  # E2E tests: inline imports required for lazy loading
 "kairix/**/cli.py" = ["T201", "S108", "S110", "E501"] # CLI modules: allow print for user output
 "kairix/cli.py" = ["T201"]
-"kairix/_azure.py" = ["S603", "S607"]  # Azure CLI subprocess (az keyvault) is intentional
 "kairix/platform/onboard/check.py" = ["S607"]  # Trusted system binaries (openclaw, systemctl)
 "scripts/*" = ["S", "T20", "B007"]    # Scripts: allow subprocess, print, unused loop vars
 

@@ -115,10 +115,10 @@ threads in one process is simpler and adequate.
 
 ### Tier 1 — likely worth doing (measure first to confirm)
 
-1. **Tune Azure embed HTTP client pool size + retry/backoff config** —
+1. **Tune the provider embed HTTP client pool size + retry/backoff config** —
    typical first contention point under concurrent load. One config block
-   in `kairix._azure`. The probe will tell us if it's saturated by
-   surfacing 429s or pool-wait timing.
+   per provider plugin under `kairix/providers/<name>/`. The probe will
+   tell us if it's saturated by surfacing 429s or pool-wait timing.
 
 2. **Add query-result LRU cache** (small, keyed on `(query, scope, agent)`,
    bounded by item count + max age). In teaming environments where multiple

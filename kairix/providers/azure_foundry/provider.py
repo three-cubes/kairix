@@ -31,10 +31,11 @@ DI seams:
   seam; F6 forbids ``*_fn=None`` callables-as-test-shims, not all
   ``=None`` defaults.
 
-The Wave-2 rewire of :mod:`kairix._azure` to delegate to this plugin
-is owned by IM-1; this module is concerned only with making the
-provider importable and testable. Until IM-1 lands, the legacy
-``kairix/_azure.py`` path stays the production caller.
+Production callers resolve this plugin through
+:func:`kairix.providers.get_provider` and the
+``[project.entry-points."kairix.providers"]`` table — there is no
+direct import path. Tests construct ``AzureFoundryProvider`` directly
+with a fake transport client.
 """
 
 from __future__ import annotations
@@ -294,9 +295,8 @@ class AzureFoundryProvider:
         Translates the Protocol's ``messages=[...]`` shape into the
         SDK's ``chat.completions.create(model=, messages=, max_tokens=)``
         call. ``model=`` carries the configured deployment, ``temperature``
-        defaults to ``0.3`` matching the existing :mod:`kairix._azure`
-        path (deterministic-ish synthesis). Maps transport failures via
-        :func:`_map_transport_error`.
+        defaults to ``0.3`` for deterministic-ish synthesis. Maps
+        transport failures via :func:`_map_transport_error`.
         """
         client = self._client()
         try:

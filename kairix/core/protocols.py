@@ -171,10 +171,11 @@ class AgentRegistry(Protocol):
 class ChatBackend(Protocol):
     """LLM chat-completion surface — substitutable across Azure / OpenRouter / fakes.
 
-    Wraps the call shape ``kairix._azure.chat_completion`` / OpenAI-API
-    chat completions use. The eval module's LLM judge and query generator
-    consume this protocol so test code can inject a `FakeChatBackend`
-    rather than reaching past `_call_llm` into module-level state.
+    Wraps the OpenAI-API chat-completions call shape that every
+    provider plugin (``kairix/providers/<name>/``) speaks. The eval
+    module's LLM judge and query generator consume this protocol so
+    test code can inject a `FakeChatBackend` rather than reaching past
+    `_call_llm` into module-level state.
 
     Implementations are expected to:
       - Block until the response is complete (no streaming surface here).

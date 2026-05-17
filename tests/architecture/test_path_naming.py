@@ -62,7 +62,7 @@ def test_leading_underscore_private_module_passes() -> None:
     fails.
     """
     detector = _load_detector()
-    assert detector.file_violates("kairix/_azure.py") is False
+    assert detector.file_violates("kairix/providers/_base.py") is False
     assert detector.file_violates("kairix/core/_internal.py") is False
     assert detector.file_violates("kairix/core/_Foo.py") is True
 

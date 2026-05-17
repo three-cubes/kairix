@@ -12,8 +12,10 @@ Exports:
 * ``reset_client_cache`` — drop the cached client (tests / credential
   rotation)
 
-The Wave 1 scaffold (this directory) is now load-bearing for the
-TLS-handshake fix in ``kairix/_azure.py``.
+This directory is load-bearing for the TLS-handshake fix the
+provider plugins rely on — every plugin's transport client is built
+via ``get_client`` so a single ``httpx.Client`` is reused across
+batch dispatches.
 """
 
 from kairix.transport.pool.client_pool import (

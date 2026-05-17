@@ -110,33 +110,3 @@ class VectorSearchBackend:
         finally:
             if timings is not None:
                 timings["vector_ann"] = round((time.monotonic() - t) * 1000.0, 2)
-
-
-class AzureEmbeddingService:
-    """EmbeddingService adapter wrapping kairix._azure embed functions.
-
-    DEPRECATED in v2026.5.17 — kept only as a transitional shim while
-    callers migrate to ``ProviderEmbeddingService`` (lives in
-    ``kairix.transport.embed_service``). New code (and every production
-    factory wire) constructs
-    ``ProviderEmbeddingService(get_provider(provider_name()))`` instead.
-    This class is removed once every internal caller has migrated.
-
-    Lazily imports kairix._azure to avoid hard dependency at module load.
-    Uses existing credential resolution from the Azure module.
-    """
-
-    def __init__(self) -> None:
-        pass  # Uses existing credential resolution
-
-    def embed(self, text: str) -> list[float]:
-        """Embed a single text string. Returns [] on failure."""
-        from kairix._azure import embed_text
-
-        return embed_text(text)
-
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed multiple texts sequentially. Returns list of vectors."""
-        from kairix._azure import embed_text
-
-        return [embed_text(t) for t in texts]

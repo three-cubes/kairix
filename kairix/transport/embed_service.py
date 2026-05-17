@@ -10,10 +10,8 @@ domain layer.
 Why this module exists
 ----------------------
 
-In v2026.5.17 the plugin layer (``kairix/providers/<name>/``) is the
-only embed/chat path. ``kairix/core/search/backends.py`` previously
-hosted ``AzureEmbeddingService`` which delegated to the now-deprecated
-``kairix._azure.embed_text``. The replacement contract is
+In v2026.5.17 the plugin layer (``kairix/providers/<name>/``) became
+the only embed/chat path. The replacement contract is
 provider-agnostic — every plugin satisfies ``Provider.embed_batch`` —
 so the adapter sits at the transport boundary and owns the cache +
 coalescer routing.
@@ -64,8 +62,7 @@ class ProviderEmbeddingService:
     because the coalescer's call shape is per-text — bulk callers
     (worker ingestion, suite builders) own their own batching strategy.
 
-    Failure contract — matches the legacy
-    :class:`kairix.core.search.backends.AzureEmbeddingService`:
+    Failure contract:
 
       - ``embed(text)`` returns ``[]`` on plugin error (so the search
         pipeline can short-circuit rather than abort the surrounding
@@ -92,8 +89,7 @@ class ProviderEmbeddingService:
 
         Routes through the process-shared cache and (when wired) the
         request coalescer so concurrent callers asking the same /
-        nearby questions pay one round-trip total. Matches the hot-path
-        wiring previously owned by ``kairix._azure.embed_text``.
+        nearby questions pay one round-trip total.
         """
         if not text or not text.strip():
             return []
@@ -169,14 +165,12 @@ class ProviderChatBackend:
     the ``LLMBackend`` contract that callers can short-circuit on an
     empty reply.
 
-    Wiring of the eval module's :class:`~kairix.core.protocols.ChatBackend`
+    The eval module's :class:`~kairix.core.protocols.ChatBackend`
     surface (``complete(prompt, *, api_key, endpoint, deployment,
-    system, temperature, timeout_s) -> str``) is a follow-up — every
-    eval-side caller (LLMJudge / QueryGenerator / ProductionLLMJudge)
-    needs to migrate from the deprecated
-    :class:`kairix._azure.AzureChatBackend` adapter at the same time,
-    so the change is sequenced into the same wave that deletes
-    ``kairix/_azure.py``.
+    system, temperature, timeout_s) -> str``) is a different shape;
+    eval callers (LLMJudge / QueryGenerator / ProductionLLMJudge)
+    are wired via ``kairix.quality.eval.chat_backend.ProviderEvalChatBackend``
+    in the same provider-plugin migration.
 
     Construction:
 

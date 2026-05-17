@@ -1,10 +1,10 @@
 """
 Multi-hop query planning for the kairix hybrid search pipeline.
 
-Decomposes complex queries into 2-3 focused sub-queries via GPT-4o-mini
-(using the existing kairix._azure.chat_completion — no extra dependencies),
-runs them in parallel via ThreadPoolExecutor, and merges results with
-Reciprocal Rank Fusion (RRF).
+Decomposes complex queries into 2-3 focused sub-queries via the
+configured provider plugin's chat surface, runs them in parallel via
+ThreadPoolExecutor, and merges results with Reciprocal Rank Fusion
+(RRF).
 
 Phase 4B-2 — 2026-04-05
 """
@@ -129,8 +129,8 @@ _DECOMPOSE_PROMPT_WITH_CONTEXT = (
 class QueryPlanner:
     """LLM-based query decomposition with parallel execution and RRF merge.
 
-    Uses kairix._azure.chat_completion — same Azure OpenAI endpoint as
-    embeddings, no extra SDK dependencies.
+    Uses the configured provider plugin's chat surface — same endpoint
+    as embeddings, no extra SDK dependencies.
     """
 
     def _build_decompose_prompt(self, query: str, neo4j_client: object | None) -> str:

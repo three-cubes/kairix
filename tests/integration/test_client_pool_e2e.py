@@ -17,11 +17,11 @@ the production builder swapped for a counting fake. Sabotage-prove:
 drop the cache short-circuit on ``ClientPool.get`` → the counter
 goes from 1 to 10.
 
-The wiring of the call-site ``kairix/_azure.py:_get_client`` into
-``kairix.transport.pool.get_client`` is enforced statically by the
-unit test ``test_module_level_get_client_uses_production_pool`` plus
-the import in ``kairix/_azure.py`` itself (``from kairix.transport.pool
-import get_client as _pool_get_client``).
+Provider plugins (under ``kairix/providers/<name>/``) are the
+production callers; they each route their transport client
+construction through ``kairix.transport.pool.get_client`` so the
+same TLS-handshake amortisation applies regardless of which provider
+is configured.
 
 F1-clean (no @patch), F2-clean (no env monkeypatch — we substitute
 the builder via direct attribute write on the pool's own surface,

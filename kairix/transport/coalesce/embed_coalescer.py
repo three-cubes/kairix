@@ -37,8 +37,9 @@ buffered texts and resolves each Future with its result (or ``[]`` on
 error — the embed_text contract is "never raises, returns []").
 
 Cache hits + empty-text checks happen **before** the coalescer — only
-actual Azure-bound requests reach it. The caller-side wiring in
-:mod:`kairix._azure` is responsible for those guards.
+actual provider-bound requests reach it. The caller-side wiring in
+:class:`kairix.transport.embed_service.ProviderEmbeddingService` owns
+those guards.
 
 Test seam
 ---------

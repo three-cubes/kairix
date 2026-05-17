@@ -20,7 +20,6 @@ from kairix.core.protocols import (
     VectorRepository,
 )
 from kairix.core.search.backends import (
-    AzureEmbeddingService,
     BM25SearchBackend,
     VectorSearchBackend,
 )
@@ -729,7 +728,7 @@ class TestScorerRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Phase 4: Adapter contract tests — BM25SearchBackend, VectorSearchBackend, AzureEmbeddingService
+# Phase 4: Adapter contract tests — BM25SearchBackend, VectorSearchBackend
 # ---------------------------------------------------------------------------
 
 
@@ -850,23 +849,3 @@ class TestVectorSearchBackendAdapter:
         vector_repo = FakeVectorRepository()
         backend = VectorSearchBackend(embedding, vector_repo)
         assert backend.search("anything") == []
-
-
-@pytest.mark.contract
-class TestAzureEmbeddingServiceAdapter:
-    """AzureEmbeddingService satisfies EmbeddingService protocol."""
-
-    @pytest.mark.contract
-    def test_satisfies_embedding_service_protocol(self):
-        svc = AzureEmbeddingService()
-        assert isinstance(svc, EmbeddingService)
-
-    @pytest.mark.contract
-    def test_has_embed_method(self):
-        svc = AzureEmbeddingService()
-        assert callable(svc.embed)
-
-    @pytest.mark.contract
-    def test_has_embed_batch_method(self):
-        svc = AzureEmbeddingService()
-        assert callable(svc.embed_batch)

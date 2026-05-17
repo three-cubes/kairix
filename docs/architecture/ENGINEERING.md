@@ -216,7 +216,7 @@ Phase gate rule: Phase N+1 does not start until Phase N benchmark confirms gate 
 
 - **All secrets via Key Vault at runtime.** `az keyvault secret show --vault-name ${KV_NAME}`
 - **Never written to disk, environment file, or log**
-- **Never passed as function arguments** — use the shared `_azure.py` client
+- **Never passed as function arguments** — let the configured provider plugin under `kairix/providers/<name>/` resolve them via `kairix.credentials.get_credentials()`
 - `detect-secrets` runs in CI on every PR (baseline in `.secrets.baseline`)
 - If a secret is exposed: rotate immediately in Key Vault (next process run picks it up)
 

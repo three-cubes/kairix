@@ -1,90 +1,55 @@
-"""Integration: embed coalescer wired into embed_text folds Azure calls (#288).
+"""Integration: embed coalescer wired into ProviderEmbeddingService folds provider calls (#288).
 
 Boundary chain:
-  caller -> embed_text -> EmbedCache (miss) -> EmbedCoalescer -> fake batch fn
-                                                                  (closes over fake client)
+  caller -> ProviderEmbeddingService.embed -> EmbedCache (miss) ->
+            EmbedCoalescer -> FakeProvider.embed_batch (one batch)
   -> caller's Future resolves with per-text vector
 
-The fake client lives inside the batch_fn closure so the same
-production wiring runs (cache → coalescer → batch dispatcher → SDK
-shape) without touching Azure. F1-clean (no @patch on kairix
-internals), F5-clean (no private-name imports — the coalescer + cache
-classes are part of the public surface for #288/#285).
+The provider is a :class:`FakeProvider` from ``tests/fakes.py`` whose
+``embed_batch`` records every batch invocation so the test can pin
+"10 concurrent embed calls become 1 batch invocation". F1-clean (no
+@patch on kairix internals), F5-clean (no private-name imports — the
+adapter + coalescer + cache classes are part of the public surface
+for #288/#285).
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from typing import Any
 
 import pytest
 
-from kairix.core.embed import embed_text
 from kairix.transport.cache import embed_cache as embed_cache_mod
 from kairix.transport.cache.embed_cache import EmbedCache, reset_embed_cache
 from kairix.transport.coalesce import EmbedCoalescer, reset_embed_coalescer
 from kairix.transport.coalesce import embed_coalescer as embed_coalescer_mod
+from kairix.transport.embed_service import ProviderEmbeddingService
 
 pytestmark = pytest.mark.integration
 
-# F17: lift the shared test deployment label.
-_TEST_DEPLOYMENT = "test-deployment"
 
+class _DeterministicProvider:
+    """FakeProvider variant whose ``embed_batch`` returns a deterministic
+    per-text vector so callers can verify alignment.
 
-# ---------------------------------------------------------------------------
-# Counting fake Azure client + batch wiring
-# ---------------------------------------------------------------------------
-
-
-class _EmbedItem:
-    """Stub the openai SDK's response[i] shape — only ``.embedding`` is read."""
-
-    def __init__(self, embedding: list[float]) -> None:
-        self.embedding = embedding
-
-
-class _EmbedResponse:
-    """Stub the openai SDK's create() return shape — only ``.data`` is read."""
-
-    def __init__(self, embeddings: list[list[float]]) -> None:
-        self.data = [_EmbedItem(e) for e in embeddings]
-
-
-class _CountingEmbeddings:
-    def __init__(self, owner: _CountingClient) -> None:
-        self._owner = owner
-
-    def create(self, *, model: str, input: list[str], dimensions: int) -> _EmbedResponse:
-        self._owner.calls.append({"model": model, "input": list(input), "dimensions": dimensions})
-        # Deterministic per-text vector so callers can verify alignment.
-        return _EmbedResponse([[float(len(t)), 0.5, 1.5] for t in input])
-
-
-class _CountingClient:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-        self.embeddings = _CountingEmbeddings(self)
-
-
-def _make_batch_fn(client: _CountingClient, deployment: str = _TEST_DEPLOYMENT) -> Any:
-    """Build a coalescer batch_fn that closes over a fake client.
-
-    Mirrors the production batch dispatcher's shape (it calls
-    ``client.embeddings.create(model=..., input=..., dimensions=...)``)
-    so the integration test exercises the same SDK contract.
+    Matches the :class:`kairix.providers.Provider` Protocol surface used
+    by ``ProviderEmbeddingService.embed`` (the only method exercised on
+    the embed hot path).
     """
 
-    def batch(texts: list[str]) -> list[list[float]]:
-        response = client.embeddings.create(model=deployment, input=texts, dimensions=3)
-        return [list(item.embedding) for item in response.data]
+    def __init__(self) -> None:
+        self.embed_calls: list[list[str]] = []
 
-    return batch
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        self.embed_calls.append(list(texts))
+        # First component encodes len(text) so a misalignment surfaces.
+        return [[float(len(t)), 0.5, 1.5] for t in texts]
 
 
 @pytest.fixture
-def _wire(monkeypatch: pytest.MonkeyPatch) -> tuple[_CountingClient, EmbedCoalescer, EmbedCache]:
-    """Install a fresh cache + coalescer singleton owning a counting client.
+def _wire(monkeypatch: pytest.MonkeyPatch) -> tuple[_DeterministicProvider, EmbedCoalescer, EmbedCache]:
+    """Install a fresh cache + coalescer singleton wired to a counting provider.
 
     F2-clean: every object is constructed directly and substituted into
     the module singleton via ``setattr`` on a public attribute. No env
@@ -96,43 +61,49 @@ def _wire(monkeypatch: pytest.MonkeyPatch) -> tuple[_CountingClient, EmbedCoales
     cache = EmbedCache(max_entries=10, max_age_s=60.0)
     monkeypatch.setattr(embed_cache_mod, "_EMBED_CACHE", cache)
 
-    client = _CountingClient()
+    provider = _DeterministicProvider()
     coalescer = EmbedCoalescer(
-        embed_batch_fn=_make_batch_fn(client),
+        embed_batch_fn=provider.embed_batch,
         coalesce_window_ms=200,
         max_batch_size=64,
     )
     monkeypatch.setattr(embed_coalescer_mod, "_EMBED_COALESCER", coalescer)
 
-    yield client, coalescer, cache
+    yield provider, coalescer, cache
     coalescer.shutdown()
     reset_embed_cache()
     reset_embed_coalescer()
 
 
 # ---------------------------------------------------------------------------
-# 10 concurrent embed_text calls → 1 Azure batch call
+# 10 concurrent embed calls → 1 provider batch call
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-def test_ten_concurrent_embed_text_calls_become_one_batch(
-    _wire: tuple[_CountingClient, EmbedCoalescer, EmbedCache],
+def test_ten_concurrent_embed_calls_become_one_batch(
+    _wire: tuple[_DeterministicProvider, EmbedCoalescer, EmbedCache],
 ) -> None:
-    """The headline behaviour — 10 concurrent embed_text → 1 Azure batch.
+    """The headline behaviour — 10 concurrent embeds → 1 provider batch.
 
-    Sabotage: bypass the coalescer in ``embed_text`` (drop the
-    ``_route_through_coalescer`` call) and each caller drives its own
-    Azure roundtrip — client.calls grows to 10, this assertion fires.
+    Sabotage: bypass the coalescer in ``ProviderEmbeddingService.embed``
+    (drop the ``existing.embed(text)`` short-circuit when the singleton
+    is installed) and each caller drives its own provider round-trip —
+    ``embed_calls`` grows to 10, this assertion fires.
     """
-    client, _coalescer, _cache = _wire
+    provider, _coalescer, _cache = _wire
+    # Provider Protocol satisfied structurally; the adapter only needs
+    # embed_batch. mypy doesn't know our _DeterministicProvider matches
+    # because it lives inline in this test file.
+    service = ProviderEmbeddingService(provider)  # type: ignore[arg-type] — _DeterministicProvider satisfies the Protocol structurally; mypy can't see it lives in this test file
+
     results: dict[str, list[float]] = {}
     results_lock = threading.Lock()
     errors: list[BaseException] = []
 
     def worker(text: str) -> None:
         try:
-            vec = embed_text(text, deployment=_TEST_DEPLOYMENT)
+            vec = service.embed(text)
             with results_lock:
                 results[text] = vec
         except Exception as exc:
@@ -146,8 +117,10 @@ def test_ten_concurrent_embed_text_calls_become_one_batch(
         th.join()
 
     assert not errors, f"workers raised: {errors!r}"
-    assert len(client.calls) == 1, f"expected exactly 1 Azure batch call; got {len(client.calls)}: {client.calls!r}"
-    assert len(client.calls[0]["input"]) == 10
+    assert len(provider.embed_calls) == 1, (
+        f"expected exactly 1 provider batch call; got {len(provider.embed_calls)}: {provider.embed_calls!r}"
+    )
+    assert len(provider.embed_calls[0]) == 10
 
     # Each caller got back its own embedding (the fake assigns the
     # first vector component to ``len(text)`` so a misalignment surfaces).
@@ -163,19 +136,20 @@ def test_ten_concurrent_embed_text_calls_become_one_batch(
 
 @pytest.mark.integration
 def test_cache_hit_skips_the_coalescer(
-    _wire: tuple[_CountingClient, EmbedCoalescer, EmbedCache],
+    _wire: tuple[_DeterministicProvider, EmbedCoalescer, EmbedCache],
 ) -> None:
-    """A second embed_text of the same text returns from cache; no batch.
+    """A second embed of the same text returns from cache; no batch.
 
-    Sabotage: drop the ``cache.get(text)`` short-circuit before
-    ``_route_through_coalescer`` in embed_text and the second call
-    re-enters the coalescer — client.calls grows to 2.
+    Sabotage: drop the ``cache.get(text)`` short-circuit before the
+    coalescer routing in ``ProviderEmbeddingService.embed`` and the
+    second call re-enters the coalescer — ``embed_calls`` grows to 2.
     """
-    client, coalescer, _cache = _wire
-    first = embed_text("FEAT-288 status", deployment=_TEST_DEPLOYMENT)
-    second = embed_text("FEAT-288 status", deployment=_TEST_DEPLOYMENT)
+    provider, coalescer, _cache = _wire
+    service = ProviderEmbeddingService(provider)  # type: ignore[arg-type] — _DeterministicProvider satisfies the Protocol structurally; mypy can't see it lives in this test file
+    first = service.embed("FEAT-288 status")
+    second = service.embed("FEAT-288 status")
     assert first == second
-    assert len(client.calls) == 1
+    assert len(provider.embed_calls) == 1
     # The coalescer should have seen exactly 1 request (the cache miss).
     assert coalescer.stats().requests == 1
 
@@ -187,22 +161,23 @@ def test_cache_hit_skips_the_coalescer(
 
 @pytest.mark.integration
 def test_sequential_calls_return_within_bounded_window(
-    _wire: tuple[_CountingClient, EmbedCoalescer, EmbedCache],
+    _wire: tuple[_DeterministicProvider, EmbedCoalescer, EmbedCache],
 ) -> None:
     """Single caller doesn't hang — dispatcher fires on window timeout.
 
     Sabotage: remove the ``wait(timeout=self._window_s)`` and a single
     caller blocks forever — pytest times out instead of asserting.
     """
-    client, _coalescer, _cache = _wire
+    provider, _coalescer, _cache = _wire
+    service = ProviderEmbeddingService(provider)  # type: ignore[arg-type] — _DeterministicProvider satisfies the Protocol structurally; mypy can't see it lives in this test file
     start = time.monotonic()
-    out = embed_text("solo-text", deployment=_TEST_DEPLOYMENT)
+    out = service.embed("solo-text")
     elapsed_ms = (time.monotonic() - start) * 1000
-    assert out, "single embed_text call returned empty"
+    assert out, "single embed call returned empty"
     # Window=200ms; allow generous upper bound for CI flakes.
-    assert 150 <= elapsed_ms < 2000, f"single embed_text latency out of band: {elapsed_ms:.1f}ms"
-    assert len(client.calls) == 1
-    assert client.calls[0]["input"] == ["solo-text"]
+    assert 150 <= elapsed_ms < 2000, f"single embed latency out of band: {elapsed_ms:.1f}ms"
+    assert len(provider.embed_calls) == 1
+    assert provider.embed_calls[0] == ["solo-text"]
 
 
 # ---------------------------------------------------------------------------
@@ -212,20 +187,21 @@ def test_sequential_calls_return_within_bounded_window(
 
 @pytest.mark.integration
 def test_empty_text_bypasses_both_cache_and_coalescer(
-    _wire: tuple[_CountingClient, EmbedCoalescer, EmbedCache],
+    _wire: tuple[_DeterministicProvider, EmbedCoalescer, EmbedCache],
 ) -> None:
-    """An empty embed_text call returns [] without touching anything.
+    """An empty embed call returns [] without touching anything.
 
     Sabotage: drop the ``if not text or not text.strip()`` guard at
-    the top of embed_text and the empty string flows into the
-    coalescer — client.calls grows.
+    the top of ``ProviderEmbeddingService.embed`` and the empty string
+    flows into the coalescer — ``embed_calls`` grows.
     """
-    client, coalescer, _cache = _wire
-    assert embed_text("", deployment=_TEST_DEPLOYMENT) == []
-    assert embed_text("   ", deployment=_TEST_DEPLOYMENT) == []
+    provider, coalescer, _cache = _wire
+    service = ProviderEmbeddingService(provider)  # type: ignore[arg-type] — _DeterministicProvider satisfies the Protocol structurally; mypy can't see it lives in this test file
+    assert service.embed("") == []
+    assert service.embed("   ") == []
     # Wait past the window so any (sabotaged) dispatch would have fired.
     time.sleep(0.25)
-    assert client.calls == []
+    assert provider.embed_calls == []
     assert coalescer.stats().requests == 0
 
 
@@ -236,20 +212,22 @@ def test_empty_text_bypasses_both_cache_and_coalescer(
 
 @pytest.mark.integration
 def test_coalesced_results_populate_the_cache(
-    _wire: tuple[_CountingClient, EmbedCoalescer, EmbedCache],
+    _wire: tuple[_DeterministicProvider, EmbedCoalescer, EmbedCache],
 ) -> None:
     """After the coalesced batch resolves, the cache holds each text.
 
-    Sabotage: drop the ``cache.put(text, coalesced)`` after the
-    coalesced path returns in embed_text and the next same-text call
-    re-routes through the coalescer instead of hitting the cache.
+    Sabotage: drop the ``cache.put(text, result)`` after the coalesced
+    path returns in ``ProviderEmbeddingService.embed`` and the next
+    same-text call re-routes through the coalescer instead of hitting
+    the cache.
     """
-    client, _coalescer, cache = _wire
+    provider, _coalescer, cache = _wire
+    service = ProviderEmbeddingService(provider)  # type: ignore[arg-type] — _DeterministicProvider satisfies the Protocol structurally; mypy can't see it lives in this test file
     results: list[list[float]] = []
     lock = threading.Lock()
 
     def worker(text: str) -> None:
-        vec = embed_text(text, deployment=_TEST_DEPLOYMENT)
+        vec = service.embed(text)
         with lock:
             results.append(vec)
 
@@ -259,10 +237,10 @@ def test_coalesced_results_populate_the_cache(
         th.start()
     for th in threads:
         th.join()
-    assert len(client.calls) == 1
+    assert len(provider.embed_calls) == 1
     assert cache.stats().size == 3
 
     # Second wave — all three should be cache hits, no new batch.
     for t in texts:
-        embed_text(t, deployment=_TEST_DEPLOYMENT)
-    assert len(client.calls) == 1, "cache hits should not re-enter the coalescer"
+        service.embed(t)
+    assert len(provider.embed_calls) == 1, "cache hits should not re-enter the coalescer"

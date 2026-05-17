@@ -201,10 +201,22 @@ def test_to_json_envelope_includes_error_field_when_set() -> None:
 def test_main_text_mode_prints_query_and_intent_lines(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Sabotage: deleting `print(format_text(out))` in main() causes
-    # capsys.readouterr().out to be empty and the "Query:" assertion to fail.
+    """The CLI prints ``Query:`` / ``Intent:`` lines on every call,
+    including failure modes.
+
+    In the test env there's no ``provider:`` in ``kairix.config.yaml``,
+    so the factory raises ``ValueError`` at pipeline-build time. The
+    ``run_search`` use-case catches that, returns a populated
+    ``SearchOutput.error``, and the CLI prints its text envelope then
+    exits 1. We capture the SystemExit and assert on the printed lines.
+
+    Sabotage: deleting ``print(format_text(out))`` in main() causes
+    capsys.readouterr().out to be empty and the "Query:" assertion to fail.
+    """
     main_module = __import__("kairix.core.search.cli", fromlist=["main"])
-    main_module.main(["my unit test query"])
+    with pytest.raises(SystemExit) as exc_info:
+        main_module.main(["my unit test query"])
+    assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "Query: my unit test query" in captured.out
     assert "Intent:" in captured.out
@@ -214,10 +226,17 @@ def test_main_text_mode_prints_query_and_intent_lines(
 def test_main_json_mode_emits_parseable_envelope(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Sabotage: swapping to_json_envelope for format_text in the --json branch
-    # makes captured.out non-JSON and json.loads raises ValueError → test fails.
+    """``--json`` mode prints a JSON envelope on every call, including
+    failure modes. See ``test_main_text_mode_prints_query_and_intent_lines``
+    for the why-it-exits-1 rationale.
+
+    Sabotage: swapping to_json_envelope for format_text in the --json branch
+    makes captured.out non-JSON and json.loads raises ValueError → test fails.
+    """
     main_module = __import__("kairix.core.search.cli", fromlist=["main"])
-    main_module.main(["another query", "--json"])
+    with pytest.raises(SystemExit) as exc_info:
+        main_module.main(["another query", "--json"])
+    assert exc_info.value.code == 1
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["query"] == "another query"
@@ -246,19 +265,30 @@ def test_main_exits_nonzero_when_search_output_has_error(
 def test_main_module_guard_invokes_main(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Sabotage: removing `main()` under `if __name__ == "__main__"` makes
-    # runpy.run_module return without printing the "Query:" line, so the
-    # captured.out assert fails.
-    #
-    # runpy executes the module as __main__ which triggers the guard line.
-    # We patch sys.argv (NOT a KAIRIX_ env var, so F2-compliant) to feed argv.
+    """The ``if __name__ == "__main__"`` guard wires ``main()`` so
+    ``python -m kairix.core.search.cli`` works.
+
+    In the test env there's no ``provider:`` in ``kairix.config.yaml``,
+    so the CLI exits 1 via SystemExit after printing the error
+    envelope. We capture the SystemExit and assert the "Query:" line
+    still made it to stdout.
+
+    Sabotage: removing ``main()`` under ``if __name__ == "__main__"``
+    makes runpy.run_module return without printing the "Query:" line,
+    so the captured.out assert fails.
+
+    runpy executes the module as __main__ which triggers the guard line.
+    We patch sys.argv (NOT a KAIRIX_ env var, so F2-compliant) to feed argv.
+    """
     import runpy
     import sys as _sys
 
     saved_argv = _sys.argv
     _sys.argv = ["kairix-search", "guarded module run"]
     try:
-        runpy.run_module("kairix.core.search.cli", run_name="__main__")
+        with pytest.raises(SystemExit) as exc_info:
+            runpy.run_module("kairix.core.search.cli", run_name="__main__")
+        assert exc_info.value.code == 1
     finally:
         _sys.argv = saved_argv
     captured = capsys.readouterr()

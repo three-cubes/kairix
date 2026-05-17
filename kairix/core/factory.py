@@ -301,11 +301,9 @@ def _resolve_provider_name(cfg: RetrievalConfig) -> str | None:
          ``RetrievalConfig`` instances by hand without going through
          ``load_config`` (so ``cfg.provider`` is ``None``) but still
          have a ``kairix.config.yaml`` on disk that names a plugin.
-      3. ``None`` — no provider configured. The caller falls back to
-         the legacy ``AzureEmbeddingService`` shim and logs a deprecation
-         warning. This branch keeps the existing test fleet working while
-         the migration to plugin-driven embed proceeds across the rest
-         of the codebase.
+      3. ``None`` — no provider configured. The caller raises a typed
+         ``ValueError`` so operators see a misconfiguration immediately
+         rather than silently degrading to a legacy code path.
     """
     if cfg.provider:
         return cfg.provider
@@ -320,19 +318,18 @@ def _build_embedding_service(
 ) -> Any:
     """Construct the production ``EmbeddingService`` for the pipeline.
 
-    Plugin-driven path (v2026.5.17 onward): when a provider name is
-    configured, resolve it via :func:`kairix.providers.get_provider`
-    and wrap the resulting plugin in
+    Plugin-driven path (v2026.5.17 onward): resolves the configured
+    provider via :func:`kairix.providers.get_provider` and wraps the
+    plugin in
     :class:`kairix.transport.embed_service.ProviderEmbeddingService` —
     the Protocol-shaped adapter that owns the cache + coalescer
     routing.
 
-    Transitional fallback: when no provider is configured (no
-    ``provider:`` in YAML, no ``cfg.provider``), keep returning
-    :class:`kairix.core.search.backends.AzureEmbeddingService` so the
-    factory still produces a usable pipeline while the rest of the
-    codebase migrates. This branch logs a deprecation warning that
-    operators see in the search log on every cold-start.
+    When no provider is configured (no ``provider:`` in YAML, no
+    ``cfg.provider``), raises a typed ``ValueError`` listing the
+    installed plugins. Operators see the misconfiguration at
+    pipeline-build time rather than discovering an inert embed surface
+    at query time.
 
     F26 carve-out: this is the one core/ file allowed to import
     ``kairix.transport.embed_service`` and ``kairix.providers``. The
@@ -351,20 +348,23 @@ def _build_embedding_service(
     Returns:
         An object satisfying the ``EmbeddingService`` Protocol.
     """
+    from kairix.providers import EntryPointRegistry, get_provider
+    from kairix.transport.embed_service import ProviderEmbeddingService
+
     name = _resolve_provider_name(cfg)
     if name is None:
-        from kairix.core.search.backends import AzureEmbeddingService
-
-        logger.warning(
-            "factory: no provider configured — falling back to legacy "
-            "AzureEmbeddingService. fix: add provider: <name> to "
-            "kairix.config.yaml. run: kairix probe-config to see "
-            "installed plugins."
+        available_registry = registry if registry is not None else EntryPointRegistry()
+        try:
+            available = sorted(available_registry.available())
+        except Exception:  # pragma: no cover - registry pathologies surface via the message below
+            available = []
+        installed = ", ".join(available) if available else "<none>"
+        raise ValueError(
+            "kairix.config.yaml is missing the required 'provider:' field. "
+            "fix: add 'provider: <name>' to kairix.config.yaml. "
+            "run: kairix probe-config to see installed plugins. "
+            f"installed plugins: {installed}."
         )
-        return AzureEmbeddingService()
-
-    from kairix.providers import get_provider
-    from kairix.transport.embed_service import ProviderEmbeddingService
 
     provider = get_provider(name, registry=registry)
     return ProviderEmbeddingService(provider)

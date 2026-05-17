@@ -65,7 +65,7 @@ Group by effort. Each file is roughly 1-2 hours.
 
 The 8 files explicitly excluded from coverage measurement need a different strategy:
 
-- `kairix/_azure.py`, `kairix/knowledge/graph/client.py` — **Tier 3.** External-I/O adapters; integration tests can hit the boundary but unit-coverage-of-adapter-internals is theatre. Document in `pyproject.toml` as permanent omits with rationale (already done; just confirm the rationale is durable).
+- `kairix/knowledge/graph/client.py` — **Tier 3.** External-I/O adapter; integration tests can hit the boundary but unit-coverage-of-adapter-internals is theatre. Document in `pyproject.toml` as a permanent omit with rationale (already done; just confirm the rationale is durable). The historical `kairix/_azure.py` entry was deleted in v2026.5.17 alongside the module.
 - `kairix/knowledge/contradict/cli.py`, `kairix/knowledge/reflib/cli.py`, `kairix/platform/onboard/cli.py`, `kairix/quality/benchmark/cli.py` — **Tier 2.** CLIs without test coverage yet. Apply the helper-extraction pattern. **Move OUT of the omit list once tests land.**
 - `kairix/knowledge/wikilinks/audit.py` — **Tier 2.** "0% coverage today, no public callers in tests." Either backfill or delete.
 

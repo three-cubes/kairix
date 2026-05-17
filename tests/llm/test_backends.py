@@ -229,7 +229,7 @@ def test_provider_eval_chat_backend_drops_credential_and_tuning_kwargs() -> None
 # ``provider:`` field in ``kairix.config.yaml`` so the lazy provider
 # resolution raises ValueError on first chat / embed call. This is the
 # end-to-end receipt that the default callables wire through the provider
-# plugin layer instead of importing ``kairix._azure`` directly.
+# plugin layer — the only embed/chat path in v2026.5.17.
 # ---------------------------------------------------------------------------
 
 
@@ -242,11 +242,12 @@ def test_default_backend_raises_value_error_on_chat_when_provider_not_configured
     the lazy ``kairix.config.yaml`` lookup; the test config doesn't seed
     a ``provider:`` field so a typed ValueError fires.
 
-    Sabotage: rewire the chat default to import ``kairix._azure`` (the
-    pre-migration shape) — the test would then see a credential-resolution
-    error from the legacy path, NOT the ValueError from the new
-    config-missing path, and the ``pytest.raises(ValueError, match=...)``
-    clause fails on the wrong exception or message.
+    Sabotage: rewire the chat default to construct a hard-coded
+    legacy backend (the pre-migration shape) — the test would then see
+    a credential-resolution error from that path, NOT the ValueError
+    from the config-missing path, and the
+    ``pytest.raises(ValueError, match=...)`` clause fails on the wrong
+    exception or message.
     """
     backend = AzureOpenAIBackend()
     with pytest.raises(ValueError, match="missing the required 'provider:' field"):
@@ -257,9 +258,10 @@ def test_default_backend_raises_value_error_on_chat_when_provider_not_configured
 def test_default_backend_raises_value_error_on_embed_when_provider_not_configured() -> None:
     """Default-wired ``AzureOpenAIBackend()`` raises ValueError on ``embed()``.
 
-    Sabotage: rewire the embed default to import ``kairix._azure.embed_text``
-    (the pre-migration shape) — the test would see a different exception
-    (credential error or empty-list return) and the match clause fails.
+    Sabotage: rewire the embed default to construct a hard-coded legacy
+    backend (the pre-migration shape) — the test would see a different
+    exception (credential error or empty-list return) and the match
+    clause fails.
     """
     backend = AzureOpenAIBackend()
     with pytest.raises(ValueError, match="missing the required 'provider:' field"):

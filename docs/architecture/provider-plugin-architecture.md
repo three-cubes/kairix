@@ -16,11 +16,12 @@
 
 The Phase-3 performance work accreted a small AI-gateway in process:
 `EmbedCoalescer` (#288), `EmbedCache` (#285), `QueryResultCache` (#281),
-retry/pool tuning (#280), plus a now-discovered TLS-handshake bug in
-`kairix/_azure.py:_get_client` where every coalescer batch builds a
-fresh `httpx.Client`. Each fix was sound on its own, but cumulatively
-they recreate a transport layer inside the domain module, with the same
-class of bugs that ship-stable transport infrastructure already solves.
+retry/pool tuning (#280), plus a TLS-handshake bug in the legacy
+`kairix/_azure.py:_get_client` (removed in v2026.5.17) where every
+coalescer batch built a fresh `httpx.Client`. Each fix was sound on
+its own, but cumulatively they recreated a transport layer inside the
+domain module, with the same class of bugs that ship-stable transport
+infrastructure already solves.
 
 A second forcing function: kairix has to be deployable on any VM
 (operator-owned or any enterprise cloud) with a configuration-driven
