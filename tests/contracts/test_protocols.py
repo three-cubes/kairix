@@ -665,7 +665,14 @@ class TestScoringStrategyImplementations:
 
     @pytest.mark.contract
     def test_llm_judge_scorer_satisfies_protocol(self):
-        assert isinstance(LLMJudgeScorer(), ScoringStrategy)
+        # Pass an explicit FakeChatBackend so the dataclass's default_factory
+        # doesn't invoke ProviderEvalChatBackend.from_config() — the production
+        # default needs ``kairix.config.yaml`` configured, which the contract
+        # test environment doesn't provide. The protocol-conformance check
+        # only cares about the resulting object satisfying ScoringStrategy.
+        from tests.fakes import FakeChatBackend
+
+        assert isinstance(LLMJudgeScorer(chat_backend=FakeChatBackend()), ScoringStrategy)
 
     @pytest.mark.contract
     def test_exact_match_scorer_empty_gold(self):

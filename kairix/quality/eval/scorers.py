@@ -76,8 +76,10 @@ class LLMJudgeScorer:
 
     Refactored per #204: chat_backend is a non-Optional ``ChatBackend``
     field with a ``default_factory`` wiring the production
-    ``AzureChatBackend``. Tests inject ``LLMJudgeScorer(chat_backend=fake)``;
-    production callers leave the kwarg unset and get the live backend.
+    :class:`~kairix.quality.eval.chat_backend.ProviderEvalChatBackend`.
+    Tests inject ``LLMJudgeScorer(chat_backend=fake)``; production
+    callers leave the kwarg unset and get the live backend wired to the
+    configured provider plugin.
 
     Attributes:
         chat_backend: ``ChatBackend`` protocol implementation.
@@ -101,15 +103,15 @@ class LLMJudgeScorer:
 
 
 def _default_chat_backend() -> ChatBackend:  # pragma: no cover — prod wrapper; tests pass chat_backend=fake
-    """Production ``ChatBackend`` factory — wraps ``AzureChatBackend``.
+    """Production ``ChatBackend`` factory — wraps the configured provider plugin.
 
     Kept as a separate function so the lambda in ``LLMJudgeScorer.chat_backend``
-    has a stable, typed default that doesn't import ``kairix._azure`` at
-    module-import time.
+    has a stable, typed default that doesn't import the provider layer
+    at module-import time.
     """
-    from kairix._azure import AzureChatBackend
+    from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
 
-    return AzureChatBackend()
+    return ProviderEvalChatBackend.from_config()
 
 
 # ---------------------------------------------------------------------------

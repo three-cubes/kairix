@@ -51,9 +51,9 @@ JUDGE_DEPLOYMENT: str = "gpt-4o-mini"
 CALIBRATION_MAX_ERRORS: int = 3  # raise if more anchors are wrong
 
 # JUDGE_API_VERSION and JUDGE_TIMEOUT_S were declared here but never used —
-# the Azure adapter (kairix._azure.chat_completion) sets its own API version
-# and timeout. Removed in #143 Phase 0b to stop giving the false impression
-# that this module controls those values.
+# the provider plugin sets its own API version and timeout. Removed in
+# #143 Phase 0b to stop giving the false impression that this module
+# controls those values.
 
 # Letter labels for presenting candidates to the LLM
 _LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -262,9 +262,9 @@ def _parse_grade_response(content: str, labels: list[str]) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 # LLMJudge — ChatBackend-injected LLM judge implementing the LLMJudge protocol.
 #
-# Production: LLMJudge(chat_backend=AzureChatBackend()) at the CLI / pipeline
-# entry point. Tests: LLMJudge(chat_backend=FakeChatBackend(...)) from
-# tests/fakes.py. The class owns the implementation — the module-level
+# Production: LLMJudge(chat_backend=ProviderEvalChatBackend.from_config()) at
+# the CLI / pipeline entry point. Tests: LLMJudge(chat_backend=FakeChatBackend(...))
+# from tests/fakes.py. The class owns the implementation — the module-level
 # judge_batch / calibrate functions below are thin shims for legacy callers
 # in generate.py / gold_builder.py and disappear when those drop.
 # ---------------------------------------------------------------------------
@@ -452,9 +452,9 @@ def judge_batch(
 ) -> JudgeResult:
     """DEPRECATED shim — use ``LLMJudge.grade``. Kept for legacy callers."""
     if chat_backend is None:
-        from kairix._azure import AzureChatBackend
+        from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
 
-        chat_backend = AzureChatBackend()
+        chat_backend = ProviderEvalChatBackend.from_config()
     return LLMJudge(chat_backend=chat_backend, deployment=deployment).grade(
         query,
         candidates,
@@ -472,9 +472,9 @@ def calibrate(
 ) -> bool:
     """DEPRECATED shim — use ``LLMJudge.calibrate``. Kept for legacy callers."""
     if chat_backend is None:
-        from kairix._azure import AzureChatBackend
+        from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
 
-        chat_backend = AzureChatBackend()
+        chat_backend = ProviderEvalChatBackend.from_config()
     return LLMJudge(chat_backend=chat_backend, deployment=deployment).calibrate(
         api_key=api_key,
         endpoint=endpoint,

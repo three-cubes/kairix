@@ -127,12 +127,18 @@ def test_judge_batch_records_shuffle_order() -> None:
 
 @pytest.mark.unit
 def test_judge_batch_empty_candidates() -> None:
-    """Empty candidate list returns empty JudgeResult."""
+    """Empty candidate list returns empty JudgeResult.
+
+    Injects ``FakeChatBackend`` so the shim doesn't reach the
+    provider-resolution path — the early-return on ``not candidates``
+    fires before any backend call.
+    """
     result = judge_batch(
         query=_QUERY,
         candidates=[],
         api_key="test-key",
         endpoint="https://test.openai.azure.com",
+        chat_backend=FakeChatBackend(responses=[]),
     )
     assert result.grades == {}
     assert result.shuffle_order == ()
@@ -178,13 +184,22 @@ def test_judge_batch_returns_zeros_on_malformed_json() -> None:
 
 @pytest.mark.unit
 def test_judge_batch_returns_zeros_when_no_credentials() -> None:
-    """Empty api_key/endpoint → all grades are 0, no exception."""
+    """Empty api_key/endpoint → all grades are 0, no exception.
+
+    The empty-credential branch lives inside ``LLMJudge.grade`` (raises
+    ``ValueError`` which is caught by the same method's try/except).
+    The shim only constructs the default backend when ``chat_backend``
+    is omitted — pass a ``FakeChatBackend`` so we exercise the empty-
+    credential branch deterministically without depending on the
+    provider-resolution path.
+    """
     result = judge_batch(
         query=_QUERY,
         candidates=_CANDIDATES,
         api_key="",
         endpoint="",
         shuffle=False,
+        chat_backend=FakeChatBackend(responses=[]),
     )
     assert all(g == 0 for g in result.grades.values())
 
@@ -474,17 +489,43 @@ def test_fetch_llm_credentials_returns_empties_when_secrets_unavailable() -> Non
 
 
 # ---------------------------------------------------------------------------
-# calibrate (free-function shim) — exercises the AzureChatBackend default branch
+# calibrate (free-function shim) — exercises the provider-backed default branch
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_calibrate_shim_constructs_default_backend_when_chat_backend_omitted() -> None:
-    """The free-function ``calibrate`` shim constructs an AzureChatBackend on its own.
+def test_calibrate_shim_raises_value_error_when_no_provider_configured() -> None:
+    """The free-function ``calibrate`` shim constructs a provider-backed default.
 
-    With empty credentials the inner ``LLMJudge.grade`` raises ValueError before
-    any network call, so each anchor returns grade 0 — for grade-2 / grade-1
-    anchors that's wrong, exceeding CALIBRATION_MAX_ERRORS=3.
+    When ``kairix.config.yaml`` has no ``provider:`` field (the default
+    test-environment shape), ``ProviderEvalChatBackend.from_config()``
+    raises ``ValueError`` with an actionable affordance — the shim
+    surfaces that directly rather than masking it.
+
+    Sabotage proof: regressing the shim to silently swallow the missing-
+    provider error (e.g. returning ``True`` like a passing calibration)
+    would let this test fall through without raising; pinned by the
+    ``pytest.raises(ValueError)`` matcher on the affordance text.
     """
-    with pytest.raises(JudgeCalibrationError):
+    with pytest.raises(ValueError, match="provider:"):
         calibrate(api_key="", endpoint="")
+
+
+@pytest.mark.unit
+def test_calibrate_shim_uses_injected_chat_backend_when_supplied() -> None:
+    """When a ``chat_backend`` is passed explicitly, the shim does not touch
+    the provider-resolution path.
+
+    The injected ``FakeChatBackend`` exhausts its canned responses across the
+    15 calibration anchors and most replies parse to grade 0 — so for
+    grade-2 / grade-1 anchors the result is wrong, exceeding
+    CALIBRATION_MAX_ERRORS=3 and raising ``JudgeCalibrationError``.
+
+    Sabotage proof: regressing the shim to ignore ``chat_backend`` and call
+    the provider-resolution path anyway would raise the missing-provider
+    ``ValueError`` (different exception type) — pinned by the
+    ``pytest.raises(JudgeCalibrationError)`` match here.
+    """
+    fake = FakeChatBackend(responses=['{"A": 0}'] * len(CALIBRATION_ANCHORS))
+    with pytest.raises(JudgeCalibrationError):
+        calibrate(api_key="k", endpoint="https://e", chat_backend=fake)
