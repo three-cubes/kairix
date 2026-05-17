@@ -1,4 +1,4 @@
-"""Unit tests for kairix.core.embed.embed_coalescer.EmbedCoalescer (#288).
+"""Unit tests for kairix.transport.coalesce.EmbedCoalescer (#288).
 
 Every test is sabotage-proof: each assertion's comment names a concrete
 mutation in production that would break the assertion, so a future
@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from kairix.core.embed.embed_coalescer import (
+from kairix.transport.coalesce import (
     DEFAULT_COALESCE_WINDOW_MS,
     DEFAULT_MAX_BATCH_SIZE,
     CoalescerStats,

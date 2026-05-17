@@ -1,16 +1,31 @@
-"""In-process request coalescer for transport.
+"""EmbedCoalescer — universal coalescing for concurrent endpoint calls.
 
-See docs/architecture/provider-plugin-architecture.md. Re-exports the
-current ``EmbedCoalescer`` from ``kairix.core.embed.embed_coalescer``.
-Wave 2 (IM-2) will flip the canonical path; this shim keeps imports
-working during the migration so consumers can opportunistically switch
-to the ``kairix.transport.coalesce`` namespace ahead of the move.
+In-process request coalescer that folds N concurrent single-text embed
+calls into one batched HTTP request, so N agents asking N different
+questions in the same window pay one round-trip latency total instead
+of N.
+
+This is the canonical home for the coalescer (Wave 2 / IM-2 of the
+provider-plugin-architecture migration). See
+``docs/architecture/provider-plugin-architecture.md`` for the
+three-layer split that places universal endpoint concerns under
+``kairix/transport/`` and away from the domain layer.
 """
 
-from kairix.core.embed.embed_coalescer import (
+from kairix.transport.coalesce.embed_coalescer import (
+    DEFAULT_COALESCE_WINDOW_MS,
+    DEFAULT_MAX_BATCH_SIZE,
+    CoalescerStats,
     EmbedCoalescer,
     get_embed_coalescer,
     reset_embed_coalescer,
 )
 
-__all__ = ["EmbedCoalescer", "get_embed_coalescer", "reset_embed_coalescer"]
+__all__ = [
+    "DEFAULT_COALESCE_WINDOW_MS",
+    "DEFAULT_MAX_BATCH_SIZE",
+    "CoalescerStats",
+    "EmbedCoalescer",
+    "get_embed_coalescer",
+    "reset_embed_coalescer",
+]

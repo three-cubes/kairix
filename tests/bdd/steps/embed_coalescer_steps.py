@@ -1,6 +1,6 @@
 """Step definitions for embed_coalescer.feature (#288).
 
-Drives the real :class:`kairix.core.embed.embed_coalescer.EmbedCoalescer`
+Drives the real :class:`kairix.transport.coalesce.EmbedCoalescer`
 with a counting fake batch function so each scenario can pin call
 count + batch sizes. F1-clean (no @patch on internals), F2-clean (no
 env monkeypatch), F5-clean (no private-name imports — the coalescer
@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from pytest_bdd import given, then, when
 
-from kairix.core.embed.embed_coalescer import EmbedCoalescer
+from kairix.transport.coalesce import EmbedCoalescer
 
 pytestmark = pytest.mark.bdd
 

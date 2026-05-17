@@ -222,8 +222,8 @@ def _route_through_coalescer(text: str, deployment: str | None, *, client: Any |
     their own deployment in the fake batch_fn.
     """
     del deployment  # F19: see docstring
-    from kairix.core.embed import embed_coalescer as embed_coalescer_mod
-    from kairix.core.embed.embed_coalescer import get_embed_coalescer
+    from kairix.transport.coalesce import embed_coalescer as embed_coalescer_mod
+    from kairix.transport.coalesce import get_embed_coalescer
 
     # If a singleton is already installed, use it — even if client= was
     # passed (the singleton's batch_fn owns its own client/transport).

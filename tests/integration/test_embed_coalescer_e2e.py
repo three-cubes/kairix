@@ -21,10 +21,10 @@ from typing import Any
 import pytest
 
 from kairix.core.embed import embed_cache as embed_cache_mod
-from kairix.core.embed import embed_coalescer as embed_coalescer_mod
 from kairix.core.embed import embed_text
 from kairix.core.embed.embed_cache import EmbedCache, reset_embed_cache
-from kairix.core.embed.embed_coalescer import EmbedCoalescer, reset_embed_coalescer
+from kairix.transport.coalesce import EmbedCoalescer, reset_embed_coalescer
+from kairix.transport.coalesce import embed_coalescer as embed_coalescer_mod
 
 pytestmark = pytest.mark.integration
 

@@ -138,7 +138,7 @@ def _reset_embed_coalescer():
     keeps each test's coalescer state isolated.
     """
     yield
-    from kairix.core.embed.embed_coalescer import reset_embed_coalescer
+    from kairix.transport.coalesce import reset_embed_coalescer
 
     reset_embed_coalescer()
 

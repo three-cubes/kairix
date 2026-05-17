@@ -1,5 +1,10 @@
 """In-process request coalescer for concurrent embed calls.
 
+Lives in :mod:`kairix.transport.coalesce` per the three-layer provider
+plugin architecture (see ``docs/architecture/provider-plugin-architecture.md``).
+The previous home at ``kairix.core.embed.embed_coalescer`` is gone;
+all callers import from ``kairix.transport.coalesce`` now.
+
 #288 — fold concurrent single-text embed calls into one batched Azure
 HTTP request so N agents asking N different questions in the same
 window pay one round-trip latency total instead of N.
