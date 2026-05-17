@@ -170,6 +170,16 @@ def _add_burst_args(p: argparse.ArgumentParser) -> None:
         help=f"pass-fail cap on sustained-vs-peak QPS drop. Default {DEFAULT_QPS_DROP_PCT_THRESHOLD}.",
     )
     p.add_argument(
+        "--include-warmup",
+        action=_STORE_TRUE,
+        help=(
+            "include pre-completion (cold-start) and partial-final buckets in "
+            "headline peak/sustained stats. Default off — auto-skip keeps the "
+            "headline aligned with steady-state behaviour. Use to inspect the "
+            "raw timeline."
+        ),
+    )
+    p.add_argument(
         "--json",
         action=_STORE_TRUE,
         help="emit JSON envelope on stdout; suppress human-readable output",
@@ -321,11 +331,25 @@ def _invalid_args(message: str) -> int:
 
 
 def _format_burst_buckets(result: BurstResult) -> list[str]:
+    skipped_idx = {s.index for s in result.skipped_buckets}
     lines = ["  buckets:"]
-    for b in result.buckets:
+    for i, b in enumerate(result.buckets):
+        marker = "  [skipped]" if i in skipped_idx else ""
         lines.append(
-            f"    [{b.window_start_s}-{b.window_end_s}s) qps={b.qps} completed={b.queries_completed}  errors={b.errors}"
+            f"    [{b.window_start_s}-{b.window_end_s}s) qps={b.qps} "
+            f"completed={b.queries_completed}  errors={b.errors}{marker}"
         )
+    return lines
+
+
+def _format_burst_skip_summary(result: BurstResult) -> list[str]:
+    if result.include_warmup:
+        return ["  warmup-detection: disabled (raw timeline; --include-warmup)"]
+    if not result.skipped_buckets:
+        return ["  warmup-detection: clean (no buckets skipped)"]
+    lines = ["  warmup-detection: auto-skip applied"]
+    for s in result.skipped_buckets:
+        lines.append(f"    skipped bucket {s.index}: {s.reason}")
     return lines
 
 
@@ -352,6 +376,7 @@ def _format_burst_text(result: BurstResult) -> str:
         f"qps_drop={result.qps_drop_pct}%  wallclock={result.wallclock_s:.2f}s  errors={result.errors}",
     ]
     lines.extend(_format_burst_buckets(result))
+    lines.extend(_format_burst_skip_summary(result))
     lines.extend(_format_burst_verdict(result))
     return "\n".join(lines)
 
@@ -364,6 +389,7 @@ def _emit_burst(args: argparse.Namespace) -> int:
         bucket_ms=args.bucket_ms,
         seed=args.seed,
         qps_drop_threshold_pct=args.qps_drop_threshold_pct,
+        include_warmup=args.include_warmup,
     )
     if args.json:
         print(json.dumps(result.to_envelope(), indent=2))

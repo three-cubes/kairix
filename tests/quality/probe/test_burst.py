@@ -328,3 +328,172 @@ def test_default_threshold_constant_is_thirty_percent() -> None:
     passes — the change must be intentional and visible in the diff.
     """
     assert DEFAULT_QPS_DROP_PCT_THRESHOLD == 30.0
+
+
+def test_cold_start_pre_completion_buckets_are_auto_skipped() -> None:
+    """A slow opening run produces leading zero-completion buckets — those
+    must not appear in ``sustained_qps`` and must be listed in ``skipped_buckets``
+    with the pre-completion rationale.
+
+    We pace concurrency=1 with one slow leading query (~80 ms) and a fast
+    tail; with bucket_ms=20 the first 3-4 buckets carry no completions at
+    all (queries in flight, none completed). The first_completion_bucket_idx
+    must point past the zero-completion tail.
+
+    Sabotage: remove the pre-completion skip branch from
+    ``_identify_skipped_buckets`` and the cold-start buckets appear in
+    headline stats — sustained_qps drops to near zero and the assertion on
+    the rationale string fails.
+    """
+    call_counter = {"i": 0}
+
+    def slow_first_then_fast(_q: SampledQuery) -> int:
+        call_counter["i"] += 1
+        if call_counter["i"] == 1:
+            time.sleep(0.08)
+        return 0
+
+    result = run_probe_burst(
+        suite="x",
+        total_queries=20,
+        peak_concurrency=1,
+        bucket_ms=20,
+        suite_loader=_suite_loader,
+        searcher=slow_first_then_fast,
+    )
+    # Cold-start buckets must be detected and surfaced.
+    assert result.first_completion_bucket_idx >= 1, (
+        f"expected zero-completion lead buckets, got first_completion_bucket_idx={result.first_completion_bucket_idx}"
+    )
+    pre_completion = [s for s in result.skipped_buckets if "pre-completion" in s.reason]
+    assert pre_completion, f"expected pre-completion skip rationale; got skipped={result.skipped_buckets}"
+    # Auto-skip must produce a non-zero sustained_qps from the steady-state tail.
+    assert result.sustained_qps > 0
+    # The full timeline is retained for inspection even after auto-skip.
+    assert len(result.buckets) >= result.first_completion_bucket_idx + 1
+
+
+def test_include_warmup_disables_auto_skip() -> None:
+    """``include_warmup=True`` mirrors raw-timeline behaviour: every bucket
+    is part of the headline stats, ``skipped_buckets`` is empty, but the
+    diagnostic fields (first_completion_bucket_idx, partial_final_bucket)
+    still reflect what auto-skip *would* have detected.
+
+    Sabotage: drop the ``include_warmup`` branch in ``_compute_qps_summary``
+    and the operator opt-in becomes a no-op — skipped_buckets stays non-empty
+    and the headline numbers change vs raw mode, breaking the contract.
+    """
+    call_counter = {"i": 0}
+
+    def slow_first_then_fast(_q: SampledQuery) -> int:
+        call_counter["i"] += 1
+        if call_counter["i"] == 1:
+            time.sleep(0.08)
+        return 0
+
+    auto = run_probe_burst(
+        suite="x",
+        total_queries=20,
+        peak_concurrency=1,
+        bucket_ms=20,
+        suite_loader=_suite_loader,
+        searcher=slow_first_then_fast,
+    )
+    # Reset counter for the second run so it sees the same shape.
+    call_counter["i"] = 0
+    raw = run_probe_burst(
+        suite="x",
+        total_queries=20,
+        peak_concurrency=1,
+        bucket_ms=20,
+        include_warmup=True,
+        suite_loader=_suite_loader,
+        searcher=slow_first_then_fast,
+    )
+    assert raw.include_warmup is True
+    assert auto.include_warmup is False
+    assert raw.skipped_buckets == [], "include_warmup=True must drop the skip list (raw mode)"
+    # Diagnostic fields still surface — operator wants to see what auto-skip
+    # would have caught even when they opt out of the trim.
+    assert raw.first_completion_bucket_idx >= 1
+    # When sustained drops to near-zero from cold-start contamination, the
+    # raw sustained must be lower than the auto-skipped sustained (auto-skip
+    # excludes the zero-QPS leading buckets).
+    if auto.skipped_buckets:
+        assert raw.sustained_qps <= auto.sustained_qps, (
+            f"raw sustained={raw.sustained_qps} should be <= auto={auto.sustained_qps} "
+            "(raw includes pre-completion zero buckets)"
+        )
+
+
+def test_skipped_buckets_serialise_in_envelope() -> None:
+    """The JSON envelope must round-trip ``skipped_buckets`` as a list of
+    {index, reason} dicts so MCP / CI consumers can read what was trimmed.
+
+    Sabotage: drop the ``skipped_buckets`` key from ``to_envelope`` and an
+    operator parsing the JSON loses the "why this bucket was excluded"
+    rationale — the assertion on the reason string fails.
+    """
+    call_counter = {"i": 0}
+
+    def slow_first_then_fast(_q: SampledQuery) -> int:
+        call_counter["i"] += 1
+        if call_counter["i"] == 1:
+            time.sleep(0.08)
+        return 0
+
+    result = run_probe_burst(
+        suite="x",
+        total_queries=15,
+        peak_concurrency=1,
+        bucket_ms=20,
+        suite_loader=_suite_loader,
+        searcher=slow_first_then_fast,
+    )
+    env = result.to_envelope()
+    assert "skipped_buckets" in env
+    assert "first_completion_bucket_idx" in env
+    assert "partial_final_bucket" in env
+    assert "include_warmup" in env
+    assert isinstance(env["skipped_buckets"], list)
+    if env["skipped_buckets"]:
+        first = env["skipped_buckets"][0]
+        assert "index" in first
+        assert "reason" in first
+        assert isinstance(first["index"], int)
+        assert isinstance(first["reason"], str)
+
+
+def test_partial_final_bucket_flagged_when_wallclock_clips_window() -> None:
+    """When the wallclock ends mid-bucket, the final bucket's width is
+    < 80% of ``bucket_ms`` and ``partial_final_bucket`` flips to True.
+
+    We arrange for a wallclock cliff by setting bucket_ms large enough that
+    the run finishes well inside the second bucket. The probe must:
+      - flag ``partial_final_bucket`` True;
+      - list the final bucket index in ``skipped_buckets`` with the
+        partial-final rationale (so it can't inflate peak_qps).
+
+    Sabotage: remove the partial-final detection from
+    ``_identify_skipped_buckets`` and the clipped final bucket leaks into
+    headline peak_qps — the assertion on the rationale fails.
+    """
+    # Fast searcher; 5 queries take <50 ms total. bucket_ms=500 means the
+    # final bucket is partial (width ~= run wallclock, far below 0.5 s).
+    result = run_probe_burst(
+        suite="x",
+        total_queries=5,
+        peak_concurrency=1,
+        bucket_ms=500,
+        suite_loader=_suite_loader,
+        searcher=_fast_client.search,
+    )
+    assert result.partial_final_bucket is True, (
+        f"expected partial-final bucket; wallclock={result.wallclock_s} "
+        f"bucket_ms={result.bucket_ms} buckets={result.buckets}"
+    )
+    partial = [s for s in result.skipped_buckets if "partial-final" in s.reason]
+    assert partial, f"expected partial-final rationale in skipped_buckets; got {result.skipped_buckets}"
+    # Final bucket must be the last index.
+    final_idx = len(result.buckets) - 1
+    assert any(s.index == final_idx for s in result.skipped_buckets)

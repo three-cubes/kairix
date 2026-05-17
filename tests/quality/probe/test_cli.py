@@ -478,6 +478,34 @@ def test_burst_bucket_ms_zero_exits_two() -> None:
     assert "fix:" in stderr
 
 
+def test_burst_include_warmup_flag_forwards_to_runner() -> None:
+    """``--include-warmup`` must propagate to ``run_probe_burst(include_warmup=True)``.
+
+    Sabotage: drop the ``include_warmup=args.include_warmup`` forwarding in
+    ``_emit_burst`` and the operator opt-in becomes a silent no-op — the
+    runner always auto-skips, regardless of the flag.
+    """
+    with mock.patch.object(probe_cli, "run_probe_burst", return_value=_pass_burst_result()) as m:
+        rc, _stdout, _ = _capture(["burst", "--suite", "reflib", "--include-warmup"])
+    assert rc == 0
+    assert m.call_count == 1
+    _, kwargs = m.call_args
+    assert kwargs.get("include_warmup") is True
+
+
+def test_burst_omits_include_warmup_by_default() -> None:
+    """Default invocation (no ``--include-warmup``) forwards ``include_warmup=False``.
+
+    Sabotage: flip the argparse default to True and the auto-skip stops
+    firing for the headline operator path — defeating #283's fix.
+    """
+    with mock.patch.object(probe_cli, "run_probe_burst", return_value=_pass_burst_result()) as m:
+        rc, _stdout, _ = _capture(["burst", "--suite", "reflib"])
+    assert rc == 0
+    _, kwargs = m.call_args
+    assert kwargs.get("include_warmup") is False
+
+
 def test_search_subcommand_still_dispatches_after_refactor() -> None:
     # Sabotage: collapse the subparsers refactor and the search dispatch
     # breaks — call_count drops to zero.

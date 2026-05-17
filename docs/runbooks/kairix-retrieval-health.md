@@ -325,7 +325,14 @@ Complementary to `probe search`. Search measures p50/p95/p99 latency at sustaine
 kairix probe burst --suite reflib --total-queries 200 --peak-concurrency 20 --json | jq .
 ```
 
-Read three fields: `peak_qps`, `sustained_qps` (mean of post-warmup buckets, skipping the first 2), and `qps_drop_pct`. Pass = drop within 30% AND zero errors.
+Read three fields: `peak_qps` (max QPS across headline-eligible buckets), `sustained_qps` (mean of headline-eligible buckets), and `qps_drop_pct`. Pass = drop within 30% AND zero errors.
+
+The probe auto-skips two classes of contaminated buckets from headline stats:
+
+- **Pre-completion buckets** — the cold factory-build tax (~4-5 s on a fresh CLI subprocess) leaves leading buckets with zero completions. `first_completion_bucket_idx` tells you how many were dropped; the run anchors the warmup window there, then skips a further 2 buckets to clear post-cold-start churn.
+- **Partial-final bucket** — when wallclock ends mid-window, the final bucket's narrow width inflates `qps` artificially (a handful of queries / sub-bucket-ms width). `partial_final_bucket: true` flags it; it's excluded from `peak_qps` so the operator sees a steady-state peak, not a clipped-window artifact.
+
+The full timeline stays in `buckets` (for inspection) and `skipped_buckets` lists the trimmed indices with rationale strings. To see headline stats computed over every bucket (raw mode), pass `--include-warmup`.
 
 ```
 fix: investigate sustained QPS degradation — likely cache eviction or resource leak under burst

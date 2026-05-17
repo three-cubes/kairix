@@ -31,7 +31,14 @@ from kairix.quality.probe.runner import SampledQuery
 from kairix.quality.probe.sampler import sample_weighted
 
 DEFAULT_QPS_DROP_PCT_THRESHOLD = 30.0  # % — sustained must stay within this of peak
-_WARMUP_BUCKETS = 2  # skip the first N buckets when computing sustained_qps
+_WARMUP_BUCKETS_AFTER_COMPLETION = 2  # skip N more buckets once completions begin
+_PARTIAL_FINAL_BUCKET_FRACTION = 0.8  # final bucket whose width < 80% of bucket_ms is partial
+
+# Rationale strings surfaced in ``BurstResult.skipped_buckets`` so the operator
+# can see *why* a bucket was trimmed from headline stats. F17-safe via constant.
+_REASON_PRE_COMPLETION = "pre-completion: no queries finished in this bucket (cold factory)"
+_REASON_WARMUP_AFTER_FIRST = "warmup: within the first N buckets after completions begin"
+_REASON_PARTIAL_FINAL = "partial-final: bucket width is <80% of bucket_ms (clipped window)"
 
 
 @dataclass(frozen=True)
@@ -46,6 +53,14 @@ class BurstBucket:
 
 
 @dataclass(frozen=True)
+class SkippedBucket:
+    """An index excluded from headline stats with operator-readable rationale."""
+
+    index: int
+    reason: str
+
+
+@dataclass(frozen=True)
 class BurstResult:
     """Outcome of one ``run_probe_burst`` call. Round-trippable via ``to_envelope``.
 
@@ -56,12 +71,27 @@ class BurstResult:
         bucket_ms: time-bucket width in milliseconds.
         seed: deterministic sample/shuffle seed.
         wallclock_s: total elapsed time across the run.
-        buckets: per-window throughput slices, in chronological order.
-        peak_qps: max QPS across all buckets.
-        sustained_qps: mean of post-warmup buckets (skips first
-            ``_WARMUP_BUCKETS``). Falls back to peak_qps when fewer than
-            ``_WARMUP_BUCKETS + 1`` buckets exist.
+        buckets: per-window throughput slices, in chronological order. The
+            full list is retained for transparency even when headline stats
+            exclude some of them.
+        peak_qps: max QPS across headline-eligible buckets (excludes the
+            partial-final bucket when present, since a partial window inflates
+            QPS spuriously).
+        sustained_qps: mean of headline-eligible buckets starting at
+            ``first_completion_bucket_idx + _WARMUP_BUCKETS_AFTER_COMPLETION``,
+            ending before any partial-final bucket. Falls back to peak when
+            insufficient buckets remain after auto-skip.
         qps_drop_pct: percentage drop from peak to sustained.
+        first_completion_bucket_idx: index of the first bucket with at least
+            one completed query (the cold-start tail ends here). 0 when no
+            warmup contamination was detected.
+        partial_final_bucket: True when the final bucket's actual width is
+            less than ``_PARTIAL_FINAL_BUCKET_FRACTION`` of ``bucket_ms`` —
+            indicating the wallclock ended mid-window.
+        skipped_buckets: indices excluded from headline stats with reason
+            strings. Empty when ``include_warmup=True``.
+        include_warmup: True when the operator opted to disable auto-skip
+            (raw timeline mode). Headline stats then span every bucket.
         errors: number of tasks that raised inside the executor.
         qps_drop_threshold_pct: pass-fail cap (default 30%).
         passed: True when qps_drop_pct <= threshold AND errors == 0.
@@ -77,6 +107,10 @@ class BurstResult:
     peak_qps: float = 0.0
     sustained_qps: float = 0.0
     qps_drop_pct: float = 0.0
+    first_completion_bucket_idx: int = 0
+    partial_final_bucket: bool = False
+    skipped_buckets: list[SkippedBucket] = field(default_factory=list)
+    include_warmup: bool = False
     errors: int = 0
     qps_drop_threshold_pct: float = DEFAULT_QPS_DROP_PCT_THRESHOLD
     passed: bool = True
@@ -94,6 +128,10 @@ class BurstResult:
             "peak_qps": self.peak_qps,
             "sustained_qps": self.sustained_qps,
             "qps_drop_pct": self.qps_drop_pct,
+            "first_completion_bucket_idx": self.first_completion_bucket_idx,
+            "partial_final_bucket": self.partial_final_bucket,
+            "skipped_buckets": [{"index": s.index, "reason": s.reason} for s in self.skipped_buckets],
+            "include_warmup": self.include_warmup,
             "errors": self.errors,
             "qps_drop_threshold_pct": self.qps_drop_threshold_pct,
             "passed": self.passed,
@@ -210,24 +248,127 @@ def _group_into_buckets(
     return buckets
 
 
-def _compute_qps_summary(buckets: list[BurstBucket]) -> tuple[float, float, float]:
-    """Return (peak_qps, sustained_qps, qps_drop_pct).
+def _first_completion_idx(buckets: list[BurstBucket]) -> int:
+    """Return the index of the first bucket with ``queries_completed > 0``.
 
-    sustained_qps = mean(qps for buckets[_WARMUP_BUCKETS:]). When fewer than
-    _WARMUP_BUCKETS + 1 buckets exist, sustained falls back to peak so
-    qps_drop_pct stays 0 (insufficient data to claim degradation).
+    Cold-start contamination shows up as leading zero-completion buckets while
+    the CLI subprocess pays the factory-build tax. We need to anchor the warmup
+    window to "queries actually started completing" rather than wallclock zero.
+    Returns 0 when every bucket has completions (no contamination detected).
     """
-    if not buckets:
+    for i, b in enumerate(buckets):
+        if b.queries_completed > 0:
+            return i
+    return 0
+
+
+def _is_partial_final(bucket: BurstBucket, bucket_ms: int) -> bool:
+    """True when the final bucket's actual width is < 80% of nominal.
+
+    A bucket clipped by the wallclock cliff hosts only a handful of queries
+    in a sub-bucket-ms window, so its qps = N / tiny_width is artificially
+    inflated. We detect that geometry and exclude it from headline peak/
+    sustained to keep the operator's "peak_qps" intuition honest.
+    """
+    width = bucket.window_end_s - bucket.window_start_s
+    nominal = bucket_ms / 1000.0
+    return width < nominal * _PARTIAL_FINAL_BUCKET_FRACTION
+
+
+def _identify_skipped_buckets(
+    buckets: list[BurstBucket],
+    bucket_ms: int,
+    first_completion: int,
+) -> tuple[list[SkippedBucket], bool]:
+    """Return (skipped_buckets, partial_final_bucket).
+
+    Buckets are skipped in three layers:
+      1. Every leading bucket with ``queries_completed == 0`` (cold factory).
+      2. ``_WARMUP_BUCKETS_AFTER_COMPLETION`` buckets after completions begin
+         (steady-state hasn't been reached yet — old hand-tuned constant).
+      3. The final bucket if its width is < 80% of ``bucket_ms`` (partial).
+    """
+    skipped: list[SkippedBucket] = []
+    n = len(buckets)
+    partial = bool(buckets) and _is_partial_final(buckets[-1], bucket_ms)
+    final_idx = n - 1 if buckets else -1
+    for i in range(min(first_completion, n)):
+        # Pre-completion takes precedence over partial-final at the same idx —
+        # cold start is the bigger signal. (Hits when the run produced zero
+        # completions; n_buckets degenerates to 1.)
+        skipped.append(SkippedBucket(index=i, reason=_REASON_PRE_COMPLETION))
+    warmup_end = min(first_completion + _WARMUP_BUCKETS_AFTER_COMPLETION, n)
+    for i in range(first_completion, warmup_end):
+        # If this warmup bucket is *also* the partial-final, prefer the
+        # partial-final reason — clipping is the more actionable diagnosis
+        # (operator can re-run with a longer wallclock to fix it).
+        if partial and i == final_idx:
+            skipped.append(SkippedBucket(index=i, reason=_REASON_PARTIAL_FINAL))
+        else:
+            skipped.append(SkippedBucket(index=i, reason=_REASON_WARMUP_AFTER_FIRST))
+    if partial and final_idx >= warmup_end:
+        skipped.append(SkippedBucket(index=final_idx, reason=_REASON_PARTIAL_FINAL))
+    return skipped, partial
+
+
+def _summarise_from_eligible(eligible: list[BurstBucket]) -> tuple[float, float, float]:
+    """Compute (peak_qps, sustained_qps, qps_drop_pct) from headline-eligible buckets.
+
+    ``eligible`` is the bucket list with auto-skip already applied (cold start,
+    post-completion warmup, partial-final all removed). When empty we return
+    zeros — the caller falls back to the peak-equals-sustained branch.
+    """
+    if not eligible:
         return 0.0, 0.0, 0.0
-    peak_qps = max(b.qps for b in buckets)
-    post_warmup = buckets[_WARMUP_BUCKETS:]
-    if not post_warmup:
-        return peak_qps, peak_qps, 0.0
-    sustained_qps = sum(b.qps for b in post_warmup) / len(post_warmup)
+    peak_qps = max(b.qps for b in eligible)
+    sustained_qps = sum(b.qps for b in eligible) / len(eligible)
     if peak_qps <= 0:
-        return peak_qps, sustained_qps, 0.0
+        return round(peak_qps, 3), round(sustained_qps, 3), 0.0
     qps_drop_pct = max(0.0, (peak_qps - sustained_qps) / peak_qps * 100.0)
     return round(peak_qps, 3), round(sustained_qps, 3), round(qps_drop_pct, 2)
+
+
+def _compute_qps_summary(
+    buckets: list[BurstBucket],
+    bucket_ms: int,
+    *,
+    include_warmup: bool,
+) -> tuple[float, float, float, int, bool, list[SkippedBucket]]:
+    """Return (peak_qps, sustained_qps, qps_drop_pct, first_completion_idx,
+    partial_final_bucket, skipped_buckets).
+
+    Headline stats auto-skip pre-completion (cold-start) and partial-final
+    buckets unless ``include_warmup=True`` (raw timeline mode). The full
+    ``buckets`` list is always preserved on the result for operator inspection.
+    """
+    if not buckets:
+        return 0.0, 0.0, 0.0, 0, False, []
+
+    first_completion = _first_completion_idx(buckets)
+    skipped, partial = _identify_skipped_buckets(buckets, bucket_ms, first_completion)
+
+    if include_warmup:
+        # Operator opted to see the raw timeline; surface diagnostics but use
+        # every bucket for headline numbers (matches pre-auto-skip behaviour).
+        peak, sustained, drop = _summarise_from_eligible(buckets)
+        return peak, sustained, drop, first_completion, partial, []
+
+    skipped_idxs = {s.index for s in skipped}
+    eligible = [b for i, b in enumerate(buckets) if i not in skipped_idxs]
+    if not eligible:
+        # Auto-skip consumed every bucket — fall back to raw peak so the
+        # operator still sees a number rather than a silent zero.
+        peak_raw = max(b.qps for b in buckets)
+        return (
+            round(peak_raw, 3),
+            round(peak_raw, 3),
+            0.0,
+            first_completion,
+            partial,
+            skipped,
+        )
+    peak, sustained, drop = _summarise_from_eligible(eligible)
+    return peak, sustained, drop, first_completion, partial, skipped
 
 
 def run_probe_burst(
@@ -237,6 +378,7 @@ def run_probe_burst(
     bucket_ms: int = 500,
     seed: int = 0,
     qps_drop_threshold_pct: float = DEFAULT_QPS_DROP_PCT_THRESHOLD,
+    include_warmup: bool = False,
     *,
     suite_loader: Callable[[str], list[Any]] | None = None,
     searcher: Callable[[SampledQuery], Any] | None = None,
@@ -250,12 +392,18 @@ def run_probe_burst(
         bucket_ms: time-bucket width in milliseconds (>=1).
         seed: deterministic sample + shuffle seed.
         qps_drop_threshold_pct: pass-fail cap on sustained-from-peak QPS drop.
+        include_warmup: when True, disable auto-skip and compute headline
+            stats from every bucket (raw timeline mode). Default False — most
+            operators want pre-completion + partial-final buckets excluded so
+            ``peak_qps`` / ``sustained_qps`` reflect steady-state behaviour.
         suite_loader: test seam — returns list[BenchmarkCase] for a suite name.
         searcher: test seam — runs one SampledQuery through a search pipeline.
 
     Returns:
-        BurstResult with per-bucket QPS, peak/sustained summary, error count,
-        and pass/fail verdict.
+        BurstResult with the full per-bucket timeline, headline peak/sustained
+        summary (auto-skip applied unless ``include_warmup=True``), the
+        bucket indices skipped with rationale, error count, and pass/fail
+        verdict.
 
     Raises:
         ValueError: when total_queries<1, peak_concurrency<1, or bucket_ms<1.
@@ -291,7 +439,14 @@ def run_probe_burst(
             completions.append((wallclock_s, False))
 
     buckets = _group_into_buckets(completions, bucket_ms, wallclock_s)
-    peak_qps, sustained_qps, qps_drop_pct = _compute_qps_summary(buckets)
+    (
+        peak_qps,
+        sustained_qps,
+        qps_drop_pct,
+        first_completion_idx,
+        partial_final,
+        skipped,
+    ) = _compute_qps_summary(buckets, bucket_ms, include_warmup=include_warmup)
     passed = qps_drop_pct <= qps_drop_threshold_pct and run.errors == 0
 
     return BurstResult(
@@ -305,6 +460,10 @@ def run_probe_burst(
         peak_qps=peak_qps,
         sustained_qps=sustained_qps,
         qps_drop_pct=qps_drop_pct,
+        first_completion_bucket_idx=first_completion_idx,
+        partial_final_bucket=partial_final,
+        skipped_buckets=skipped,
+        include_warmup=include_warmup,
         errors=run.errors,
         qps_drop_threshold_pct=qps_drop_threshold_pct,
         passed=passed,
