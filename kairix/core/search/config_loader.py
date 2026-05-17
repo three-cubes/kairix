@@ -96,6 +96,56 @@ def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _resolve_layered_base(base_value: str, image_base_default: Path) -> Path | None:
+    """Resolve the base path for layered mode.
+
+    Explicit ``KAIRIX_CONFIG_BASE_PATH`` wins; otherwise the image-bundled
+    default applies when it exists. Missing files log a warning and yield
+    ``None`` so the caller can degrade gracefully.
+    """
+    if base_value:
+        base_p = Path(base_value)
+        if base_p.is_file():
+            return base_p
+        logger.warning("config_loader: KAIRIX_CONFIG_BASE_PATH=%r not found", base_value)
+        return None
+    return image_base_default if image_base_default.is_file() else None
+
+
+def _resolve_layered_overlay(overlay_value: str) -> Path | None:
+    """Resolve the overlay path for layered mode.
+
+    Empty string → ``None`` (base-only layered mode). Missing file logs a
+    warning and yields ``None`` so the caller still loads the base alone.
+    """
+    if not overlay_value:
+        return None
+    overlay_p = Path(overlay_value)
+    if overlay_p.is_file():
+        return overlay_p
+    logger.warning(
+        "config_loader: KAIRIX_CONFIG_OVERLAY_PATH=%r not found — loading base alone",
+        overlay_value,
+    )
+    return None
+
+
+def _resolve_legacy_or_cwd(env: dict[str, str]) -> tuple[Path | None, Path | None]:
+    """Resolve the legacy single-file mode or cwd-discovery fallback."""
+    legacy_value = env.get("KAIRIX_CONFIG_PATH", "").strip()
+    if legacy_value:
+        legacy_p = Path(legacy_value)
+        if legacy_p.is_file():
+            return legacy_p, None
+        logger.warning("config_loader: KAIRIX_CONFIG_PATH=%r not found — using defaults", legacy_value)
+        return None, None
+
+    cwd_p = Path.cwd() / _DEFAULT_CONFIG_FILENAME
+    if cwd_p.is_file():
+        return cwd_p, None
+    return None, None
+
+
 def resolve_layered_paths(
     *,
     env: dict[str, str] | None = None,
@@ -124,41 +174,9 @@ def resolve_layered_paths(
     base_value = env.get("KAIRIX_CONFIG_BASE_PATH", "").strip()
 
     if overlay_value or base_value:
-        # Layered mode — either explicit base, explicit overlay, or both.
-        # Base falls back to the image-bundled default when KAIRIX_CONFIG_BASE_PATH
-        # is unset.
-        if base_value:
-            base_p: Path | None = Path(base_value)
-            if not base_p.is_file():
-                logger.warning("config_loader: KAIRIX_CONFIG_BASE_PATH=%r not found", base_value)
-                base_p = None
-        else:
-            base_p = image_base_default if image_base_default.is_file() else None
+        return _resolve_layered_base(base_value, image_base_default), _resolve_layered_overlay(overlay_value)
 
-        if overlay_value:
-            overlay_p: Path | None = Path(overlay_value)
-            if not overlay_p.is_file():
-                logger.warning(
-                    "config_loader: KAIRIX_CONFIG_OVERLAY_PATH=%r not found — loading base alone",
-                    overlay_value,
-                )
-                overlay_p = None
-        else:
-            overlay_p = None
-        return base_p, overlay_p
-
-    legacy_value = env.get("KAIRIX_CONFIG_PATH", "").strip()
-    if legacy_value:
-        legacy_p = Path(legacy_value)
-        if legacy_p.is_file():
-            return legacy_p, None
-        logger.warning("config_loader: KAIRIX_CONFIG_PATH=%r not found — using defaults", legacy_value)
-        return None, None
-
-    cwd_p = Path.cwd() / _DEFAULT_CONFIG_FILENAME
-    if cwd_p.is_file():
-        return cwd_p, None
-    return None, None
+    return _resolve_legacy_or_cwd(env)
 
 
 def validate_schema_compat(base_data: dict[str, Any], overlay_data: dict[str, Any] | None) -> None:
