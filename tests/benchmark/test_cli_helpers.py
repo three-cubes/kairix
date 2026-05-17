@@ -347,17 +347,20 @@ def test_cmd_compare_emits_per_category_rows(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_main_unknown_subcommand_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_unknown_subcommand_branch() -> None:
     """If a subcommand string slips past the parser (defence-in-depth), the
-    fallthrough returns 1 with an 'Unknown subcommand' stderr message."""
+    fallthrough returns 1 with an 'Unknown subcommand' stderr message.
 
-    def _fake_parse(_argv):
+    Drives the public ``parse_args`` kwarg seam with a stub that returns a
+    namespace argparse would normally reject — no monkeypatching of the
+    private ``_parse_args``.
+    """
+
+    def _stub_parse(_argv: list[str] | None) -> argparse.Namespace:
         return argparse.Namespace(subcommand="totally-bogus")
-
-    monkeypatch.setattr(cli_mod, "_parse_args", _fake_parse)
 
     err = io.StringIO()
     with redirect_stderr(err):
-        rc = main([])
+        rc = main([], parse_args=_stub_parse)
     assert rc == 1
     assert "Unknown subcommand: totally-bogus" in err.getvalue()

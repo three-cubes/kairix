@@ -1,5 +1,3 @@
-tests/agents/mcp/test_tool_probe_search.py
-tests/benchmark/test_cli_helpers.py
 tests/classify/test_cli.py
 tests/core/test_factory.py
 tests/curator/test_cli_unit.py

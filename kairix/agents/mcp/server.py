@@ -25,6 +25,7 @@ Design principles:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -576,11 +577,20 @@ MCP_PROBE_QUERIES_CAP = 20
 MCP_PROBE_CONCURRENCY_CAP = 3
 
 
+def _default_probe_search_runner(**kwargs: Any) -> Any:
+    """Production runner — defers the heavy probe import until call time."""
+    from kairix.quality.probe import run_probe_search
+
+    return run_probe_search(**kwargs)
+
+
 def tool_probe_search(
     suite: str = "reflib",
     queries: int = 20,
     concurrency: int = 3,
     seed: int = 0,
+    *,
+    probe_runner: Callable[..., Any] = _default_probe_search_runner,
 ) -> dict[str, Any]:
     """Concurrent-load latency probe — capped for agent safety.
 
@@ -591,6 +601,9 @@ def tool_probe_search(
     Reason this isn't escalation-only: a small probe is the only way for an
     agent to confirm retrieval is healthy before committing to a long task.
     Larger probes stress the system and must be operator-driven.
+
+    The ``probe_runner`` kwarg is the public DI seam: tests pass a stub
+    runner instead of monkey-patching the production module attribute.
     """
     if queries > MCP_PROBE_QUERIES_CAP or concurrency > MCP_PROBE_CONCURRENCY_CAP:
         return _operator_only_envelope(
@@ -606,15 +619,14 @@ def tool_probe_search(
             see_also=[_RETRIEVAL_RUNBOOK],
         )
 
-    from kairix.quality.probe import run_probe_search
-
-    result = run_probe_search(
+    result = probe_runner(
         suite=suite,
         queries=queries,
         concurrency=concurrency,
         seed=seed,
     )
-    return result.to_envelope()
+    envelope: dict[str, Any] = result.to_envelope()
+    return envelope
 
 
 def tool_probe_burst(

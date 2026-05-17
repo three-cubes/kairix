@@ -43,6 +43,8 @@ _EXPECTED_TOOLS = {
     "warm",
     # Agent-safe capped surface (escalates above queries<=20 / concurrency<=3)
     "probe_search",
+    # Tuning advisor — bundles capabilities + recent probe runs into recommendations.
+    "probe_config",
     # Programmatic introspection (affordance pattern 4)
     "capabilities",
     # Operator-only escalation stubs

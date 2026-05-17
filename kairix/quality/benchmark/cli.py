@@ -441,7 +441,12 @@ cases:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None, deps: BenchmarkCLIDeps | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    deps: BenchmarkCLIDeps | None = None,
+    *,
+    parse_args: Callable[..., argparse.Namespace] = _parse_args,
+) -> int:
     """Dispatch a single ``kairix benchmark`` invocation.
 
     Returns the exit code so tests can assert without ``SystemExit``. The
@@ -451,8 +456,12 @@ def main(argv: list[str] | None = None, deps: BenchmarkCLIDeps | None = None) ->
     ``deps`` is threaded through to ``cmd_run`` and ``cmd_list`` — the two
     subcommands that talk to retrieval/suite-discovery. ``validate``,
     ``compare``, and ``init`` operate purely on filesystem inputs.
+
+    ``parse_args`` is the public DI seam for tests that want to drive a
+    namespace argparse wouldn't normally produce (e.g. the unknown-subcommand
+    fallthrough). Production callers leave it at the default.
     """
-    args = _parse_args(argv)
+    args = parse_args(argv)
 
     if args.subcommand == "run":
         return cmd_run(args, deps=deps)
