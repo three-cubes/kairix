@@ -175,9 +175,16 @@ func (s *Service) pullAndUp(ctx context.Context, version string) error {
 	if err != nil {
 		return fmt.Errorf("pull: %w (output: %s)", err, truncate(out, 500))
 	}
-	s.Logger.Info("docker compose up -d")
+	s.Logger.Info("docker compose up -d --wait (waits for the container healthcheck)")
+	// --wait blocks until docker considers the kairix container "healthy"
+	// per its compose healthcheck (which itself runs `kairix onboard check`).
+	// Eliminates the race where the webhook's subsequent onboard check fires
+	// before the MCP server has finished warming and binding port 8080.
+	// --wait-timeout is generous: warm + bind has been observed at ~13-15s on
+	// the production VM; 90s gives headroom for slower restart paths without
+	// hanging the deploy indefinitely.
 	upCmd := fmt.Sprintf(
-		"KAIRIX_IMAGE_TAG=%s docker compose -f docker-compose.yml -f docker-compose.override.yml up -d kairix kairix-worker",
+		"KAIRIX_IMAGE_TAG=%s docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --wait --wait-timeout 90 kairix kairix-worker",
 		quoted,
 	)
 	out, err = s.Runner.Run(ctx, s.ComposeDir, "sh", "-c", upCmd)
