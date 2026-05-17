@@ -159,7 +159,6 @@ def test_trigger_background_warm_is_noop_when_already_warm(monkeypatch: pytest.M
     Sabotage-proof: remove the ``if _state[_K_WARM] or _state[_K_WARMING]: return``
     guard and run_warm gets called again — the call_count assertion fails.
     """
-    from kairix.platform.warm import runner as runner_mod
     from kairix.platform.warm.state import trigger_background_warm
 
     calls = {"n": 0}
@@ -168,9 +167,8 @@ def test_trigger_background_warm_is_noop_when_already_warm(monkeypatch: pytest.M
         calls["n"] += 1
         raise AssertionError("run_warm must not be called when already warm")
 
-    monkeypatch.setattr(runner_mod, "run_warm", fake_run_warm)
     mark_warm()  # process is already warm
-    trigger_background_warm()
+    trigger_background_warm(warm_runner=fake_run_warm)
     _wait_for_warming_to_clear()
     assert calls["n"] == 0
 
@@ -181,12 +179,10 @@ def test_trigger_background_warm_marks_warm_on_ok_result(monkeypatch: pytest.Mon
     Sabotage-proof: drop the ``if result.ok: mark_warm()`` branch and is_warm()
     stays False after the thread completes.
     """
-    from kairix.platform.warm import runner as runner_mod
     from kairix.platform.warm.runner import WarmResult
     from kairix.platform.warm.state import trigger_background_warm
 
-    monkeypatch.setattr(runner_mod, "run_warm", lambda: WarmResult(ok=True))
-    trigger_background_warm()
+    trigger_background_warm(warm_runner=lambda: WarmResult(ok=True))
     _wait_for_warming_to_clear()
     assert is_warm() is True
     assert is_warming() is False
@@ -200,13 +196,11 @@ def test_trigger_background_warm_clears_warming_on_ok_false(monkeypatch: pytest.
     _state[_K_WARMING] = False`` in the else branch and is_warming() stays True
     forever after a failed warm.
     """
-    from kairix.platform.warm import runner as runner_mod
     from kairix.platform.warm.runner import WarmFailure, WarmResult
     from kairix.platform.warm.state import trigger_background_warm
 
     failed_result = WarmResult(ok=False, failures=[WarmFailure(step="vector", detail="boom")])
-    monkeypatch.setattr(runner_mod, "run_warm", lambda: failed_result)
-    trigger_background_warm()
+    trigger_background_warm(warm_runner=lambda: failed_result)
     _wait_for_warming_to_clear()
     assert is_warm() is False
     assert is_warming() is False  # the next trigger isn't blocked
@@ -220,14 +214,12 @@ def test_trigger_background_warm_clears_warming_when_run_warm_raises(monkeypatch
     Sabotage-proof: remove the ``except Exception`` block and the thread
     propagates uncaught + leaves warming=True; the assertion catches it.
     """
-    from kairix.platform.warm import runner as runner_mod
     from kairix.platform.warm.state import trigger_background_warm
 
     def raiser() -> object:
         raise RuntimeError("transient warm-up failure")
 
-    monkeypatch.setattr(runner_mod, "run_warm", raiser)
-    trigger_background_warm()
+    trigger_background_warm(warm_runner=raiser)
     _wait_for_warming_to_clear()
     assert is_warm() is False
     assert is_warming() is False
