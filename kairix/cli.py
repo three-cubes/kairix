@@ -69,7 +69,16 @@ COMMANDS: dict[str, tuple[str, str, bool]] = {
 }
 
 
-def main() -> None:
+def main(*, commands: dict[str, tuple[str, str, bool]] | None = None) -> None:
+    """Top-level ``kairix`` CLI dispatcher.
+
+    The ``commands`` kwarg is the public DI seam: production callers leave
+    it ``None`` and the dispatcher reads :data:`COMMANDS` from this module;
+    tests pass a synthetic dispatch table to drive the routing logic
+    without monkey-patching the module attribute.
+    """
+    table = commands if commands is not None else COMMANDS
+
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
         print(__doc__)
         sys.exit(0 if len(sys.argv) >= 2 else 1)
@@ -82,7 +91,7 @@ def main() -> None:
         print(f"kairix {__version__}")
         sys.exit(0)
 
-    entry = COMMANDS.get(cmd)
+    entry = table.get(cmd)
     if entry is None:
         print(f"Unknown command: {cmd}\n{__doc__}", file=sys.stderr)
         sys.exit(1)
