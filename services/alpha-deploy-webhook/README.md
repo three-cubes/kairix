@@ -50,8 +50,8 @@ process state never carries them. The systemd unit can mount
 
 Built in CI by `.github/workflows/go-quality.yml` (build-matrix
 linux/arm64). Distributed via the same release pipeline as the docker
-image. systemd unit + apply script live in `tc-agent-zone` (cross-repo;
-see kairix#272 Phase 4 follow-ups).
+image. systemd unit + apply script live in your sibling infrastructure
+repo (cross-repo; see kairix#272 Phase 4 follow-ups).
 
 ## Run locally
 

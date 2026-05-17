@@ -8,9 +8,9 @@ Kairix's CLAUDE.md "Naming" section pins the high-level rules:
 
 This fitness function operationalises the *file path* counterpart of
 those rules: each tracked file must live under a known tree and its
-basename must satisfy that tree's naming regex. Convergence with
-tc-agent-zone's ``path_naming.py`` (issue #258); kairix uses kairix's
-own repo layout, not tc-agent-zone's.
+basename must satisfy that tree's naming regex. Convergence with a
+sibling repo's ``path_naming.py`` (issue #258); kairix uses kairix's
+own repo layout.
 
 Trees enforced (first match wins; the order matters):
 

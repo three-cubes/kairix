@@ -53,7 +53,7 @@ Pass example (services/alpha-deploy-webhook/README.md):
   GitHub commit status. Justifies Go vs Python on the operability axis:
   runs on the VM without a Python venv; verifies HMAC with stdlib.
   Run: ./bin/alpha-deploy-webhook --listen :9443 --secret-file /run/secrets/webhook.key
-  Deploy: see infra/scripts/install-alpha-deploy-webhook.sh in tc-agent-zone.
+  Deploy: see infra/scripts/install-alpha-deploy-webhook.sh in your sibling infrastructure repo.
 
 Forbidden example:
   services/alpha-deploy-webhook/    # no README.md — fails G9

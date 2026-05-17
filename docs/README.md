@@ -1,8 +1,8 @@
 # docs/
 
 User-facing documentation. Internal sprint planning and PM artefacts
-live in the Three Cubes vault, not here (see memory:
-`feedback_doc_style_and_pm_separation`).
+live in the operator's private knowledge store, not here (this repo
+stays user-facing).
 
 - `getting-started/` — quick-start guide for new users
 - `architecture/` — ENGINEERING.md, fitness-functions.md, ADRs

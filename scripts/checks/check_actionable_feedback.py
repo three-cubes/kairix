@@ -2,7 +2,7 @@
 
 Quality-harness failures only deliver value if the agent reading them
 can take the next step *without re-reading the codebase*. The convention
-we converged on with tc-agent-zone (see issue #258) is that every
+we converged on with a sibling repo (see issue #258) is that every
 emitted error string carries at least one of three lowercase action
 markers — ``fix:``, ``next:``, ``run:``. Each marker means:
 
