@@ -538,6 +538,13 @@ jobs:
   # Method → "CI-based analysis") or this job conflicts with it and
   # SonarCloud fails the analysis with "You are running CI analysis while
   # Automatic Analysis is enabled."
+  #
+  # `sonar.qualitygate.wait=true` in sonar-project.properties makes this job
+  # block on the Quality Gate verdict and exit with it, so the GHA job
+  # conclusion IS the gate verdict (deterministic, in-pipeline). The external
+  # "SonarCloud Code Analysis" check posted by the SonarCloud GitHub App over
+  # webhook can race / temporarily disagree (#269); branch protection should
+  # gate on this `SonarCloud analysis` job, not the webhook-posted check.
   sonarcloud:
     name: "SonarCloud analysis"
     runs-on: ubuntu-latest
