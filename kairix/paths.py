@@ -483,6 +483,42 @@ def azure_api_version(default: str = "2024-12-01-preview") -> str:
     return os.environ.get("KAIRIX_AZURE_API_VERSION", default)
 
 
+def bedrock_region_override() -> str | None:
+    """AWS region for the bedrock provider — configurable via ``KAIRIX_BEDROCK_REGION``.
+
+    Overrides whatever the boto3 default credential chain picked
+    (``AWS_DEFAULT_REGION`` / ``~/.aws/config``) so operators can pin
+    the Bedrock inference region distinct from their AWS control-plane
+    region. Returns ``None`` when unset; the bedrock plugin then falls
+    back to boto3's resolved region. Lives in :mod:`kairix.paths` per
+    F4 — no other module may read ``KAIRIX_*`` env vars.
+    """
+    value = os.environ.get("KAIRIX_BEDROCK_REGION")
+    return value if value else None
+
+
+def bedrock_embed_model(default: str = "amazon.titan-embed-text-v2:0") -> str:
+    """Bedrock embed model id — configurable via ``KAIRIX_BEDROCK_EMBED_MODEL``.
+
+    Defaults to Amazon Titan Text Embeddings V2. Cohere embed models on
+    Bedrock (``cohere.embed-*``) are also supported by the plugin's
+    body-shape dispatch. Lives in :mod:`kairix.paths` per F4.
+    """
+    return os.environ.get("KAIRIX_BEDROCK_EMBED_MODEL", default)
+
+
+def bedrock_chat_model(default: str = "anthropic.claude-3-5-sonnet-20241022-v2:0") -> str:
+    """Bedrock chat model id — configurable via ``KAIRIX_BEDROCK_CHAT_MODEL``.
+
+    Defaults to Anthropic Claude 3.5 Sonnet on Bedrock. Only
+    ``anthropic.*`` model ids are wired for chat at present; non-
+    Anthropic ids surface as a typed ``ClientError`` from
+    :meth:`kairix.providers.bedrock.BedrockProvider.chat`. Lives in
+    :mod:`kairix.paths` per F4.
+    """
+    return os.environ.get("KAIRIX_BEDROCK_CHAT_MODEL", default)
+
+
 def embed_pool_size(default: int = 20) -> int:
     """Max concurrent HTTP connections to the embed provider.
 

@@ -50,6 +50,15 @@ rerank = [
     # Cross-encoder re-ranking (post-RRF semantic pass). CPU-only, ~22 MB model.
     "sentence-transformers>=3.0,<4",
 ]
+bedrock = [
+    # AWS SDK — required only when KAIRIX_PROVIDER=bedrock. boto3 is heavy
+    # (~50 MB with botocore + s3transfer transitive deps) so operators not
+    # on AWS opt out by skipping this extra. The bedrock plugin imports
+    # boto3 lazily inside its credential resolver so installs without this
+    # extra raise a clear "fix:" error only when the plugin is actually
+    # selected, never at module import time.
+    "boto3>=1.34,<2",
+]
 dev = [
     # Test runner
     "pytest>=8.0",

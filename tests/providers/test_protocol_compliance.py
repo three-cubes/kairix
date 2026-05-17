@@ -99,7 +99,6 @@ class TestFirstPartyStubProtocolShape:
         "import_path",
         [
             "kairix.providers.azure_legacy",
-            "kairix.providers.bedrock",
             "kairix.providers.litellm_proxy",
             "kairix.providers.anthropic",
         ],
@@ -151,15 +150,27 @@ class TestFirstPartyStubProtocolShape:
     def test_ollama_make_provider_is_importable(self) -> None:
         # ollama graduated to Wave 4 (IM-11) — the local-sidecar plugin
         # proving the contract carries to an unauthenticated endpoint
-        # with a non-OpenAI wire shape. Behaviour conformance is asserted
-        # in tests/providers/ollama/test_provider.py. We don't call the
-        # factory here because it would need a real credential resolution
-        # (which the unit suite intentionally doesn't wire).
+        # with a non-OpenAI wire shape.
         import importlib
 
         module = importlib.import_module("kairix.providers.ollama")
         assert hasattr(module, "make_provider"), (
             "kairix.providers.ollama missing make_provider — entry-point factory target is removed by mistake."
+        )
+        assert callable(module.make_provider)
+
+    @pytest.mark.unit
+    def test_bedrock_make_provider_is_importable(self) -> None:
+        # bedrock graduated to Wave 4 (IM-10) — first non-OpenAI-compatible
+        # plugin, proving the contract carries beyond the openai SDK shape
+        # (AWS SigV4 + boto3-style client). Behaviour conformance lives in
+        # tests/providers/bedrock/test_provider.py. boto3 is an optional
+        # dep under the [bedrock] extra.
+        import importlib
+
+        module = importlib.import_module("kairix.providers.bedrock")
+        assert hasattr(module, "make_provider"), (
+            "kairix.providers.bedrock missing make_provider — entry-point factory target is removed by mistake."
         )
         assert callable(module.make_provider)
 
