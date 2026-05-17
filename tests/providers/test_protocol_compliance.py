@@ -89,17 +89,16 @@ class TestFirstPartyStubProtocolShape:
     ``RuntimeError``). The factory's mere *existence* under the
     declared import path is what the entry-point spec keys on.
 
-    ``azure_foundry`` is the first plugin to graduate to Wave 2
-    (IM-4). Its conformance is exercised by
-    ``tests/providers/azure_foundry/test_provider.py``; here we only
-    assert that the factory symbol stays importable.
+    ``azure_foundry`` (IM-4) and ``openai`` (IM-5) are the first two
+    plugins to graduate to Wave 2. Their conformance is exercised by
+    ``tests/providers/<name>/test_provider.py``; here we only assert
+    that the factory symbol stays importable.
     """
 
     @pytest.mark.parametrize(
         "import_path",
         [
             "kairix.providers.azure_legacy",
-            "kairix.providers.openai",
             "kairix.providers.bedrock",
             "kairix.providers.ollama",
             "kairix.providers.litellm_proxy",
@@ -130,6 +129,22 @@ class TestFirstPartyStubProtocolShape:
         module = importlib.import_module("kairix.providers.azure_foundry")
         assert hasattr(module, "make_provider"), (
             "kairix.providers.azure_foundry missing make_provider — entry-point factory target is removed by mistake."
+        )
+        assert callable(module.make_provider)
+
+    @pytest.mark.unit
+    def test_openai_make_provider_is_importable(self) -> None:
+        # openai graduated to Wave 2 (IM-5) — the proof-of-shape that
+        # the plugin contract carries beyond Azure. Behaviour conformance
+        # is asserted in tests/providers/openai/test_provider.py. We
+        # don't call the factory here because it would need a real
+        # credential resolution (which the unit suite intentionally
+        # doesn't wire).
+        import importlib
+
+        module = importlib.import_module("kairix.providers.openai")
+        assert hasattr(module, "make_provider"), (
+            "kairix.providers.openai missing make_provider — entry-point factory target is removed by mistake."
         )
         assert callable(module.make_provider)
 

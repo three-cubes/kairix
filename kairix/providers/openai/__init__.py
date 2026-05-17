@@ -1,28 +1,77 @@
-"""OpenAI-direct provider plugin (scaffold).
+"""OpenAI-direct provider plugin.
 
-Wave 1 stub: entry-point factory wired into ``pyproject.toml`` but
-raises ``NotImplementedError`` until Wave 2 (IM-5) lands the
-implementation that proves the Provider contract against a
-non-Azure endpoint.
+Wire-level translator that adapts the universal
+:class:`kairix.providers.Provider` Protocol to the OpenAI-direct API
+(or any drop-in OpenAI-compatible base URL — Together, Groq, Fireworks,
+local vLLM, etc).
 
-See ``docs/architecture/provider-plugin-architecture.md`` § Migration plan.
+The plugin is discovered by ``EntryPointRegistry`` through the
+``[project.entry-points."kairix.providers"]`` table in kairix's
+``pyproject.toml`` — production callers resolve it by name:
+
+.. code-block:: python
+
+   from kairix.providers import get_provider
+
+   provider = get_provider("openai")
+   vectors = provider.embed_batch(["hello world"])
+
+This plugin is the proof of shape that the Protocol-and-error-mapping
+pattern from :mod:`kairix.providers.azure_foundry` carries over to a
+non-Azure endpoint without surgery. Once green, third-party plugins
+under ``[project.entry-points."kairix.providers"]`` follow the same
+shell.
+
+See ``docs/architecture/provider-plugin-architecture.md`` for the ADR
+and ``tests/bdd/features/provider_openai.feature`` for the wire-shape
+contract this plugin pins.
 """
 
 from __future__ import annotations
 
 from kairix.providers._base import Provider
+from kairix.providers.openai.provider import (
+    DEFAULT_CHAT_MAX_TOKENS,
+    DEFAULT_EMBED_DIMENSION,
+    PROVIDER_NAME,
+    OpenAIProvider,
+)
 
 
 def make_provider() -> Provider:
-    """Construct the OpenAI-direct ``Provider`` (Wave 2: IM-5).
+    """Construct the OpenAI-direct :class:`Provider` for entry-point discovery.
 
-    Currently raises ``NotImplementedError``; entry-point registration
-    keeps discovery green so Wave 2 can drop the implementation in
-    without re-wiring metadata.
+    Resolves the ``embed`` credential set via
+    :func:`kairix.credentials.get_credentials` (which already encodes
+    the vault-agent → env → Azure Key Vault fallback) and constructs
+    an :class:`OpenAIProvider` against it. The provider's transport
+    client is resolved lazily via :func:`kairix.transport.pool.get_client`
+    so the process-shared connection pool is reused across coalescer
+    batches.
+
+    Tests should NOT call ``make_provider()``; they construct
+    :class:`OpenAIProvider` directly with a
+    :class:`~kairix.credentials.Credentials` test instance and (where
+    relevant) a recording ``transport_client``. This factory exists
+    purely to satisfy the entry-point discovery contract.
     """
-    raise NotImplementedError(
-        "openai provider lands in Wave 2 (IM-5). "
-        "fix: track docs/architecture/provider-plugin-architecture.md "
-        "Migration plan; "
-        "next: IM-5 is the contract-proving plugin once IM-4 lands."
-    )
+    from kairix.credentials import Credentials, get_credentials
+
+    creds = get_credentials("embed")
+    if not isinstance(creds, Credentials):
+        raise RuntimeError(
+            "openai: embed credentials did not resolve to a Credentials "
+            "instance. fix: configure kairix-embed-* or kairix-llm-* secrets "
+            "per docs/operations/OPERATIONS.md; "
+            "next: re-run with KAIRIX_PROVIDER=openai once secrets are populated."
+        )
+    return OpenAIProvider(credentials=creds)
+
+
+__all__ = [
+    "DEFAULT_CHAT_MAX_TOKENS",
+    "DEFAULT_EMBED_DIMENSION",
+    "PROVIDER_NAME",
+    "OpenAIProvider",
+    "make_provider",
+]
