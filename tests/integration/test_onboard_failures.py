@@ -20,7 +20,6 @@ import json
 
 import pytest
 
-from kairix.platform.onboard import check as check_mod
 from kairix.platform.onboard.check import CheckResult, run_onboard_check
 
 pytestmark = pytest.mark.integration
@@ -52,9 +51,7 @@ def _make_check(
 
 
 @pytest.mark.integration
-def test_aggregate_envelope_reports_fully_passed_when_all_checks_green(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_aggregate_envelope_reports_fully_passed_when_all_checks_green() -> None:
     """All checks green → ``OnboardResult.fully_passed=True``, ``passed==total``,
     no failures.
 
@@ -68,9 +65,7 @@ def test_aggregate_envelope_reports_fully_passed_when_all_checks_green(
         _make_check("vector_search_working", ok=True),
         _make_check("neo4j_reachable", ok=True),
     ]
-    monkeypatch.setattr(check_mod, "ALL_CHECKS", fakes)
-
-    result = run_onboard_check()
+    result = run_onboard_check(checks=fakes)
 
     assert result.fully_passed is True
     assert result.passed == result.total == len(fakes)
@@ -78,9 +73,7 @@ def test_aggregate_envelope_reports_fully_passed_when_all_checks_green(
 
 
 @pytest.mark.integration
-def test_vector_search_failure_surfaces_non_empty_remediation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_vector_search_failure_surfaces_non_empty_remediation() -> None:
     """A single failing ``vector_search_working`` check produces one
     ``CheckFailure`` with a non-empty canonical remediation.
 
@@ -96,9 +89,7 @@ def test_vector_search_failure_surfaces_non_empty_remediation(
             detail="search returned 0 results (vec=0, bm25=0)",
         ),
     ]
-    monkeypatch.setattr(check_mod, "ALL_CHECKS", fakes)
-
-    result = run_onboard_check()
+    result = run_onboard_check(checks=fakes)
 
     assert result.fully_passed is False
     assert len(result.failures) == 1
@@ -111,9 +102,7 @@ def test_vector_search_failure_surfaces_non_empty_remediation(
 
 
 @pytest.mark.integration
-def test_one_failure_does_not_short_circuit_rest_of_run(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_one_failure_does_not_short_circuit_rest_of_run() -> None:
     """A failing ``neo4j_reachable`` doesn't prevent the subsequent
     checks from running — the envelope still records every check
     result, passed or failed.
@@ -131,9 +120,7 @@ def test_one_failure_does_not_short_circuit_rest_of_run(
         _make_check("chunk_date_populated", ok=True),
         _make_check("mcp_service", ok=True),
     ]
-    monkeypatch.setattr(check_mod, "ALL_CHECKS", fakes)
-
-    result = run_onboard_check()
+    result = run_onboard_check(checks=fakes)
 
     assert result.total == len(fakes)
     assert result.passed == len(fakes) - 1
@@ -144,9 +131,7 @@ def test_one_failure_does_not_short_circuit_rest_of_run(
 
 
 @pytest.mark.integration
-def test_multiple_failures_serialise_to_well_formed_json(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_multiple_failures_serialise_to_well_formed_json() -> None:
     """The aggregate envelope round-trips through ``json.dumps`` cleanly
     when multiple checks fail with multi-line ``fix`` strings.
 
@@ -175,9 +160,7 @@ def test_multiple_failures_serialise_to_well_formed_json(
             fix="bash scripts/install-neo4j.sh",
         ),
     ]
-    monkeypatch.setattr(check_mod, "ALL_CHECKS", fakes)
-
-    result = run_onboard_check()
+    result = run_onboard_check(checks=fakes)
 
     assert result.fully_passed is False
     assert len(result.failures) == 3

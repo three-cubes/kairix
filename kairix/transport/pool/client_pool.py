@@ -114,13 +114,30 @@ def _build_production_client(api_key: str, endpoint: str, *, timeout: float) -> 
 _PRODUCTION_CLIENT_POOL = ClientPool(builder=_build_production_client)
 
 
+def install_production_builder(builder: Callable[..., Any]) -> Callable[..., Any]:
+    """Swap the production pool's builder and return the previous one.
+
+    Public test seam: tests inject a counting / stubbed builder, capture
+    the returned previous builder, exercise the pool, then restore. This
+    replaces the F1-violating direct ``_PRODUCTION_CLIENT_POOL._builder = ...``
+    attribute write — the test still touches the same private state, but
+    now through a documented public function rather than reaching past
+    the underscore prefix.
+    """
+    previous = _PRODUCTION_CLIENT_POOL._builder
+    _PRODUCTION_CLIENT_POOL._builder = builder
+    _PRODUCTION_CLIENT_POOL.reset()
+    return previous
+
+
 def get_client(api_key: str, endpoint: str, timeout: float) -> Any:
     """Return the process-shared OpenAI-compatible client.
 
     Thin module-level wrapper over the production
     ``_PRODUCTION_CLIENT_POOL`` singleton. Production callers (the
     per-provider plugins under ``kairix/providers/<name>/``) use this;
-    tests that want to inject a fake builder construct their own
+    tests that want to inject a fake builder use
+    :func:`install_production_builder` or construct their own
     ``ClientPool`` instance.
     """
     return _PRODUCTION_CLIENT_POOL.get(api_key, endpoint, timeout)

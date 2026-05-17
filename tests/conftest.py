@@ -81,6 +81,7 @@ pytest_plugins = [
     "tests.bdd.steps.bootstrap_steps",
     "tests.bdd.steps.usage_guide_steps",
     "tests.bdd.steps.classify_steps",
+    "tests.bdd.steps.classify_error_steps",
     "tests.bdd.steps.embed_pool_config_steps",
     "tests.bdd.steps.query_cache_steps",
     "tests.bdd.steps.enrich_cache_steps",
@@ -109,6 +110,8 @@ pytest_plugins = [
     "tests.bdd.steps.e2e_provider_switch_steps",
     # probe-config health-check end-user CLI.
     "tests.bdd.steps.probe_config_health_steps",
+    # Layered config loader — image-bundled base + sparse operator overlay.
+    "tests.bdd.steps.config_layering_steps",
 ]
 
 # PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.

@@ -22,3 +22,27 @@ Feature: Classify — auto-assign collection for memory writes
     And a memory content "Pattern: anything"
     When the operator runs classify for the unknown agent
     Then the classify result contains an error message naming the missing agent
+
+  @error
+  Scenario: Rule classifier raises ValueError — CLI exits 1 with structured error envelope
+    Given classify CLI inputs content="anything" agent="builder"
+    And the injected rule classifier raises ValueError
+    When the operator invokes the classify CLI with --no-llm
+    Then the classify CLI exits with code 1
+    And the classify CLI stderr contains a structured JSON error envelope
+
+  @error
+  Scenario: Rule classifier raises a generic exception — CLI masks the message
+    Given classify CLI inputs content="anything" agent="builder"
+    And the injected rule classifier raises RuntimeError carrying "secret-internal-detail"
+    When the operator invokes the classify CLI with --no-llm
+    Then the classify CLI exits with code 1
+    And the classify CLI stderr error envelope does NOT leak "secret-internal-detail"
+
+  Scenario: LLM fallback engages when the rule classifier returns "unknown"
+    Given classify CLI inputs content="ambiguous content" agent="builder"
+    And the injected rule classifier returns type "unknown"
+    And the injected LLM classifier returns type "semantic-decision" with reason "llm fallback hit"
+    When the operator invokes the classify CLI without --no-llm
+    Then the classify CLI stdout JSON has type "semantic-decision"
+    And the classify CLI stdout JSON has reason "llm fallback hit"

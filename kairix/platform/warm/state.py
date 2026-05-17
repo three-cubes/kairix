@@ -134,12 +134,24 @@ def cold_start_envelope(tool_name: str) -> dict[str, Any]:
     }
 
 
-def trigger_background_warm() -> None:
+def _default_warm_runner() -> Any:
+    """Production warm runner — defers the heavy import until call time."""
+    from kairix.platform.warm.runner import run_warm
+
+    return run_warm()
+
+
+def trigger_background_warm(*, warm_runner: Any = None) -> None:
     """Start a warm-up in a background thread, if not already running.
 
     Idempotent: calling this when already warm or already warming is a
     no-op. The background thread is daemonised so an exit while warming
     doesn't block process shutdown.
+
+    ``warm_runner`` is the public DI seam: tests pass a fake runner to
+    drive the success / failure / exception paths without monkey-patching
+    ``kairix.platform.warm.runner.run_warm``. Production callers leave
+    it ``None``.
     """
     with _lock:
         if _state[_K_WARM] or _state[_K_WARMING]:
@@ -147,11 +159,11 @@ def trigger_background_warm() -> None:
         _state[_K_WARMING] = True
         _state[_K_STARTED_AT] = time.time()
 
-    def _warm_target() -> None:
-        from kairix.platform.warm.runner import run_warm
+    runner = warm_runner if warm_runner is not None else _default_warm_runner
 
+    def _warm_target() -> None:
         try:
-            result = run_warm()
+            result = runner()
             if result.ok:
                 mark_warm()
             else:

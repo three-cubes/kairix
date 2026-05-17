@@ -203,14 +203,16 @@ def test_read_audit_file_returns_text_for_normal_file(tmp_path: Path) -> None:
     assert audit_mod._read_audit_file(md) == "hello world"
 
 
-def test_read_audit_file_returns_none_when_oversize(tmp_path: Path, monkeypatch) -> None:
-    """A file larger than MAX_FILE_SIZE returns None (skipped)."""
+def test_read_audit_file_returns_none_when_oversize(tmp_path: Path) -> None:
+    """A file larger than MAX_FILE_SIZE returns None (skipped).
+
+    Drives the public ``max_file_size`` kwarg on ``_read_audit_file`` —
+    tests pass 0 to exercise the oversize-skip branch without
+    monkey-patching the audit-module constant.
+    """
     md = tmp_path / "big.md"
     md.write_text("x", encoding="utf-8")
-    # Set MAX_FILE_SIZE smaller than the file by patching the audit-module
-    # attribute (module-attribute test seam, not internals import).
-    monkeypatch.setattr(audit_mod, "MAX_FILE_SIZE", 0)
-    assert audit_mod._read_audit_file(md) is None
+    assert audit_mod._read_audit_file(md, max_file_size=0) is None
 
 
 def test_read_audit_file_returns_none_for_missing_file(tmp_path: Path) -> None:
@@ -332,13 +334,27 @@ def test_scan_file_for_unlinked_skips_when_already_wikilinked(tmp_path: Path) ->
     assert audit_mod._scan_file_for_unlinked(md, doc, entities) == []
 
 
-def test_scan_file_for_unlinked_returns_empty_on_unreadable(tmp_path: Path, monkeypatch) -> None:
-    """When _read_audit_file returns None (oversize or unreadable), no rows."""
+def test_scan_file_for_unlinked_returns_empty_on_unreadable(tmp_path: Path) -> None:
+    """When _read_audit_file returns None (oversize), no rows.
+
+    Forces the oversize-skip by writing the file with content longer
+    than zero bytes and calling the audit-file reader with max_file_size=0
+    via the public kwarg seam on _read_audit_file. _scan_file_for_unlinked
+    consults the reader on each scan; with the reader returning None it
+    must yield no rows.
+    """
     doc = tmp_path / "vault"
     doc.mkdir()
     md = doc / "page.md"
     md.write_text("Acme-Corp", encoding="utf-8")
-    monkeypatch.setattr(audit_mod, "MAX_FILE_SIZE", 0)
+    # Sanity: the reader returns None at size cap 0, which is the
+    # contract _scan_file_for_unlinked relies on to skip.
+    assert audit_mod._read_audit_file(md, max_file_size=0) is None
+    # _scan_file_for_unlinked uses _read_audit_file internally — with a
+    # zero-size cap baked into the reader's default, the scan yields nothing.
+    # Drive the same path by writing a file that exceeds the production
+    # MAX_FILE_SIZE; using 6 MB would dwarf the prod cap.
+    md.write_text("Acme-Corp\n" + ("padding " * (1024 * 1024)), encoding="utf-8")
     assert audit_mod._scan_file_for_unlinked(md, doc, [_entity(name="Acme-Corp")]) == []
 
 
@@ -387,13 +403,12 @@ def test_find_unlinked_mentions_samples_when_oversized(vault_paths) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_read_recent_log_returns_empty_when_log_missing(monkeypatch, tmp_path: Path) -> None:
+def test_read_recent_log_returns_empty_when_log_missing(tmp_path: Path) -> None:
     """A missing log file returns an empty list (no exception)."""
-    monkeypatch.setattr(audit_mod, "_LOG_PATH", str(tmp_path / "absent.jsonl"))
-    assert audit_mod._read_recent_log(days=7) == []
+    assert audit_mod._read_recent_log(days=7, log_path=str(tmp_path / "absent.jsonl")) == []
 
 
-def test_read_recent_log_skips_blank_and_bad_lines(monkeypatch, tmp_path: Path) -> None:
+def test_read_recent_log_skips_blank_and_bad_lines(tmp_path: Path) -> None:
     """Blank lines and JSON-decode failures are silently skipped."""
     import time as _time
 
@@ -409,13 +424,12 @@ def test_read_recent_log_skips_blank_and_bad_lines(monkeypatch, tmp_path: Path) 
         ]
     )
     log.write_text(body, encoding="utf-8")
-    monkeypatch.setattr(audit_mod, "_LOG_PATH", str(log))
-    entries = audit_mod._read_recent_log(days=7)
+    entries = audit_mod._read_recent_log(days=7, log_path=str(log))
     assert len(entries) == 2
     assert entries[0]["injected"] == ["A"]
 
 
-def test_read_recent_log_filters_out_old_entries(monkeypatch, tmp_path: Path) -> None:
+def test_read_recent_log_filters_out_old_entries(tmp_path: Path) -> None:
     """Entries with ``ts`` older than the cutoff are excluded."""
     import time as _time
 
@@ -429,8 +443,7 @@ def test_read_recent_log_filters_out_old_entries(monkeypatch, tmp_path: Path) ->
         ]
     )
     log.write_text(body, encoding="utf-8")
-    monkeypatch.setattr(audit_mod, "_LOG_PATH", str(log))
-    entries = audit_mod._read_recent_log(days=7)
+    entries = audit_mod._read_recent_log(days=7, log_path=str(log))
     assert [e["injected"] for e in entries] == [["NEW"]]
 
 
@@ -502,11 +515,15 @@ def test_render_recent_injections_summarises_runs() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_weekly_report_includes_all_sections(vault_paths, monkeypatch) -> None:
+def test_weekly_report_includes_all_sections(vault_paths) -> None:
     """The composed report has the entity-ontology table and all three
     section headers, even when each section's data is empty."""
-    monkeypatch.setattr(audit_mod, "_LOG_PATH", "/tmp/kairix-audit-test-absent-log.jsonl")
-    out = audit_mod.weekly_report(str(vault_paths.document_root), [], paths=vault_paths)
+    out = audit_mod.weekly_report(
+        str(vault_paths.document_root),
+        [],
+        paths=vault_paths,
+        log_path="/tmp/kairix-audit-test-absent-log.jsonl",
+    )
     assert "Wikilink Audit Report" in out
     assert "## Entity Ontology" in out
     assert "## Broken Links" in out
@@ -514,14 +531,18 @@ def test_weekly_report_includes_all_sections(vault_paths, monkeypatch) -> None:
     assert "## Recent Injections" in out
 
 
-def test_weekly_report_counts_vault_paths(vault_paths, monkeypatch) -> None:
+def test_weekly_report_counts_vault_paths(vault_paths) -> None:
     """The ontology table separates entities with vault_path from those without."""
-    monkeypatch.setattr(audit_mod, "_LOG_PATH", "/tmp/kairix-audit-test-absent-log.jsonl")
     entities = [
         _entity(name="X", vault_path="x/"),
         _entity(name="Y", vault_path=""),
     ]
-    out = audit_mod.weekly_report(str(vault_paths.document_root), entities, paths=vault_paths)
+    out = audit_mod.weekly_report(
+        str(vault_paths.document_root),
+        entities,
+        paths=vault_paths,
+        log_path="/tmp/kairix-audit-test-absent-log.jsonl",
+    )
     assert "Total entities | 2" in out
     assert "With vault_path (linkable) | 1" in out
     assert "Without vault_path (not linked) | 1" in out

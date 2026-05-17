@@ -175,7 +175,7 @@ func (s *Service) pullAndUp(ctx context.Context, version string) error {
 	if err != nil {
 		return fmt.Errorf("pull: %w (output: %s)", err, truncate(out, 500))
 	}
-	s.Logger.Info("docker compose up -d --wait (waits for the container healthcheck)")
+	s.Logger.Info("docker compose up -d --force-recreate --wait (waits for the container healthcheck)")
 	// --wait blocks until docker considers the kairix container "healthy"
 	// per its compose healthcheck (which itself runs `kairix onboard check`).
 	// Eliminates the race where the webhook's subsequent onboard check fires
@@ -183,8 +183,16 @@ func (s *Service) pullAndUp(ctx context.Context, version string) error {
 	// --wait-timeout is generous: warm + bind has been observed at ~13-15s on
 	// the production VM; 90s gives headroom for slower restart paths without
 	// hanging the deploy indefinitely.
+	//
+	// --force-recreate addresses the v2026.5.17a9 incident: when a config
+	// patch on the bind-mounted host file changes between deploys but the
+	// image digest doesn't, compose up sees the container as "running" and
+	// skips the restart — so the unhealthy container with the stale config
+	// stays up forever. --force-recreate makes every deploy idempotent on
+	// the running-process side, costing one ~10s container restart per
+	// deploy in exchange for eliminating the stale-container trap.
 	upCmd := fmt.Sprintf(
-		"KAIRIX_IMAGE_TAG=%s docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --wait --wait-timeout 90 kairix kairix-worker",
+		"KAIRIX_IMAGE_TAG=%s docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --force-recreate --wait --wait-timeout 90 kairix kairix-worker",
 		quoted,
 	)
 	out, err = s.Runner.Run(ctx, s.ComposeDir, "sh", "-c", upCmd)

@@ -257,17 +257,16 @@ def test_module_level_get_client_uses_production_pool() -> None:
     a per-call instance. The contract: between two ``get_client``
     calls with the same key, the production builder runs at most once.
     """
-    from kairix.transport.pool import client_pool as cp
+    from kairix.transport.pool.client_pool import install_production_builder
 
     # Swap the production pool's builder for a counting one for this
-    # test, then restore — done WITHOUT monkeypatch, by direct
-    # attribute write on the pool's own surface. The autouse
-    # _reset_client_pool fixture in conftest drops cached state at
-    # teardown so this doesn't leak to other tests.
+    # test, then restore. Uses the public ``install_production_builder``
+    # seam (F1-clean) rather than a direct write on the underscore-
+    # prefixed pool attribute. The autouse _reset_client_pool fixture
+    # in conftest drops cached state at teardown so this doesn't leak
+    # to other tests.
     counter = _CountingBuilder()
-    original_builder = cp._PRODUCTION_CLIENT_POOL._builder
-    cp._PRODUCTION_CLIENT_POOL._builder = counter
-    cp._PRODUCTION_CLIENT_POOL.reset()
+    original_builder = install_production_builder(counter)
     try:
         from kairix.transport.pool import get_client
 
@@ -276,8 +275,7 @@ def test_module_level_get_client_uses_production_pool() -> None:
         assert a is b
         assert len(counter.calls) == 1
     finally:
-        cp._PRODUCTION_CLIENT_POOL._builder = original_builder
-        cp._PRODUCTION_CLIENT_POOL.reset()
+        install_production_builder(original_builder)
 
 
 def test_reset_client_cache_clears_production_singleton() -> None:
@@ -287,18 +285,15 @@ def test_reset_client_cache_clears_production_singleton() -> None:
     next ``get_client`` returns the cached object and counter stays
     at 1.
     """
-    from kairix.transport.pool import client_pool as cp
     from kairix.transport.pool import get_client, reset_client_cache
+    from kairix.transport.pool.client_pool import install_production_builder
 
     counter = _CountingBuilder()
-    original_builder = cp._PRODUCTION_CLIENT_POOL._builder
-    cp._PRODUCTION_CLIENT_POOL._builder = counter
-    cp._PRODUCTION_CLIENT_POOL.reset()
+    original_builder = install_production_builder(counter)
     try:
         get_client("k", "https://example.invalid", 30.0)
         reset_client_cache()
         get_client("k", "https://example.invalid", 30.0)
         assert len(counter.calls) == 2
     finally:
-        cp._PRODUCTION_CLIENT_POOL._builder = original_builder
-        cp._PRODUCTION_CLIENT_POOL.reset()
+        install_production_builder(original_builder)

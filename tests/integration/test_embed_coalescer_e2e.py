@@ -20,10 +20,12 @@ import time
 
 import pytest
 
-from kairix.transport.cache import embed_cache as embed_cache_mod
-from kairix.transport.cache.embed_cache import EmbedCache, reset_embed_cache
-from kairix.transport.coalesce import EmbedCoalescer, reset_embed_coalescer
-from kairix.transport.coalesce import embed_coalescer as embed_coalescer_mod
+from kairix.transport.cache.embed_cache import EmbedCache, install_embed_cache, reset_embed_cache
+from kairix.transport.coalesce import (
+    EmbedCoalescer,
+    install_embed_coalescer,
+    reset_embed_coalescer,
+)
 from kairix.transport.embed_service import ProviderEmbeddingService
 
 pytestmark = pytest.mark.integration
@@ -48,18 +50,18 @@ class _DeterministicProvider:
 
 
 @pytest.fixture
-def _wire(monkeypatch: pytest.MonkeyPatch) -> tuple[_DeterministicProvider, EmbedCoalescer, EmbedCache]:
+def _wire() -> tuple[_DeterministicProvider, EmbedCoalescer, EmbedCache]:
     """Install a fresh cache + coalescer singleton wired to a counting provider.
 
-    F2-clean: every object is constructed directly and substituted into
-    the module singleton via ``setattr`` on a public attribute. No env
-    monkeypatching. F5-clean: no private-name imports — the coalescer
-    + cache classes are part of the public test surface.
+    F1-clean: uses the public ``install_embed_cache`` / ``install_embed_coalescer``
+    accessors rather than monkey-patching the transport module singletons.
+    F5-clean: no private-name imports — the coalescer + cache classes are
+    part of the public test surface.
     """
     reset_embed_cache()
     reset_embed_coalescer()
     cache = EmbedCache(max_entries=10, max_age_s=60.0)
-    monkeypatch.setattr(embed_cache_mod, "_EMBED_CACHE", cache)
+    install_embed_cache(cache)
 
     provider = _DeterministicProvider()
     coalescer = EmbedCoalescer(
@@ -67,7 +69,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch) -> tuple[_DeterministicProvider, Embe
         coalesce_window_ms=200,
         max_batch_size=64,
     )
-    monkeypatch.setattr(embed_coalescer_mod, "_EMBED_COALESCER", coalescer)
+    install_embed_coalescer(coalescer)
 
     yield provider, coalescer, cache
     coalescer.shutdown()

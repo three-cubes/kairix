@@ -50,6 +50,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # Re-export normalise_query so consumers (tests, integration code) can
@@ -109,6 +110,8 @@ class EmbedCache:
         self,
         max_entries: int = DEFAULT_MAX_ENTRIES,
         max_age_s: float = DEFAULT_MAX_AGE_S,
+        *,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._max_entries = max(1, int(max_entries))
         self._max_age_s = float(max_age_s)
@@ -117,6 +120,9 @@ class EmbedCache:
         self._hits = 0
         self._misses = 0
         self._evictions = 0
+        # Public DI seam — tests pass a controllable clock to drive
+        # expiry without monkey-patching ``time.time`` inside this module.
+        self._clock = clock
 
     def get(self, query: str) -> list[float] | None:
         """Return the cached embedding or ``None``. Expired entries miss.
@@ -164,7 +170,7 @@ class EmbedCache:
             return
         key = normalise_query(query)
         with self._lock:
-            now = time.time()
+            now = self._clock()
             # Defensive copy so the cache owns its own list and a
             # caller mutating the original argument after put() can't
             # change what we hand out on the next get().
@@ -190,7 +196,7 @@ class EmbedCache:
                 # lock window stays tight.
                 oldest_key = next(iter(self._entries))
                 oldest_inserted_at, _ = self._entries[oldest_key]
-                oldest_age = max(0.0, time.time() - oldest_inserted_at)
+                oldest_age = max(0.0, self._clock() - oldest_inserted_at)
             total = self._hits + self._misses
             hit_rate = (self._hits / total) if total > 0 else 0.0
             return EmbedCacheStats(
@@ -216,7 +222,7 @@ class EmbedCache:
 
     def _is_expired(self, inserted_at: float) -> bool:
         """Internal age check — caller already holds the lock."""
-        return (time.time() - inserted_at) > self._max_age_s
+        return (self._clock() - inserted_at) > self._max_age_s
 
 
 # ---------------------------------------------------------------------------

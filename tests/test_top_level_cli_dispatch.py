@@ -39,8 +39,14 @@ def _install_fake_handler_module(name: str, *, accepts_args: bool, record: list[
 
 
 @pytest.fixture
-def patched_dispatch_table(monkeypatch):
-    """Replace COMMANDS with fake entries that record their invocation."""
+def patched_dispatch_table():
+    """Build a synthetic ``COMMANDS`` table for tests that pin dispatch routing.
+
+    Returns ``(record_list, commands_dict)``. The recorder captures each
+    fake handler's invocation; the commands_dict is passed via
+    ``kairix.cli.main(commands=...)`` — the public DI seam — so the test
+    drives the routing logic without monkey-patching the module attribute.
+    """
     record: list[object] = []
     fake_table = {
         "fake-args": (
@@ -69,17 +75,16 @@ def patched_dispatch_table(monkeypatch):
     nonzero_mod.main = main_nonzero  # type: ignore[attr-defined] — dynamically-assigned module attribute on a synthetic ModuleType
     sys.modules["tests._fake_kairix_handlers.nonzero"] = nonzero_mod
 
-    monkeypatch.setattr(kairix_cli, "COMMANDS", fake_table)
-    return record
+    return record, fake_table
 
 
-def _drive_main(argv: list[str], monkeypatch) -> tuple[str, str, int]:
+def _drive_main(argv: list[str], monkeypatch, commands: dict | None = None) -> tuple[str, str, int]:
     monkeypatch.setattr(sys, "argv", ["kairix", *argv])
     out, err = io.StringIO(), io.StringIO()
     code = 0
     try:
         with redirect_stdout(out), redirect_stderr(err):
-            kairix_cli.main()
+            kairix_cli.main(commands=commands)
     except SystemExit as exit_signal:
         code = int(exit_signal.code) if exit_signal.code is not None else 0
     return out.getvalue(), err.getvalue(), code
@@ -87,8 +92,8 @@ def _drive_main(argv: list[str], monkeypatch) -> tuple[str, str, int]:
 
 @pytest.mark.unit
 def test_dispatch_accepts_args_path_calls_handler_with_remaining_argv(patched_dispatch_table, monkeypatch):
-    record = patched_dispatch_table
-    _stdout, _stderr, code = _drive_main(["fake-args", "--flag", "value"], monkeypatch)
+    record, commands = patched_dispatch_table
+    _stdout, _stderr, code = _drive_main(["fake-args", "--flag", "value"], monkeypatch, commands=commands)
     # main() returned None-equivalent (0) from the fake; no SystemExit raised.
     assert code == 0
     assert record == [["--flag", "value"]]
@@ -96,8 +101,8 @@ def test_dispatch_accepts_args_path_calls_handler_with_remaining_argv(patched_di
 
 @pytest.mark.unit
 def test_dispatch_accepts_args_nonzero_return_triggers_sys_exit(patched_dispatch_table, monkeypatch):
-    record = patched_dispatch_table
-    _stdout, _stderr, code = _drive_main(["fake-nonzero", "arg"], monkeypatch)
+    record, commands = patched_dispatch_table
+    _stdout, _stderr, code = _drive_main(["fake-nonzero", "arg"], monkeypatch, commands=commands)
     # The fake returns 7; the dispatcher must propagate via sys.exit(7).
     assert code == 7
     assert record == [("nonzero", ["arg"])]
@@ -105,9 +110,9 @@ def test_dispatch_accepts_args_nonzero_return_triggers_sys_exit(patched_dispatch
 
 @pytest.mark.unit
 def test_dispatch_no_args_path_calls_handler_without_passing_argv(patched_dispatch_table, monkeypatch):
-    record = patched_dispatch_table
+    record, commands = patched_dispatch_table
     # Extra CLI tokens after the subcommand must be ignored by the no-args path.
-    _stdout, _stderr, code = _drive_main(["fake-noargs", "ignored"], monkeypatch)
+    _stdout, _stderr, code = _drive_main(["fake-noargs", "ignored"], monkeypatch, commands=commands)
     assert code == 0
     assert record == ["called-noargs"]
 
@@ -130,7 +135,8 @@ def test_version_alias_exit_zero(monkeypatch):
 
 @pytest.mark.unit
 def test_unknown_command_prints_to_stderr_and_exits_1(patched_dispatch_table, monkeypatch):
-    _stdout, stderr, code = _drive_main(["definitely-unknown"], monkeypatch)
+    _record, commands = patched_dispatch_table
+    _stdout, stderr, code = _drive_main(["definitely-unknown"], monkeypatch, commands=commands)
     assert code == 1
     assert "Unknown command: definitely-unknown" in stderr
     # The full docstring is appended for actionable help context.

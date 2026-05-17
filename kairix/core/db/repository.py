@@ -29,8 +29,13 @@ class SQLiteDocumentRepository:
     Satisfies kairix.core.protocols.DocumentRepository.
     """
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, opener: Any = None) -> None:
         self._db_path = db_path
+        # Public DI seam — production callers omit ``opener`` and the
+        # repo uses the module-level ``open_db``. Tests inject a fake
+        # opener to drive open-failure / cursor-failure branches without
+        # monkey-patching the repository module's ``open_db`` binding.
+        self._opener = opener if opener is not None else open_db
         # Bounded LRU around the per-batch chunk-date lookup. The cache key
         # is the frozenset of paths (order-independent); the value is the
         # path -> chunk_date dict. Cache invalidates on process restart,
@@ -93,7 +98,7 @@ class SQLiteDocumentRepository:
             return []
 
         try:
-            db = open_db(Path(self._db_path))
+            db = self._opener(Path(self._db_path))
             db.row_factory = sqlite3.Row
         except Exception as e:
             logger.warning("SQLiteDocumentRepository.search_fts: cannot open DB — %s", e)
@@ -119,7 +124,7 @@ class SQLiteDocumentRepository:
     def get_by_path(self, path: str) -> dict[str, Any] | None:
         """Look up a document by its path. Returns None if not found."""
         try:
-            db = open_db(Path(self._db_path))
+            db = self._opener(Path(self._db_path))
             db.row_factory = sqlite3.Row
             row = db.execute(
                 "SELECT d.path, d.collection, d.title, d.hash, COALESCE(c.doc, '') AS content "
@@ -161,7 +166,7 @@ class SQLiteDocumentRepository:
         # generator iterate the same elements in the same order.
         path_list = list(paths)
         try:
-            db = open_db(Path(self._db_path))
+            db = self._opener(Path(self._db_path))
             try:
                 like_clauses = " OR ".join("d.path LIKE ?" for _ in path_list)
                 rows = db.execute(
@@ -202,7 +207,7 @@ class SQLiteDocumentRepository:
     ) -> None:
         """Insert or update a document and its content."""
         try:
-            db = open_db(Path(self._db_path))
+            db = self._opener(Path(self._db_path))
             try:
                 db.execute(
                     "INSERT OR REPLACE INTO content (hash, doc) VALUES (?, ?)",

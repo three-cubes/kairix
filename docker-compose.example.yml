@@ -48,13 +48,25 @@ services:
     volumes:
       - ./documents:/data/documents
       - kairix-data:/data/kairix
-      # - ./kairix.config.yaml:/opt/kairix/kairix.config.yaml:ro
+      # Layered config: the image ships a complete canonical config at
+      # /opt/kairix/kairix.config.yaml (containing _schema_version, provider:,
+      # collections, retrieval defaults). Operators overlay sparse host-side
+      # overrides via the OVERLAY env-var below — the overlay only needs to
+      # declare the keys you're changing; required keys come from the image.
+      # NEVER bind-mount over /opt/kairix/kairix.config.yaml — that shadow-
+      # mount drops required keys silently (the v2026.5.17a9 incident).
+      - ./kairix.config.local.yaml:/opt/kairix/kairix.config.local.yaml:ro
     env_file:
       - .env
     environment:
       - KAIRIX_NEO4J_URI=bolt://neo4j:7687
       - KAIRIX_NEO4J_USER=neo4j
       - KAIRIX_NEO4J_PASSWORD=${KAIRIX_NEO4J_PASSWORD}
+      # Point kairix at the host-side overlay file. The image-bundled base
+      # at /opt/kairix/kairix.config.yaml is the source of required keys;
+      # the overlay supplies operator-specific values (vault paths, agent
+      # registry, retrieval tuning). See docs/operations/runbooks/config-upgrade.md.
+      - KAIRIX_CONFIG_OVERLAY_PATH=/opt/kairix/kairix.config.local.yaml
     depends_on:
       neo4j:
         condition: service_healthy
@@ -96,13 +108,21 @@ services:
     volumes:
       - ./documents:/data/documents
       - kairix-data:/data/kairix
-      # - ./kairix.config.yaml:/opt/kairix/kairix.config.yaml:ro
+      # Layered config: the image ships a complete canonical config at
+      # /opt/kairix/kairix.config.yaml (containing _schema_version, provider:,
+      # collections, retrieval defaults). Operators overlay sparse host-side
+      # overrides via the OVERLAY env-var below — the overlay only needs to
+      # declare the keys you're changing; required keys come from the image.
+      # NEVER bind-mount over /opt/kairix/kairix.config.yaml — that shadow-
+      # mount drops required keys silently (the v2026.5.17a9 incident).
+      - ./kairix.config.local.yaml:/opt/kairix/kairix.config.local.yaml:ro
     env_file:
       - .env
     environment:
       - KAIRIX_NEO4J_URI=bolt://neo4j:7687
       - KAIRIX_NEO4J_USER=neo4j
       - KAIRIX_NEO4J_PASSWORD=${KAIRIX_NEO4J_PASSWORD}
+      - KAIRIX_CONFIG_OVERLAY_PATH=/opt/kairix/kairix.config.local.yaml
     depends_on:
       neo4j:
         condition: service_healthy
