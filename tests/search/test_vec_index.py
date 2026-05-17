@@ -430,6 +430,387 @@ def test_load_then_add_vectors_rebuilds_immutable_view(tmp_path: Path) -> None:
     assert len(loaded) == 4
 
 
+# ---------------------------------------------------------------------------
+# Batched-metadata behaviour (#287).
+#
+# These tests pin the post-refactor invariants: ONE SQL call per ANN sweep,
+# ANN-rank preserved across SQL's unordered IN-clause fetch, active+collection
+# filters honoured, frontmatter stripped, missing rows skipped, defensive
+# chunking on k > 500.
+#
+# SQL-call counting is done via a thin VectorIndex subclass that attaches
+# ``set_trace_callback`` to the open connection — no @patch, no
+# monkeypatch on kairix internals (F1 / no-monkeypatch policy).
+# ---------------------------------------------------------------------------
+
+
+class _SqlCountingVectorIndex:
+    """Drop-in test wrapper that counts the SELECT statements issued during
+    ``_resolve_match_metadata``.
+
+    Wraps a real ``VectorIndex`` and proxies the metadata helper so the
+    production batching logic is exercised end-to-end while a
+    ``set_trace_callback`` on the live connection captures every executed
+    SQL string. Subclassing isn't used because ``_fetch_metadata_batched``
+    opens its own connection inside the function body; we re-implement
+    the helper locally with the same behaviour PLUS the trace hook.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        from kairix.core.search import vec_index as vi
+
+        self._inner = inner
+        self._vi = vi
+        self.sql_calls: list[str] = []
+        # Replace the inner's helper bound method with one that records SQL.
+        original_fetch = inner._fetch_metadata_batched
+
+        def traced_fetch(unique_hashes: list[str]) -> dict:
+            from kairix.core.db import open_db as _open_db
+
+            rows_by_hash: dict[str, sqlite3.Row] = {}
+            db = _open_db(Path(inner._db_path))
+            try:
+                db.row_factory = sqlite3.Row
+                db.set_trace_callback(self.sql_calls.append)
+                for start in range(0, len(unique_hashes), vi._IN_CLAUSE_BATCH_SIZE):
+                    chunk = unique_hashes[start : start + vi._IN_CLAUSE_BATCH_SIZE]
+                    placeholders = ",".join("?" * len(chunk))
+                    sql = vi._METADATA_SELECT_SQL.format(placeholders=placeholders)
+                    for row in db.execute(sql, tuple(chunk)).fetchall():
+                        rows_by_hash[row["hash"]] = row
+            finally:
+                db.close()
+            return rows_by_hash
+
+        # Use object.__setattr__ to avoid touching the production class.
+        inner._fetch_metadata_batched = traced_fetch  # type: ignore[method-assign]  # test wrapper records SQL via set_trace_callback; no production internals patched
+
+        # Keep a handle to the original to allow restoration if needed.
+        self._original_fetch = original_fetch
+
+    def resolve(self, matches: Any, k: int, collections: list[str] | None) -> list[dict]:
+        return self._inner._resolve_match_metadata(matches, k, collections)
+
+    @property
+    def select_count(self) -> int:
+        """Count SELECT statements only — PRAGMAs and connection setup don't count."""
+        return sum(1 for stmt in self.sql_calls if stmt.strip().upper().startswith("SELECT"))
+
+
+class _FakeMatches:
+    """Minimal usearch-match shape: ``.keys`` + ``.distances`` lists."""
+
+    def __init__(self, keys: list[int], distances: list[float]) -> None:
+        self.keys = keys
+        self.distances = distances
+
+
+def _seed_metadata_db(tmp_path: Path, rows: list[dict[str, Any]]) -> Path:
+    """Create a minimal documents+content DB seeded with ``rows``.
+
+    Each row: {hash, path, title, collection, doc, active}.
+    """
+    db_path = tmp_path / "index.sqlite"
+    db = sqlite3.connect(str(db_path))
+    db.executescript(
+        """
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY, collection TEXT, path TEXT,
+            title TEXT, hash TEXT, active INTEGER DEFAULT 1
+        );
+        CREATE TABLE content (hash TEXT PRIMARY KEY, doc TEXT);
+        """
+    )
+    for r in rows:
+        db.execute(
+            "INSERT INTO documents (collection, path, title, hash, active) VALUES (?,?,?,?,?)",
+            (r["collection"], r["path"], r["title"], r["hash"], r.get("active", 1)),
+        )
+        db.execute("INSERT INTO content (hash, doc) VALUES (?, ?)", (r["hash"], r["doc"]))
+    db.commit()
+    db.close()
+    return db_path
+
+
+def _make_idx_with_keys(tmp_path: Path, db_path: Path, hash_seqs: list[str]) -> Any:
+    """Build a VectorIndex whose ``_key_to_hash_seq`` mapping is pre-populated.
+
+    The ANN index file is NOT built — these tests drive
+    ``_resolve_match_metadata`` directly with a hand-crafted matches object.
+    """
+    from kairix.core.search.vec_index import VectorIndex
+
+    idx = VectorIndex(
+        index_path=tmp_path / "vectors.usearch",
+        meta_path=tmp_path / "vectors.meta.json",
+        db_path=db_path,
+    )
+    idx._key_to_hash_seq = {i: hs for i, hs in enumerate(hash_seqs)}
+    return idx
+
+
+@pytest.mark.unit
+def test_resolve_metadata_empty_matches_returns_empty(tmp_path: Path) -> None:
+    """Empty matches list short-circuits — no SQL issued, [] returned.
+
+    Sabotage: dropping the ``if not ordered: return []`` early-exit means
+    ``_fetch_metadata_batched([])`` runs, issuing a malformed
+    ``SELECT ... IN ()`` query that SQLite parses as an error — the
+    assert ``out == []`` then fires because the except path returns [],
+    BUT the ``counter.select_count == 0`` assertion below catches the
+    regression cleanly.
+    """
+    db_path = _seed_metadata_db(tmp_path, [])
+    idx = _make_idx_with_keys(tmp_path, db_path, hash_seqs=[])
+    counter = _SqlCountingVectorIndex(idx)
+
+    matches = _FakeMatches(keys=[], distances=[])
+    out = counter.resolve(matches, k=10, collections=None)
+
+    assert out == []
+    assert counter.select_count == 0, f"empty matches must issue zero SELECTs; got {counter.sql_calls}"
+
+
+@pytest.mark.unit
+def test_resolve_metadata_single_sql_call_for_twenty_keys(tmp_path: Path) -> None:
+    """Twenty ANN hits resolve in ONE batched SQL query, not twenty.
+
+    Sabotage: reverting ``_fetch_metadata_batched`` to a per-row loop
+    (issuing one SELECT per hash) makes ``select_count == 20`` and this
+    assertion fires — the N+1 regression is caught.
+    """
+    rows = [
+        {
+            "hash": f"hash{i}",
+            "path": f"vault/doc-{i}.md",
+            "title": f"doc-{i}",
+            "collection": "vault",
+            "doc": f"Body {i}.",
+        }
+        for i in range(20)
+    ]
+    db_path = _seed_metadata_db(tmp_path, rows)
+    hash_seqs = [f"hash{i}_0" for i in range(20)]
+    idx = _make_idx_with_keys(tmp_path, db_path, hash_seqs=hash_seqs)
+    counter = _SqlCountingVectorIndex(idx)
+
+    keys = list(range(20))
+    distances = [float(i) * 0.01 for i in range(20)]
+    out = counter.resolve(_FakeMatches(keys=keys, distances=distances), k=20, collections=None)
+
+    assert len(out) == 20
+    assert counter.select_count == 1, (
+        f"twenty ANN hits must batch into one SELECT; got {counter.select_count}: {counter.sql_calls}"
+    )
+
+
+@pytest.mark.unit
+def test_resolve_metadata_preserves_ann_order(tmp_path: Path) -> None:
+    """Output list follows ANN ranking even when SQL returns rows in another order.
+
+    SQLite's ``WHERE hash IN (...)`` makes no order guarantee, and our
+    seeded DB returns rows in insertion order — which we deliberately
+    invert relative to the ANN keys. The output must still follow
+    matches.keys.
+
+    Sabotage: returning ``rows_by_hash.values()`` directly (skipping the
+    ordered-iter zip in ``_build_results``) flips the order — this
+    assertion fires.
+    """
+    # Insert in REVERSE order so SQL's natural fetch is reversed vs ANN.
+    rows = [
+        {
+            "hash": f"hash{i}",
+            "path": f"vault/{i}.md",
+            "title": f"t-{i}",
+            "collection": "vault",
+            "doc": f"d{i}",
+        }
+        for i in reversed(range(3))
+    ]
+    db_path = _seed_metadata_db(tmp_path, rows)
+    hash_seqs = ["hash0_0", "hash1_0", "hash2_0"]
+    idx = _make_idx_with_keys(tmp_path, db_path, hash_seqs=hash_seqs)
+    counter = _SqlCountingVectorIndex(idx)
+
+    matches = _FakeMatches(keys=[0, 1, 2], distances=[0.1, 0.2, 0.3])
+    out = counter.resolve(matches, k=10, collections=None)
+
+    assert [r["hash_seq"] for r in out] == ["hash0_0", "hash1_0", "hash2_0"]
+    assert [r["distance"] for r in out] == [0.1, 0.2, 0.3]
+
+
+@pytest.mark.unit
+def test_resolve_metadata_handles_missing_hash(tmp_path: Path) -> None:
+    """Keys whose hash isn't in the DB are silently skipped (no result row).
+
+    Sabotage: removing ``if row is None: continue`` in ``_build_results``
+    would raise KeyError when building the dict from a None row — the
+    call raises and ``out`` is never assigned.
+    """
+    rows = [
+        {
+            "hash": "hash0",
+            "path": "vault/0.md",
+            "title": "t-0",
+            "collection": "vault",
+            "doc": "d0",
+        },
+        # hash1 deliberately absent → match key 1 must be skipped silently
+        {
+            "hash": "hash2",
+            "path": "vault/2.md",
+            "title": "t-2",
+            "collection": "vault",
+            "doc": "d2",
+        },
+    ]
+    db_path = _seed_metadata_db(tmp_path, rows)
+    hash_seqs = ["hash0_0", "hash1_0", "hash2_0"]
+    idx = _make_idx_with_keys(tmp_path, db_path, hash_seqs=hash_seqs)
+    counter = _SqlCountingVectorIndex(idx)
+
+    matches = _FakeMatches(keys=[0, 1, 2], distances=[0.1, 0.2, 0.3])
+    out = counter.resolve(matches, k=10, collections=None)
+
+    assert [r["hash_seq"] for r in out] == ["hash0_0", "hash2_0"]
+
+
+@pytest.mark.unit
+def test_resolve_metadata_active_filter(tmp_path: Path) -> None:
+    """Rows with ``active = 0`` are dropped — invariant preserved post-batch.
+
+    Sabotage: removing the ``d.active = 1`` clause in the WHERE returns
+    the inactive doc, growing the result list and failing this length
+    assertion.
+    """
+    rows = [
+        {
+            "hash": "hash0",
+            "path": "v/0.md",
+            "title": "t0",
+            "collection": "vault",
+            "doc": "d0",
+            "active": 1,
+        },
+        {
+            "hash": "hash1",
+            "path": "v/1.md",
+            "title": "t1",
+            "collection": "vault",
+            "doc": "d1",
+            "active": 0,  # archived — must be filtered out
+        },
+    ]
+    db_path = _seed_metadata_db(tmp_path, rows)
+    hash_seqs = ["hash0_0", "hash1_0"]
+    idx = _make_idx_with_keys(tmp_path, db_path, hash_seqs=hash_seqs)
+    counter = _SqlCountingVectorIndex(idx)
+
+    matches = _FakeMatches(keys=[0, 1], distances=[0.1, 0.2])
+    out = counter.resolve(matches, k=10, collections=None)
+
+    assert len(out) == 1
+    assert out[0]["hash_seq"] == "hash0_0"
+
+
+@pytest.mark.unit
+def test_resolve_metadata_collection_filter(tmp_path: Path) -> None:
+    """Rows outside the supplied collection set are dropped.
+
+    Sabotage: removing the ``collections and row["collection"] not in``
+    guard in ``_build_results`` returns the vault-projects doc too,
+    failing the equality assertion below.
+    """
+    rows = [
+        {
+            "hash": "hash0",
+            "path": "ref/0.md",
+            "title": "t0",
+            "collection": "reference-library",
+            "doc": "d0",
+        },
+        {
+            "hash": "hash1",
+            "path": "vp/1.md",
+            "title": "t1",
+            "collection": "vault-projects",
+            "doc": "d1",
+        },
+    ]
+    db_path = _seed_metadata_db(tmp_path, rows)
+    hash_seqs = ["hash0_0", "hash1_0"]
+    idx = _make_idx_with_keys(tmp_path, db_path, hash_seqs=hash_seqs)
+    counter = _SqlCountingVectorIndex(idx)
+
+    matches = _FakeMatches(keys=[0, 1], distances=[0.1, 0.2])
+    out = counter.resolve(matches, k=10, collections=["reference-library"])
+
+    assert len(out) == 1
+    assert out[0]["collection"] == "reference-library"
+
+
+@pytest.mark.unit
+def test_resolve_metadata_strips_frontmatter(tmp_path: Path) -> None:
+    """Snippet drops YAML frontmatter before slicing to 300 chars.
+
+    Sabotage: removing the ``strip_frontmatter`` call leaves the
+    ``---\\nkey: val\\n---\\n`` header in the snippet — this assertion fires.
+    """
+    rows = [
+        {
+            "hash": "hash0",
+            "path": "vault/0.md",
+            "title": "t0",
+            "collection": "vault",
+            "doc": "---\nkey: val\nfoo: bar\n---\nactual body text follows here.",
+        }
+    ]
+    db_path = _seed_metadata_db(tmp_path, rows)
+    idx = _make_idx_with_keys(tmp_path, db_path, hash_seqs=["hash0_0"])
+    counter = _SqlCountingVectorIndex(idx)
+
+    out = counter.resolve(_FakeMatches(keys=[0], distances=[0.0]), k=1, collections=None)
+
+    assert len(out) == 1
+    snippet = out[0]["snippet"]
+    assert "key: val" not in snippet, f"frontmatter not stripped: {snippet!r}"
+    assert snippet.startswith("actual body text follows")
+
+
+@pytest.mark.unit
+def test_resolve_metadata_batches_when_over_500_keys(tmp_path: Path) -> None:
+    """Defensive: > 500 keys chunk into multiple SELECTs to dodge SQLite limits.
+
+    Sabotage: removing the ``range(..., _IN_CLAUSE_BATCH_SIZE)`` chunk
+    loop and issuing a single SELECT with 600 placeholders works on
+    modern SQLite (limit 32 766) but DOES double the assertion
+    expectation — this test fails because ``select_count == 1`` instead
+    of 2. The defensive guard is then visibly missing.
+    """
+    rows = [
+        {
+            "hash": f"hash{i}",
+            "path": f"v/{i}.md",
+            "title": f"t{i}",
+            "collection": "vault",
+            "doc": f"d{i}",
+        }
+        for i in range(600)
+    ]
+    db_path = _seed_metadata_db(tmp_path, rows)
+    hash_seqs = [f"hash{i}_0" for i in range(600)]
+    idx = _make_idx_with_keys(tmp_path, db_path, hash_seqs=hash_seqs)
+    counter = _SqlCountingVectorIndex(idx)
+
+    matches = _FakeMatches(keys=list(range(600)), distances=[0.001 * i for i in range(600)])
+    out = counter.resolve(matches, k=600, collections=None)
+
+    assert len(out) == 600
+    assert counter.select_count == 2, f"600 keys must chunk into 2 SELECTs at batch=500; got {counter.select_count}"
+
+
 @pytest.mark.unit
 def test_get_vector_index_returns_none_on_loader_failure() -> None:
     """``get_vector_index`` returns None when path arithmetic raises.

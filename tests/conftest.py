@@ -86,6 +86,7 @@ pytest_plugins = [
     "tests.bdd.steps.enrich_cache_steps",
     "tests.bdd.steps.embed_cache_steps",
     "tests.bdd.steps.embed_coalescer_steps",
+    "tests.bdd.steps.vec_index_batched_metadata_steps",
 ]
 
 # PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.
