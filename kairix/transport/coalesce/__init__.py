@@ -17,7 +17,9 @@ from kairix.transport.coalesce.embed_coalescer import (
     DEFAULT_MAX_BATCH_SIZE,
     CoalescerStats,
     EmbedCoalescer,
+    current_embed_coalescer,
     get_embed_coalescer,
+    install_embed_coalescer,
     reset_embed_coalescer,
 )
 
@@ -26,6 +28,8 @@ __all__ = [
     "DEFAULT_MAX_BATCH_SIZE",
     "CoalescerStats",
     "EmbedCoalescer",
+    "current_embed_coalescer",
     "get_embed_coalescer",
+    "install_embed_coalescer",
     "reset_embed_coalescer",
 ]

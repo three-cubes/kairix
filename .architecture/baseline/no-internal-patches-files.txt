@@ -27,7 +27,6 @@ tests/summaries/test_cli_unit.py
 tests/temporal/test_cli.py
 tests/test_top_level_cli_dispatch.py
 tests/transport/test_client_pool.py
-tests/transport/test_provider_embed_service_branches.py
 tests/wikilinks/test_audit_unit.py
 tests/wikilinks/test_cli_unit.py
 tests/wikilinks/test_resolver.py

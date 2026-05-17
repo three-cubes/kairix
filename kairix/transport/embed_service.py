@@ -43,7 +43,11 @@ Tests construct ``ProviderEmbeddingService(FakeProvider(...))`` from
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+from kairix.transport.coalesce import current_embed_coalescer as _module_default_existing_coalescer
+from kairix.transport.coalesce import get_embed_coalescer as _module_default_coalescer_factory
 
 if TYPE_CHECKING:
     from kairix.providers import Provider
@@ -79,10 +83,22 @@ class ProviderEmbeddingService:
       ``provider``: the resolved plugin. Production callers build it
       via ``kairix.providers.get_provider(provider_name())``; tests
       pass a ``FakeProvider`` from ``tests/fakes.py``.
+      ``existing_coalescer_fn`` / ``coalescer_factory``: optional
+      callables for driving the coalescer-routing branches in tests.
+      Production defaults read the process-shared singleton and
+      lazy-build factory from ``kairix.transport.coalesce``.
     """
 
-    def __init__(self, provider: Provider) -> None:
+    def __init__(
+        self,
+        provider: Provider,
+        *,
+        existing_coalescer_fn: Callable[[], Any] = _module_default_existing_coalescer,
+        coalescer_factory: Callable[..., Any] = _module_default_coalescer_factory,
+    ) -> None:
         self._provider = provider
+        self._existing_coalescer_fn = existing_coalescer_fn
+        self._coalescer_factory = coalescer_factory
 
     def embed(self, text: str) -> list[float]:
         """Embed a single text string. Returns ``[]`` on failure.
@@ -95,8 +111,6 @@ class ProviderEmbeddingService:
             return []
 
         from kairix.transport.cache import get_embed_cache
-        from kairix.transport.coalesce import embed_coalescer as embed_coalescer_mod
-        from kairix.transport.coalesce import get_embed_coalescer
 
         cache = get_embed_cache()
         cached = cache.get(text)
@@ -107,14 +121,14 @@ class ProviderEmbeddingService:
         # pre-installation or a previous production warm-up), use it.
         # Otherwise lazily build one with this provider's batch dispatcher
         # so concurrent agents fold into one provider round-trip.
-        existing = embed_coalescer_mod._EMBED_COALESCER
+        existing = self._existing_coalescer_fn()
         if existing is not None:
             result = existing.embed(text)
             if result:
                 cache.put(text, result)
             return result
 
-        coalescer = get_embed_coalescer(embed_batch=self._provider.embed_batch)
+        coalescer = self._coalescer_factory(embed_batch=self._provider.embed_batch)
         if coalescer is not None:
             result = coalescer.embed(text)
             if result:

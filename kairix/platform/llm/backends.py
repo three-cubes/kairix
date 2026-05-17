@@ -49,7 +49,8 @@ def resolve_provider(
             "fix: set 'provider: <plugin-name>' in kairix.config.yaml. "
             "next: see docs/architecture/provider-plugin-architecture.md."
         )
-    return get_provider_fn(name)
+    provider: Provider = get_provider_fn(name)
+    return provider
 
 
 def default_chat_callable(

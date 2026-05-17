@@ -76,7 +76,9 @@ __all__ = [
     "DEFAULT_MAX_BATCH_SIZE",
     "CoalescerStats",
     "EmbedCoalescer",
+    "current_embed_coalescer",
     "get_embed_coalescer",
+    "install_embed_coalescer",
     "reset_embed_coalescer",
 ]
 
@@ -478,3 +480,35 @@ def reset_embed_coalescer() -> None:
         if _EMBED_COALESCER is not None:
             _EMBED_COALESCER.shutdown()
         _EMBED_COALESCER = None
+
+
+def current_embed_coalescer() -> "EmbedCoalescer | None":
+    """Return the currently-installed process-shared coalescer, if any.
+
+    ``None`` indicates no singleton is installed; callers fall back to
+    :func:`get_embed_coalescer` (lazy-build) or direct dispatch.
+
+    This is the public read accessor for the module-level singleton.
+    Callers MUST use this (not direct ``_EMBED_COALESCER`` access)
+    so the read is lock-protected and the singleton's namespace stays
+    encapsulated.
+    """
+    with _EMBED_COALESCER_LOCK:
+        return _EMBED_COALESCER
+
+
+def install_embed_coalescer(coalescer: "EmbedCoalescer | None") -> None:
+    """Install ``coalescer`` as the process-shared singleton.
+
+    Pass an :class:`EmbedCoalescer`-shaped object (or ``None`` to clear)
+    and the next :func:`current_embed_coalescer` read returns it. Tests
+    use this to pre-install a stand-in coalescer through the public
+    write accessor instead of reassigning the module attribute.
+
+    Production callers do not call this directly — they rely on
+    :func:`get_embed_coalescer` which builds-and-installs lazily under
+    the lock.
+    """
+    global _EMBED_COALESCER
+    with _EMBED_COALESCER_LOCK:
+        _EMBED_COALESCER = coalescer  # type: ignore[assignment] — accept duck-typed stand-ins from tests; production callers always pass EmbedCoalescer
