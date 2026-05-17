@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 # Bound on the per-repo chunk-date LRU. Sized larger than any reasonable
 # bm25_limit + vector_limit sum so a single search's enrich call never
-# evicts the prior search's batch under conc>=5 traffic (W1D profile,
-# v2026.5.16 enrich SQLite-WAL-lock contention investigation).
+# evicts the prior search's batch under conc>=5 traffic — eviction under
+# load drives SQLite-WAL-lock contention on the enrich path.
 _CHUNK_DATES_CACHE_MAX = 256
 
 

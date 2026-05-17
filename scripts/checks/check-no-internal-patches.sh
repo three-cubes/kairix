@@ -39,6 +39,7 @@ Forbidden example:
 Stdlib boundaries (os.*, builtins.*) and external SDK boundaries
 (openai.*, httpx.*) remain allowed — F1 only blocks kairix.* targets."
 
-# Delegate to AST-based detector (resolves #214 — grep missed multi-line patch()).
+# Delegate to AST-based detector — a grep-based check would miss
+# multi-line patch() invocations.
 python3 "${SCRIPT_DIR}/check_no_internal_patches.py" \
     | arch_gate "no-internal-patches" "$REMEDIATION"

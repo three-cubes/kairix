@@ -13,8 +13,7 @@ These tests verify ``async_tool_handler``:
   - Maps exceptions to the same ``{"error": ...}`` envelope as
     ``wrap_tool_errors``.
   - **Schedules concurrent calls onto separate threads** so a slow
-    handler doesn't block subsequent ones — pinning the v2026.5.10.5
-    fix from #177.
+    handler doesn't block subsequent ones (#177).
 
 Tested through public surface only — no private symbols, no
 @patch / monkeypatch.

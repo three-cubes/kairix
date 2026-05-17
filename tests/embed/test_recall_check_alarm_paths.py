@@ -3,8 +3,7 @@
 The ``recall_check`` module is the post-embed quality gate. Its happy
 paths are covered by ``test_recall_check.py`` and
 ``test_recall_check_contracts.py``; this file targets the failure paths
-that used to be ``# pragma: no cover``-marked because no test could
-reach them through the public surface:
+that are otherwise hard to reach through the public surface:
 
   - credentials missing / empty / wrong type → query is skipped
   - ``provider_factory`` raises → query is skipped

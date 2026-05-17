@@ -195,10 +195,10 @@ class TestSweepBm25Params:
     def test_non_finite_or_non_positive_weights_rejected_at_entry(self, tmp_path, bad_weights):
         """Non-finite or non-positive weights raise ValueError before any SQL runs.
 
-        Closes #143 Phase 0b: ``ORDER BY bm25(documents_fts, {float(w)}, ...)``
-        previously injected nan/inf into SQLite's bm25() with no guard. The
-        validator now refuses non-finite or non-positive weights up front so
-        the sweep never produces nondeterministic ordering.
+        ``ORDER BY bm25(documents_fts, {float(w)}, ...)`` would otherwise
+        inject nan/inf into SQLite's bm25() producing nondeterministic
+        ordering — the validator refuses non-finite or non-positive weights
+        up front so the sweep cannot reach the SQL with a poisoned param.
         """
         import yaml
 

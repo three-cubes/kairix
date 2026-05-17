@@ -1,9 +1,9 @@
 """F11: Test-skip mechanisms require rationale.
 
 A silently-skipping test is a worse signal than a missing test — it
-looks present, but never runs. The starlette/transport regression
-earlier in this branch (F7 measured 0% on a file whose unit tests
-silently skipped) is the canonical example.
+looks present, but never runs (a file can register tests, have them
+all skip on a missing optional import, and still measure 0% coverage
+without any visible failure).
 
 Detection (AST walk over ``tests/**.py``):
 

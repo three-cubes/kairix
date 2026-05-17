@@ -388,10 +388,9 @@ def test_should_not_inject_oversized_file_at_eligible_prefix(
 ) -> None:
     """A file under an eligible prefix that exceeds MAX_FILE_SIZE is rejected.
 
-    Closes coverage of the ``return False`` after ``os.path.getsize > MAX_FILE_SIZE``
-    in ``should_inject`` (line 98). The previous test for oversize files only
-    exercised it via ``inject_file`` which short-circuits earlier; this test
-    asserts the size branch in ``should_inject`` itself.
+    Drives the ``return False`` after ``os.path.getsize > MAX_FILE_SIZE`` in
+    ``should_inject`` (line 98) directly, rather than transitively through
+    ``inject_file`` (which short-circuits earlier on a different branch).
     """
     # Place a >500KB file at an eligible vault prefix path.
     path = tmp_path / "vault" / "02-Areas" / "big.md"

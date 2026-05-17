@@ -40,6 +40,7 @@ If the production code requires process-env mutation to be testable,
 that is the test-shaped-API smell from #139 — refactor the production
 function to accept ``paths: KairixPaths`` as an explicit argument."
 
-# Delegate to AST-based detector (resolves #217 — grep matched docstring text).
+# Delegate to AST-based detector — a grep-based check would match
+# docstring text and produce false positives.
 python3 "${SCRIPT_DIR}/check_no_env_monkeypatch.py" \
     | arch_gate "no-env-monkeypatch" "$REMEDIATION"

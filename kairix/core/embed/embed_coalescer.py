@@ -7,16 +7,15 @@ window pay one round-trip latency total instead of N.
 Why this exists
 ---------------
 
-The per-query stage telemetry on ``v2026.5.17a7`` shows that even with
-#280 (pool tuning) + #281 (query cache) + #285 (embed cache), the
-``embed_http`` stage at concurrency 10 still has a long tail: mean
-~379 ms, worst-case ~1100 ms per query. The shape is N concurrent
-threads each making independent embed HTTP calls and each paying the
-full Azure roundtrip — sequential on the wire, parallel only on the
-client side. Azure's embedding endpoint supports a batch ``input=`` list
-in a single request, with the same per-request latency as a single
-text. Folding N concurrent caller-threads into one batched request
-therefore turns N roundtrips into one.
+Even with pool tuning (#280), query cache (#281) and embed cache (#285),
+the ``embed_http`` stage at concurrency 10 has a long tail: mean ~379 ms,
+worst-case ~1100 ms per query. The shape is N concurrent threads each
+making independent embed HTTP calls and each paying the full Azure
+roundtrip — sequential on the wire, parallel only on the client side.
+Azure's embedding endpoint supports a batch ``input=`` list in a single
+request, with the same per-request latency as a single text. Folding N
+concurrent caller-threads into one batched request therefore turns N
+roundtrips into one.
 
 Architectural shape
 -------------------

@@ -27,10 +27,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# Estimated wall time for a full warm-up, captured from live profile on
-# v2026.5.16a3: build_search_pipeline ~2.5s + probe_search ~4.5s + graph
-# open ~0s = ~7s. We round up to 8 so the agent's "retry in ~N seconds"
-# message slightly over-promises the wait rather than under-promises.
+# Estimated wall time for a full warm-up: build_search_pipeline ~2.5s +
+# probe_search ~4.5s + graph open ~0s = ~7s. We round up to 8 so the
+# agent's "retry in ~N seconds" message slightly over-promises the wait
+# rather than under-promises.
 _ESTIMATED_WARM_SECONDS = 8.0
 
 

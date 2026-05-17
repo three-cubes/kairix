@@ -317,7 +317,7 @@ class TestChunkFile:
 
 
 # ---------------------------------------------------------------------------
-# Branch-coverage tests for the previously-uncovered defensive paths
+# Branch-coverage tests for the defensive paths
 # ---------------------------------------------------------------------------
 
 

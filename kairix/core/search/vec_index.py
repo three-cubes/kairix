@@ -92,9 +92,8 @@ class VectorIndex:
         if not self._index_path.exists():
             return 0
 
-        # Parse meta ONCE — the file can be 14 MB+ on a fully-indexed corpus.
-        # The dimension check and the key-mapping load both used to call
-        # json.loads independently, doubling the warm-up cost.
+        # Parse meta ONCE — the file can be 14 MB+ on a fully-indexed corpus,
+        # and both the dimension check and the key-mapping load consume it.
         meta: dict[str, Any] | None = None
         if self._meta_path.exists():
             try:

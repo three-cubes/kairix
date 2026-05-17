@@ -393,7 +393,7 @@ def _merge_top_level_scalars(base: RetrievalConfig, overrides: dict) -> dict:
         if key in overrides:
             out[key] = type(getattr(base, key))(overrides[key])
     # rerank_intents is a tuple[str, ...] — coerce list/None from YAML into
-    # the right shape (per-collection override; closes #74).
+    # the right shape (per-collection override).
     if "rerank_intents" in overrides:
         intents = overrides["rerank_intents"] or []
         out["rerank_intents"] = tuple(str(x) for x in intents)

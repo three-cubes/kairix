@@ -1,9 +1,9 @@
 """Tests for Neo4j upsert_edge — Document MENTIONS edge handling.
 
-Verifies the fix for issue #40: Document nodes must be created via MERGE
-(not MATCH) since they don't exist before the first MENTIONS edge.
-These tests mock the Neo4j driver to verify Cypher query construction
-without requiring a live database.
+Pins the contract that Document nodes are created via MERGE (not MATCH)
+since they don't exist before the first MENTIONS edge. These tests mock
+the Neo4j driver to verify Cypher query construction without requiring
+a live database.
 """
 
 from __future__ import annotations

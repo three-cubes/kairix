@@ -627,9 +627,9 @@ def document_root_override() -> str | None:
 def data_dir() -> Path:
     """Public accessor for the platform-aware data dir.
 
-    Wraps the previously-private ``default_data_dir`` so other modules can
-    centralise their "log / cache under the kairix data dir" path resolution
-    without re-reading ``KAIRIX_DATA_DIR`` (or its legacy fallback) themselves.
+    Wraps ``default_data_dir`` so other modules can centralise their
+    "log / cache under the kairix data dir" path resolution without
+    re-reading ``KAIRIX_DATA_DIR`` (or its legacy fallback) themselves.
     Honours ``KAIRIX_DATA_DIR`` when set — operators occasionally pin the
     data dir directly rather than via Docker / service detection.
     """
@@ -735,9 +735,8 @@ def agent_memory_path(agent: str, *, root: Path | str | None = None) -> Path:
     If the override path already ends with /{agent}/memory (a common
     misuse — passing the full agent-memory path rather than the parent
     of agent directories), the function detects this and returns the
-    path as-is rather than double-appending. This is the regression
-    guard for the path-doubling bug fixed in #67 / #93 — silently
-    handling the misuse with a warning is friendlier than failing.
+    path as-is rather than double-appending. Silently handling the
+    misuse with a warning is friendlier than failing.
 
     ``root`` is the test seam (F2-clean): tests pass an explicit root
     instead of monkeypatching ``KAIRIX_AGENT_MEMORY_ROOT``.

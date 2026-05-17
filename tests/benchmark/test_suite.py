@@ -960,7 +960,7 @@ def test_all_bundled_suites_load_without_errors() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Branch-coverage tests for previously-uncovered validation paths
+# Branch-coverage tests for the validation paths
 # ---------------------------------------------------------------------------
 
 

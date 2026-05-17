@@ -125,10 +125,10 @@ def test_thin_snippets_filtered_no_chat_call() -> None:
     """#254: title-only hits (empty / very short content) must not reach the LLM.
 
     When search returns matches but every snippet is title-equivalent (e.g.
-    a frontmatter-only doc or stripped index page), prep used to call the
-    LLM with effectively zero grounding and got hallucinated 'generic
-    filler' summaries back. Now those hits are filtered upstream and the
-    use case returns the no-results sentinel.
+    a frontmatter-only doc or stripped index page), calling the LLM with
+    effectively zero grounding produces hallucinated 'generic filler'
+    summaries. Thin hits are filtered upstream and the use case returns
+    the no-results sentinel instead.
     """
     sr = _FakeSearchResult(
         results=[
@@ -195,7 +195,7 @@ def test_agent_and_scope_pass_through() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Determinism — closes #116
+# Determinism — L0 prefix property
 # ---------------------------------------------------------------------------
 
 

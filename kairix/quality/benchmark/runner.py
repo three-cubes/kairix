@@ -131,8 +131,8 @@ def _default_retrieve(
     """Production retrieve callable — delegates to ``runner.retrieve``.
 
     Wrapper exists so ``BenchmarkDeps.retrieve`` has a stable, typed
-    default that doesn't import ``runner.retrieve`` at module-import time
-    (avoids the circular-import risk callers historically tripped on).
+    default that doesn't import ``runner.retrieve`` at module-import
+    time (avoiding a circular-import risk on the retrieve callers).
     """
     return retrieve(
         query=query,
@@ -156,12 +156,10 @@ class BenchmarkDeps:
     """Injectable dependencies for ``run_benchmark`` and its helpers.
 
     Each field defaults to a production implementation; tests construct
-    ``BenchmarkDeps`` with fakes from ``tests/fakes.py``.
-
-    The dataclass replaces the per-helper ``*_fn=None`` substitution kwargs
-    that previously threaded through ``run_benchmark`` / ``retrieve_case`` /
-    ``score_case`` (the F6 violation that the issue resolves). All three
-    boundary collaborators are now reified as one typed bag.
+    ``BenchmarkDeps`` with fakes from ``tests/fakes.py``. All boundary
+    collaborators that ``run_benchmark`` / ``retrieve_case`` / ``score_case``
+    delegate to are reified as one typed bag (F6 — no ``*_fn=None`` test
+    seams threaded through production signatures).
     """
 
     classifier: ContentClassifier = field(default_factory=DefaultContentClassifier)

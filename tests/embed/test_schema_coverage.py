@@ -1,5 +1,5 @@
 """
-Additional tests for kairix.core.embed.schema — covers previously-untested paths:
+Tests for kairix.core.embed.schema. Covers:
 - get_db_path(): env override, missing file
 - get_pending_chunks(): synthetic DB
 - get_all_chunks_needing_embedding(): synthetic DB

@@ -108,9 +108,9 @@ def test_sync_fts_empty_list() -> None:
 def test_rebuild_fts_is_atomic_under_failure() -> None:
     """If an INSERT fails mid-rebuild, the OLD documents_fts must still exist.
 
-    Regression for #223: previously rebuild_fts ran DROP, CREATE, INSERT as
-    three separate auto-commit steps. A reader between DROP and CREATE saw
-    "no such table: documents_fts" and BM25 silently degraded to vector-only.
+    rebuild_fts wraps DROP/CREATE/INSERT in a single transaction so a
+    concurrent reader never observes a window where documents_fts is missing
+    (which would silently degrade BM25 to vector-only search).
 
     Sabotage-prove: drop the ``content`` table mid-rebuild so the INSERT's
     JOIN fails; assert documents_fts is still queryable with the old data.

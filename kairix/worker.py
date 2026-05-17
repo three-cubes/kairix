@@ -237,11 +237,11 @@ def run_embed(deps: WorkerDeps | None = None) -> bool:
     KEEP RUNNING on a schedule; the embed use case's job is to do the
     work and report what happened.
 
-    The pre-v2026.5.10 worker called the embed CLI which used
-    ``sys.exit()`` to signal recall-gate failures. ``SystemExit`` is
-    not caught by ``except Exception``, so any gate alert killed the
-    worker process. That coupling is removed here: the use case
-    returns a ``EmbedPipelineResult`` dataclass; we inspect it and log.
+    The embed use case returns an ``EmbedPipelineResult`` dataclass that
+    the worker inspects and logs — it must NOT call a code path that uses
+    ``sys.exit()`` (e.g. the embed CLI) because ``SystemExit`` is not
+    caught by ``except Exception`` and any gate alert would kill the
+    worker process.
 
     ``deps.embed`` is the injection seam: tests pass a callable returning
     either the result dataclass or None (legacy). Production passes

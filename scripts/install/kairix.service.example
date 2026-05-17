@@ -6,11 +6,11 @@
 #   sudo systemctl enable --now kairix-fetch-secrets.service kairix.service
 #
 # Why this file ships with kairix:
-# v2026.5.10 hardens the deployment story per #167. The previous unit
-# definition was hand-rolled per host; mistakes in `Requires=` /
-# `After=` ordering let kairix.service start before secrets had been
-# hydrated, leaving vector search broken until manual intervention.
-# This file pins the correct ordering.
+# kairix.service MUST NOT start before kairix-fetch-secrets.service has
+# hydrated /run/secrets/kairix.env, otherwise vector search comes up
+# degraded (BM25 only) and requires manual intervention. This file pins
+# the correct `Requires=` / `After=` ordering so operators don't have to
+# rediscover it per host.
 
 [Unit]
 Description=Kairix — private knowledge retrieval for AI agents

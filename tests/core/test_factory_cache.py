@@ -1,8 +1,8 @@
 """Unit tests for build_search_pipeline memoisation (#279).
 
-Live profiling on v2026.5.16a3 showed each `build_search_pipeline()` call
-costs ~2.3s + ~120 MB. The factory now memoises by config identity so
-repeat calls in the same process return the cached instance instantly.
+Each `build_search_pipeline()` call costs ~2.3s + ~120 MB. The factory
+memoises by config identity so repeat calls in the same process return
+the cached instance instantly.
 """
 
 from __future__ import annotations

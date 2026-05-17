@@ -845,24 +845,12 @@ def test_suite_generator_enrich_skips_case_when_no_relevant_doc(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Phase 0-deferred regression tests
+# Credential-failure handling — pipeline-level coverage
 #
-# The original Phase 0 PR landed credential-handling fixes without unit-level
-# regression tests because both required substituting the module-level
-# ``fetch_llm_credentials`` callable — the smell this initiative is removing.
-#
-# Status after Phase 2b:
-#   - ``resolve_credentials`` caller-wins semantics still tests cleanest with
-#     a substituted ``fetch_llm_credentials``. Phase 3 will inject this as a
-#     constructor seam on ``SuiteGenerator``; we DEFER the unit-level test
-#     until then to avoid introducing monkeypatch.
-#   - ``enrich_suite`` credential-failure handling is verified at the broader
-#     pipeline level: passing both ``api_key`` and ``endpoint`` as non-empty
-#     strings means ``resolve_credentials`` is never called, and the rest of
-#     the pipeline runs through the injected protocol fakes.
-#
-# Both deferrals are explicit in the PR body for #143 Phase 2b.
+# ``enrich_suite`` credential-failure handling is verified at the pipeline
+# level: passing both ``api_key`` and ``endpoint`` as non-empty strings means
+# ``resolve_credentials`` is never called, and the rest of the pipeline runs
+# through the injected protocol fakes.
 # ---------------------------------------------------------------------------
 
 
@@ -870,15 +858,10 @@ def test_suite_generator_enrich_skips_case_when_no_relevant_doc(tmp_path: Path) 
 def test_enrich_suite_handles_runtime_failure_via_chat_backend(tmp_path: Path) -> None:
     """enrich_suite returns EnrichmentResult (not raises) when the judge backend errors.
 
-    This is the broader credential-failure-shape coverage the Phase 0 deferral
-    asked for: any RuntimeError from the LLM call path (which a credential
-    rejection from the API would surface as) is captured and surfaced via
-    result.errors / n_failed rather than propagating.
-
-    NOTE: Tests the LLM-failure branch via FakeLLMJudge wired to a chat
-    backend that always raises. The credential-fetch failure branch in
-    `resolve_credentials` itself remains a Phase 3 deferral — see module
-    docstring above.
+    Any RuntimeError from the LLM call path (which a credential rejection from
+    the API would surface as) is captured and surfaced via result.errors /
+    n_failed rather than propagating. The branch is driven via FakeLLMJudge
+    wired to a chat backend that always raises.
     """
     input_suite = {
         "meta": {},

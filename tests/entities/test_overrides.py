@@ -227,10 +227,11 @@ def test_empty_term_quoted_skipped(tmp_path: Path, caplog: pytest.LogCaptureFixt
 
 
 # ---------------------------------------------------------------------------
-# Regex-split regression — the two-stage head + tail grammar must match
-# everything the old single-regex grammar matched and reject everything it
-# rejected. These tests anchor the refactor that split ``_ENTRY_PATTERN``
-# into ``_ENTRY_HEAD_PATTERN`` + ``_ENTRY_TAIL_PATTERN`` (Sonar PR #247).
+# Two-stage entry parser — head + tail grammar
+#
+# Pins the behaviour of ``_ENTRY_HEAD_PATTERN`` + ``_ENTRY_TAIL_PATTERN``: any
+# malformed entry (garbage tail, unbalanced quotes, unknown label) must be
+# rejected at parse time rather than silently producing a partial override.
 # ---------------------------------------------------------------------------
 
 

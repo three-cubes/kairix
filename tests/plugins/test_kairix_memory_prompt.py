@@ -257,7 +257,8 @@ def test_plugin_manifest_declares_canonical_name() -> None:
     assert manifest["runtime"] == "python"
     assert manifest["entry"] == "plugin.py"
     assert manifest["entryFunction"] == "on_session_start"
-    # Append, not replace — this is the regression #246 was filed for.
+    # Append, not replace — the runtime must merge memory into the existing
+    # system prompt rather than overwrite the host's prompt.
     assert manifest["capabilities"]["promptInjection"] == "append"
 
 

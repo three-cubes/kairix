@@ -158,7 +158,10 @@ def test_pipeline_writes_run_log_with_embed_metadata() -> None:
 
 
 def test_recall_gate_failure_surfaces_as_alert_not_exception() -> None:
-    """The whole point of the v2026.5.10 fix: gate failure → structured alert."""
+    """Recall-gate failure surfaces as a structured alert on the result,
+    not as a raised exception (the worker's ``except Exception`` would
+    not catch a ``SystemExit`` and the gate must never tear the worker
+    down)."""
     deps = _make_deps(
         recall_passed=False,
         recall_score=0.20,

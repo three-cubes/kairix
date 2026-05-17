@@ -135,8 +135,7 @@ def test_allowlist_via_baseline_is_honoured(tmp_path: Path) -> None:
 
 def test_real_repo_gate_is_green() -> None:
     """The real ``check_no_test_imports_in_prod.py`` against the full
-    kairix tree emits no net-new violations. The baseline ships empty
-    after v2026.5.15.2's cleanup.
+    kairix tree emits no net-new violations; the baseline ships empty.
     """
     detector = _load_detector()
     assert detector.main() == 0

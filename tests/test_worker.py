@@ -74,11 +74,11 @@ def test_run_embed_calls_embed_callable() -> None:
 def test_run_embed_survives_systemexit_from_embed_callable() -> None:
     """A ``SystemExit`` from the embed step MUST NOT propagate.
 
-    This pins the v2026.5.10 fix: pre-fix, the worker called the embed
-    CLI which used ``sys.exit(1)`` on recall-gate failure. SystemExit
-    is not caught by ``except Exception``, so the worker process died
-    on every gate alert. The fix catches ``(Exception, SystemExit)``;
-    this test fires SystemExit and asserts run_embed returns cleanly.
+    ``except Exception`` does not catch ``SystemExit``, so any embed
+    callable that calls ``sys.exit()`` (e.g. the embed CLI on recall-gate
+    failure) would tear down the worker process on every gate alert.
+    run_embed catches ``(Exception, SystemExit)``; this test fires
+    SystemExit and asserts run_embed returns cleanly.
     """
 
     def _exiting_embed() -> None:

@@ -1,18 +1,16 @@
 """Resolution-order tests for `bundled_suites_root` (#268).
 
-`kairix benchmark list` and `kairix benchmark run <name>` previously
-failed inside the container with `No bundled suites found` because the
-resolver only consulted `$KAIRIX_SUITES_ROOT` and otherwise returned a
-CWD-relative `Path("suites")`. The host-wrapper `docker exec` invocation
-lands the process in a working directory that is unrelated to where the
-image ships its `suites/` tree.
-
-The fix adds a 4-step resolution chain:
+`kairix benchmark list` and `kairix benchmark run <name>` use a 4-step
+resolution chain to locate the bundled suites directory:
 
   1. `$KAIRIX_SUITES_ROOT` override
   2. `<repo-root>/suites/` (dev UX)
   3. `/opt/kairix/suites/` (canonical install path)
   4. `./suites/` CWD fallback
+
+The chain must hold even when the process is launched in an unrelated
+CWD (e.g. via `docker exec`), so the resolver cannot fall back to a
+plain `Path("suites")` lookup.
 
 These tests drive the pure helper `resolve_first_existing_dir` with
 `tmp_path` candidate lists so no env-var monkeypatch is needed (F2-clean).

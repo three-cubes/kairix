@@ -414,8 +414,9 @@ def test_search_result_has_fallback_used_field() -> None:
 def test_search_entity_intent_errors_when_neo4j_unavailable() -> None:
     """ENTITY intent returns an error result when Neo4j is unavailable.
 
-    Regression: previously search() silently fell through to BM25+vector,
-    producing misleading results with no entity graph expansion.
+    A silent fall-through to BM25+vector would produce misleading results
+    (no entity graph expansion) under the ENTITY intent contract, so the
+    pipeline must surface the missing-graph condition as an explicit error.
     """
     pipeline = _build_test_pipeline(
         intent=QueryIntent.ENTITY,

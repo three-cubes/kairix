@@ -1,8 +1,8 @@
 """Warm-up runner — pay the factory-init + first-search costs at startup.
 
-Live profile from the v2026.5.16a3 alpha (#279) showed an agent's first
-request paid ~192 MB of allocations + factory wall-time. This runner
-absorbs that cost so it lands BEFORE ``/healthz/ready`` flips to 200.
+An agent's first request pays ~192 MB of allocations + factory
+wall-time (#279). This runner absorbs that cost so it lands BEFORE
+``/healthz/ready`` flips to 200.
 
 Steps:
     1. Build the SearchPipeline (factory: DB connections, Azure embed

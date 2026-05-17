@@ -563,7 +563,7 @@ def test_cache_miss_invokes_sql_exactly_once_per_unique_pathset(db_path: Path, r
     assert info.hits == 2
 
 
-# ── search_fts result-shape regression: score normalisation ──────────
+# ── search_fts result-shape contract: score normalisation ───────────
 
 
 @pytest.mark.unit

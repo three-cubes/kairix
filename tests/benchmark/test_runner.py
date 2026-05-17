@@ -1,5 +1,5 @@
 """
-Tests for kairix.quality.benchmark.runner — covers previously-untested paths:
+Tests for kairix.quality.benchmark.runner. Covers:
 - exact_match(): gold path matching variants
 - fuzzy_match(): partial path matching
 - classification_score(): rule classifier integration
@@ -996,13 +996,12 @@ def test_run_benchmark_raises_value_error_when_all_recall_cases_have_no_gold() -
 
 
 # ---------------------------------------------------------------------------
-# BenchmarkDeps — production-default coverage for the formerly-pragma'd branches.
+# BenchmarkDeps — production-default coverage for the lazy-import branches.
 #
-# The three # pragma: no cover markers in runner.py guarded production-only
-# paths: the lazy classify_content / classify_with_llm imports inside
-# DefaultContentClassifier, and the lazy AzureChatBackend construction inside
-# llm_judge. With BenchmarkDeps in place those branches are reachable through
-# the public surface — the tests below drive each one.
+# The lazy classify_content / classify_with_llm imports inside
+# DefaultContentClassifier and the lazy AzureChatBackend construction inside
+# llm_judge are reachable through the BenchmarkDeps public surface — the
+# tests below drive each one.
 # ---------------------------------------------------------------------------
 
 

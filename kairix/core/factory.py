@@ -8,9 +8,8 @@ only for production wiring.
 
 Process-lifetime memoisation: ``build_search_pipeline()`` caches its
 result keyed by the resolved retrieval-config identity, so repeat calls
-within the same process return instantly. Live profiling on the v2026.5.16a3
-alpha showed each rebuild costs ~2.3s + ~120 MB; memoising drops the second
-call to <1ms (#279).
+within the same process return instantly. Each rebuild costs ~2.3s +
+~120 MB; memoising drops the second call to <1ms (#279).
 
 Tests that need fresh state call ``reset_search_pipeline_cache()`` to clear
 the cache between cases.
@@ -129,8 +128,6 @@ def select_boosts(cfg: RetrievalConfig, graph: Any) -> list[Any]:
 def _resolve_retrieval_config(config: RetrievalConfig | None) -> RetrievalConfig:
     """Pick the explicit config or fall back to ``load_config`` (which itself
     falls back to ``RetrievalConfig.defaults()`` when no YAML is present).
-
-    Closes #112: factory previously ignored the YAML.
     """
     if config is not None:
         return config

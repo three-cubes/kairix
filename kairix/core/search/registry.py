@@ -278,9 +278,9 @@ def _parse_paths_list(name: str, paths_raw: object) -> list[str]:
 
 # Per-process dedup for the legacy `collection:` deprecation warning. Each
 # (agent_name, candidate) emits once across the lifetime of the process —
-# the benchmark and eval paths re-parse the agent registry per case, which
-# previously produced N_agents x N_cases warning lines (~1400 for reflib;
-# #275) and drowned out real signal in container stderr / journal output.
+# benchmark and eval paths re-parse the agent registry per case, so without
+# dedup a single run would emit N_agents x N_cases warnings and drown out
+# real signal in container stderr / journal output (#275).
 _LEGACY_COLLECTION_WARNED: set[tuple[str, str]] = set()
 
 
