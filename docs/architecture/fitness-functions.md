@@ -1806,6 +1806,300 @@ the import works without `tests/` on `sys.path`.
 
 ---
 
+### F26 — `kairix/core/**` may not import providers/ or transport/
+
+#### Statement
+
+No Python file under `kairix/core/` may import from `kairix/providers/`
+or `kairix/transport/`. Domain code crosses those boundaries through
+Protocols only.
+
+Allowed from core: sibling `kairix.core.*` modules, `kairix.core.protocols`
+(the seam), and any non-kairix import. Rejected: any `Import` or
+`ImportFrom` whose module path equals or starts with
+`kairix.providers.` or `kairix.transport.`.
+
+Pre-existing violations are grandfathered in
+`.architecture/baseline/f26-files.txt`. The check is a no-op when
+`kairix/core/` does not yet exist (fresh checkout before the
+three-layer scaffold lands).
+
+#### Why
+
+The three-layer provider-plugin split
+(`docs/architecture/provider-plugin-architecture.md`) puts a hard
+boundary between domain logic, universal endpoint concerns, and
+per-provider plugins. Without the F26 gate, every new perf concern
+accretes another homegrown class inside `kairix/core/`, every new
+provider mutates `_azure.py` further, and the probe code grows
+per-provider conditionals — exactly the AI-gateway-in-process shape
+the ADR exists to undo.
+
+#### Detection
+
+`scripts/checks/check_provider_layer_imports.py`. AST-walks every
+`.py` under `kairix/core/`, scans `Import` and `ImportFrom` nodes,
+flags any forbidden prefix match. Anchored on the dotted boundary so
+hypothetical siblings (`kairix.providers_helpers`) don't false-positive.
+
+#### Examples
+
+Rejected:
+
+```python
+# kairix/core/search/pipeline.py
+from kairix.providers.azure_foundry import AzureFoundryProvider  # F26
+from kairix.transport.pool import make_openai_client            # F26
+import kairix.transport.coalesce                                # F26
+```
+
+Allowed:
+
+```python
+# kairix/core/search/pipeline.py
+from kairix.core.protocols import EmbeddingService, VectorSearchBackend
+from kairix.core.factory import build_search_pipeline
+import logging  # non-kairix is fine
+```
+
+#### Fix pattern
+
+Define or reuse a Protocol in `kairix/core/protocols.py` for the
+capability the import was reaching for, then accept it as a
+constructor / factory parameter. Production wire-up in
+`kairix/core/factory.py` (or the provider registry) supplies the
+concrete provider; tests inject a `Fake*` from `tests/fakes.py`.
+
+---
+
+### F27 — `kairix/providers/<a>/**` may not import another provider
+
+#### Statement
+
+No Python file under `kairix/providers/<plugin>/` may import from
+`kairix/providers/<other>/`. Plugins must remain independently
+shippable as separate pip distributions.
+
+Allowed: sibling imports within the same plugin
+(`kairix.providers.<plugin>.*`), shared scaffolding
+(`kairix.providers._base` and any `_`-prefixed module under
+providers/), `kairix.core.*`, `kairix.transport.*`, and non-kairix
+imports. Rejected: any import whose first path segment under
+`kairix.providers.` names a different plugin.
+
+Pre-existing violations are grandfathered in
+`.architecture/baseline/f27-files.txt`. The check is a no-op when
+`kairix/providers/` doesn't exist or holds no plugin subdirectories.
+
+#### Why
+
+The plugin model in the ADR
+(`docs/architecture/provider-plugin-architecture.md` — "Plugin
+discovery") is that a third party can `pip install kairix-provider-foo`
+and register a new endpoint family with zero kairix changes. A plugin
+that imports another can't be split out without dragging its sibling
+along, and the dependency graph becomes a tangle that defeats the
+plugin model. Shared concerns belong in `kairix/transport/`.
+
+#### Detection
+
+`scripts/checks/check_no_cross_provider.py`. For each `.py` under
+`kairix/providers/`, derives the owning plugin from the path; AST-walks
+imports; flags any `kairix.providers.<other>` reference. The shared
+`kairix.providers._base` module is explicitly NOT cross-plugin.
+
+#### Examples
+
+Rejected:
+
+```python
+# kairix/providers/openai/embed.py
+from kairix.providers.azure_foundry import auth_header  # F27
+import kairix.providers.bedrock.sigv4                   # F27
+```
+
+Allowed:
+
+```python
+# kairix/providers/openai/embed.py
+from kairix.providers._base import Provider                  # shared base
+from kairix.providers.openai.client import build_client      # same plugin
+from kairix.transport.pool import get_openai_client          # transport
+from kairix.core.protocols import LLMBackend                 # Protocol
+```
+
+#### Fix pattern
+
+Extract the shared concern to `kairix/transport/`. If it's genuinely
+provider-specific shape, duplicate it inline rather than importing a
+sibling plugin.
+
+---
+
+### F28 — Every provider plugin has matching BDD coverage
+
+#### Statement
+
+For every plugin directory under `kairix/providers/<name>/`, both
+must hold:
+
+1. `tests/bdd/features/provider_<name>.feature` exists and has at
+   least one Scenario (the per-plugin file).
+2. Every `tests/bdd/features/e2e_provider_*.feature` either has an
+   Examples-table row whose first non-empty cell equals `<name>`,
+   OR carries the opt-out tag `@<name>_no_<journey>` (where
+   `<journey>` is the part after `e2e_provider_` in the filename).
+
+Plugin discovery: every immediate non-`_`-prefixed subdirectory of
+`kairix/providers/` is a plugin. Bare files at the providers root
+(`__init__.py`, `_base.py`) are scaffolding, not plugins.
+
+Pre-existing violations are grandfathered in
+`.architecture/baseline/f28-files.txt` (one entry per plugin missing
+coverage; format `kairix/providers/<name>`). When `kairix/providers/`
+holds no plugins, the check is a no-op. When plugins exist but no
+`e2e_provider_*.feature` files exist yet (Wave 1 scaffold), only the
+per-plugin requirement fires.
+
+#### Why
+
+The E2E features are Scenario Outlines parameterised over the provider
+column — adding a provider is one new fixture + one new Examples row,
+not a copy-pasted feature. F28 is the mechanical guard that keeps
+that property: a plugin without coverage shouldn't ship. The
+per-plugin feature covers auth shape, URL shape, error mapping, and
+model-id semantics (provider-specific); the E2E journey covers the
+generic "user configures provider X → embed/chat works" path.
+
+#### Detection
+
+`scripts/checks/check_provider_bdd_completeness.py`. Discovers plugins
+by listing `kairix/providers/<name>/`; for each, checks per-plugin
+feature presence and Examples-row inclusion across every
+`e2e_provider_*.feature`. The Examples-row matcher tolerates leading
+whitespace, ignores the header row, and matches on the first
+non-empty cell.
+
+#### Examples
+
+Rejected:
+
+```
+kairix/providers/bedrock/        exists, but
+tests/bdd/features/provider_bedrock.feature  does not exist  → F28
+```
+
+```
+tests/bdd/features/e2e_provider_embed.feature  exists with rows
+                                               | openai | ... |
+                                               | azure_foundry | ... |
+kairix/providers/bedrock/  exists  → F28 (no bedrock row, no @bedrock_no_embed tag)
+```
+
+Allowed:
+
+```gherkin
+# tests/bdd/features/provider_openai.feature
+Feature: openai provider plugin
+  Scenario: embed_batch reaches the configured base_url
+    Given an openai plugin configured with base_url=https://api.openai.com
+    When the caller invokes embed_batch with two texts
+    Then the recorded request URL is https://api.openai.com/v1/embeddings
+```
+
+```gherkin
+# tests/bdd/features/e2e_provider_embed.feature
+Feature: E2E provider embed journey
+  Scenario Outline: embed with provider <provider>
+    ...
+    Examples:
+      | provider      | model              |
+      | openai        | text-embedding-3   |
+      | azure_foundry | text-embedding-ada |
+      | bedrock       | titan-embed-v1     |
+```
+
+Allowed (opt-out for an embed-only plugin):
+
+```gherkin
+# tests/bdd/features/e2e_provider_chat.feature
+@embedonly_no_chat
+Feature: E2E provider chat journey
+  Scenario Outline: chat with provider <provider>
+    ...
+```
+
+#### Fix pattern
+
+Create `tests/bdd/features/provider_<name>.feature` with a happy-path
+Scenario per the per-plugin contract (auth, URL, error mapping). Add
+`| <name> | <model> | ... |` rows to every
+`tests/bdd/features/e2e_provider_*.feature`. Use the
+`@<name>_no_<journey>` tag only when the plugin genuinely doesn't
+implement that journey (e.g. embed-only plugin with no chat).
+
+---
+
+### F29 — Performance-measurement code lives only under `kairix/quality/probe/`
+
+#### Statement
+
+Any `.py` file under `kairix/` whose basename matches a
+perf-measurement pattern (`bench*.py`, `microbench*.py`, `*_bench.py`,
+`*_microbench.py`, `*_latency*.py`, `*_perf*.py`) must live under
+`kairix/quality/probe/`. Tests (`tests/**`) and operational probe
+drivers (`scripts/probe*.{py,sh}`) are exempt because they consume
+the probe, they don't reimplement it.
+
+Pre-existing violations are grandfathered in
+`.architecture/baseline/f29-files.txt`. The check is a no-op when
+`kairix/` is absent.
+
+#### Why
+
+The ADR (`docs/architecture/provider-plugin-architecture.md` —
+"Performance") centralises every layer's instrumentation in
+`kairix/quality/probe/` so the PVT release gate and the end-user
+`kairix probe-config` health check share one implementation. Letting
+`transport/` or `providers/` grow ad-hoc benchmarks recreates the
+per-provider conditional jungle the split exists to remove.
+
+#### Detection
+
+`scripts/checks/check_perf_singleton.py`. Walks `kairix/`; for each
+`.py` whose basename matches the perf regex, checks the file's path
+against the allow-list (`kairix/quality/probe/**`, `tests/**`,
+`scripts/probe*`). Flags any perf-named file outside the allow-list.
+
+#### Examples
+
+Rejected:
+
+```
+kairix/transport/pool/bench_pool.py         # F29
+kairix/providers/openai/openai_perf.py      # F29
+kairix/core/search/bm25_latency.py          # F29
+```
+
+Allowed:
+
+```
+kairix/quality/probe/embed_latency.py       # canonical home
+tests/integration/test_embed_perf_floor.py  # latency assertion in a test
+scripts/probe-config-runner.py              # operational driver
+kairix/transport/pool/client.py             # not perf-named — fine
+```
+
+#### Fix pattern
+
+Relocate the measurement script under `kairix/quality/probe/`, expose
+it via the probe CLI, and consume `kairix/transport/telemetry/`'s
+timings hook rather than reinventing measurement plumbing. If the
+"measurement" is a test assertion, move it under `tests/` (the
+allow-list covers that).
+
+---
+
 ## SDLC integration map
 
 Each fitness function fires at multiple lifecycle stages. The same

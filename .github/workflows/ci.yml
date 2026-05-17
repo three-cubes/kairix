@@ -103,7 +103,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run F1-F6 + F8 + F10-F13 (no test runtime needed)
+      - name: Run F1-F6 + F8 + F10-F23 + F26-F29 (no test runtime needed)
         run: bash scripts/checks/run-all.sh --skip-coverage
 
   contracts:

@@ -202,3 +202,31 @@ repos:
         language: system
         pass_filenames: false
         files: ^kairix/.*\.py$
+
+      - id: arch-provider-layer-imports
+        name: "arch F26: kairix/core/** may not import providers/ or transport/"
+        entry: python3 scripts/checks/check_provider_layer_imports.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-no-cross-provider
+        name: "arch F27: providers/<a>/ may not import providers/<b>/"
+        entry: python3 scripts/checks/check_no_cross_provider.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/providers/.*\.py$
+
+      - id: arch-provider-bdd-completeness
+        name: "arch F28: every provider/<name>/ has matching BDD coverage"
+        entry: python3 scripts/checks/check_provider_bdd_completeness.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: arch-perf-singleton
+        name: "arch F29: perf-measurement code only under kairix/quality/probe/"
+        entry: python3 scripts/checks/check_perf_singleton.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$

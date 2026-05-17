@@ -94,6 +94,18 @@ python3 "${SCRIPT_DIR}/check_no_test_imports_in_prod.py" || overall=1
 # F25 — every CLI subcommand has an MCP affordance (real binding or escalation stub)
 python3 "${SCRIPT_DIR}/check_capability_affordance.py" || overall=1
 
+# F26 — kairix/core/** may not import providers/ or transport/
+python3 "${SCRIPT_DIR}/check_provider_layer_imports.py" || overall=1
+
+# F27 — providers/<a>/ may not import providers/<b>/
+python3 "${SCRIPT_DIR}/check_no_cross_provider.py" || overall=1
+
+# F28 — every provider/<name>/ has matching BDD coverage
+python3 "${SCRIPT_DIR}/check_provider_bdd_completeness.py" || overall=1
+
+# F29 — perf-measurement code only under kairix/quality/probe/
+python3 "${SCRIPT_DIR}/check_perf_singleton.py" || overall=1
+
 # G9 — every services/<name>/ has a README.md (Go side; mirrors F23)
 python3 "${SCRIPT_DIR}/check_go_readme_coverage.py" || overall=1
 
