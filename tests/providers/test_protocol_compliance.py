@@ -95,23 +95,21 @@ class TestFirstPartyStubProtocolShape:
     that the factory symbol stays importable.
     """
 
-    @pytest.mark.parametrize(
-        "import_path",
-        [
-            "kairix.providers.litellm_proxy",
-        ],
-    )
     @pytest.mark.unit
-    def test_stub_make_provider_raises_not_implemented(self, import_path: str) -> None:
+    def test_no_stub_make_provider_remains(self) -> None:
+        # Wave 4 graduated every first-party plugin out of the
+        # NotImplementedError-stub state. If a new stub is added in a
+        # future Wave it should be registered in this test (and removed
+        # once the implementation lands) — same pattern as the
+        # graduated tests below.
         import importlib
 
-        module = importlib.import_module(import_path)
-        assert hasattr(module, "make_provider"), (
-            f"{import_path} missing make_provider — entry-point factory "
-            f"target must exist even before the Wave-2 implementation lands."
-        )
-        with pytest.raises(NotImplementedError):
-            module.make_provider()
+        for name in ("azure_foundry", "azure_legacy", "openai", "bedrock", "ollama", "litellm_proxy", "anthropic"):
+            module = importlib.import_module(f"kairix.providers.{name}")
+            assert hasattr(module, "make_provider"), (
+                f"kairix.providers.{name} missing make_provider — entry-point factory target is removed by mistake."
+            )
+            assert callable(module.make_provider)
 
     @pytest.mark.unit
     def test_anthropic_make_provider_is_importable(self) -> None:
@@ -202,6 +200,23 @@ class TestFirstPartyStubProtocolShape:
         module = importlib.import_module("kairix.providers.bedrock")
         assert hasattr(module, "make_provider"), (
             "kairix.providers.bedrock missing make_provider — entry-point factory target is removed by mistake."
+        )
+        assert callable(module.make_provider)
+
+    @pytest.mark.unit
+    def test_litellm_proxy_make_provider_is_importable(self) -> None:
+        # litellm_proxy graduated to Wave 4 (IM-12) — the proxy-sidecar
+        # plugin proving the OpenAI-compatible Bearer-auth contract
+        # carries through a virtual-key-fronted aggregator. Behaviour
+        # conformance is asserted in
+        # tests/providers/litellm_proxy/test_provider.py. We don't call
+        # the factory here because it would need a real credential
+        # resolution (which the unit suite intentionally doesn't wire).
+        import importlib
+
+        module = importlib.import_module("kairix.providers.litellm_proxy")
+        assert hasattr(module, "make_provider"), (
+            "kairix.providers.litellm_proxy missing make_provider — entry-point factory target is removed by mistake."
         )
         assert callable(module.make_provider)
 
