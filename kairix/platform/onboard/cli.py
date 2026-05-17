@@ -24,6 +24,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kairix.paths import document_root_override, env_file_override
+
 if TYPE_CHECKING:
     from kairix.platform.onboard.check import CheckResult
 
@@ -32,22 +34,13 @@ if TYPE_CHECKING:
 _AGENT_USAGE_GUIDE_FILENAME = "kairix-usage.md"
 
 
-def _default_env_file_override() -> str | None:
-    """Production seam — defers `kairix.paths.env_file_override` to call time."""
-    from kairix.paths import env_file_override
-
-    return env_file_override()
-
-
-def _default_document_root_override() -> str | None:
-    """Production seam — defers `kairix.paths.document_root_override` to call time."""
-    from kairix.paths import document_root_override
-
-    return document_root_override()
-
-
 def _default_run_all_checks(*args: Any, **kwargs: Any) -> Any:
-    """Production seam — defers `run_all_checks` import to call time."""
+    """Production seam — defers `run_all_checks` import to call time.
+
+    Lazy because ``kairix.platform.onboard.check`` pulls in heavy
+    dependencies (Neo4j client, sqlite, secrets); we don't want them at
+    CLI module-import time when the operator might only run ``--help``.
+    """
     from kairix.platform.onboard.check import run_all_checks
 
     return run_all_checks(*args, **kwargs)
@@ -92,7 +85,7 @@ def _load_env_file(path: str) -> list[str]:
 def _self_load_env(
     explicit_path: str | None,
     *,
-    env_file_override_fn: Callable[[], str | None] = _default_env_file_override,
+    env_file_override_fn: Callable[[], str | None] = env_file_override,
     known_env_paths: tuple[str, ...] | None = None,
 ) -> tuple[str | None, list[str]]:
     """
@@ -139,7 +132,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     # Self-load env files so check results are context-independent (ERR-003)
     env_source, env_keys = _self_load_env(
         getattr(args, "env_file", None),
-        env_file_override_fn=getattr(args, "_env_file_override_fn", _default_env_file_override),
+        env_file_override_fn=getattr(args, "_env_file_override_fn", env_file_override),
         known_env_paths=getattr(args, "_known_env_paths", None),
     )
 
@@ -279,9 +272,7 @@ def _resolve_doc_root(args: argparse.Namespace) -> Path | None:
     root is unset or points at a non-existent directory; callers
     convert ``None`` into a non-zero exit.
     """
-    doc_root = (
-        args.document_root or getattr(args, "_document_root_override_fn", _default_document_root_override)() or ""
-    )
+    doc_root = args.document_root or getattr(args, "_document_root_override_fn", document_root_override)() or ""
     if not doc_root:
         print(
             "Error: --document-root is required (or set KAIRIX_DOCUMENT_ROOT)",
@@ -414,9 +405,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def main(
     argv: list[str] | None = None,
     *,
-    env_file_override_fn: Callable[[], str | None] = _default_env_file_override,
+    env_file_override_fn: Callable[[], str | None] = env_file_override,
     known_env_paths: tuple[str, ...] | None = None,
-    document_root_override_fn: Callable[[], str | None] = _default_document_root_override,
+    document_root_override_fn: Callable[[], str | None] = document_root_override,
     script_root: Path | None = None,
     run_all_checks_fn: Callable[..., Any] = _default_run_all_checks,
     pkg_root: Path | None = None,

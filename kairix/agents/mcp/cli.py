@@ -22,6 +22,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from kairix.platform.onboard.ports import find_available_port, is_port_available
+
 
 def _default_build_server() -> Callable[..., Any]:
     """Default factory: lazy-import build_server so it isn't loaded at module import."""
@@ -35,20 +37,6 @@ def _default_uvicorn_run() -> Callable[..., Any]:
     import uvicorn
 
     return uvicorn.run
-
-
-def _default_is_port_available(port: int) -> bool:
-    """Production port-availability check — defers the heavy import until call time."""
-    from kairix.platform.onboard.ports import is_port_available
-
-    return is_port_available(port)
-
-
-def _default_find_available_port(*, preferred: int) -> int:
-    """Production port-suggestion — defers the heavy import until call time."""
-    from kairix.platform.onboard.ports import find_available_port
-
-    return find_available_port(preferred=preferred)
 
 
 @dataclass
@@ -68,8 +56,8 @@ class McpCliDeps:
 
     build_server_factory: Callable[[], Callable[..., Any]] = field(default_factory=lambda: _default_build_server)
     uvicorn_runner_factory: Callable[[], Callable[..., Any]] = field(default_factory=lambda: _default_uvicorn_run)
-    is_port_available_fn: Callable[[int], bool] = field(default_factory=lambda: _default_is_port_available)
-    find_available_port_fn: Callable[..., int] = field(default_factory=lambda: _default_find_available_port)
+    is_port_available_fn: Callable[[int], bool] = field(default_factory=lambda: is_port_available)
+    find_available_port_fn: Callable[..., int] = field(default_factory=lambda: find_available_port)
 
 
 def main(argv: list[str] | None = None, *, deps: McpCliDeps | None = None) -> None:
