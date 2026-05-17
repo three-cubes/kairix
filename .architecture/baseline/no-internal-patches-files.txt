@@ -14,6 +14,5 @@ tests/onboard/test_cli.py
 tests/platform/warm/test_state.py
 tests/setup/test_wizard.py
 tests/summaries/test_cli_unit.py
-tests/transport/test_client_pool.py
 tests/wikilinks/test_audit_unit.py
 tests/wikilinks/test_cli_unit.py
