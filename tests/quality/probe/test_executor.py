@@ -128,3 +128,92 @@ def test_durations_recorded_per_task() -> None:
     durs = sorted(r.duration_ms for r in run.results)
     assert durs[0] < 40, f"fast task duration leaked: {durs[0]}ms"
     assert durs[1] >= 50
+
+
+class _StagedReturn:
+    """Carries a stage_latency_ms dict — matches kairix SearchResult shape."""
+
+    def __init__(self, stages: dict[str, float]) -> None:
+        self.stage_latency_ms = stages
+
+
+def test_timed_result_caches_stage_latency_from_kairix_shaped_results() -> None:
+    """A task returning a SearchResult-shaped value populates TimedResult.stage_latency_ms.
+
+    The executor reads ``stage_latency_ms`` off the task's return value via
+    ``getattr`` and caches a defensive copy on TimedResult so the runner
+    can build per-query stage records without reaching into ``.result``.
+
+    Sabotage-proof: drop the ``getattr(value, "stage_latency_ms", None)``
+    capture in ``_wrapped`` and ``TimedResult.stage_latency_ms`` stays
+    None even when the task returned a kairix-shaped result.
+    """
+    stages = {"classify": 1.0, "vector": 200.0, "embed_http": 180.0, "vector_ann": 20.0}
+    run = run_concurrent([lambda: _StagedReturn(stages)], concurrency=1)
+    assert len(run.results) == 1
+    cached = run.results[0].stage_latency_ms
+    assert cached == stages, f"expected stage map {stages!r} cached on TimedResult; got {cached!r}"
+    # Defensive copy: mutating the source dict must not mutate the cache.
+    stages["classify"] = 999.0
+    assert run.results[0].stage_latency_ms is not None
+    assert run.results[0].stage_latency_ms["classify"] == 1.0
+
+
+def test_timed_result_stage_latency_none_for_dict_returning_fakes() -> None:
+    """Non-kairix-shaped results yield TimedResult.stage_latency_ms = None.
+
+    A dict-returning fake has no ``stage_latency_ms`` attribute. The
+    ``getattr`` default is None, the runner aggregator skips it, and
+    the probe envelope stays valid with an empty stage_means_ms.
+
+    Sabotage-proof: change the ``isinstance(stage_map, dict)`` guard to
+    ``stage_map is not None`` and a fake returning ``{"results": [...]}``
+    (where dict items are scalars, not stage->ms) populates a bogus
+    stage map.
+    """
+    run = run_concurrent([lambda: {"results": "fake"}], concurrency=1)
+    assert run.results[0].stage_latency_ms is None
+
+
+def test_timed_result_records_submission_order_task_index() -> None:
+    """Each TimedResult carries its 0-based submission-order index.
+
+    Necessary because the pool returns results in completion order; without
+    task_index the runner can't map a completed result back to its source
+    SampledQuery (case_id, category).
+
+    Sabotage-proof: drop the ``enumerate(tasks)`` / ``i`` plumbing and every
+    task_index stays at the -1 default, so per_query_stages in the runner
+    is built off the wrong sampled-query metadata.
+    """
+
+    def make_task(v: int):
+        return lambda: v
+
+    tasks = [make_task(v) for v in range(4)]
+    run = run_concurrent(tasks, concurrency=2)
+    # Index must round-trip to the original value the task returned —
+    # proves the index in TimedResult matches the submission position.
+    by_index = {r.task_index: r.result for r in run.results}
+    assert by_index == {0: 0, 1: 1, 2: 2, 3: 3}
+
+
+def test_timed_result_task_index_set_even_when_task_raises() -> None:
+    """A raising task still gets its task_index recorded.
+
+    Sabotage-proof: omit ``task_index=idx`` from the failure-path
+    TimedResult and a failed task can't be mapped back to its sampled
+    query for triage.
+    """
+
+    def raiser() -> int:
+        raise RuntimeError("boom")
+
+    def succeeder() -> int:
+        return 7
+
+    run = run_concurrent([raiser, succeeder], concurrency=2)
+    failed = next(r for r in run.results if not r.succeeded)
+    succeeded = next(r for r in run.results if r.succeeded)
+    assert failed.task_index == 0
+    assert succeeded.task_index == 1

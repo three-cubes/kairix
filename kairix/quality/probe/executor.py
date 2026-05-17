@@ -37,12 +37,28 @@ class TimedResult(Generic[T]):
     ``result`` is None when ``succeeded=False``. ``duration_ms`` is captured
     around the task callable regardless of success, so failed-but-slow tasks
     are still visible to the latency distribution.
+
+    ``stage_latency_ms`` carries the per-stage breakdown when the task's
+    return value exposes a ``stage_latency_ms`` attribute (kairix
+    SearchResult does, dict-returning fakes don't). The wrapper reads it
+    via ``getattr`` so non-kairix-shaped results just yield ``None``. This
+    lets the probe runner surface per-query stage data without each call
+    site reaching into ``.result`` (#282 follow-up).
+
+    ``task_index`` is the 0-based position of the task in the submitted
+    ``tasks`` sequence. Lets callers map each completion-order result back
+    to its submission-order metadata (sampled-query case_id, category) —
+    necessary because the pool returns results in completion order, not
+    submission order. ``-1`` is the default for tasks submitted via APIs
+    that don't track index.
     """
 
     duration_ms: float
     succeeded: bool
     result: T | None = None
     error: str = ""
+    stage_latency_ms: dict[str, float] | None = None
+    task_index: int = -1
 
 
 @dataclass(frozen=True)
@@ -85,20 +101,36 @@ def run_concurrent(
     if not tasks:
         raise ValueError("tasks must contain at least one callable")
 
-    def _wrapped(t: Callable[[], T]) -> TimedResult[T]:
+    def _wrapped(t: Callable[[], T], idx: int) -> TimedResult[T]:
         t_start = time.perf_counter()
         try:
             value = t()
         except Exception as exc:
             duration_ms = (time.perf_counter() - t_start) * 1000.0
-            return TimedResult(duration_ms=duration_ms, succeeded=False, error=f"{type(exc).__name__}: {exc}")
+            return TimedResult(
+                duration_ms=duration_ms,
+                succeeded=False,
+                error=f"{type(exc).__name__}: {exc}",
+                task_index=idx,
+            )
         duration_ms = (time.perf_counter() - t_start) * 1000.0
-        return TimedResult(duration_ms=duration_ms, succeeded=True, result=value)
+        # getattr is the documented seam for non-kairix-shaped results.
+        # A dict-returning fake (no .stage_latency_ms attribute) yields
+        # None and the runner aggregator skips it cleanly.
+        stage_map = getattr(value, "stage_latency_ms", None)
+        stage_latency = dict(stage_map) if isinstance(stage_map, dict) else None
+        return TimedResult(
+            duration_ms=duration_ms,
+            succeeded=True,
+            result=value,
+            stage_latency_ms=stage_latency,
+            task_index=idx,
+        )
 
     wall_start = time.perf_counter()
     results: list[TimedResult[T]] = []
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = [pool.submit(_wrapped, t) for t in tasks]
+        futures = [pool.submit(_wrapped, t, i) for i, t in enumerate(tasks)]
         for fut in as_completed(futures):
             results.append(fut.result())
     wallclock_s = time.perf_counter() - wall_start

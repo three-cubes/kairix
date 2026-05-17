@@ -28,6 +28,13 @@ from kairix.quality.probe.stats import LatencyStats, latency_stats, suggest_bott
 
 DEFAULT_P95_THRESHOLD_MS = 500.0
 
+# Attribute / envelope key for the per-stage wall-clock map carried on
+# SearchResult-shaped results and on each per_query_stages record (#282
+# follow-up). Extracted to a constant so the getattr fallback chain in
+# ``_result_stage_map`` and the projection in ``_per_query_stages``
+# can't drift apart silently if either string is renamed.
+_STAGE_LATENCY_KEY = "stage_latency_ms"
+
 
 @dataclass(frozen=True)
 class SampledQuery:
@@ -80,10 +87,18 @@ class ProbeResult:
     passed: bool = True
     bottleneck: tuple[str, str] | None = None
     # Mean per-stage wall-clock (ms) across every successful query (#282).
-    # Keys: classify, resolve, dispatch, fuse, enrich, boost, budget.
-    # Empty when no stage data was returned (e.g. fake searcher that doesn't
-    # populate stage_latency_ms). Reads with .get(stage, 0.0).
+    # Keys: classify, resolve, dispatch, fuse, enrich, boost, budget,
+    # bm25, vector, embed_http, vector_ann. Empty when no stage data was
+    # returned (e.g. fake searcher that doesn't populate stage_latency_ms).
+    # Reads with .get(stage, 0.0).
     stage_means_ms: dict[str, float] = field(default_factory=dict)
+    # Per-query stage record list (#282 follow-up). One entry per executed
+    # query with case_id, category, latency_ms, and the full stage_latency_ms
+    # dict from that query's underlying SearchResult. Operators jq this list
+    # to pull out the slow queries the means hide:
+    #   jq '.per_query_stages | sort_by(-.latency_ms) | .[0:5]' probe.json
+    # Empty when no successful results carried stage data.
+    per_query_stages: list[dict[str, Any]] = field(default_factory=list)
 
     def to_envelope(self) -> dict[str, Any]:
         """Project to the JSON envelope CLI ``--json`` + MCP would emit."""
@@ -104,6 +119,7 @@ class ProbeResult:
                 {"kind": self.bottleneck[0], "recommended_action": self.bottleneck[1]} if self.bottleneck else None
             ),
             "stage_means_ms": self.stage_means_ms,
+            "per_query_stages": list(self.per_query_stages),
         }
 
 
@@ -168,26 +184,75 @@ def _per_category_stats(
     return {cat: latency_stats(durs) for cat, durs in by_cat.items()}
 
 
+def _result_stage_map(r: Any) -> dict[str, float] | None:
+    """Resolve the stage_latency_ms dict for a TimedResult, if any.
+
+    Prefers the executor-side cached ``r.stage_latency_ms`` (populated via
+    ``getattr`` inside the executor wrapper). Falls back to reading
+    ``getattr(r.result, "stage_latency_ms", None)`` for older TimedResult
+    shapes that predate the executor cache. Returns ``None`` when neither
+    surface exposes a dict.
+    """
+    cached = getattr(r, _STAGE_LATENCY_KEY, None)
+    if isinstance(cached, dict):
+        return cached
+    inner = getattr(r.result, _STAGE_LATENCY_KEY, None) if r.result is not None else None
+    return inner if isinstance(inner, dict) else None
+
+
 def _stage_means(results: list[Any]) -> dict[str, float]:
     """Average per-stage wall-clock across successful results.
 
-    Reads ``stage_latency_ms`` off each result's ``.result`` attribute (when
-    the searcher returned a kairix SearchResult). Other searcher shapes
-    (e.g. fakes that return dicts without stage timings) contribute nothing
-    and yield an empty dict, which is a valid envelope shape.
+    Reads ``stage_latency_ms`` off each result (via executor cache, with
+    ``.result`` fallback). Other searcher shapes (e.g. fakes that return
+    dicts without stage timings) contribute nothing and yield an empty
+    dict, which is a valid envelope shape.
     """
     sums: dict[str, float] = {}
     counts: dict[str, int] = {}
     for r in results:
         if not r.succeeded or r.result is None:
             continue
-        stage_map = getattr(r.result, "stage_latency_ms", None)
-        if not isinstance(stage_map, dict):
+        stage_map = _result_stage_map(r)
+        if stage_map is None:
             continue
         for stage, ms in stage_map.items():
             sums[stage] = sums.get(stage, 0.0) + float(ms)
             counts[stage] = counts.get(stage, 0) + 1
     return {stage: round(sums[stage] / counts[stage], 2) for stage in sums if counts[stage] > 0}
+
+
+def _per_query_stages(
+    sampled: list[SampledQuery],
+    results: list[Any],
+) -> list[dict[str, Any]]:
+    """Project per-query stage records keyed by sampled-query metadata.
+
+    Each record carries case_id, category, latency_ms, and stage_latency_ms.
+    Uses ``r.task_index`` to map completion-order results back to their
+    submission-order SampledQuery — required because the pool returns
+    results in completion order, not submission order, so a naïve zip
+    misattributes latency under concurrency > 1.
+
+    Failed tasks still surface (with an empty stage_latency_ms) so
+    operators can spot patterns in which queries error out.
+    """
+    out: list[dict[str, Any]] = []
+    for r in results:
+        idx = getattr(r, "task_index", -1)
+        if idx < 0 or idx >= len(sampled):
+            continue
+        sq = sampled[idx]
+        stage_map = _result_stage_map(r) or {}
+        out.append(
+            {
+                "case_id": sq.case_id,
+                "category": sq.category,
+                "latency_ms": round(r.duration_ms, 2),
+                _STAGE_LATENCY_KEY: dict(stage_map),
+            }
+        )
+    return out
 
 
 def run_probe_search(
@@ -237,6 +302,7 @@ def run_probe_search(
     overall = latency_stats(durations_ms)
     per_category = _per_category_stats(sampled, durations_ms)
     stage_means_ms = _stage_means(run.results)
+    per_query_stages = _per_query_stages(sampled, run.results)
 
     azure_429_count = 0  # See ProbeResult.azure_429_count docstring for wire-up status.
     bottleneck = suggest_bottleneck(
@@ -263,4 +329,5 @@ def run_probe_search(
         passed=passed,
         bottleneck=bottleneck,
         stage_means_ms=stage_means_ms,
+        per_query_stages=per_query_stages,
     )

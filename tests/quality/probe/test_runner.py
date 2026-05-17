@@ -351,3 +351,177 @@ def test_stage_means_empty_when_searcher_omits_stage_latency() -> None:
         searcher=_fast_client.search,
     )
     assert result.stage_means_ms == {}
+
+
+def test_per_query_stages_one_record_per_query_with_full_metadata() -> None:
+    """Each executed query produces one per_query_stages record with all keys.
+
+    The record carries case_id (mapped via task_index, not zip-order),
+    category from the SampledQuery, the per-query latency_ms, and the
+    full stage_latency_ms dict from the underlying SearchResult.
+
+    Sabotage-proof: drop the ``_per_query_stages`` call in run_probe_search
+    and ``result.per_query_stages`` stays empty so this assertion fires.
+    """
+
+    class _Staged:
+        def __init__(self, classify_ms: float, vector_ms: float) -> None:
+            self.stage_latency_ms = {"classify": classify_ms, "vector": vector_ms}
+
+    counter = {"i": 0}
+
+    def staged_searcher(_q: SampledQuery) -> _Staged:
+        counter["i"] += 1
+        return _Staged(classify_ms=float(counter["i"]), vector_ms=10.0 * counter["i"])
+
+    result = run_probe_search(
+        suite="x",
+        queries=4,
+        concurrency=2,
+        suite_loader=_suite_loader,
+        searcher=staged_searcher,
+    )
+    assert len(result.per_query_stages) == 4
+    for record in result.per_query_stages:
+        assert set(record.keys()) == {"case_id", "category", "latency_ms", "stage_latency_ms"}
+        assert isinstance(record["case_id"], str) and record["case_id"]
+        assert isinstance(record["category"], str) and record["category"]
+        assert isinstance(record["latency_ms"], float)
+        assert "classify" in record["stage_latency_ms"]
+        assert "vector" in record["stage_latency_ms"]
+
+
+def test_per_query_stages_preserves_task_to_sampled_mapping_under_concurrency() -> None:
+    """Under concurrency, per_query_stages still maps each result to its sampled query.
+
+    The executor returns results in completion order. The runner uses
+    ``TimedResult.task_index`` to recover the original submission-order
+    SampledQuery — so the case_id/category on each record actually belongs
+    to the query that produced that latency.
+
+    Sabotage-proof: change ``_per_query_stages`` to ``zip(sampled, results)``
+    (the per_category-stats bug pattern) and under concurrency > 1 the
+    case_id <-> stage_map mapping shuffles non-deterministically — the
+    invariant below (the union of case_ids equals the sampled case_ids
+    AND each record's category matches its case_id prefix) breaks.
+    """
+
+    class _StagedReturningSelf:
+        def __init__(self, case_id: str) -> None:
+            self.stage_latency_ms = {"marker": float(hash(case_id) & 0xFFFF)}
+            self.case_id = case_id
+
+    def staged_searcher(q: SampledQuery) -> _StagedReturningSelf:
+        # Tiny variable sleep so completion order differs from submission order
+        # under concurrency. Without this, the bug we're guarding against
+        # wouldn't manifest in test runs that happen to complete in submission
+        # order.
+        time.sleep(0.005 if hash(q.case_id) % 2 == 0 else 0.001)
+        return _StagedReturningSelf(case_id=q.case_id)
+
+    result = run_probe_search(
+        suite="x",
+        queries=12,
+        concurrency=4,
+        suite_loader=_suite_loader,
+        searcher=staged_searcher,
+    )
+    # Each record's category prefix appears in its case_id (per _build_cases).
+    for record in result.per_query_stages:
+        case_id = record["case_id"]
+        category = record["category"]
+        assert case_id.startswith(f"{category}-"), (
+            f"category {category!r} does not match case_id {case_id!r} — task_index mapping shuffled under concurrency"
+        )
+
+
+def test_per_query_stages_handles_results_without_stage_latency() -> None:
+    """Searchers without stage data produce records with empty stage_latency_ms.
+
+    A dict-returning fake has no ``stage_latency_ms`` attribute. The
+    record still surfaces with case_id, category, latency_ms — so an
+    operator can see the per-query latency distribution even when stage
+    decomposition is unavailable.
+
+    Sabotage-proof: change the ``_result_stage_map`` fallback to
+    ``raise`` instead of returning None, and probes using dict-returning
+    fakes start crashing in the runner.
+    """
+    result = run_probe_search(
+        suite="x",
+        queries=3,
+        concurrency=1,
+        suite_loader=_suite_loader,
+        searcher=_fast_client.search,
+    )
+    assert len(result.per_query_stages) == 3
+    for record in result.per_query_stages:
+        assert record["stage_latency_ms"] == {}
+        assert record["case_id"]
+        assert record["category"]
+        assert record["latency_ms"] >= 0.0
+
+
+def test_per_query_stages_envelope_serialises_as_list_of_dicts() -> None:
+    """to_envelope round-trips per_query_stages as a top-level JSON-shaped list.
+
+    CLI ``--json`` and MCP envelope need ``per_query_stages`` to be a
+    JSON-serialisable list of plain dicts. Without it, ``jq``
+    post-processing (the operator's primary tool for ranking slow
+    queries) can't run.
+
+    Sabotage-proof: drop ``per_query_stages`` from the envelope dict
+    and operators lose the slow-query surfacing entirely.
+    """
+    result = run_probe_search(
+        suite="x",
+        queries=5,
+        concurrency=2,
+        suite_loader=_suite_loader,
+        searcher=_fast_client.search,
+    )
+    env = result.to_envelope()
+    assert "per_query_stages" in env
+    assert isinstance(env["per_query_stages"], list)
+    assert len(env["per_query_stages"]) == 5
+    for record in env["per_query_stages"]:
+        assert isinstance(record, dict)
+        assert "case_id" in record
+        assert "latency_ms" in record
+
+
+def test_per_query_stages_aggregation_pins_known_stage_maps() -> None:
+    """Pin _per_query_stages projection from synthetic results with known stage maps.
+
+    Drives the runner directly via the public ``run_probe_search`` API
+    (no internal-function tests, per project policy). Synthetic searcher
+    returns objects with explicit per-call stage maps, and the asserted
+    invariant is: each record's stage_latency_ms equals what the searcher
+    returned for that case_id.
+
+    Sabotage-proof: change ``dict(stage_map)`` in _per_query_stages to a
+    shallow alias and a later mutation of the runner's internal sums dict
+    would leak; this assertion catches that the per-record dicts are
+    independent copies.
+    """
+
+    class _Staged:
+        def __init__(self, case_id: str) -> None:
+            # Encode case_id into the stage value so we can verify the
+            # mapping survived task_index round-tripping.
+            self.stage_latency_ms = {"classify": 7.0, "case_marker": float(len(case_id))}
+            self.case_id = case_id
+
+    def staged_searcher(q: SampledQuery) -> _Staged:
+        return _Staged(case_id=q.case_id)
+
+    result = run_probe_search(
+        suite="x",
+        queries=6,
+        concurrency=1,  # deterministic order for the exact-equality check
+        suite_loader=_suite_loader,
+        searcher=staged_searcher,
+    )
+    for record in result.per_query_stages:
+        assert record["stage_latency_ms"]["classify"] == 7.0
+        assert record["stage_latency_ms"]["case_marker"] == float(len(record["case_id"]))

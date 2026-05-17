@@ -242,7 +242,7 @@ class SearchPipeline:
             stages["bm25"] = round((time.monotonic() - t) * 1000.0, 2)
 
         t = time.monotonic()
-        vec_results, vec_failed = self._dispatch_vector(query, collections)
+        vec_results, vec_failed = self._dispatch_vector(query, collections, stages=stages)
         if stages is not None:
             stages["vector"] = round((time.monotonic() - t) * 1000.0, 2)
         return bm25_results, vec_results, vec_failed
@@ -251,17 +251,32 @@ class SearchPipeline:
         self,
         query: str,
         collections: list[str] | None,
+        stages: dict[str, float] | None = None,
     ) -> tuple[list[dict], bool]:
         """Vector backend dispatch with skip-flag and failure-vs-empty distinction.
 
         ``vec_failed`` reflects backend failure only — operators consume
         this field to triage real outages. Empty-and-failed conflation
         produced false-positive alerts.
+
+        When ``stages`` is supplied, records the ``embed_http`` and
+        ``vector_ann`` split via the VectorSearchBackend timing hook so
+        probe data can attribute slow tail queries to Azure HTTP tail vs
+        local ANN cost (#282 follow-up). ``vector`` (the sum) stays the
+        outer-wall total recorded in ``_dispatch_backends``.
         """
         if self.config.skip_vector:
             return [], False
         try:
-            return self.vector.search(query, collections=collections, limit=self.config.vec_limit), False
+            return (
+                self.vector.search(
+                    query,
+                    collections=collections,
+                    limit=self.config.vec_limit,
+                    timings=stages,
+                ),
+                False,
+            )
         except Exception as e:
             _logger.warning("pipeline: vector search failed — %s", e)
             return [], True

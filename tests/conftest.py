@@ -76,6 +76,7 @@ pytest_plugins = [
     "tests.bdd.steps.soak_steps",
     "tests.bdd.steps.warm_steps",
     "tests.bdd.steps.probe_steps",
+    "tests.bdd.steps.probe_per_query_telemetry_steps",
     "tests.bdd.steps.worker_steps",
     "tests.bdd.steps.bootstrap_steps",
     "tests.bdd.steps.usage_guide_steps",

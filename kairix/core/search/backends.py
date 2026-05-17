@@ -10,6 +10,7 @@ directly in production code.
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -74,6 +75,8 @@ class VectorSearchBackend:
         query: str,
         collections: list[str] | None = None,
         limit: int = 10,
+        *,
+        timings: dict[str, float] | None = None,
     ) -> list[dict]:
         """Embed query and run ANN vector search.
 
@@ -87,11 +90,26 @@ class VectorSearchBackend:
         An empty embedding from the EmbeddingService is treated as a failure
         (raised, not returned as ``[]``) so operators see vec_failed=True
         when the embedding pipeline is broken.
+
+        When ``timings`` is supplied, records the ``embed_http`` (embed-call
+        wall-clock) and ``vector_ann`` (vector-repo search wall-clock) deltas
+        into it in milliseconds. Lets ``SearchPipeline._dispatch_vector``
+        decompose the ``vector`` stage so probe data can attribute slow tail
+        queries to Azure HTTP tail vs local ANN cost (#282 follow-up).
         """
+        t = time.monotonic()
         vec = self._embedding.embed(query)
+        embed_ms = (time.monotonic() - t) * 1000.0
+        if timings is not None:
+            timings["embed_http"] = round(embed_ms, 2)
         if not vec:
             raise RuntimeError("VectorSearchBackend: embedding service returned no vector")
-        return self._vector_repo.search(vec, k=limit, collections=collections)
+        t = time.monotonic()
+        try:
+            return self._vector_repo.search(vec, k=limit, collections=collections)
+        finally:
+            if timings is not None:
+                timings["vector_ann"] = round((time.monotonic() - t) * 1000.0, 2)
 
 
 class AzureEmbeddingService:
