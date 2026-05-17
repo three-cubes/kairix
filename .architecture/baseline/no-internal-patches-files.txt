@@ -17,4 +17,3 @@ tests/summaries/test_cli_unit.py
 tests/transport/test_client_pool.py
 tests/wikilinks/test_audit_unit.py
 tests/wikilinks/test_cli_unit.py
-tests/wikilinks/test_resolver.py

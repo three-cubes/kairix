@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kairix.knowledge.graph.client import Neo4jClient
@@ -237,20 +237,36 @@ def load_entities_from_neo4j(client: Neo4jClient | None = None) -> list[WikiEnti
 # ---------------------------------------------------------------------------
 
 
-def get_entities(client: Neo4jClient | None = None) -> list[WikiEntity]:
+def get_entities(
+    client: Neo4jClient | None = None,
+    *,
+    neo4j_loader: Any = None,
+    bootstrap_loader: Any = None,
+) -> list[WikiEntity]:
     """
     Load entities from Neo4j (preferred), then bootstrap index.
 
     Falls back to the bootstrap index if Neo4j is unavailable or returns
     fewer than _DB_THRESHOLD entities with vault_path populated.
 
-    ``client`` is passed through to ``load_entities_from_neo4j`` — production
-    callers omit it for the default Neo4j connection; tests inject fakes.
+    Args:
+        client: Passed through to the Neo4j loader; production callers omit
+            it for the default Neo4j connection.
+        neo4j_loader: Public DI seam — defaults to
+            :func:`load_entities_from_neo4j`. Tests pass a fake to drive the
+            sparse / unavailable / sufficient paths without monkey-patching
+            the resolver module.
+        bootstrap_loader: Public DI seam — defaults to
+            :func:`load_entities_from_bootstrap`. Tests pass a fake to drive
+            the fallback path with a controlled bootstrap.
     """
+    _neo4j = neo4j_loader if neo4j_loader is not None else load_entities_from_neo4j
+    _bootstrap = bootstrap_loader if bootstrap_loader is not None else load_entities_from_bootstrap
+
     # Try Neo4j first
-    neo4j_entities = load_entities_from_neo4j(client=client)
+    neo4j_entities = _neo4j(client=client)
     if len(neo4j_entities) >= _DB_THRESHOLD:
         return neo4j_entities
 
     # Fallback to bootstrap
-    return load_entities_from_bootstrap()
+    return _bootstrap()

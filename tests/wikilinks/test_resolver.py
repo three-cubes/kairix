@@ -265,34 +265,26 @@ def test_neo4j_load_returns_empty_on_cypher_error() -> None:
 
 
 @pytest.mark.unit
-def test_get_entities_uses_neo4j_when_sufficient(
-    bootstrap_file: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """get_entities() uses Neo4j when it returns >= 5 entities with vault_path."""
-    import kairix.knowledge.wikilinks.resolver as resolver_mod
+def test_get_entities_uses_neo4j_when_sufficient(bootstrap_file: str) -> None:
+    """get_entities() uses Neo4j when it returns >= 5 entities with vault_path.
 
-    monkeypatch.setattr(
-        resolver_mod,
-        "load_entities_from_neo4j",
-        lambda client=None: [
-            WikiEntity(
-                name=r["name"],
-                aliases=r["aliases"],
-                vault_path=r["vault_path"],
-                link=f"[[{r['name']}]]",
-                entity_type="organisation",
-            )
-            for r in _NEO4J_ROWS
-        ],
+    Drives the public ``neo4j_loader`` / ``bootstrap_loader`` kwarg seams
+    on :func:`get_entities` — F1-clean (no resolver-module monkey-patch).
+    """
+    neo4j_entities = [
+        WikiEntity(
+            name=r["name"],
+            aliases=r["aliases"],
+            vault_path=r["vault_path"],
+            link=f"[[{r['name']}]]",
+            entity_type="organisation",
+        )
+        for r in _NEO4J_ROWS
+    ]
+    entities = get_entities(
+        neo4j_loader=lambda client=None: neo4j_entities,
+        bootstrap_loader=lambda: load_entities_from_bootstrap(bootstrap_file),
     )
-    monkeypatch.setattr(
-        resolver_mod,
-        "load_entities_from_bootstrap",
-        lambda: load_entities_from_bootstrap(bootstrap_file),
-    )
-
-    entities = get_entities()
     names = [e.name for e in entities]
     assert "Acme Corp" in names
     # Should have exactly the 6 Neo4j entities, not the 12 bootstrap entries
@@ -300,14 +292,8 @@ def test_get_entities_uses_neo4j_when_sufficient(
 
 
 @pytest.mark.unit
-def test_get_entities_falls_back_to_bootstrap_when_neo4j_sparse(
-    bootstrap_file: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_get_entities_falls_back_to_bootstrap_when_neo4j_sparse(bootstrap_file: str) -> None:
     """get_entities() falls back to bootstrap when Neo4j returns < 5 entities."""
-    import kairix.knowledge.wikilinks.resolver as resolver_mod
-
-    # Only 2 entities from Neo4j — below _DB_THRESHOLD of 5
     sparse_rows = [
         WikiEntity(
             name="Acme Corp",
@@ -324,34 +310,21 @@ def test_get_entities_falls_back_to_bootstrap_when_neo4j_sparse(
             entity_type="organisation",
         ),
     ]
-    monkeypatch.setattr(resolver_mod, "load_entities_from_neo4j", lambda client=None: sparse_rows)
-    monkeypatch.setattr(
-        resolver_mod,
-        "load_entities_from_bootstrap",
-        lambda: load_entities_from_bootstrap(bootstrap_file),
+    entities = get_entities(
+        neo4j_loader=lambda client=None: sparse_rows,
+        bootstrap_loader=lambda: load_entities_from_bootstrap(bootstrap_file),
     )
-
-    entities = get_entities()
     # Should have fallen back to bootstrap (12 entries)
     assert len(entities) >= 10, f"Expected fallback to bootstrap, got {len(entities)} entities"
 
 
 @pytest.mark.unit
-def test_get_entities_falls_back_to_bootstrap_when_neo4j_unavailable(
-    bootstrap_file: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_get_entities_falls_back_to_bootstrap_when_neo4j_unavailable(bootstrap_file: str) -> None:
     """get_entities() falls back to bootstrap when Neo4j is completely unavailable."""
-    import kairix.knowledge.wikilinks.resolver as resolver_mod
-
-    monkeypatch.setattr(resolver_mod, "load_entities_from_neo4j", lambda client=None: [])
-    monkeypatch.setattr(
-        resolver_mod,
-        "load_entities_from_bootstrap",
-        lambda: load_entities_from_bootstrap(bootstrap_file),
+    entities = get_entities(
+        neo4j_loader=lambda client=None: [],
+        bootstrap_loader=lambda: load_entities_from_bootstrap(bootstrap_file),
     )
-
-    entities = get_entities()
     assert len(entities) >= 10
     names = [e.name for e in entities]
     assert "Acme Corp" in names
