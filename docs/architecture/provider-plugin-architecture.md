@@ -118,7 +118,29 @@ anthropic     = "kairix.providers.anthropic:make_provider"
 
 Third parties ship a separate pip distribution that declares the same
 entry-point group. `pip install kairix-provider-foo` then
-`KAIRIX_PROVIDER=foo` works with zero kairix code change.
+`provider: foo` in `kairix.config.yaml` works with zero kairix code
+change.
+
+**Provider selection lives in `kairix.config.yaml`** (top-level
+`provider:` field), not an env var. The plugin owns its own
+credential-retrieval pattern — Azure plugins read from the Key Vault
+sidecar; AWS plugins use Secrets Manager / instance metadata; etc. —
+so the operator doesn't choose `KAIRIX_PROVIDER` AND wire env vars
+for credentials; they pick a plugin and the plugin owns the rest.
+
+```yaml
+# kairix.config.yaml — top of file
+provider: azure_foundry   # or: openai
+```
+
+The kairix runtime reads this field via `kairix.paths.provider_name()`
+(F4-clean — the config-yaml read stays at the same boundary the
+legacy `KAIRIX_PROVIDER` env-var read sat at). Callers that depend on
+a configured plugin (`kairix.transport.embed_service.ProviderEmbeddingService`
+construction in `kairix.core.factory`, `kairix probe-config`, etc.)
+raise a typed `ProviderNotRegistered`-shaped error with the
+installed-plugins list when the field is unset or names a missing
+plugin.
 
 Resolution is name-filtered, not eager-scanned:
 

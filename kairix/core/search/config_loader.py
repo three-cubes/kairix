@@ -162,7 +162,14 @@ def load_config(config_path: Path | str | None = None) -> RetrievalConfig:
 
 
 def parse_config(data: dict) -> RetrievalConfig:
-    """Parse YAML dict into RetrievalConfig. Returns defaults for any missing/invalid section."""
+    """Parse YAML dict into RetrievalConfig. Returns defaults for any missing/invalid section.
+
+    Top-level ``provider:`` is honoured as the configured provider plugin
+    name (see ``docs/architecture/provider-plugin-architecture.md``). A
+    missing / blank value yields ``provider=None``; callers that depend
+    on a configured provider (``kairix.core.factory.build_search_pipeline``)
+    surface a typed ValueError listing the installed plugins.
+    """
     retrieval = data.get("retrieval", {}) or {}
     boosts = retrieval.get("boosts", {}) or {}
 
@@ -184,7 +191,17 @@ def parse_config(data: dict) -> RetrievalConfig:
     vec_limit = int(retrieval.get("vec_limit", defaults.vec_limit))
     bm25_limit = int(retrieval.get("bm25_limit", defaults.bm25_limit))
 
+    # Top-level ``provider:`` — names the plugin loaded by
+    # ``kairix.providers.get_provider``. ``None`` propagates when the
+    # field is absent or blank so the factory's typed error surfaces
+    # with the installed-plugins list.
+    raw_provider = data.get("provider")
+    provider_name = str(raw_provider).strip() if raw_provider else None
+    if provider_name == "":
+        provider_name = None
+
     return RetrievalConfig(
+        provider=provider_name,
         fusion_strategy=fusion,
         rrf_k=rrf_k,
         bm25_limit=bm25_limit,

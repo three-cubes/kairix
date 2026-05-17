@@ -461,20 +461,41 @@ def boards_dir_override() -> Path | None:
 
 
 def provider_name() -> str | None:
-    """Configured provider plugin name from ``KAIRIX_PROVIDER``, or ``None``.
+    """Configured provider plugin name from ``kairix.config.yaml``, or ``None``.
 
-    Canonical reader for the env var that picks a provider plugin
-    (azure_foundry / openai / bedrock / ollama / anthropic /
-    litellm_proxy / a third-party plugin). Consumed by
-    ``kairix probe-config`` and any other operator-facing surface that
-    needs to know which provider is configured without hard-coding a
-    default. Returns ``None`` when unset so callers can surface an
-    actionable "no provider configured" error themselves.
+    Reads the top-level ``provider:`` field from the operator's
+    ``kairix.config.yaml``. Returns the stripped string when present
+    and non-empty; returns ``None`` otherwise so callers that depend
+    on a configured plugin can surface a typed
+    ``ProviderNotRegistered``-shaped error themselves.
 
-    Lives in :mod:`kairix.paths` per F4 — no other module may read
-    ``KAIRIX_*`` env vars.
+    The seam moved from ``KAIRIX_PROVIDER`` (env var) to the config
+    file in v2026.5.17 — operators pick a plugin in config; the plugin
+    owns its own credential-retrieval pattern (Azure → Key Vault;
+    AWS → Secrets Manager; etc.) so the secrets surface is shaped by
+    the plugin, not the env vocabulary. See
+    ``docs/architecture/provider-plugin-architecture.md``.
+
+    Lives in :mod:`kairix.paths` so the file-system read stays at the
+    F4 boundary even when the underlying source is a yaml file rather
+    than ``os.environ``. The import lives inside the function to keep
+    ``kairix.paths`` free of a module-level dependency on the
+    retrieval-config loader (which itself imports ``kairix.paths`` for
+    ``config_path_override``).
     """
-    value = os.environ.get("KAIRIX_PROVIDER")
+    # Lazy import — avoid circular dependency with config_loader, which
+    # imports ``config_path_override`` from this module.
+    from kairix.core.search.config_loader import load_config
+
+    try:
+        cfg = load_config()
+    except Exception as exc:
+        # YAML parse errors / ConfigValidationError shouldn't crash
+        # operator-facing probes; surface ``None`` and let the caller
+        # render the actionable affordance.
+        logger.warning("provider_name: failed to load kairix.config.yaml — %s", exc)
+        return None
+    value = getattr(cfg, "provider", None)
     return value if value else None
 
 

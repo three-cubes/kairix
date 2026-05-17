@@ -8,6 +8,27 @@
 #
 # Set KAIRIX_CONFIG_PATH=/path/to/kairix.config.yaml to use a custom location.
 
+# ── Provider ────────────────────────────────────────────────────────────────
+# Which LLM/embed plugin to load. Each plugin owns its own credential-
+# retrieval pattern (Azure → Key Vault; AWS → Secrets Manager; etc.)
+# so you don't configure secrets here — the plugin reads them from
+# wherever its operator runbook says.
+#
+# Installed plugins (run `kairix probe-config` to verify your choice
+# resolves):
+#   azure_foundry  — Azure AI Foundry endpoint (default for existing deploys)
+#   openai         — OpenAI direct (api.openai.com or compatible base_url)
+#
+# Plugins shipping in v2026.5.18:
+#   azure_legacy / bedrock / ollama / litellm_proxy / anthropic
+#
+# Operators upgrading from v2026.5.16 or earlier MUST set this field —
+# the env-var fallback (KAIRIX_PROVIDER) was retired in v2026.5.17 so
+# the plugin is the only embed/chat path. See
+# docs/operations/runbooks/how-to-upgrade-kairix.md for the migration
+# step.
+provider: azure_foundry
+
 # ── Paths ───────────────────────────────────────────────────────────────────
 # Where your documents and data live. Defaults work for most setups.
 # Environment variables (KAIRIX_DOCUMENT_ROOT, KAIRIX_DB_PATH, etc.) take

@@ -123,6 +123,19 @@ class RetrievalConfig:
         kairix eval hybrid-sweep --suite gold.yaml --output sweep.csv
     """
 
+    # Configured provider plugin name (matches a key under the
+    # ``kairix.providers`` entry-point group). The plugin owns its own
+    # credential-retrieval pattern (Azure → Key Vault; AWS → Secrets
+    # Manager; etc.) so this field selects which one is loaded. ``None``
+    # means "no provider configured" — callers that depend on a provider
+    # (``ProviderEmbeddingService`` construction in
+    # ``kairix.core.factory``) surface a typed error with the list of
+    # installed plugins. Lives on ``RetrievalConfig`` because the
+    # configured plugin is part of the retrieval pipeline's identity:
+    # rotating providers should bust the per-config memoisation in
+    # ``build_search_pipeline``.
+    provider: str | None = None
+
     # Fusion strategy: "bm25_primary" or "rrf".
     # bm25_primary: BM25 results ranked first, vector-only appended at bottom.
     # rrf: standard Reciprocal Rank Fusion with equal BM25/vector weight.

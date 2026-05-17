@@ -115,6 +115,13 @@ class VectorSearchBackend:
 class AzureEmbeddingService:
     """EmbeddingService adapter wrapping kairix._azure embed functions.
 
+    DEPRECATED in v2026.5.17 — kept only as a transitional shim while
+    callers migrate to ``ProviderEmbeddingService`` (lives in
+    ``kairix.transport.embed_service``). New code (and every production
+    factory wire) constructs
+    ``ProviderEmbeddingService(get_provider(provider_name()))`` instead.
+    This class is removed once every internal caller has migrated.
+
     Lazily imports kairix._azure to avoid hard dependency at module load.
     Uses existing credential resolution from the Azure module.
     """
