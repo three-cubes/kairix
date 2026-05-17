@@ -120,10 +120,16 @@ def _gather_audit_files(doc_path: Path, paths: KairixPaths) -> list[Path]:
     return eligible
 
 
-def _read_audit_file(md_file: Path) -> str | None:
-    """Read an audit-eligible .md file; return None when oversize or unreadable."""
+def _read_audit_file(md_file: Path, *, max_file_size: int = MAX_FILE_SIZE) -> str | None:
+    """Read an audit-eligible .md file; return None when oversize or unreadable.
+
+    ``max_file_size`` is the public threshold seam — production callers
+    leave it at the module-level ``MAX_FILE_SIZE``; tests pass 0 to
+    exercise the oversize-skip branch without monkey-patching the
+    audit-module constant.
+    """
     try:
-        if md_file.stat().st_size > MAX_FILE_SIZE:
+        if md_file.stat().st_size > max_file_size:
             return None
         return md_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -300,6 +306,7 @@ def weekly_report(
     entities: list[WikiEntity],
     *,
     paths: KairixPaths | None = None,
+    log_path: str | None = None,
 ) -> str:
     """
     Generate markdown weekly audit report covering:
@@ -314,6 +321,12 @@ def weekly_report(
         paths:         Injected ``KairixPaths`` for workspace discovery in
                        unlinked-mention sampling. When ``None``, falls back
                        to ``KairixPaths.resolve()``.
+        log_path:      Public seam for the injection-log file path.
+                       Production callers leave it ``None`` and the function
+                       threads through to the module-level ``_LOG_PATH``;
+                       tests pass a tmp-path so they exercise the
+                       missing-log / valid-entries / out-of-window branches
+                       without monkey-patching ``_LOG_PATH``.
     """
     paths = paths or KairixPaths.resolve()
 
@@ -326,7 +339,7 @@ def weekly_report(
 
     broken = find_broken_links(document_root)
     unlinked = find_unlinked_mentions(document_root, entities, sample_size=50, paths=paths)
-    recent_injections = _read_recent_log(days=7)
+    recent_injections = _read_recent_log(days=7, log_path=log_path)
 
     lines: list[str] = [
         f"# Wikilink Audit Report — {report_date}",
@@ -352,12 +365,20 @@ def weekly_report(
     return "\n".join(lines)
 
 
-def _read_recent_log(days: int = 7) -> list[dict[str, Any]]:
-    """Read injection log entries from the last N days."""
+def _read_recent_log(days: int = 7, *, log_path: str | None = None) -> list[dict[str, Any]]:
+    """Read injection log entries from the last N days.
+
+    ``log_path`` is the public seam — production callers leave it
+    ``None`` and the function reads from the module-level ``_LOG_PATH``;
+    tests pass a tmp_path-derived path to drive the
+    missing-file / valid-entries / out-of-window branches without
+    monkey-patching the module constant.
+    """
     cutoff = time.time() - (days * 86400)
     entries: list[dict[str, Any]] = []
+    effective_path = log_path if log_path is not None else _LOG_PATH
     try:
-        with open(_LOG_PATH, encoding="utf-8") as fh:
+        with open(effective_path, encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
