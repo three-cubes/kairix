@@ -21,51 +21,75 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from kairix.providers import Provider
 
+from kairix.paths import provider_name as _config_provider_name
+from kairix.providers import get_provider as _registry_get_provider
 
-def _resolve_provider() -> Provider:
+
+def resolve_provider(
+    *,
+    provider_name_fn: Callable[[], str | None] = _config_provider_name,
+    get_provider_fn: Callable[..., Any] = _registry_get_provider,
+) -> Provider:
     """Resolve the production ``Provider`` plugin from ``kairix.config.yaml``.
 
-    Reads the ``provider:`` field via :func:`kairix.paths.provider_name` and
-    looks up the registered entry-point via :func:`kairix.providers.get_provider`.
-    Raises ``ValueError`` if the config field is absent (so operators see a
-    typed misconfiguration rather than a silent fall-through).
-    """
-    from kairix.paths import provider_name
-    from kairix.providers import get_provider
+    Reads the ``provider:`` field via ``provider_name_fn`` (defaults to
+    :func:`kairix.paths.provider_name`) and looks up the registered
+    entry-point via ``get_provider_fn`` (defaults to
+    :func:`kairix.providers.get_provider`). Raises ``ValueError`` if
+    the config field is absent.
 
-    name = provider_name()
+    Tests pass ``provider_name_fn`` / ``get_provider_fn`` to inject
+    the resolution path — F1-clean (no internal patching) and F6-clean
+    (production defaults are real callables, not ``None``).
+    """
+    name = provider_name_fn()
     if name is None:
         raise ValueError(
             "kairix.config.yaml is missing the required 'provider:' field. "
             "fix: set 'provider: <plugin-name>' in kairix.config.yaml. "
             "next: see docs/architecture/provider-plugin-architecture.md."
         )
-    return get_provider(name)
+    return get_provider_fn(name)
 
 
-def _default_chat(messages: list[dict[str, Any]], max_tokens: int = 800) -> str:
+def default_chat_callable(
+    messages: list[dict[str, Any]],
+    max_tokens: int = 800,
+    *,
+    provider_resolver: Callable[[], Any] = resolve_provider,
+) -> str:
     """Production chat callable — delegates to the configured provider plugin.
 
-    Construction route: ``kairix.config.yaml → provider_name() →
-    get_provider() → ProviderChatBackend.chat``. Never raises; returns ``""``
-    on plugin error (honoured by ``ProviderChatBackend``).
+    Construction route: ``kairix.config.yaml → provider_resolver() →
+    ProviderChatBackend.chat``. Never raises; returns ``""`` on plugin
+    error (honoured by ``ProviderChatBackend``).
+
+    Tests pass ``provider_resolver=lambda: fake_provider`` to inject a
+    Fake* through the public callable seam.
     """
     from kairix.transport.embed_service import ProviderChatBackend
 
-    backend = ProviderChatBackend(_resolve_provider())
+    backend = ProviderChatBackend(provider_resolver())
     return backend.chat(messages, max_tokens=max_tokens)
 
 
-def _default_embed(text: str) -> list[float]:
+def default_embed_callable(
+    text: str,
+    *,
+    provider_resolver: Callable[[], Any] = resolve_provider,
+) -> list[float]:
     """Production embed callable — delegates to the configured provider plugin.
 
     Routes through :class:`kairix.transport.embed_service.ProviderEmbeddingService`
     which owns cache + coalescer wiring. Never raises; returns ``[]`` on
     plugin error.
+
+    Tests pass ``provider_resolver=lambda: fake_provider`` to inject a
+    Fake* through the public callable seam.
     """
     from kairix.transport.embed_service import ProviderEmbeddingService
 
-    svc = ProviderEmbeddingService(_resolve_provider())
+    svc = ProviderEmbeddingService(provider_resolver())
     return svc.embed(text)
 
 
@@ -78,8 +102,8 @@ class LLMBackendDeps:
     ``chat_fn=`` / ``embed_fn=`` kwargs to the backend's constructor.
     """
 
-    chat: Callable[..., str] = field(default_factory=lambda: _default_chat)
-    embed: Callable[[str], list[float]] = field(default_factory=lambda: _default_embed)
+    chat: Callable[..., str] = field(default_factory=lambda: default_chat_callable)
+    embed: Callable[[str], list[float]] = field(default_factory=lambda: default_embed_callable)
 
 
 class AzureOpenAIBackend:
