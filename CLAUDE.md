@@ -64,7 +64,7 @@ Failing any check: send the subagent back with a `SendMessage` correction or rej
 
 Mechanical, blocking checks encode rejected patterns into automation:
 
-- **F1** no `@patch` on kairix internals — **F2** no `monkeypatch.setenv("KAIRIX_*")` — **F3** every per-line suppression (`# noqa` / `# NOSONAR` / `# pragma: no cover` / `# type: ignore` / `# nosec`) has rationale — **F4** no `os.environ.get("KAIRIX_*")` outside `paths.py`/`secrets.py`.
+- **F1** no internal-substitution patching of kairix code — catches **all six shapes**: `@patch("kairix.X")`, `with patch("kairix.X")`, `kairix.X.Y = expr`, `alias.Y = expr` (where alias resolves to a kairix module), `monkeypatch.setattr("kairix.X.Y", ...)`, `monkeypatch.setattr(<kairix module ref>, ...)`. Stdlib (`os.*`, `time.*`) and external SDKs (`httpx.*`, `openai.*`, `boto3.*`) remain allowed. The fix is always production DI, not better-wrapped monkeypatching — **F2** no `monkeypatch.setenv("KAIRIX_*")` — **F3** every per-line suppression (`# noqa` / `# NOSONAR` / `# pragma: no cover` / `# type: ignore` / `# nosec`) has rationale — **F4** no `os.environ.get("KAIRIX_*")` outside `paths.py`/`secrets.py`.
 - **F5** no internal-name imports in tests — **F6** no `*_fn=None` test-only kwargs in production.
 - **F7** per-file coverage ≥ 90% (unit) — **F9** per-file coverage ≥ 90% on the unit ∪ integration union (Stage 5).
 - **F8** every `test_*` carries a category marker (`unit`/`bdd`/`contract`/`integration`/`e2e`/`slow`).

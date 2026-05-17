@@ -216,12 +216,26 @@ Each rule below is described with: **statement**, **why**,
 **detection mechanism**, **examples** (rejected and allowed), and
 **fix pattern**.
 
-### F1 — No `@patch` on kairix internal code
+### F1 — No internal-substitution patching of kairix code
 
 #### Statement
 
-Test files MUST NOT call `@patch("kairix.…")` or
-`with patch("kairix.…")`.
+Test files MUST NOT reach into a production kairix module's namespace
+to swap an implementation. F1 catches **six structurally identical
+shapes** — all are the same anti-pattern regardless of which API
+expresses it:
+
+1. `@patch("kairix.X.Y", ...)` — decorator
+2. `with patch("kairix.X.Y", ...):` — context manager
+3. `kairix.X.Y = <expr>` — full-path attribute assignment
+4. `<alias>.Y = <expr>` where alias resolves via imports to a kairix module
+5. `monkeypatch.setattr("kairix.X.Y", ...)` — string-target form
+6. `monkeypatch.setattr(<kairix module ref>, "attr", fake)` — ref-target form
+
+Stdlib (`os`, `time`, `pathlib`, `sys`, `importlib`, ...) and external
+SDKs (`httpx`, `openai`, `boto3`, `anthropic`, `requests`, `numpy`,
+`neo4j`, ...) remain allowed — those are boundary fakes for genuinely
+external state, not internals patching.
 
 #### Why
 
@@ -230,19 +244,38 @@ breaks silently when `_helper` is renamed or moved). They also make
 production code grow defensive shims to remain mockable, which is
 exactly the test-shaped-API smell.
 
+The narrow original F1 only matched the `@patch` decorator literal, so
+the same anti-pattern proliferated via `monkeypatch.setattr` and bare
+attribute reassignment with "test seam, restored in finally" comments
+dressing it up. Those are the same violation — the gate now catches
+all six shapes. Comments don't change semantics.
+
 The replacement is **constructor injection** or a **`Protocol` seam**
 from `kairix.core.protocols`. `tests/fakes.py` exists for exactly this:
-canonical Fake* implementations of every domain Protocol.
+canonical Fake* implementations of every domain Protocol. When you
+find yourself wanting one of the six F1-blocked shapes, the production
+code is the problem — it has a hidden dependency (function-local
+imports, at-call-time resolution) that should be moved to construction
+time via a `*Deps` dataclass with `default_factory` (see
+`EmbedDependencies` / `LLMBackendDeps` / `BenchmarkDeps` for the
+canonical shape).
 
 #### Detection
 
-`scripts/checks/check-no-internal-patches.sh`. Grep is the right tool
-here — the pattern `@patch("kairix.` is unambiguous at the line level.
-The script:
+`scripts/checks/check-no-internal-patches.sh` delegates to
+`scripts/checks/check_no_internal_patches.py` — AST-based, walks every
+test file's imports to resolve aliases, then checks for any of the six
+shapes against the alias-resolved root. Multi-line constructs, aliased
+imports (`import kairix.paths as paths_mod`), from-imports
+(`from kairix import providers as providers_mod`), and full-path forms
+(`kairix.paths.provider_name = ...`) are all caught.
 
-```bash
-grep -rEl '(@patch|with patch)\("kairix\.' tests/ --include='*.py'
-```
+The detector's own tests live at
+`tests/architecture/test_check_no_internal_patches.py` — each of the
+six shapes has a positive (kairix target → violation) and negative
+(stdlib/external target → allowed) test. Sabotage-proven: mutate the
+detector branch for any shape, run the corresponding test, confirm it
+goes red, restore, confirm green.
 
 #### Examples
 
