@@ -173,8 +173,8 @@ class _LazyDefaultChatBackend:
         timeout_s: float = 30.0,
     ) -> str:
         from kairix.paths import provider_name
-        from kairix.platform.llm.backends import ProviderEvalChatBackend
         from kairix.providers import get_provider
+        from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
 
         name = provider_name()
         if name is None:

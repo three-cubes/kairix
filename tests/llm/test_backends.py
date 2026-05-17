@@ -10,8 +10,9 @@ import pytest
 
 from kairix.core.protocols import ChatBackend
 from kairix.platform.llm import AzureOpenAIBackend, get_default_backend
-from kairix.platform.llm.backends import LLMBackendDeps, ProviderEvalChatBackend
+from kairix.platform.llm.backends import LLMBackendDeps
 from kairix.platform.llm.protocol import LLMBackend
+from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
 from tests.fakes import FakeLLMBackend, FakeProvider
 
 # ---------------------------------------------------------------------------
