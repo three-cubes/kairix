@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.pipeline import SearchPipeline
@@ -28,6 +28,9 @@ from kairix.core.search.query_cache import (
     DEFAULT_MAX_ENTRIES,
     QueryResultCache,
 )
+
+if TYPE_CHECKING:
+    from kairix.providers import ProviderRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +288,93 @@ def _build_collection_resolver() -> Any:
     )
 
 
-def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeline:
+def _resolve_provider_name(cfg: RetrievalConfig) -> str | None:
+    """Return the configured provider plugin name or ``None``.
+
+    Resolution order:
+
+      1. ``cfg.provider`` — the value threaded through ``RetrievalConfig``
+         (SWAP v2 added this field; ``load_config`` parses ``provider:``
+         from ``kairix.config.yaml`` into it).
+      2. :func:`kairix.paths.provider_name` fallback — re-reads the YAML
+         directly. Covers ad-hoc test paths that construct
+         ``RetrievalConfig`` instances by hand without going through
+         ``load_config`` (so ``cfg.provider`` is ``None``) but still
+         have a ``kairix.config.yaml`` on disk that names a plugin.
+      3. ``None`` — no provider configured. The caller falls back to
+         the legacy ``AzureEmbeddingService`` shim and logs a deprecation
+         warning. This branch keeps the existing test fleet working while
+         the migration to plugin-driven embed proceeds across the rest
+         of the codebase.
+    """
+    if cfg.provider:
+        return cfg.provider
+    from kairix.paths import provider_name
+
+    return provider_name()
+
+
+def _build_embedding_service(
+    cfg: RetrievalConfig,
+    registry: ProviderRegistry | None = None,
+) -> Any:
+    """Construct the production ``EmbeddingService`` for the pipeline.
+
+    Plugin-driven path (v2026.5.17 onward): when a provider name is
+    configured, resolve it via :func:`kairix.providers.get_provider`
+    and wrap the resulting plugin in
+    :class:`kairix.transport.embed_service.ProviderEmbeddingService` —
+    the Protocol-shaped adapter that owns the cache + coalescer
+    routing.
+
+    Transitional fallback: when no provider is configured (no
+    ``provider:`` in YAML, no ``cfg.provider``), keep returning
+    :class:`kairix.core.search.backends.AzureEmbeddingService` so the
+    factory still produces a usable pipeline while the rest of the
+    codebase migrates. This branch logs a deprecation warning that
+    operators see in the search log on every cold-start.
+
+    F26 carve-out: this is the one core/ file allowed to import
+    ``kairix.transport.embed_service`` and ``kairix.providers``. The
+    factory is the wiring point named in
+    ``docs/architecture/provider-plugin-architecture.md``; the
+    domain Protocols still live in ``kairix.core.protocols``.
+    See ``.architecture/baseline/f26-files.txt`` for the grandfathered
+    entry covering this file.
+
+    Args:
+        cfg:       resolved ``RetrievalConfig`` carrying the
+                   configured provider name (if any).
+        registry:  optional ``ProviderRegistry`` for tests; production
+                   resolves via the default ``EntryPointRegistry``.
+
+    Returns:
+        An object satisfying the ``EmbeddingService`` Protocol.
+    """
+    name = _resolve_provider_name(cfg)
+    if name is None:
+        from kairix.core.search.backends import AzureEmbeddingService
+
+        logger.warning(
+            "factory: no provider configured — falling back to legacy "
+            "AzureEmbeddingService. fix: add provider: <name> to "
+            "kairix.config.yaml. run: kairix probe-config to see "
+            "installed plugins."
+        )
+        return AzureEmbeddingService()
+
+    from kairix.providers import get_provider
+    from kairix.transport.embed_service import ProviderEmbeddingService
+
+    provider = get_provider(name, registry=registry)
+    return ProviderEmbeddingService(provider)
+
+
+def build_search_pipeline(
+    config: RetrievalConfig | None = None,
+    *,
+    registry: ProviderRegistry | None = None,
+) -> SearchPipeline:
     """Construct the production search pipeline.
 
     Memoised per-config for the process lifetime. The first call pays the
@@ -299,15 +388,22 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
     field values share one cached pipeline — the case the benchmark path
     hits when ``_retrieve_hybrid`` constructs a new config object per case.
 
-    Resolves all dependencies from the environment (DB paths, Azure credentials,
-    Neo4j connection, usearch index). Each dependency is imported lazily to avoid
-    hard dependency at module load.
+    Resolves all dependencies from the environment (DB paths, configured
+    provider plugin, Neo4j connection, usearch index). Each dependency is
+    imported lazily to avoid hard dependency at module load.
 
     Args:
-        config: Explicit retrieval config. When ``None``, the factory loads
-                the top-level ``retrieval:`` section from
-                ``kairix.config.yaml`` via :func:`load_config`. If no YAML is
-                present, falls back to ``RetrievalConfig.defaults()``.
+        config:    Explicit retrieval config. When ``None``, the factory
+                   loads the top-level ``retrieval:`` section from
+                   ``kairix.config.yaml`` via :func:`load_config`. If no
+                   YAML is present, falls back to
+                   ``RetrievalConfig.defaults()``.
+        registry:  Optional ``ProviderRegistry`` for tests — pass a
+                   ``FakeProviderRegistry`` from ``tests/fakes.py`` to
+                   resolve plugin names against an in-memory mapping.
+                   Production passes ``None``; the default
+                   ``EntryPointRegistry`` is constructed inside
+                   :func:`kairix.providers.get_provider`.
 
     Returns:
         A fully wired SearchPipeline ready for search() calls.
@@ -318,6 +414,11 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
     # field values). Critical that the key is the RESOLVED config, not the
     # raw arg: when config=None is passed, every call resolves to the same
     # default config object, so the cache hits.
+    #
+    # Memoisation is keyed on the config alone (not the registry): the
+    # registry is a test seam, and within a single test the same registry
+    # is reused. Tests that need a fresh build with a different registry
+    # call ``reset_search_pipeline_cache()`` between cases.
     cached = _PIPELINE_CACHE.get(cfg)
     if cached is not None:
         return cached
@@ -331,14 +432,14 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
     from kairix.core.db import get_db_path
     from kairix.core.db.repository import SQLiteDocumentRepository
     from kairix.core.search.backends import (
-        AzureEmbeddingService,
         BM25SearchBackend,
         VectorSearchBackend,
     )
 
     doc_repo = SQLiteDocumentRepository(db_path=get_db_path())
     bm25 = BM25SearchBackend(doc_repo)
-    vector = VectorSearchBackend(AzureEmbeddingService(), _build_vector_repo())
+    embed_service = _build_embedding_service(cfg, registry=registry)
+    vector = VectorSearchBackend(embed_service, _build_vector_repo())
     graph = _build_graph()
 
     pipeline = SearchPipeline(

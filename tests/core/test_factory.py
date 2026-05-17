@@ -617,3 +617,107 @@ def test_build_search_pipeline_tolerates_load_collections_exception(
 
     # Sabotage proof: pipeline still constructed despite the failure.
     assert isinstance(pipeline.config, RetrievalConfig)
+
+
+# ── plugin-driven embedding service wiring ────────────────────────────
+
+
+@pytest.mark.unit
+def test_build_search_pipeline_wires_provider_embedding_service_from_registry() -> None:
+    """When ``cfg.provider`` names an installed plugin, the factory builds
+    a ``ProviderEmbeddingService`` wrapping that plugin — not the legacy
+    ``AzureEmbeddingService``. The registry seam lets us inject a
+    ``FakeProviderRegistry`` without touching env vars or patching
+    ``kairix`` internals (F1/F2 clean).
+
+    Sabotage proof: revert the factory to constructing
+    ``AzureEmbeddingService()`` unconditionally and this test fails
+    because the embed-service type no longer threads back to the
+    ``FakeProvider`` we supplied.
+    """
+    from kairix.transport.embed_service import ProviderEmbeddingService
+    from tests.fakes import FakeProvider, FakeProviderRegistry
+
+    fake_provider = FakeProvider(name="fake", vector=[0.1, 0.2, 0.3], dim=3)
+    registry = FakeProviderRegistry({"fake": fake_provider})
+
+    cfg = RetrievalConfig(fusion_strategy="rrf", provider="fake")
+    pipeline = build_search_pipeline(config=cfg, registry=registry)
+
+    embed_service = pipeline.vector._embedding
+    assert isinstance(embed_service, ProviderEmbeddingService)
+    # The registry's resolve() was driven exactly once, with our name.
+    assert registry.resolve_calls == ["fake"]
+
+
+@pytest.mark.unit
+def test_build_search_pipeline_provider_embedding_service_routes_through_plugin() -> None:
+    """End-to-end behavioural pin: the embed call dispatches into the
+    plugin's ``embed_batch``. Confirms the ProviderEmbeddingService →
+    Provider wiring is live, not just the type assertion.
+
+    Sabotage proof: if the factory wired a dud plugin or wrapped a
+    different provider, the recorded ``embed_calls`` would not match
+    the text we submitted.
+    """
+    from tests.fakes import FakeProvider, FakeProviderRegistry
+
+    fake_provider = FakeProvider(name="fake", vector=[0.4, 0.5, 0.6], dim=3)
+    registry = FakeProviderRegistry({"fake": fake_provider})
+
+    cfg = RetrievalConfig(fusion_strategy="rrf", provider="fake")
+    pipeline = build_search_pipeline(config=cfg, registry=registry)
+
+    vec = pipeline.vector._embedding.embed("hello")
+    assert vec == [0.4, 0.5, 0.6]
+    # The plugin saw exactly one call carrying our text — either directly
+    # or via the coalescer-batched path; both shapes resolve to a single
+    # entry in embed_calls.
+    assert fake_provider.embed_calls
+    assert "hello" in fake_provider.embed_calls[-1]
+
+
+@pytest.mark.unit
+def test_build_search_pipeline_falls_back_to_legacy_azure_when_no_provider_configured() -> None:
+    """Transitional path: ``cfg.provider=None`` and no YAML on disk →
+    factory still produces a working pipeline by falling back to the
+    legacy ``AzureEmbeddingService``. The fallback is logged so
+    operators can spot un-migrated deployments.
+
+    Sabotage proof: drop the fallback branch and either the factory
+    raises (no embed service) or wires ``ProviderEmbeddingService``
+    with ``get_provider(None)`` (TypeError); both leave the pipeline
+    inoperable.
+    """
+    from kairix.core.search.backends import AzureEmbeddingService
+
+    cfg = RetrievalConfig(fusion_strategy="rrf")
+    assert cfg.provider is None, "test premise: cfg has no provider configured"
+    pipeline = build_search_pipeline(config=cfg)
+
+    # Embed service is the legacy shim, not a ProviderEmbeddingService.
+    assert isinstance(pipeline.vector._embedding, AzureEmbeddingService)
+
+
+@pytest.mark.unit
+def test_build_search_pipeline_propagates_provider_not_registered() -> None:
+    """When the configured provider name is unknown to the registry,
+    the factory surfaces the typed ``ProviderNotRegistered`` error
+    rather than silently degrading. Operators see the installed-plugins
+    list in the error message.
+
+    Sabotage proof: swallowing the registry error and falling back
+    silently would mask config typos; this test asserts the typed
+    exception propagates.
+    """
+    from kairix.providers import ProviderNotRegistered
+    from tests.fakes import FakeProvider, FakeProviderRegistry
+
+    registry = FakeProviderRegistry({"fake": FakeProvider(name="fake")})
+    cfg = RetrievalConfig(fusion_strategy="rrf", provider="nonexistent")
+
+    with pytest.raises(ProviderNotRegistered) as excinfo:
+        build_search_pipeline(config=cfg, registry=registry)
+
+    assert excinfo.value.name == "nonexistent"
+    assert "fake" in excinfo.value.available
