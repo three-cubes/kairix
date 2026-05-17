@@ -19,10 +19,16 @@ the cache between cases.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.pipeline import SearchPipeline
+from kairix.core.search.query_cache import (
+    DEFAULT_MAX_AGE_S,
+    DEFAULT_MAX_ENTRIES,
+    QueryResultCache,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +39,54 @@ logger = logging.getLogger(__name__)
 _PIPELINE_CACHE: dict[RetrievalConfig, SearchPipeline] = {}
 
 
+# Process-shared QueryResultCache (#281). One instance per process,
+# wired into every SearchPipeline constructed by build_search_pipeline.
+# Lazy-initialised so the env-var bounds are read once at first use.
+_QUERY_CACHE: QueryResultCache | None = None
+_QUERY_CACHE_LOCK = threading.Lock()
+
+
 def reset_search_pipeline_cache() -> None:
-    """Clear the memoised pipeline cache. Tests use this between cases."""
+    """Clear the memoised pipeline cache. Tests use this between cases.
+
+    Also clears the process-shared query cache so cached results from a
+    previous fixture-built pipeline don't bleed across tests.
+    """
     _PIPELINE_CACHE.clear()
+    with _QUERY_CACHE_LOCK:
+        if _QUERY_CACHE is not None:
+            _QUERY_CACHE.clear()
+
+
+def _get_or_create_query_cache() -> QueryResultCache:
+    """Return the process-shared :class:`QueryResultCache`, building it lazily.
+
+    Bounds are read from env vars on first construction (#281):
+      - ``KAIRIX_QUERY_CACHE_MAX_ENTRIES`` (int, default 500)
+      - ``KAIRIX_QUERY_CACHE_MAX_AGE_S`` (float seconds, default 300)
+
+    F4-clean: env reads route through :mod:`kairix.paths`.
+    """
+    global _QUERY_CACHE
+    with _QUERY_CACHE_LOCK:
+        if _QUERY_CACHE is None:
+            from kairix.paths import read_float_env, read_int_env
+
+            max_entries = read_int_env("KAIRIX_QUERY_CACHE_MAX_ENTRIES", default=DEFAULT_MAX_ENTRIES)
+            max_age_s = read_float_env("KAIRIX_QUERY_CACHE_MAX_AGE_S", default=DEFAULT_MAX_AGE_S)
+            _QUERY_CACHE = QueryResultCache(max_entries=max_entries, max_age_s=max_age_s)
+        return _QUERY_CACHE
+
+
+def get_query_cache() -> QueryResultCache:
+    """Return the process-shared query cache (lazily built on first call).
+
+    Public accessor for the onboard check + any other diagnostic that
+    wants to read :meth:`QueryResultCache.stats`. Going through this
+    helper keeps the module-global hidden so callers can't accidentally
+    rebind ``_QUERY_CACHE``.
+    """
+    return _get_or_create_query_cache()
 
 
 def select_boosts(cfg: RetrievalConfig, graph: Any) -> list[Any]:
@@ -303,6 +354,9 @@ def build_search_pipeline(config: RetrievalConfig | None = None) -> SearchPipeli
         logger=_build_search_logger(),
         resolver=_build_collection_resolver(),
         config=cfg,
+        # #281 — wire the process-shared LRU so repeat queries from
+        # teaming agents skip the Azure embed roundtrip.
+        query_cache=_get_or_create_query_cache(),
     )
     _PIPELINE_CACHE[cfg] = pipeline
     return pipeline

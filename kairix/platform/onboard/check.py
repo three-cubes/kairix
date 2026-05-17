@@ -101,6 +101,10 @@ class OnboardResult:
 # is the one-line "run this now" command an agent or healthcheck can act on.
 
 _CANONICAL_REMEDIATIONS: dict[str, str] = {
+    "query_cache_stats": (
+        "Diagnostic check — no remediation required. Cache hit-rate is informational; "
+        "tune `KAIRIX_QUERY_CACHE_MAX_ENTRIES` / `KAIRIX_QUERY_CACHE_MAX_AGE_S` if needed."
+    ),
     "kairix_on_path": (
         "Run `bash scripts/deploy-vm.sh` on the host to install the wrapper + symlink; "
         "or manually export `PATH=/opt/openclaw/bin:$PATH`."
@@ -888,6 +892,43 @@ def check_mcp_service() -> CheckResult:
 # ---------------------------------------------------------------------------
 
 
+def check_query_cache_stats(query_cache: Any | None = None) -> CheckResult:
+    """Diagnostic: report query-result cache stats (#281).
+
+    Always passes — the existence of this check is so operators can
+    see the cache hit-rate in ``kairix onboard check --json``. A
+    process that has run zero queries reports size=0, hit_rate=0.0
+    and still passes.
+
+    Args:
+        query_cache: Override for the process-shared
+            :class:`QueryResultCache`. Tests pass an explicit instance
+            rather than relying on the lazy module-level singleton.
+    """
+    try:
+        if query_cache is None:
+            from kairix.core.factory import get_query_cache
+
+            query_cache = get_query_cache()
+        stats = query_cache.stats()
+        detail = (
+            f"query cache: size={stats.size}, hits={stats.hits}, "
+            f"misses={stats.misses}, hit_rate={stats.hit_rate:.2f}, "
+            f"oldest_age_s={stats.oldest_entry_age_s:.1f}, "
+            f"evictions={stats.evictions}"
+        )
+        return CheckResult(name="query_cache_stats", ok=True, detail=detail)
+    except Exception as exc:
+        # Diagnostic check must never block onboarding; a missing cache
+        # is reported as a passing check with a degraded detail string
+        # rather than a failure (operators see the warning, not a red).
+        return CheckResult(
+            name="query_cache_stats",
+            ok=True,
+            detail=f"query cache: unavailable ({exc})",
+        )
+
+
 ALL_CHECKS: list[Callable[..., CheckResult]] = [
     check_kairix_on_path,
     check_wrapper_installed,
@@ -898,6 +939,7 @@ ALL_CHECKS: list[Callable[..., CheckResult]] = [
     check_agent_knowledge_populated,
     check_chunk_date_populated,
     check_mcp_service,
+    check_query_cache_stats,
 ]
 
 

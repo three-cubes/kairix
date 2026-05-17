@@ -357,6 +357,40 @@ def set_agent_memory_root_override(root: str) -> None:
     os.environ["KAIRIX_AGENT_MEMORY_ROOT"] = root
 
 
+def read_int_env(name: str, *, default: int) -> int:
+    """Read an int from the named env var, falling back to ``default``.
+
+    Centralised here so callers needing tunable int knobs do not scatter
+    ``os.environ.get`` reads across production modules (F4). Malformed
+    values log a warning and fall back to ``default`` — the same
+    defensive policy used by the other typed env-var readers above.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not an int; using default %d", name, raw, default)
+        return default
+
+
+def read_float_env(name: str, *, default: float) -> float:
+    """Read a float from the named env var, falling back to ``default``.
+
+    Counterpart to :func:`read_int_env` for float-typed knobs (e.g.
+    cache TTLs in seconds). F4-clean — env reads stay in this module.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a float; using default %f", name, raw, default)
+        return default
+
+
 def embed_vector_dims(default: int = 1536) -> int:
     """Embedding vector dimensions — configurable via ``KAIRIX_EMBED_DIMS``.
 

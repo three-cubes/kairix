@@ -285,6 +285,53 @@ def test_stage_means_aggregated_from_search_result_stage_latencies() -> None:
     assert result.to_envelope()["stage_means_ms"] == {"classify": 20.0, "dispatch": 200.0}
 
 
+def test_query_cache_dedupes_repeat_queries_through_pipeline() -> None:
+    """SearchPipeline with a query_cache hits the underlying searcher once for two
+    identical queries — proving the cache integrates into the search path (#281).
+
+    Sabotage-proof: drop the ``cached = self.query_cache.get(cache_key)`` /
+    ``if cached is not None: return cached`` block in
+    :meth:`SearchPipeline.search` and the second query falls through to
+    the BM25 backend, so ``doc_repo.calls`` grows to 2 instead of 1.
+    """
+    from kairix.core.search.backends import BM25SearchBackend, VectorSearchBackend
+    from kairix.core.search.config import RetrievalConfig
+    from kairix.core.search.pipeline import SearchPipeline
+    from kairix.core.search.query_cache import QueryResultCache
+    from tests.fakes import (
+        FakeClassifier,
+        FakeDocumentRepository,
+        FakeEmbeddingService,
+        FakeFusion,
+        FakeGraphRepository,
+        FakeSearchLogger,
+        FakeVectorRepository,
+    )
+
+    doc_repo = FakeDocumentRepository(
+        documents=[{"path": "p.md", "title": "T", "content": "alpha bravo", "collection": "c"}]
+    )
+    pipeline = SearchPipeline(
+        classifier=FakeClassifier(),
+        bm25=BM25SearchBackend(doc_repo),
+        vector=VectorSearchBackend(FakeEmbeddingService(), FakeVectorRepository()),
+        graph=FakeGraphRepository(available=True),
+        fusion=FakeFusion(),
+        boosts=[],
+        logger=FakeSearchLogger(),
+        config=RetrievalConfig.defaults(),
+        query_cache=QueryResultCache(max_entries=10, max_age_s=60.0),
+    )
+
+    pipeline.search("alpha bravo")
+    pipeline.search("alpha bravo")
+
+    # Two identical queries → cache hits second time → BM25 backend
+    # invoked exactly once. The fake doc repo tracks every search_fts
+    # call in .calls, so this is the canonical assertion.
+    assert len(doc_repo.calls) == 1
+
+
 def test_stage_means_empty_when_searcher_omits_stage_latency() -> None:
     """Searchers that don't return SearchResult-shaped objects yield empty means.
 

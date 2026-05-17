@@ -19,6 +19,7 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from kairix.core.protocols import (
     BoostStrategy,
@@ -31,6 +32,7 @@ from kairix.core.search.backends import BM25SearchBackend, VectorSearchBackend
 from kairix.core.search.budget import apply_budget
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.intent import QueryIntent
+from kairix.core.search.query_cache import QueryResultCache, make_cache_key
 from kairix.core.search.scope import Scope
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,11 @@ class SearchPipeline:
     logger: SearchLogger | None = None
     resolver: CollectionResolver | None = None
     config: RetrievalConfig = field(default_factory=RetrievalConfig.defaults)
+    # In-process query-result cache (#281). When None, no caching is
+    # applied — preserves existing test behaviour where pipelines are
+    # constructed directly with fakes. Factories that want caching
+    # inject a shared QueryResultCache instance per process.
+    query_cache: QueryResultCache | None = None
 
     def search(
         self,
@@ -94,6 +101,16 @@ class SearchPipeline:
 
         Never raises — returns SearchResult with empty results on any failure.
         """
+        # 0. Query-cache fast path (#281). When a cache is wired and the
+        # key hits, return the cached SearchResult immediately — sidesteps
+        # the entire pipeline including the dominant Azure embed HTTP cost.
+        cache_key: tuple[Any, ...] | None = None
+        if self.query_cache is not None:
+            cache_key = make_cache_key(query, scope, agent, collections)
+            cached = self.query_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         t_start = time.monotonic()
         stages: dict[str, float] = {}
 
@@ -167,6 +184,13 @@ class SearchPipeline:
 
         # 8. Log
         self._log_search(query, intent, agent, scope, collections, result)
+
+        # 9. Cache write (#281) — only cache successful results. Caching
+        # errors would mask transient outages from subsequent retries
+        # and stick a degraded answer in front of every same-key caller
+        # for the next 5 minutes.
+        if cache_key is not None and self.query_cache is not None and not result.error:
+            self.query_cache.put(cache_key, result)
 
         return result
 
