@@ -95,12 +95,21 @@ pytest_plugins = [
     # composition, "the caller dispatches one embed request" appears in
     # both retry + timeout) and pytest-bdd's global step registry would
     # otherwise let one definition shadow another at random.
-    # Registered AFTER transport_pool_steps so where the two modules
-    # share step text ("the fake provider reports {n} embed calls
-    # served" matches both transport_pool.feature line 30 and
-    # transport_cache.feature line 42), this module's dispatcher-aware
-    # step wins. The step impl forks on which fixture is live.
     "tests.bdd.steps.transport_bdd_steps",
+    # Provider plugin BDD step modules (#provider-plugin-arch IM-7).
+    # provider_wire_common_steps owns the shared wire-shape Given/Then;
+    # per-provider modules own their Background, When, and provider-name-
+    # bearing typed-error assertions. Five of the seven providers
+    # (azure_legacy, bedrock, ollama, litellm_proxy, anthropic) are Wave-4
+    # skeleton skips until the implementations land.
+    "tests.bdd.steps.provider_anthropic_steps",
+    "tests.bdd.steps.provider_azure_foundry_steps",
+    "tests.bdd.steps.provider_azure_legacy_steps",
+    "tests.bdd.steps.provider_bedrock_steps",
+    "tests.bdd.steps.provider_litellm_proxy_steps",
+    "tests.bdd.steps.provider_ollama_steps",
+    "tests.bdd.steps.provider_openai_steps",
+    "tests.bdd.steps.provider_wire_common_steps",
 ]
 
 # PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.
