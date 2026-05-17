@@ -100,7 +100,6 @@ class TestFirstPartyStubProtocolShape:
         [
             "kairix.providers.azure_legacy",
             "kairix.providers.litellm_proxy",
-            "kairix.providers.anthropic",
         ],
     )
     @pytest.mark.unit
@@ -114,6 +113,22 @@ class TestFirstPartyStubProtocolShape:
         )
         with pytest.raises(NotImplementedError):
             module.make_provider()
+
+    @pytest.mark.unit
+    def test_anthropic_make_provider_is_importable(self) -> None:
+        # anthropic graduated to Wave 4 (IM-13) — chat-only plugin.
+        # Behaviour conformance (including the load-bearing
+        # embed-short-circuit invariant) is asserted in
+        # tests/providers/anthropic/test_provider.py. We don't call the
+        # factory here because it would need a real credential
+        # resolution (which the unit suite intentionally doesn't wire).
+        import importlib
+
+        module = importlib.import_module("kairix.providers.anthropic")
+        assert hasattr(module, "make_provider"), (
+            "kairix.providers.anthropic missing make_provider — entry-point factory target is removed by mistake."
+        )
+        assert callable(module.make_provider)
 
     @pytest.mark.unit
     def test_azure_foundry_make_provider_is_importable(self) -> None:
