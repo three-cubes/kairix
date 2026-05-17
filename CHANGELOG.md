@@ -7,9 +7,9 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
-## [2026.5.17] - 2026-05-17 — Faster searches under concurrent load + foundation for any LLM provider
+## [2026.5.17] - 2026-05-17 — Faster searches under concurrent load + plug-in support for any LLM provider
 
-> **Upgrading?** Drop-in. No public API breaks. **New for agents**: searches and embeds feel faster when several agents work at the same time — the system now bundles concurrent requests into one network round-trip and keeps the connection to the model warm between calls. **New for operators**: the new `kairix probe-config` command checks your configured endpoint after setup and recommends concrete tuning. **Internal**: a clean three-layer split (domain / transport / providers) lays the groundwork for plug-in support for any LLM/embed endpoint — Bedrock, Ollama, OpenAI direct, LiteLLM proxy, Anthropic — which lands in a forthcoming release.
+> **Upgrading?** **One required config change**: add `provider: <name>` to the top of your `kairix.config.yaml` before pulling this version. The runtime fails fast at startup if the field is missing and lists the installed plugin names so you can pick. See [`docs/operations/runbooks/how-to-upgrade-kairix.md`](docs/operations/runbooks/how-to-upgrade-kairix.md) for the one-line edit. **New for agents**: searches and embeds feel faster when several agents work at the same time — the system bundles concurrent requests into one network round-trip and keeps the connection to the model warm between calls. **New for operators**: the new `kairix probe-config` command checks your configured endpoint after setup and recommends concrete tuning; seven first-party plug-ins ship today (Azure Foundry, Azure Legacy, OpenAI direct, Bedrock, Ollama, LiteLLM proxy, Anthropic) and a clean three-layer split (domain / transport / providers) makes adding more an additive change.
 
 ### New for agents
 
