@@ -3,8 +3,6 @@ tests/embed/test_cli_unit.py
 tests/embed/test_deps.py
 tests/embed/test_use_cases_defaults.py
 tests/eval/test_cli_unit.py
-tests/integration/test_embed_cache_e2e.py
-tests/integration/test_embed_coalescer_e2e.py
 tests/integration/test_onboard_failures.py
 tests/knowledge/entities/test_cli_unit.py
 tests/knowledge/store/test_cli_unit.py

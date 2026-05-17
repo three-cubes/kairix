@@ -16,8 +16,7 @@ from typing import Any
 
 import pytest
 
-from kairix.transport.cache import embed_cache as embed_cache_mod
-from kairix.transport.cache.embed_cache import EmbedCache, reset_embed_cache
+from kairix.transport.cache.embed_cache import EmbedCache, install_embed_cache, reset_embed_cache
 from kairix.transport.coalesce import reset_embed_coalescer
 from kairix.transport.embed_service import ProviderEmbeddingService
 from tests.fakes import FakeProvider
@@ -41,7 +40,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeProvider, ProviderEmbedd
     reset_embed_cache()
     reset_embed_coalescer()
     cache = EmbedCache(max_entries=10, max_age_s=60.0)
-    monkeypatch.setattr(embed_cache_mod, "_EMBED_CACHE", cache)
+    install_embed_cache(cache)
 
     provider = FakeProvider(vector=[0.1, 0.2, 0.3])
     service = ProviderEmbeddingService(provider)
@@ -117,7 +116,7 @@ def test_failed_embed_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     reset_embed_cache()
     reset_embed_coalescer()
     cache = EmbedCache(max_entries=10, max_age_s=60.0)
-    monkeypatch.setattr(embed_cache_mod, "_EMBED_CACHE", cache)
+    install_embed_cache(cache)
 
     call_state = {"n": 0}
 
@@ -169,21 +168,21 @@ def test_cache_age_expiry_triggers_re_embed(
     provider, _, _ = _wire
     # The _wire fixture already provided a fresh provider+service; swap
     # in a smaller-age cache for this specific scenario.
-    fresh = EmbedCache(max_entries=10, max_age_s=1.0)
-    monkeypatch.setattr(embed_cache_mod, "_EMBED_CACHE", fresh)
+    # Drive the cache's clock via the public ``clock`` kwarg on EmbedCache —
+    # F1-clean (no monkey-patch of the embed_cache module's ``time.time``).
+    fake_now = [0.0]
+    import time as _time
+
+    fake_now[0] = _time.time()
+    fresh = EmbedCache(max_entries=10, max_age_s=1.0, clock=lambda: fake_now[0])
+    install_embed_cache(fresh)
     service = ProviderEmbeddingService(provider)
 
     service.embed("alpha")
     assert len(provider.embed_calls) == 1
 
     # Advance the clock past max_age_s.
-    import time as _time
-
-    real_now = _time.time()
-    monkeypatch.setattr(
-        "kairix.transport.cache.embed_cache.time.time",
-        lambda: real_now + 5.0,
-    )
+    fake_now[0] += 5.0
 
     service.embed("alpha")
     assert len(provider.embed_calls) == 2, "expired entry should not have been served"
