@@ -33,9 +33,15 @@ def _default_search(**kwargs: Any) -> Any:
 
 
 def _default_chat(**kwargs: Any) -> str:
-    from kairix._azure import chat_completion
+    from kairix.paths import provider_name
+    from kairix.providers import get_provider
+    from kairix.transport.embed_service import ProviderChatBackend
 
-    return chat_completion(**kwargs)
+    name = provider_name()
+    if name is None:
+        raise ValueError("kairix.config.yaml is missing the required 'provider:' field")
+    backend = ProviderChatBackend(get_provider(name))
+    return backend.chat(**kwargs)
 
 
 @dataclass(frozen=True)

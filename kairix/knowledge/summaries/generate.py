@@ -1,5 +1,5 @@
 """
-L0/L1 summary generation via gpt-4o-mini (Azure OpenAI).
+L0/L1 summary generation via the configured provider plugin.
 
 L0: 1-2 sentence abstract (~100 tokens)
 L1: structured overview (~500 tokens) — main topic, key points, status
@@ -71,15 +71,25 @@ def first_n_words(text: str, n: int) -> str:
     return " ".join(words[:n])
 
 
-def default_chat(messages: list[dict], max_tokens: int) -> str:  # pragma: no cover — prod wrapper around kairix._azure
-    """Production chat callable — delegates to ``kairix._azure.chat_completion``.
+def default_chat(  # pragma: no cover — prod wrapper around ProviderChatBackend
+    messages: list[dict], max_tokens: int
+) -> str:
+    """Production chat callable — delegates to the configured provider plugin.
 
     Wrapper exists so ``SummariesDeps.chat`` has a stable, typed default
-    that doesn't import ``kairix._azure`` at module-import time.
+    that doesn't resolve the provider at module-import time. Builds a
+    ``ProviderChatBackend`` adapter over the plugin named in
+    ``kairix.config.yaml``.
     """
-    from kairix._azure import chat_completion
+    from kairix.paths import provider_name
+    from kairix.providers import get_provider
+    from kairix.transport.embed_service import ProviderChatBackend
 
-    return chat_completion(messages, max_tokens=max_tokens)
+    name = provider_name()
+    if name is None:
+        raise ValueError("kairix.config.yaml is missing the required 'provider:' field")
+    backend = ProviderChatBackend(get_provider(name))
+    return backend.chat(messages, max_tokens=max_tokens)
 
 
 @dataclass
@@ -103,12 +113,12 @@ def _call_chat(
     deps: SummariesDeps,
 ) -> tuple[str, int]:
     """
-    Call Azure OpenAI chat completions via the shared SDK client.
+    Call the configured provider's chat completions endpoint.
 
     Returns (content, estimated_tokens_used). Raises on failure.
 
     The api_key, endpoint, and deployment parameters are accepted for backwards
-    compatibility but ignored — credentials are resolved by ``kairix._azure``.
+    compatibility but ignored — credentials are resolved by the provider plugin.
 
     ``deps`` is required (non-Optional). Public callers
     (``generate_l0``/``generate_l1``/``generate_summaries``) resolve the

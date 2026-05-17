@@ -1,10 +1,11 @@
 """
-GPT-4o-mini synthesis for session briefings.
+Provider-plugin synthesis for session briefings.
 
 Takes collected context (up to 3000 tokens) and produces a structured
 ~800-token briefing markdown file.
 
-Falls back gracefully: returns partial briefing with note if API call fails.
+Falls back gracefully: returns partial briefing with note if the
+provider call fails.
 """
 
 from __future__ import annotations
@@ -48,14 +49,15 @@ def synthesise(
     llm_backend=None,
 ) -> str:
     """
-    Call GPT-4o-mini to synthesise a session briefing.
+    Synthesise a session briefing via the configured provider plugin.
 
     Args:
         agent:       Agent name (e.g. "builder").
         context:     Dict mapping source name to content string.
         max_tokens:  Max tokens for the generated briefing.
         llm_backend: Optional LLM backend instance for dependency injection.
-                     Defaults to get_default_backend().
+                     Defaults to a ``ProviderChatBackend`` over the
+                     configured plugin.
 
     Returns:
         Synthesised briefing markdown string.
@@ -63,10 +65,15 @@ def synthesise(
         Never raises.
     """
     if llm_backend is None:
-        from kairix.platform.llm import get_default_backend as _get_llm
+        from kairix.paths import provider_name
+        from kairix.providers import get_provider
+        from kairix.transport.embed_service import ProviderChatBackend
 
-        llm_backend = _get_llm()
-    chat_completion = llm_backend.chat
+        name = provider_name()
+        if name is None:
+            return fallback_briefing(agent, "kairix.config.yaml is missing the required 'provider:' field")
+        llm_backend = ProviderChatBackend(get_provider(name))
+    chat = llm_backend.chat
     # Build context block
     context_parts: list[str] = []
     for source_name, content in context.items():
@@ -95,7 +102,7 @@ def synthesise(
     ]
 
     try:
-        result = chat_completion(messages, max_tokens=max_tokens)
+        result = chat(messages, max_tokens=max_tokens)
         if not result or not result.strip():
             raise ValueError("empty response from synthesis API")
         return result.strip()
