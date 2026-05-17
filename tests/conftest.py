@@ -109,6 +109,8 @@ pytest_plugins = [
     "tests.bdd.steps.e2e_provider_switch_steps",
     # probe-config health-check end-user CLI.
     "tests.bdd.steps.probe_config_health_steps",
+    # Layered config loader — image-bundled base + sparse operator overlay.
+    "tests.bdd.steps.config_layering_steps",
 ]
 
 # PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.

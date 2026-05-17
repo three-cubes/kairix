@@ -27,6 +27,15 @@
 # the plugin is the only embed/chat path. See
 # docs/operations/runbooks/how-to-upgrade-kairix.md for the migration
 # step.
+#
+# Schema version of THIS bundled config. Operators running a host-side
+# overlay via KAIRIX_CONFIG_OVERLAY_PATH may pin a minimum schema with
+# `_schema_version_required_min: N` — kairix refuses to start if the
+# image-bundled base has a lower `_schema_version` than the overlay
+# requires. Bump this value when a required key is added (e.g. `provider:`
+# in v2026.5.17) and document the bump in CHANGELOG + the upgrade runbook.
+_schema_version: 1
+
 provider: azure_foundry
 
 # ── Paths ───────────────────────────────────────────────────────────────────
