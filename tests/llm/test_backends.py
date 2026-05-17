@@ -6,8 +6,12 @@ Uses ``LLMBackendDeps`` for dependency injection — no monkey-patching needed.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 
+import kairix.paths as paths_module
+import kairix.providers as providers_module
 from kairix.core.protocols import ChatBackend
 from kairix.platform.llm import AzureOpenAIBackend, get_default_backend
 from kairix.platform.llm.backends import LLMBackendDeps
@@ -284,3 +288,99 @@ def test_default_backend_chat_returns_provider_reply_when_deps_injected() -> Non
         deps=LLMBackendDeps(chat=lambda msgs, max_tokens=800: "x"),
     )
     assert backend.chat([{"role": "user", "content": "hi"}]) == "x"
+
+
+# ---------------------------------------------------------------------------
+# Production-default wiring — drive the actual ``_default_chat`` /
+# ``_default_embed`` callables (which call ``_resolve_provider`` and route
+# through ``ProviderChatBackend`` / ``ProviderEmbeddingService``). These
+# tests cover lines 43, 56, and 69 of ``kairix/platform/llm/backends.py``
+# — the post-ValueError production wiring that the no-config tests above
+# cannot reach.
+#
+# Test seam: attribute reassignment of ``kairix.paths.provider_name`` and
+# ``kairix.providers.get_provider`` — the inner-function ``from X import Y``
+# in ``_resolve_provider`` re-resolves the symbol on each call, so the
+# reassigned attributes flow through. Stdlib-shape (no ``@patch``,
+# F1-clean; no ``monkeypatch.setenv``, F2-clean).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _wire_production_provider() -> Iterator[FakeProvider]:
+    """Wire the production resolver to a ``FakeProvider`` and restore on teardown.
+
+    Reassigns ``kairix.paths.provider_name`` to a fixed-value lookup
+    and ``kairix.providers.get_provider`` to a FakeProvider-returning
+    stub. The default-factory callables on ``LLMBackendDeps`` run
+    ``from kairix.paths import provider_name`` and ``from kairix.providers
+    import get_provider`` on every call, so reassigning the module
+    attributes is the seam the production code reads.
+
+    Teardown restores both attributes so other tests aren't affected
+    by leaks.
+    """
+    saved_provider_name = paths_module.provider_name
+    saved_get_provider = providers_module.get_provider
+
+    fake_provider = FakeProvider(name="wired", chat_reply="from production wiring", vector=[1.0, 2.0, 3.0])
+    paths_module.provider_name = lambda: "wired"  # type: ignore[assignment] — test seam reassigns the module-level callable; same pattern as tests/core/test_factory.py's client_mod.get_client swap
+    providers_module.get_provider = lambda name, registry=None: fake_provider  # type: ignore[assignment] — test seam reassigns the module-level callable for the same reason
+
+    try:
+        yield fake_provider
+    finally:
+        paths_module.provider_name = saved_provider_name  # type: ignore[assignment] — restore original (mirror of the assignment above)
+        providers_module.get_provider = saved_get_provider  # type: ignore[assignment] — restore original (mirror of the assignment above)
+
+
+@pytest.mark.unit
+def test_default_backend_chat_routes_through_production_provider_when_configured(
+    _wire_production_provider: FakeProvider,
+) -> None:
+    """Configured provider → chat() returns the FakeProvider's reply.
+
+    Drives the post-ValueError lines in ``_resolve_provider`` (43:
+    ``return get_provider(name)``) and ``_default_chat`` (56:
+    ``return backend.chat(messages, max_tokens=max_tokens)``).
+
+    Sabotage-proof: removing the ``return get_provider(name)`` line in
+    ``_resolve_provider`` makes the function fall off the end and
+    return ``None``; ``ProviderChatBackend(None).chat(...)`` then
+    AttributeErrors and the equality assertion fails.
+    """
+    backend = AzureOpenAIBackend()
+    out = backend.chat([{"role": "user", "content": "hi"}])
+
+    assert out == "from production wiring"
+    assert len(_wire_production_provider.chat_calls) == 1
+
+
+@pytest.mark.unit
+def test_default_backend_embed_routes_through_production_provider_when_configured(
+    _wire_production_provider: FakeProvider,
+) -> None:
+    """Configured provider → embed() returns the FakeProvider's vector.
+
+    Drives ``_default_embed`` (line 69: ``return svc.embed(text)``).
+
+    Sabotage-proof: removing the ``return svc.embed(text)`` line makes
+    ``_default_embed`` return ``None``; the list-equality assertion
+    fails because ``None != [1.0, 2.0, 3.0]``.
+    """
+    from kairix.transport.cache import reset_embed_cache
+    from kairix.transport.coalesce import reset_embed_coalescer
+
+    # Reset the cache+coalescer so the per-text route lands on the
+    # production wiring (not a stale vector from a prior test).
+    reset_embed_cache()
+    reset_embed_coalescer()
+    try:
+        backend = AzureOpenAIBackend()
+        out = backend.embed("hello")
+
+        assert out == [1.0, 2.0, 3.0], f"expected the FakeProvider's vector; got {out!r}"
+        assert len(_wire_production_provider.embed_calls) >= 1
+    finally:
+        reset_embed_cache()
+        reset_embed_coalescer()
