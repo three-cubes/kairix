@@ -112,8 +112,8 @@ class _UnimplementedProvider:
         return ProviderHealth(ok=False, endpoint=f"fake://{self.name}", error="NotImplementedError")
 
 
-_REAL_PLUGIN_NAMES = ("azure_foundry", "openai", "bedrock")
-_UNIMPLEMENTED_NAMES = ("azure_legacy", "ollama", "litellm_proxy")
+_REAL_PLUGIN_NAMES = ("azure_foundry", "azure_legacy", "bedrock", "ollama", "openai")
+_UNIMPLEMENTED_NAMES = ("litellm_proxy",)
 _CHAT_ONLY_NAMES = ("anthropic",)
 
 # Dimension matrix matching the feature's Examples table — keeps the

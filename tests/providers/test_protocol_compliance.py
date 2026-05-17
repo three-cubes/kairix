@@ -98,7 +98,6 @@ class TestFirstPartyStubProtocolShape:
     @pytest.mark.parametrize(
         "import_path",
         [
-            "kairix.providers.azure_legacy",
             "kairix.providers.litellm_proxy",
         ],
     )
@@ -158,6 +157,23 @@ class TestFirstPartyStubProtocolShape:
         module = importlib.import_module("kairix.providers.openai")
         assert hasattr(module, "make_provider"), (
             "kairix.providers.openai missing make_provider — entry-point factory target is removed by mistake."
+        )
+        assert callable(module.make_provider)
+
+    @pytest.mark.unit
+    def test_azure_legacy_make_provider_is_importable(self) -> None:
+        # azure_legacy graduated to Wave 4 (IM-14) — sibling to
+        # azure_foundry covering the pre-Foundry Azure OpenAI Service
+        # endpoint shape (``<resource>.openai.azure.com``). Behaviour
+        # conformance is asserted in tests/providers/azure_legacy/
+        # test_provider.py. We don't call the factory here because it
+        # would need a real credential resolution (which the unit suite
+        # intentionally doesn't wire).
+        import importlib
+
+        module = importlib.import_module("kairix.providers.azure_legacy")
+        assert hasattr(module, "make_provider"), (
+            "kairix.providers.azure_legacy missing make_provider — entry-point factory target is removed by mistake."
         )
         assert callable(module.make_provider)
 
