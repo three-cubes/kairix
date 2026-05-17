@@ -1,7 +1,12 @@
-"""pytest-bdd binding for provider_ollama.feature (#provider-plugin-arch IM-7 Wave-4 skeleton).
+"""pytest-bdd binding for provider_ollama.feature (#provider-plugin-arch IM-11).
 
-Steps live in :mod:`tests.bdd.steps.provider_ollama_steps` and skip
-with the Wave-4 rationale; see that module's docstring.
+Steps live in:
+
+- :mod:`tests.bdd.steps.provider_wire_common_steps` — shared
+  wire-shape Given / Then phrases.
+- :mod:`tests.bdd.steps.provider_ollama_steps` — Ollama-specific
+  Background, When, and ``ProviderUnreachable``-with-endpoint Then
+  assertions.
 """
 
 from pathlib import Path

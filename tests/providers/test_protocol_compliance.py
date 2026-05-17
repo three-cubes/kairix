@@ -100,7 +100,6 @@ class TestFirstPartyStubProtocolShape:
         [
             "kairix.providers.azure_legacy",
             "kairix.providers.bedrock",
-            "kairix.providers.ollama",
             "kairix.providers.litellm_proxy",
             "kairix.providers.anthropic",
         ],
@@ -145,6 +144,22 @@ class TestFirstPartyStubProtocolShape:
         module = importlib.import_module("kairix.providers.openai")
         assert hasattr(module, "make_provider"), (
             "kairix.providers.openai missing make_provider — entry-point factory target is removed by mistake."
+        )
+        assert callable(module.make_provider)
+
+    @pytest.mark.unit
+    def test_ollama_make_provider_is_importable(self) -> None:
+        # ollama graduated to Wave 4 (IM-11) — the local-sidecar plugin
+        # proving the contract carries to an unauthenticated endpoint
+        # with a non-OpenAI wire shape. Behaviour conformance is asserted
+        # in tests/providers/ollama/test_provider.py. We don't call the
+        # factory here because it would need a real credential resolution
+        # (which the unit suite intentionally doesn't wire).
+        import importlib
+
+        module = importlib.import_module("kairix.providers.ollama")
+        assert hasattr(module, "make_provider"), (
+            "kairix.providers.ollama missing make_provider — entry-point factory target is removed by mistake."
         )
         assert callable(module.make_provider)
 
