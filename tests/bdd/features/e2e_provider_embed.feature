@@ -23,18 +23,18 @@ Feature: End-to-end provider embed journey
 
     Examples: First-party providers with embed support
       | name          | key_env             | value_env       | text                   | dim  |
-      | azure_foundry | AZURE_OPENAI_KEY    | fake-azure-key  | three cubes ventures   | 1536 |
-      | azure_legacy  | AZURE_OPENAI_KEY    | fake-azure-key  | three cubes ventures   | 1536 |
-      | openai        | OPENAI_API_KEY      | fake-openai-key | three cubes ventures   | 1536 |
-      | bedrock       | AWS_ACCESS_KEY_ID   | fake-aws-key    | three cubes ventures   | 1024 |
-      | ollama        | OLLAMA_HOST         | http://localhost:11434 | three cubes ventures | 768  |
-      | litellm_proxy | LITELLM_PROXY_URL   | http://localhost:4000  | three cubes ventures | 1536 |
+      | azure_foundry | AZURE_OPENAI_KEY    | fake-azure-key  | example team workspace   | 1536 |
+      | azure_legacy  | AZURE_OPENAI_KEY    | fake-azure-key  | example team workspace   | 1536 |
+      | openai        | OPENAI_API_KEY      | fake-openai-key | example team workspace   | 1536 |
+      | bedrock       | AWS_ACCESS_KEY_ID   | fake-aws-key    | example team workspace   | 1024 |
+      | ollama        | OLLAMA_HOST         | http://localhost:11434 | example team workspace | 768  |
+      | litellm_proxy | LITELLM_PROXY_URL   | http://localhost:4000  | example team workspace | 1536 |
 
   @anthropic_no_embed
   Scenario: Anthropic provider rejects embed with a clear, typed error
     Given the operator has configured provider "anthropic"
     And the credential variable "ANTHROPIC_API_KEY" is set to "fake-anthropic-key"
-    When the operator embeds the text "three cubes ventures"
+    When the operator embeds the text "example team workspace"
     Then the operator sees a typed EmbedNotSupported error
     And the error names the provider "anthropic"
     And the error suggests configuring a different provider for embeddings

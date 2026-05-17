@@ -19,11 +19,11 @@ Feature: Operator switches provider by config alone
   Scenario Outline: Switching the configured provider with no code change keeps embed working
     Given the operator sets KAIRIX_PROVIDER to "<first_provider>"
     And the credential variable "<first_key_env>" is set to "<first_value_env>"
-    When the operator embeds the text "three cubes ventures"
+    When the operator embeds the text "example team workspace"
     Then the result envelope records the provider name "<first_provider>"
     Given the operator sets KAIRIX_PROVIDER to "<second_provider>"
     And the credential variable "<second_key_env>" is set to "<second_value_env>"
-    When the operator embeds the text "three cubes ventures"
+    When the operator embeds the text "example team workspace"
     Then the result envelope records the provider name "<second_provider>"
     And no kairix source file under kairix/ was modified between the two embeds
 
@@ -37,7 +37,7 @@ Feature: Operator switches provider by config alone
   @error
   Scenario: Unknown provider name fails with a typed error listing the installed providers
     Given the operator sets KAIRIX_PROVIDER to "nonexistent"
-    When the operator embeds the text "three cubes ventures"
+    When the operator embeds the text "example team workspace"
     Then the operator sees a typed ProviderNotRegistered error
     And the error reports the requested name "nonexistent"
     And the error lists every installed provider name under an "available" field
@@ -48,7 +48,7 @@ Feature: Operator switches provider by config alone
   Scenario: A provider directory shipped without an entry-points registration is invisible to the registry
     Given a provider directory "kairix/providers/orphan/" exists without an entry-points registration
     When the operator sets KAIRIX_PROVIDER to "orphan"
-    And the operator embeds the text "three cubes ventures"
+    And the operator embeds the text "example team workspace"
     Then the operator sees a typed ProviderNotRegistered error
     And the "available" field does not include "orphan"
 
