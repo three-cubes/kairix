@@ -1,6 +1,7 @@
 """Tests for setup wizard — config generation and template loading."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -382,22 +383,24 @@ def test_wizard_json_mode_emits_config_to_stdout(tmp_path: Path, capsys) -> None
 
 
 @pytest.mark.unit
-def test_test_llm_connection_returns_false_on_exception(monkeypatch) -> None:
-    """_test_llm_connection catches exceptions and returns False."""
-    import kairix.secrets as kairix_secrets
+def test_test_llm_connection_returns_false_on_exception() -> None:
+    """_test_llm_connection catches exceptions and returns False.
+
+    Drives the public ``set_llm_endpoint_fn`` / ``set_llm_api_key_fn``
+    kwarg seams on _test_llm_connection — F1-clean.
+    """
     from kairix.platform.setup import wizard as wiz
 
-    def _raise(_value):
+    def _raise(_value: object) -> None:
         raise RuntimeError("secrets backend down")
-
-    monkeypatch.setattr(kairix_secrets, "set_llm_endpoint", _raise)
-    monkeypatch.setattr(kairix_secrets, "set_llm_api_key", _raise)
 
     result = wiz._test_llm_connection(
         provider="azure",
         endpoint="https://x.openai.azure.com",
         api_key="key",  # pragma: allowlist secret
         embed_model="text-embedding-3-large",
+        set_llm_endpoint_fn=_raise,
+        set_llm_api_key_fn=_raise,
     )
     assert result is False
 
@@ -408,8 +411,14 @@ def _interactive_run_setup(
     *,
     inputs: list[str],
     connection_ok: bool = True,
+    embed_main: Any = None,
 ) -> tuple[bool, Path]:
-    """Helper: run wizard interactively with a fixed input sequence."""
+    """Helper: run wizard interactively with a fixed input sequence.
+
+    ``embed_main`` (when not ``None``) is threaded through ``WizardDeps``
+    so tests can drive the indexing path with a fake without
+    monkey-patching ``kairix.core.embed.cli.main``.
+    """
     from kairix.platform.setup.prompts import SetupContext
     from kairix.platform.setup.wizard import WizardDeps, run_setup
 
@@ -425,7 +434,10 @@ def _interactive_run_setup(
     result = run_setup(
         output_path=str(output),
         ctx=ctx,
-        deps=WizardDeps(connection_test=lambda *_a, **_k: connection_ok),
+        deps=WizardDeps(
+            connection_test=lambda *_a, **_k: connection_ok,
+            embed_main=embed_main,
+        ),
     )
     return result, output
 
@@ -658,17 +670,12 @@ def test_wizard_interactive_agent_direct_python(tmp_path: Path, monkeypatch) -> 
 def test_wizard_interactive_indexing_attempted(tmp_path: Path, monkeypatch) -> None:
     """When the operator says 'y' to indexing, the embed CLI is invoked (lines 426-434).
 
-    We inject a fake embed_main that raises Exception so the wizard's
-    try/except records the 'Indexing failed' branch (lines 434-436).
+    Drives the public ``WizardDeps.embed_main`` DI seam — F1-clean. The
+    fake raises so the wizard records the 'Indexing failed' branch.
     """
-    # Pre-install a fake embed.cli module so the late import inside the wizard
-    # picks up our fake instead of the real one (which needs Azure creds).
-    from kairix.core.embed import cli as embed_cli_mod
 
     def _raise_runtime():
         raise RuntimeError("simulated indexing failure")
-
-    monkeypatch.setattr(embed_cli_mod, "main", _raise_runtime)
 
     inputs = [
         "1",
@@ -684,6 +691,8 @@ def test_wizard_interactive_indexing_attempted(tmp_path: Path, monkeypatch) -> N
         "5",
         "y",  # YES, start indexing
     ]
-    result, _ = _interactive_run_setup(tmp_path, monkeypatch, inputs=inputs, connection_ok=True)
+    result, _ = _interactive_run_setup(
+        tmp_path, monkeypatch, inputs=inputs, connection_ok=True, embed_main=_raise_runtime
+    )
     # Wizard caught the indexing failure and continued
     assert result is True
