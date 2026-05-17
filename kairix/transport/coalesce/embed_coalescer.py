@@ -482,7 +482,7 @@ def reset_embed_coalescer() -> None:
         _EMBED_COALESCER = None
 
 
-def current_embed_coalescer() -> "EmbedCoalescer | None":
+def current_embed_coalescer() -> EmbedCoalescer | None:
     """Return the currently-installed process-shared coalescer, if any.
 
     ``None`` indicates no singleton is installed; callers fall back to
@@ -497,7 +497,7 @@ def current_embed_coalescer() -> "EmbedCoalescer | None":
         return _EMBED_COALESCER
 
 
-def install_embed_coalescer(coalescer: "EmbedCoalescer | None") -> None:
+def install_embed_coalescer(coalescer: EmbedCoalescer | None) -> None:
     """Install ``coalescer`` as the process-shared singleton.
 
     Pass an :class:`EmbedCoalescer`-shaped object (or ``None`` to clear)
@@ -511,4 +511,4 @@ def install_embed_coalescer(coalescer: "EmbedCoalescer | None") -> None:
     """
     global _EMBED_COALESCER
     with _EMBED_COALESCER_LOCK:
-        _EMBED_COALESCER = coalescer  # type: ignore[assignment] — accept duck-typed stand-ins from tests; production callers always pass EmbedCoalescer
+        _EMBED_COALESCER = coalescer

@@ -123,17 +123,17 @@ class ProviderEmbeddingService:
         # so concurrent agents fold into one provider round-trip.
         existing = self._existing_coalescer_fn()
         if existing is not None:
-            result = existing.embed(text)
+            result: list[float] = existing.embed(text)
             if result:
                 cache.put(text, result)
             return result
 
         coalescer = self._coalescer_factory(embed_batch=self._provider.embed_batch)
         if coalescer is not None:
-            result = coalescer.embed(text)
-            if result:
-                cache.put(text, result)
-            return result
+            coalesced_result: list[float] = coalescer.embed(text)
+            if coalesced_result:
+                cache.put(text, coalesced_result)
+            return coalesced_result
 
         # No coalescer available (window=0 or sequential/test path).
         # Dispatch directly through the plugin; honour the

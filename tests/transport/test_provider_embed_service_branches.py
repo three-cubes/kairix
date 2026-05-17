@@ -217,7 +217,7 @@ class _ChatRaisingProvider:
         return 1536
 
     def healthcheck(self) -> object:
-        from kairix.providers._base import ProviderHealth
+        from kairix.providers import ProviderHealth
 
         return ProviderHealth(
             ok=False,

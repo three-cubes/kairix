@@ -10,6 +10,11 @@ Public surface re-exported here so callers import from the package,
 not the implementation module.
 """
 
-from kairix.transport.cache.embed_cache import EmbedCache, get_embed_cache, reset_embed_cache
+from kairix.transport.cache.embed_cache import (
+    EmbedCache,
+    get_embed_cache,
+    install_embed_cache,
+    reset_embed_cache,
+)
 
-__all__ = ["EmbedCache", "get_embed_cache", "reset_embed_cache"]
+__all__ = ["EmbedCache", "get_embed_cache", "install_embed_cache", "reset_embed_cache"]

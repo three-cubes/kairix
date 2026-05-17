@@ -29,24 +29,24 @@ _PHRASE_COUNTING_BACKEND = "a counting embed backend that records every call"
 
 
 @pytest.fixture
-def _ec_state(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+def _ec_state() -> dict[str, Any]:
     """Per-scenario fresh state.
 
     Resets the process-shared embed cache + coalescer between scenarios
     so cached entries from a previous scenario don't leak. The fresh
-    cache is constructed directly (F2-clean: no env monkeypatch) and
-    swapped into the module singleton via ``monkeypatch.setattr`` on a
-    public attribute. The coalescer is reset to ``None`` so the
-    ProviderEmbeddingService takes its direct-dispatch path (the
-    coalescer's window-based batching adds non-determinism that this
-    feature isn't pinning).
+    cache is constructed directly and installed via the public
+    ``install_embed_cache`` accessor. The coalescer is reset to ``None``
+    so the ProviderEmbeddingService takes its direct-dispatch path
+    (the coalescer's window-based batching adds non-determinism that
+    this feature isn't pinning).
     """
+    from kairix.transport.cache import install_embed_cache
+
     reset_embed_cache()
     reset_embed_coalescer()
-    from kairix.transport.cache import embed_cache as embed_cache_mod
 
     fresh = EmbedCache(max_entries=10, max_age_s=60.0)
-    monkeypatch.setattr(embed_cache_mod, "_EMBED_CACHE", fresh)
+    install_embed_cache(fresh)
 
     state: dict[str, Any] = {"cache": fresh, "provider": None, "service": None}
     yield state

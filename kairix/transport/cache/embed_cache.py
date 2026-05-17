@@ -65,6 +65,7 @@ __all__ = [
     "EmbedCache",
     "EmbedCacheStats",
     "get_embed_cache",
+    "install_embed_cache",
     "normalise_query",
     "reset_embed_cache",
 ]
@@ -259,3 +260,16 @@ def reset_embed_cache() -> None:
     global _EMBED_CACHE
     with _EMBED_CACHE_LOCK:
         _EMBED_CACHE = None
+
+
+def install_embed_cache(cache: EmbedCache | None) -> None:
+    """Install ``cache`` as the process-shared singleton.
+
+    Pass an :class:`EmbedCache` (or ``None`` to clear) and the next
+    :func:`get_embed_cache` returns it. Tests use this to inject a
+    pre-built cache with custom bounds through the public write
+    accessor instead of reassigning the module attribute.
+    """
+    global _EMBED_CACHE
+    with _EMBED_CACHE_LOCK:
+        _EMBED_CACHE = cache
