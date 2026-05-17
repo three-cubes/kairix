@@ -31,6 +31,28 @@ if TYPE_CHECKING:
 # knowledge base by `kairix onboard guide`.
 _AGENT_USAGE_GUIDE_FILENAME = "kairix-usage.md"
 
+
+def _default_env_file_override() -> str | None:
+    """Production seam — defers `kairix.paths.env_file_override` to call time."""
+    from kairix.paths import env_file_override
+
+    return env_file_override()
+
+
+def _default_document_root_override() -> str | None:
+    """Production seam — defers `kairix.paths.document_root_override` to call time."""
+    from kairix.paths import document_root_override
+
+    return document_root_override()
+
+
+def _default_run_all_checks(*args: Any, **kwargs: Any) -> Any:
+    """Production seam — defers `run_all_checks` import to call time."""
+    from kairix.platform.onboard.check import run_all_checks
+
+    return run_all_checks(*args, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Env self-loader (ERR-003 fix)
 # ---------------------------------------------------------------------------
@@ -70,7 +92,7 @@ def _load_env_file(path: str) -> list[str]:
 def _self_load_env(
     explicit_path: str | None,
     *,
-    env_file_override_fn: Callable[[], str | None] | None = None,
+    env_file_override_fn: Callable[[], str | None] = _default_env_file_override,
     known_env_paths: tuple[str, ...] | None = None,
 ) -> tuple[str | None, list[str]]:
     """
@@ -93,9 +115,6 @@ def _self_load_env(
     if explicit_path:
         loaded = _load_env_file(explicit_path)
         return (explicit_path, loaded)
-
-    if env_file_override_fn is None:
-        from kairix.paths import env_file_override as env_file_override_fn  # type: ignore[no-redef]
 
     env_var_path = env_file_override_fn() or ""
     if env_var_path:
@@ -120,11 +139,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     # Self-load env files so check results are context-independent (ERR-003)
     env_source, env_keys = _self_load_env(
         getattr(args, "env_file", None),
-        env_file_override_fn=getattr(args, "_env_file_override_fn", None),
+        env_file_override_fn=getattr(args, "_env_file_override_fn", _default_env_file_override),
         known_env_paths=getattr(args, "_known_env_paths", None),
     )
 
-    run_all_checks_fn = getattr(args, "_run_all_checks_fn", None)
+    run_all_checks_fn = getattr(args, "_run_all_checks_fn", _default_run_all_checks)
     if args.json:
         return _render_check_json(env_source, run_all_checks_fn=run_all_checks_fn)
     return _render_check_human(env_source, env_keys, run_all_checks_fn=run_all_checks_fn)
@@ -133,7 +152,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 def _render_check_json(
     env_source: str | None,
     *,
-    run_all_checks_fn: Callable[..., Any] | None = None,
+    run_all_checks_fn: Callable[..., Any] = _default_run_all_checks,
 ) -> int:
     """Emit the structured JSON surface and return the exit code.
 
@@ -142,8 +161,9 @@ def _render_check_json(
     surfaced here so an admin running ``--json`` sees which env file was
     loaded.
 
-    ``run_all_checks_fn`` overrides the production check runner — tests
-    pass a fake that returns a controlled list of ``CheckResult``.
+    The OnboardResult is rebuilt from the ``CheckResult`` list returned
+    by ``run_all_checks_fn`` so production and tests share one assembly
+    path — no second registry call for production, no shape divergence.
     """
     from dataclasses import asdict
 
@@ -151,34 +171,26 @@ def _render_check_json(
         CheckFailure,
         OnboardResult,
         _remediation_for,
-        run_onboard_check,
     )
 
-    if run_all_checks_fn is not None:
-        # Test seam: build the OnboardResult directly from injected
-        # CheckResult instances rather than re-invoking the production
-        # registry. Preserves the OnboardResult shape (passed / total /
-        # fully_passed / failures with canonical remediation).
-        results = run_all_checks_fn()
-        failures = [
-            CheckFailure(
-                check=r.name,
-                detail=r.detail,
-                remediation=_remediation_for(r.name, r.fix),
-            )
-            for r in results
-            if not r.ok
-        ]
-        passed = sum(1 for r in results if r.ok)
-        total = len(results)
-        outcome = OnboardResult(
-            passed=passed,
-            total=total,
-            failures=failures,
-            fully_passed=passed == total,
+    results = run_all_checks_fn()
+    failures = [
+        CheckFailure(
+            check=r.name,
+            detail=r.detail,
+            remediation=_remediation_for(r.name, r.fix),
         )
-    else:
-        outcome = run_onboard_check()
+        for r in results
+        if not r.ok
+    ]
+    passed = sum(1 for r in results if r.ok)
+    total = len(results)
+    outcome = OnboardResult(
+        passed=passed,
+        total=total,
+        failures=failures,
+        fully_passed=passed == total,
+    )
     output = {
         "passed": outcome.passed,
         "total": outcome.total,
@@ -194,16 +206,14 @@ def _render_check_human(
     env_source: str | None,
     env_keys: list[str],
     *,
-    run_all_checks_fn: Callable[..., Any] | None = None,
+    run_all_checks_fn: Callable[..., Any] = _default_run_all_checks,
 ) -> int:
     """Emit the human-readable surface and return the exit code.
 
     Renders from ``CheckResult`` (which carries the multi-line fix
     guidance); JSON renders from ``OnboardResult`` (one-line remediation).
     """
-    from kairix.platform.onboard.check import run_all_checks
-
-    results = run_all_checks_fn() if run_all_checks_fn is not None else run_all_checks()
+    results = run_all_checks_fn()
     passed = sum(1 for r in results if r.ok)
     total = len(results)
     all_ok = passed == total
@@ -269,12 +279,8 @@ def _resolve_doc_root(args: argparse.Namespace) -> Path | None:
     root is unset or points at a non-existent directory; callers
     convert ``None`` into a non-zero exit.
     """
-    from kairix.paths import document_root_override as _doc_root_override
-
     doc_root = (
-        args.document_root
-        or getattr(args, "_document_root_override_fn", _doc_root_override)()
-        or ""
+        args.document_root or getattr(args, "_document_root_override_fn", _default_document_root_override)() or ""
     )
     if not doc_root:
         print(
@@ -408,11 +414,11 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def main(
     argv: list[str] | None = None,
     *,
-    env_file_override_fn: Callable[[], str | None] | None = None,
+    env_file_override_fn: Callable[[], str | None] = _default_env_file_override,
     known_env_paths: tuple[str, ...] | None = None,
-    document_root_override_fn: Callable[[], str | None] | None = None,
+    document_root_override_fn: Callable[[], str | None] = _default_document_root_override,
     script_root: Path | None = None,
-    run_all_checks_fn: Callable[..., Any] | None = None,
+    run_all_checks_fn: Callable[..., Any] = _default_run_all_checks,
     pkg_root: Path | None = None,
 ) -> int:
     """`kairix onboard` entry point.
@@ -462,12 +468,12 @@ def main(
     args = parser.parse_args(argv)
     # Thread the DI seams onto the args namespace so the sub-command
     # helpers pick them up through getattr in their existing signatures.
-    args._env_file_override_fn = env_file_override_fn  # type: ignore[attr-defined]
-    args._known_env_paths = known_env_paths  # type: ignore[attr-defined]
-    args._document_root_override_fn = document_root_override_fn  # type: ignore[attr-defined]
-    args._script_root = script_root  # type: ignore[attr-defined]
-    args._run_all_checks_fn = run_all_checks_fn  # type: ignore[attr-defined]
-    args._pkg_root = pkg_root  # type: ignore[attr-defined]
+    args._env_file_override_fn = env_file_override_fn
+    args._known_env_paths = known_env_paths
+    args._document_root_override_fn = document_root_override_fn
+    args._script_root = script_root
+    args._run_all_checks_fn = run_all_checks_fn
+    args._pkg_root = pkg_root
 
     if args.subcommand == "check":
         return cmd_check(args)

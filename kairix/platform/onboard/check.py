@@ -605,7 +605,7 @@ def check_agent_knowledge_populated(document_root_path: Path | None = None) -> C
 def check_chunk_date_populated(
     db_path: Path | None = None,
     *,
-    opener: Callable[[Path], Any] | None = None,
+    opener: Callable[[Path | None], Any] | None = None,
 ) -> CheckResult:
     """chunk_date is populated in content_vectors (required for TMP-7B temporal boost).
 
@@ -618,15 +618,20 @@ def check_chunk_date_populated(
                  branches without monkey-patching ``open_db``.
     """
     try:
+        _opener: Callable[[Path | None], Any]
         if opener is None:
-            from kairix.core.db import open_db as opener  # type: ignore[assignment]
+            from kairix.core.db import open_db
+
+            _opener = open_db
+        else:
+            _opener = opener
 
         if db_path is None:
             from kairix.core.db import get_db_path
 
             db_path = Path(get_db_path())
 
-        db = opener(db_path)
+        db = _opener(db_path)
         try:
             # Check if the column exists first
             cols = {row[1] for row in db.execute("PRAGMA table_info(content_vectors)")}

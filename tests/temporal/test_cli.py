@@ -236,6 +236,7 @@ def _run_main(argv: list[str], *, timeline_runner: Any = None) -> tuple[str, str
 @pytest.mark.unit
 def test_main_renders_header_and_results_when_use_case_returns_hits() -> None:
     """main() prints header + results when run_timeline returns a non-empty TimelineResult."""
+
     def _fake_run_timeline(query: str, **kw) -> TimelineResult:
         return TimelineResult(
             original_query=query,
@@ -255,7 +256,6 @@ def test_main_renders_header_and_results_when_use_case_returns_hits() -> None:
             ],
         )
 
-
     stdout, _stderr, code = _run_main(["any query"], timeline_runner=_fake_run_timeline)
     assert code == 0
     assert "Query:    any query" in stdout
@@ -266,6 +266,7 @@ def test_main_renders_header_and_results_when_use_case_returns_hits() -> None:
 @pytest.mark.unit
 def test_main_exits_1_when_use_case_reports_error() -> None:
     """main() exits 1 and prints the error to stderr when use case returns an error."""
+
     def _fake_run_timeline(query: str, **kw) -> TimelineResult:
         return TimelineResult(
             original_query=query,

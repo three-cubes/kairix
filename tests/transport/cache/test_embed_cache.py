@@ -172,25 +172,21 @@ def test_eviction_when_max_entries_exceeded() -> None:
     assert cache.stats().evictions == 1
 
 
-def test_age_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_age_expiry() -> None:
     """Past max_age, an entry is treated as missing and counted as a miss.
 
     Sabotage: remove the ``if self._is_expired(...)`` branch in get()
     and stale entries are returned as hits — the operator-facing
     stats over-count freshness.
     """
-    # Drive ``time.time`` from a list so we can advance the clock without
-    # mutating any kairix internal. ``time`` is stdlib so F1 isn't engaged.
+    # Drive the cache's clock from a list so we can advance time without
+    # touching stdlib — pass through the public ``clock`` DI seam.
     fake_now = [1_000_000.0]
 
     def _fake_time() -> float:
         return fake_now[0]
 
-    import time as _time
-
-    monkeypatch.setattr(_time, "time", _fake_time)
-
-    cache = EmbedCache(max_age_s=10.0)
+    cache = EmbedCache(max_age_s=10.0, clock=_fake_time)
     cache.put("hello", _VEC_A)
     assert cache.get("hello") == _VEC_A  # fresh
 
@@ -346,9 +342,7 @@ def test_clear_resets_state() -> None:
     assert cache.get("a") is None
 
 
-def test_oldest_entry_age_reflects_insertion_time(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_oldest_entry_age_reflects_insertion_time() -> None:
     """``stats.oldest_entry_age_s`` reports the age of the LRU entry.
 
     Sabotage: change ``oldest_age = max(0.0, time.time() - oldest_inserted_at)``
@@ -360,11 +354,7 @@ def test_oldest_entry_age_reflects_insertion_time(
     def _fake_time() -> float:
         return fake_now[0]
 
-    import time as _time
-
-    monkeypatch.setattr(_time, "time", _fake_time)
-
-    cache = EmbedCache(max_age_s=60.0)
+    cache = EmbedCache(max_age_s=60.0, clock=_fake_time)
     cache.put("hello", _VEC_A)
     fake_now[0] += 5.0
     stats = cache.stats()

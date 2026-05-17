@@ -136,6 +136,7 @@ def test_search_fts_returns_empty_when_open_db_swap_raises(db_path: Path, repo: 
     module load, so the binding lives on the repository module — we
     swap it there.
     """
+
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated open failure")
 
@@ -144,6 +145,7 @@ def test_search_fts_returns_empty_when_open_db_swap_raises(db_path: Path, repo: 
         result = repo.search_fts("anything")
     finally:
         from kairix.core.db import open_db as _real_open_db
+
         repo._opener = _real_open_db
 
     assert result == []
@@ -258,6 +260,7 @@ def test_get_by_path_returns_none_when_open_db_raises(db_path: Path, repo: SQLit
     """Drives lines 100-102 — sqlite3 / OS error during ``open_db`` is
     caught and the repo returns ``None``.
     """
+
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated open failure")
 
@@ -266,6 +269,7 @@ def test_get_by_path_returns_none_when_open_db_raises(db_path: Path, repo: SQLit
         result = repo.get_by_path("docs/a.md")
     finally:
         from kairix.core.db import open_db as _real_open_db
+
         repo._opener = _real_open_db
 
     assert result is None
@@ -344,6 +348,7 @@ def test_get_chunk_dates_returns_empty_when_open_db_raises(
     The except clause catches sqlite3.Error / OSError so the embedding
     pipeline can survive a transient DB failure.
     """
+
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated open failure")
 
@@ -352,6 +357,7 @@ def test_get_chunk_dates_returns_empty_when_open_db_raises(
         result = repo.get_chunk_dates(["docs/anything.md"])
     finally:
         from kairix.core.db import open_db as _real_open_db
+
         repo._opener = _real_open_db
 
     assert result == {}
@@ -401,6 +407,7 @@ def test_insert_or_update_swallows_open_db_failure(
     swallowed so the embed pipeline can surface a single warning
     rather than crash the whole run.
     """
+
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated insert failure")
 

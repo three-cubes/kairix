@@ -638,9 +638,7 @@ def test_chunk_date_populated_filenotfound_branch(tmp_path: Path, monkeypatch) -
 
     # Drive the open_db seam through the public ``opener`` kwarg on
     # check_chunk_date_populated — F1-clean.
-    result = check_mod.check_chunk_date_populated(
-        db_path=tmp_path / "irrelevant.sqlite", opener=_raise_fnf
-    )
+    result = check_mod.check_chunk_date_populated(db_path=tmp_path / "irrelevant.sqlite", opener=_raise_fnf)
     assert result.ok is False
     assert "Index not found" in result.detail
 
@@ -654,9 +652,7 @@ def test_chunk_date_populated_generic_exception(tmp_path: Path, monkeypatch) -> 
     def _raise_runtime(_path):
         raise RuntimeError("locked database")
 
-    result = check_mod.check_chunk_date_populated(
-        db_path=tmp_path / "irrelevant.sqlite", opener=_raise_runtime
-    )
+    result = check_mod.check_chunk_date_populated(db_path=tmp_path / "irrelevant.sqlite", opener=_raise_runtime)
     assert result.ok is False
     assert "failed" in result.detail.lower()
 

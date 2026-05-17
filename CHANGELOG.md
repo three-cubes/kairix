@@ -32,6 +32,27 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
   `--force-recreate`, costing ~10 s per deploy in exchange for eliminating
   the stale-container trap. Diagnosed during the `v2026.5.17a9` recovery.
 
+### Engineering
+
+- **F1 baseline shrunk from 26 → 9 files (-17, ~65%)** — the F1 fitness
+  function forbids `@patch`/`monkeypatch.setattr` on kairix internals so
+  tests can't reach past public seams. Seventeen test modules graduated
+  off the baseline by adding **public DI keyword-argument seams** on the
+  production code they exercised (CLIs, repositories, caches, resolvers,
+  pool builders, onboard checks, setup wizard, audit, warm runner) and
+  rewiring the tests to inject `tests/fakes.py` implementations through
+  those kwargs. Each refactor was sabotage-proofed (mutate production →
+  confirm fail → restore → confirm pass). The detector also grew a narrow
+  exemption for `with pytest.raises(...)` blocks that assign to
+  frozen-dataclass attributes — those are contract assertions, not
+  monkey-patches.
+- **New behaviour coverage piled on alongside the refactors.** BDD:
+  `classify.feature`, `config_layering.feature` (operator-language
+  scenarios for the layered loader, including the exact `a9` failure
+  mode). Integration: `test_classify_cli_e2e.py`,
+  `test_config_layering_e2e.py`. Architecture: detector test for the new
+  `pytest.raises` exemption.
+
 ## [2026.5.17] - 2026-05-17 — Faster searches under concurrent load + plug-in support for any LLM provider
 
 > **Upgrading?** **One required config change**: add `provider: <name>` to the top of your `kairix.config.yaml` before pulling this version. The runtime fails fast at startup if the field is missing and lists the installed plugin names so you can pick. See [`docs/operations/runbooks/how-to-upgrade-kairix.md`](docs/operations/runbooks/how-to-upgrade-kairix.md) for the one-line edit. **New for agents**: searches and embeds feel faster when several agents work at the same time — the system bundles concurrent requests into one network round-trip and keeps the connection to the model warm between calls. **New for operators**: the new `kairix probe-config` command checks your configured endpoint after setup and recommends concrete tuning; seven first-party plug-ins ship today (Azure Foundry, Azure Legacy, OpenAI direct, Bedrock, Ollama, LiteLLM proxy, Anthropic) and a clean three-layer split (domain / transport / providers) makes adding more an additive change.

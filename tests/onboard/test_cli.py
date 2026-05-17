@@ -46,7 +46,7 @@ def _runner_for_patched_checks() -> list[CheckResult]:
 
 @pytest.mark.unit
 def test_main_returns_zero_when_all_checks_pass(monkeypatch, capsys) -> None:
-    """main(["check"], run_all_checks_fn=_runner_for_patched_checks) returns 0 when every check passes — no SystemExit raised.
+    """main(check) returns 0 when every check passes — no SystemExit raised.
 
     Sabotage check: if main reverts to sys.exit, this test catches the
     exception escape; if it returns the wrong int, the equality fails.
@@ -341,8 +341,6 @@ def test_human_output_renders_env_source_when_loaded(monkeypatch, capsys, tmp_pa
 @pytest.mark.unit
 def test_human_output_when_no_env_source_detected(monkeypatch, capsys) -> None:
     """When no env file is found, the human output reports the bare environment."""
-    from kairix.platform.onboard import cli as cli_mod
-
     _patch_checks(
         monkeypatch,
         [CheckResult(name="kairix_on_path", ok=True, detail="found")],

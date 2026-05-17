@@ -24,12 +24,28 @@ import pytest
 
 @pytest.mark.contract
 def test_cli_main_calls_run_timeline_use_case() -> None:
-    """The CLI's ``main()`` is a thin adapter that defers to the use case."""
+    """The CLI's ``main()`` is a thin adapter that defers to the use case.
+
+    Post-F1: ``main()`` defers to a configurable ``timeline_runner``
+    whose production default is ``_default_timeline_runner``, and that
+    helper holds the use-case import + call. The contract still pins
+    both halves: the module imports ``run_timeline``, ``main()`` defers
+    to ``timeline_runner(...)``, and the production default wires the
+    use case.
+    """
     from kairix.core.temporal import cli
 
-    src = inspect.getsource(cli.main)
-    assert "from kairix.use_cases.timeline import run_timeline" in src
-    assert "run_timeline(" in src
+    module_src = inspect.getsource(cli)
+    assert "from kairix.use_cases.timeline import run_timeline" in module_src
+    assert "run_timeline(" in module_src
+
+    main_src = inspect.getsource(cli.main)
+    assert "timeline_runner(" in main_src, (
+        "main() must defer to the configured timeline_runner — not call run_timeline directly"
+    )
+
+    default_runner_src = inspect.getsource(cli._default_timeline_runner)
+    assert "run_timeline(" in default_runner_src, "_default_timeline_runner must wire the production use case"
 
 
 @pytest.mark.contract

@@ -20,7 +20,6 @@ import json
 
 import pytest
 
-from kairix.platform.onboard import check as check_mod
 from kairix.platform.onboard.check import CheckResult, run_onboard_check
 
 pytestmark = pytest.mark.integration
