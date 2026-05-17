@@ -51,13 +51,12 @@ def fake_graph() -> FakeGraphRepository:
 def _provider_registry() -> FakeProviderRegistry:
     """Production-shaped FakeProviderRegistry for factory-wiring tests.
 
-    The factory now requires an explicit provider (the legacy fallback to
-    ``AzureEmbeddingService`` was deleted in v2026.5.17). Every
-    ``build_search_pipeline(config=cfg)`` call in this module is exercising
-    the pipeline-composition surface — the embed provider's identity
-    isn't load-bearing for those scenarios — so we hand it the canonical
-    ``FakeProvider`` from ``tests/fakes.py`` and let the factory finish
-    its happy-path wiring.
+    The factory requires an explicit provider (the legacy fallback was
+    deleted in v2026.5.17). Every ``build_search_pipeline(config=cfg)``
+    call in this module is exercising the pipeline-composition surface —
+    the embed provider's identity isn't load-bearing for those scenarios —
+    so we hand it the canonical ``FakeProvider`` from ``tests/fakes.py``
+    and let the factory finish its happy-path wiring.
 
     Tests that pin embed-service identity (e.g. ``ProviderEmbeddingService``
     vs the typed error path) construct their own registry inline.

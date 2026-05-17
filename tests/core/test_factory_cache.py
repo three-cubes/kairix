@@ -5,10 +5,10 @@ memoises by config identity so repeat calls in the same process return
 the cached instance instantly.
 
 After v2026.5.17 the factory requires an explicit provider (the legacy
-``AzureEmbeddingService`` fallback was removed), so every test here
-passes ``provider="fake"`` and a ``FakeProviderRegistry`` so the
-factory's required-provider gate doesn't fire — the memoisation
-behaviour, not the provider identity, is what these scenarios pin.
+fallback was removed), so every test here passes ``provider="fake"``
+and a ``FakeProviderRegistry`` so the factory's required-provider gate
+doesn't fire — the memoisation behaviour, not the provider identity,
+is what these scenarios pin.
 """
 
 from __future__ import annotations
