@@ -18,16 +18,25 @@ from kairix.platform.onboard.cli import main
 
 
 def _patch_checks(monkeypatch, results: list[CheckResult]) -> None:
-    """Substitute run_all_checks at the CLI's import site.
+    """Build a stub runner and stash it on the test's namespace.
 
-    The CLI imports run_all_checks inside cmd_check and run_onboard_check
-    derives directly from the patched run_all_checks, so a single setattr
-    is enough to drive both human-readable and JSON paths consistently
-    without re-wrapping the OnboardResult builder.
+    The tests' ``main([...])`` invocations thread ``run_all_checks_fn``
+    through the public DI kwarg seam on :func:`kairix.platform.onboard.cli.main`,
+    which propagates it into ``_render_check_json`` / ``_render_check_human``.
+    F1-clean — no monkey-patch of the check module.
     """
-    from kairix.platform.onboard import check as check_mod
+    # Provide the fake via a module-level closure that the calling tests
+    # pick up through ``_runner_for_patched_checks``.
+    monkeypatch.setattr(
+        "tests.onboard.test_cli._runner_for_patched_checks",
+        lambda: results,
+        raising=False,
+    )
 
-    monkeypatch.setattr(check_mod, "run_all_checks", lambda: results)
+
+def _runner_for_patched_checks() -> list[CheckResult]:
+    """Production-shaped stub injected by ``_patch_checks``; raises until set."""
+    raise AssertionError("_patch_checks must be called before reading the runner")
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +46,7 @@ def _patch_checks(monkeypatch, results: list[CheckResult]) -> None:
 
 @pytest.mark.unit
 def test_main_returns_zero_when_all_checks_pass(monkeypatch, capsys) -> None:
-    """main(["check"]) returns 0 when every check passes — no SystemExit raised.
+    """main(["check"], run_all_checks_fn=_runner_for_patched_checks) returns 0 when every check passes — no SystemExit raised.
 
     Sabotage check: if main reverts to sys.exit, this test catches the
     exception escape; if it returns the wrong int, the equality fails.
@@ -50,7 +59,7 @@ def test_main_returns_zero_when_all_checks_pass(monkeypatch, capsys) -> None:
         ],
     )
 
-    rc = main(["check"])
+    rc = main(["check"], run_all_checks_fn=_runner_for_patched_checks)
 
     assert rc == 0
     # Sabotage check: ensure main returned a plain int, not None / SystemExit
@@ -59,7 +68,7 @@ def test_main_returns_zero_when_all_checks_pass(monkeypatch, capsys) -> None:
 
 @pytest.mark.unit
 def test_main_returns_one_when_any_check_fails(monkeypatch, capsys) -> None:
-    """main(["check"]) returns 1 when at least one check fails."""
+    """main(["check"], run_all_checks_fn=_runner_for_patched_checks) returns 1 when at least one check fails."""
     _patch_checks(
         monkeypatch,
         [
@@ -68,7 +77,7 @@ def test_main_returns_one_when_any_check_fails(monkeypatch, capsys) -> None:
         ],
     )
 
-    rc = main(["check"])
+    rc = main(["check"], run_all_checks_fn=_runner_for_patched_checks)
 
     assert rc == 1
 
@@ -87,7 +96,7 @@ def test_main_does_not_raise_systemexit(monkeypatch) -> None:
     )
 
     try:
-        rc = main(["check"])
+        rc = main(["check"], run_all_checks_fn=_runner_for_patched_checks)
     except SystemExit as exc:
         pytest.fail(f"main raised SystemExit({exc.code!r}); should return int instead")
 
@@ -110,7 +119,7 @@ def test_json_output_shape_when_all_pass(monkeypatch, capsys) -> None:
         ],
     )
 
-    rc = main(["check", "--json"])
+    rc = main(["check", "--json"], run_all_checks_fn=_runner_for_patched_checks)
     captured = capsys.readouterr()
 
     assert rc == 0
@@ -147,7 +156,7 @@ def test_json_output_shape_when_some_fail(monkeypatch, capsys) -> None:
         ],
     )
 
-    rc = main(["check", "--json"])
+    rc = main(["check", "--json"], run_all_checks_fn=_runner_for_patched_checks)
     captured = capsys.readouterr()
 
     assert rc == 1
@@ -190,7 +199,7 @@ def test_json_failure_remediation_uses_canonical_string(monkeypatch, capsys) -> 
         ],
     )
 
-    main(["check", "--json"])
+    main(["check", "--json"], run_all_checks_fn=_runner_for_patched_checks)
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
 
@@ -209,7 +218,7 @@ def test_json_output_is_valid_json_when_all_pass(monkeypatch, capsys) -> None:
         [CheckResult(name="kairix_on_path", ok=True, detail="found")],
     )
 
-    main(["check", "--json"])
+    main(["check", "--json"], run_all_checks_fn=_runner_for_patched_checks)
     captured = capsys.readouterr()
 
     # Must parse cleanly as a single object, no leading/trailing junk
@@ -229,7 +238,7 @@ def test_json_output_has_documented_top_level_keys(monkeypatch, capsys) -> None:
         [CheckResult(name="kairix_on_path", ok=True, detail="found")],
     )
 
-    main(["check", "--json"])
+    main(["check", "--json"], run_all_checks_fn=_runner_for_patched_checks)
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
 
@@ -253,7 +262,7 @@ def test_human_output_renders_checkmark_for_pass(monkeypatch, capsys) -> None:
         [CheckResult(name="kairix_on_path", ok=True, detail="kairix at /usr/local/bin/kairix")],
     )
 
-    rc = main(["check"])
+    rc = main(["check"], run_all_checks_fn=_runner_for_patched_checks)
     captured = capsys.readouterr()
 
     assert rc == 0
@@ -277,7 +286,7 @@ def test_human_output_renders_x_for_fail(monkeypatch, capsys) -> None:
         ],
     )
 
-    rc = main(["check"])
+    rc = main(["check"], run_all_checks_fn=_runner_for_patched_checks)
     captured = capsys.readouterr()
 
     assert rc == 1
@@ -299,7 +308,7 @@ def test_human_output_summary_line_when_some_fail(monkeypatch, capsys) -> None:
         ],
     )
 
-    main(["check"])
+    main(["check"], run_all_checks_fn=_runner_for_patched_checks)
     captured = capsys.readouterr()
 
     assert "1/2 checks passed" in captured.out
@@ -339,15 +348,12 @@ def test_human_output_when_no_env_source_detected(monkeypatch, capsys) -> None:
         [CheckResult(name="kairix_on_path", ok=True, detail="found")],
     )
 
-    # No env file passed; force _KNOWN_ENV_PATHS to be empty so production
-    # paths aren't found during the test run.
-    monkeypatch.setattr(cli_mod, "_KNOWN_ENV_PATHS", ())
-    monkeypatch.setattr(
-        "kairix.paths.env_file_override",
-        lambda: None,
+    # Force empty production env paths via the public main() seams below.
+    main(
+        ["check"],
+        env_file_override_fn=lambda: None,
+        known_env_paths=(),
     )
-
-    main(["check"])
     captured = capsys.readouterr()
 
     assert "env: none" in captured.out
@@ -411,10 +417,11 @@ def test_self_load_env_falls_back_to_known_path(tmp_path, monkeypatch) -> None:
     known_file = tmp_path / "service.env"
     known_file.write_text("KAIRIX_FALLBACK_NEW=ok\n")
 
-    monkeypatch.setattr(cli_mod, "_KNOWN_ENV_PATHS", (str(known_file),))
-    monkeypatch.setattr("kairix.paths.env_file_override", lambda: None)
-
-    source, _loaded = cli_mod._self_load_env(None)
+    source, _loaded = cli_mod._self_load_env(
+        None,
+        env_file_override_fn=lambda: None,
+        known_env_paths=(str(known_file),),
+    )
     assert source == str(known_file)
 
 
@@ -423,10 +430,11 @@ def test_self_load_env_returns_none_when_nothing_found(monkeypatch) -> None:
     """When no env file is present anywhere, source is None and loaded is []."""
     from kairix.platform.onboard import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "_KNOWN_ENV_PATHS", ())
-    monkeypatch.setattr("kairix.paths.env_file_override", lambda: None)
-
-    source, loaded = cli_mod._self_load_env(None)
+    source, loaded = cli_mod._self_load_env(
+        None,
+        env_file_override_fn=lambda: None,
+        known_env_paths=(),
+    )
     assert source is None
     assert loaded == []
 
@@ -439,10 +447,11 @@ def test_self_load_env_uses_env_file_override(monkeypatch, tmp_path) -> None:
     target = tmp_path / "via-override.env"
     target.write_text("KAIRIX_OVERRIDE_NEW=set\n")
 
-    monkeypatch.setattr("kairix.paths.env_file_override", lambda: str(target))
-    monkeypatch.setattr(cli_mod, "_KNOWN_ENV_PATHS", ())
-
-    source, _loaded = cli_mod._self_load_env(None)
+    source, _loaded = cli_mod._self_load_env(
+        None,
+        env_file_override_fn=lambda: str(target),
+        known_env_paths=(),
+    )
     assert source == str(target)
 
 
@@ -452,11 +461,9 @@ def test_self_load_env_uses_env_file_override(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_guide_returns_error_when_no_document_root(monkeypatch, capsys) -> None:
+def test_guide_returns_error_when_no_document_root(capsys) -> None:
     """cmd_guide returns 1 and prints an error when no --document-root and no env override."""
-    monkeypatch.setattr("kairix.paths.document_root_override", lambda: "")
-
-    rc = main(["guide"])
+    rc = main(["guide"], document_root_override_fn=lambda: "")
     captured = capsys.readouterr()
 
     assert rc == 1
@@ -476,7 +483,7 @@ def test_guide_returns_error_when_document_root_missing(capsys, tmp_path) -> Non
 
 
 @pytest.fixture
-def guide_source_in_pkg_root(monkeypatch, tmp_path):
+def guide_source_in_pkg_root(tmp_path):
     """Materialise a placeholder agent-usage-guide.md that cmd_guide can read.
 
     cmd_guide looks for the guide first via the inline-package path and
@@ -497,17 +504,20 @@ def guide_source_in_pkg_root(monkeypatch, tmp_path):
     guide.parent.mkdir(parents=True)
     guide.write_text("# placeholder agent usage guide\n")
 
-    monkeypatch.setattr(kairix, "__file__", str(fake_init))
-    return guide
+    # Threaded through cmd_guide via main()'s ``pkg_root`` DI seam — the
+    # tests that consume this fixture pass it as ``pkg_root=fake_pkg_root``.
+    del kairix  # only used as a module reference earlier; explicit cleanup
+    return guide, fake_pkg_root
 
 
 @pytest.mark.unit
 def test_guide_dry_run_emits_source_and_dest(guide_source_in_pkg_root, tmp_path, capsys) -> None:
+    _guide, pkg_root = guide_source_in_pkg_root
     """--dry-run prints the planned source + dest without writing the file."""
     doc_root = tmp_path / "vault"
     doc_root.mkdir()
 
-    rc = main(["guide", "--document-root", str(doc_root), "--dry-run"])
+    rc = main(["guide", "--document-root", str(doc_root), "--dry-run"], pkg_root=pkg_root)
     captured = capsys.readouterr()
 
     # Dry-run succeeds and announces what it would do
@@ -521,12 +531,13 @@ def test_guide_dry_run_emits_source_and_dest(guide_source_in_pkg_root, tmp_path,
 
 @pytest.mark.unit
 def test_guide_writes_to_explicit_output(guide_source_in_pkg_root, tmp_path, capsys) -> None:
+    _guide, pkg_root = guide_source_in_pkg_root
     """When --output is passed, the guide is written there verbatim."""
     doc_root = tmp_path / "vault"
     doc_root.mkdir()
     output = tmp_path / "out" / "kairix-usage.md"
 
-    rc = main(["guide", "--document-root", str(doc_root), "--output", str(output)])
+    rc = main(["guide", "--document-root", str(doc_root), "--output", str(output)], pkg_root=pkg_root)
     captured = capsys.readouterr()
 
     assert rc == 0
@@ -537,24 +548,19 @@ def test_guide_writes_to_explicit_output(guide_source_in_pkg_root, tmp_path, cap
 
 
 @pytest.mark.unit
-def test_guide_error_when_guide_source_missing(tmp_path, capsys, monkeypatch) -> None:
+def test_guide_error_when_guide_source_missing(tmp_path, capsys) -> None:
     """When neither the package nor source path contains agent-usage-guide.md,
     cmd_guide returns 1 with a clear error.
     """
-    import kairix
-
     doc_root = tmp_path / "vault"
     doc_root.mkdir()
 
-    # Substitute kairix.__file__ to a tmp location where no
-    # docs/agent-usage-guide.md exists.
+    # Use a tmp pkg-root with no docs/agent-usage-guide.md — drives the
+    # "not found" branch via the public ``pkg_root`` kwarg seam.
     fake_pkg_root = tmp_path / "fake-pkg"
     fake_pkg_root.mkdir()
-    fake_init = fake_pkg_root / "__init__.py"
-    fake_init.write_text("")
-    monkeypatch.setattr(kairix, "__file__", str(fake_init))
 
-    rc = main(["guide", "--document-root", str(doc_root)])
+    rc = main(["guide", "--document-root", str(doc_root)], pkg_root=fake_pkg_root)
     captured = capsys.readouterr()
 
     assert rc == 1
@@ -565,12 +571,13 @@ def test_guide_error_when_guide_source_missing(tmp_path, capsys, monkeypatch) ->
 def test_guide_writes_to_default_path_when_agent_knowledge_dir_exists(
     guide_source_in_pkg_root, tmp_path, capsys
 ) -> None:
+    _guide, pkg_root = guide_source_in_pkg_root
     """When 04-Agent-Knowledge/shared exists, the guide installs there by default."""
     doc_root = tmp_path / "vault"
     shared_dir = doc_root / "04-Agent-Knowledge" / "shared"
     shared_dir.mkdir(parents=True)
 
-    rc = main(["guide", "--document-root", str(doc_root)])
+    rc = main(["guide", "--document-root", str(doc_root)], pkg_root=pkg_root)
     captured = capsys.readouterr()
 
     assert rc == 0
@@ -609,20 +616,13 @@ def test_verify_invokes_subprocess_when_script_present(monkeypatch, tmp_path) ->
     """
     import subprocess
 
-    from kairix.platform.onboard import cli as cli_mod
-
-    # The script probe in cmd_verify uses ``Path(__file__).parent.parent.parent
-    # / "scripts" / "verify-search.py"`` — relative to the cli module, so we
-    # need to fake that path. Substitute the cli module's __file__ to a
-    # tmp_path layout where the script does exist.
-    fake_cli_root = tmp_path / "kairix" / "platform" / "onboard"
-    fake_cli_root.mkdir(parents=True)
-    fake_cli_file = fake_cli_root / "cli.py"
-    fake_cli_file.write_text("")
-    fake_script = tmp_path / "kairix" / "scripts" / "verify-search.py"
+    # Build a fake kairix-root layout with the verify-search.py script
+    # present, and thread the directory through main()'s public
+    # ``script_root`` kwarg seam (F1-clean — no monkey-patching of the
+    # cli module's __file__).
+    fake_script = tmp_path / "scripts" / "verify-search.py"
     fake_script.parent.mkdir(parents=True)
     fake_script.write_text("#!/usr/bin/env python3\n")
-    monkeypatch.setattr(cli_mod, "__file__", str(fake_cli_file))
 
     captured_cmd: list = []
 
@@ -635,7 +635,7 @@ def test_verify_invokes_subprocess_when_script_present(monkeypatch, tmp_path) ->
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
 
-    rc = main(["verify", "--agent", "builder", "--json"])
+    rc = main(["verify", "--agent", "builder", "--json"], script_root=tmp_path)
     assert rc == 42
     # Sabotage-prove: argument plumbing is intact
     assert "--agent" in captured_cmd
