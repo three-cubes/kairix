@@ -37,6 +37,20 @@ def _default_uvicorn_run() -> Callable[..., Any]:
     return uvicorn.run
 
 
+def _default_is_port_available(port: int) -> bool:
+    """Production port-availability check — defers the heavy import until call time."""
+    from kairix.platform.onboard.ports import is_port_available
+
+    return is_port_available(port)
+
+
+def _default_find_available_port(*, preferred: int) -> int:
+    """Production port-suggestion — defers the heavy import until call time."""
+    from kairix.platform.onboard.ports import find_available_port
+
+    return find_available_port(preferred=preferred)
+
+
 @dataclass
 class McpCliDeps:
     """Injection seam for the MCP CLI so tests can drive it without binding ports.
@@ -45,10 +59,17 @@ class McpCliDeps:
     Deps which lazily resolves the real ``build_server`` and ``uvicorn.run``.
     Tests pass a Deps with fakes that record their invocations instead of
     starting servers.
+
+    Port-probe seams (``is_port_available_fn`` / ``find_available_port_fn``)
+    let tests drive ``_resolve_port`` without monkey-patching
+    ``kairix.platform.onboard.ports``. Production defaults call through to
+    the real functions; tests inject fakes that pin port-conflict scenarios.
     """
 
     build_server_factory: Callable[[], Callable[..., Any]] = field(default_factory=lambda: _default_build_server)
     uvicorn_runner_factory: Callable[[], Callable[..., Any]] = field(default_factory=lambda: _default_uvicorn_run)
+    is_port_available_fn: Callable[[int], bool] = field(default_factory=lambda: _default_is_port_available)
+    find_available_port_fn: Callable[..., int] = field(default_factory=lambda: _default_find_available_port)
 
 
 def main(argv: list[str] | None = None, *, deps: McpCliDeps | None = None) -> None:
@@ -87,15 +108,21 @@ def main(argv: list[str] | None = None, *, deps: McpCliDeps | None = None) -> No
 
     args = parser.parse_args(argv)
 
+    effective_deps = deps or McpCliDeps()
     if args.subcommand == "serve":
-        _cmd_serve(args, deps=deps or McpCliDeps())
+        _cmd_serve(args, deps=effective_deps)
     else:
         parser.print_help()
         sys.exit(1)
 
 
-def _resolve_port(args: argparse.Namespace) -> int:
-    """Resolve MCP port: CLI flag → env var → config → auto-detect."""
+def _resolve_port(args: argparse.Namespace, *, deps: McpCliDeps) -> int:
+    """Resolve MCP port: CLI flag → env var → config → auto-detect.
+
+    The auto-detect path uses ``deps.is_port_available_fn`` /
+    ``find_available_port_fn`` — production callers leave deps at the
+    default; tests inject fakes via the McpCliDeps DI seam.
+    """
     from kairix.paths import mcp_port_raw
 
     # CLI flag takes precedence (argparse default is 8080)
@@ -108,13 +135,11 @@ def _resolve_port(args: argparse.Namespace) -> int:
         return int(env_port)
 
     # Auto-detect: check if default port is available
-    from kairix.platform.onboard.ports import find_available_port, is_port_available
-
     default = 8080
-    if is_port_available(default):
+    if deps.is_port_available_fn(default):
         return default
 
-    suggested = find_available_port(preferred=default)
+    suggested = deps.find_available_port_fn(preferred=default)
     print(
         f"Port {default} is in use — using {suggested} instead. "
         f"Set KAIRIX_MCP_PORT={suggested} to make this permanent.",
@@ -148,7 +173,7 @@ def _cmd_serve(args: argparse.Namespace, *, deps: McpCliDeps) -> None:
         return
 
     # http transport — streamable HTTP at /mcp via uvicorn, optional /sse legacy
-    port = _resolve_port(args)
+    port = _resolve_port(args, deps=deps)
     server = build_server(host=args.host, port=port)
 
     from kairix.agents.mcp.capability_probe import build_capability_probe
