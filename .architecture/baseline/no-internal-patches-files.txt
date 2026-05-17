@@ -1,6 +1,5 @@
 tests/classify/test_cli.py
 tests/core/test_factory.py
-tests/curator/test_cli_unit.py
 tests/db/test_repository.py
 tests/embed/test_cli_unit.py
 tests/embed/test_deps.py
@@ -13,7 +12,6 @@ tests/integration/test_query_cache_pipeline_e2e.py
 tests/knowledge/entities/test_cli_unit.py
 tests/knowledge/store/test_cli_unit.py
 tests/mcp/test_cli_unit.py
-tests/mcp/test_server_unit_coverage.py
 tests/onboard/test_check.py
 tests/onboard/test_cli.py
 tests/platform/warm/test_state.py

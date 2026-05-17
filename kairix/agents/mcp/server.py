@@ -69,13 +69,27 @@ def _build_entity_summary(row: dict[str, Any]) -> str:
     return " — ".join(parts) if parts else ""
 
 
-def _resolve_neo4j_client(neo4j_client: Any | None) -> Any:
-    """Return the supplied client, or fall back to the production client."""
-    if neo4j_client is not None:
-        return neo4j_client
+def _default_neo4j_client_factory() -> Any:
+    """Production factory — defers the heavy graph-client import until call time."""
     from kairix.knowledge.graph.client import get_client
 
     return get_client()
+
+
+def _resolve_neo4j_client(
+    neo4j_client: Any | None,
+    *,
+    client_factory: Callable[[], Any] = _default_neo4j_client_factory,
+) -> Any:
+    """Return the supplied client, or fall back to ``client_factory()``.
+
+    The ``client_factory`` kwarg is the public DI seam: production callers
+    leave it at the default; tests pass a stub factory to exercise the
+    fallback path without monkey-patching ``graph_client.get_client``.
+    """
+    if neo4j_client is not None:
+        return neo4j_client
+    return client_factory()
 
 
 def _entity_card_from_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -108,7 +122,12 @@ _ENTITY_CARD_CYPHER = (
 )
 
 
-def _fetch_entity_card(name: str, *, neo4j_client: Any | None = None) -> dict[str, Any] | None:
+def _fetch_entity_card(
+    name: str,
+    *,
+    neo4j_client: Any | None = None,
+    client_factory: Callable[[], Any] = _default_neo4j_client_factory,
+) -> dict[str, Any] | None:
     """Fetch entity card directly from Neo4j, bypassing MCP tool layer.
 
     Returns a dict with id, name, type, summary, vault_path on success,
@@ -116,12 +135,14 @@ def _fetch_entity_card(name: str, *, neo4j_client: Any | None = None) -> dict[st
 
     Args:
         neo4j_client: Injectable Neo4j client for testing.
-                      Defaults to the production client.
+                      Defaults to the production client via ``client_factory``.
+        client_factory: Public DI seam — tests pass a stub factory to
+                        exercise the "no client → factory()" fallback.
     """
     try:
         from kairix.utils import slugify as _slugify
 
-        neo4j = _resolve_neo4j_client(neo4j_client)
+        neo4j = _resolve_neo4j_client(neo4j_client, client_factory=client_factory)
         if not neo4j.available:
             return None
         rows = neo4j.cypher(_ENTITY_CARD_CYPHER, {"id": _slugify(name), "name": name})
@@ -176,6 +197,7 @@ def tool_entity(
     *,
     deps: Any = None,
     neo4j_client: Any | None = None,
+    client_factory: Callable[[], Any] = _default_neo4j_client_factory,
 ) -> dict[str, Any]:
     """Look up a specific person, company, or topic by name.
 
@@ -186,14 +208,20 @@ def tool_entity(
     The optional ``deps`` parameter forwards an ``EntityGetDeps`` directly
     to the use case — production callers leave it None.
 
-    The legacy ``neo4j_client`` parameter is retained for back-compat;
-    when set, it overrides the default ``_fetch_entity_card`` helper's
-    Neo4j client. Prefer ``deps`` for new code.
+    Two test seams sit below ``deps``:
+      - ``neo4j_client``: legacy explicit-client kwarg; overrides the
+        default ``_fetch_entity_card`` helper's Neo4j client when set.
+      - ``client_factory``: drives the "no client → factory()" fallback
+        path in ``_resolve_neo4j_client`` without monkey-patching the
+        ``graph_client.get_client`` import.
+    Prefer ``deps`` for new code.
     """
     from kairix.use_cases.entity_get import EntityGetDeps, entity_get_output_to_envelope, run_entity_get
 
-    if deps is None and neo4j_client is not None:
-        deps = EntityGetDeps(fetch_fn=lambda n: _fetch_entity_card(n, neo4j_client=neo4j_client))
+    if deps is None:
+        deps = EntityGetDeps(
+            fetch_fn=lambda n: _fetch_entity_card(n, neo4j_client=neo4j_client, client_factory=client_factory)
+        )
 
     out = run_entity_get(name, deps=deps)
     return entity_get_output_to_envelope(out)

@@ -13,11 +13,24 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 
-def _health_cmd(args: argparse.Namespace, *, neo4j_client: Any = None) -> None:
+def _default_neo4j_client_factory() -> Any:
+    """Production factory: defers the heavy graph-client import until call time."""
+    from kairix.knowledge.graph.client import get_client
+
+    return get_client()
+
+
+def _health_cmd(
+    args: argparse.Namespace,
+    *,
+    neo4j_client: Any = None,
+    client_factory: Callable[[], Any] = _default_neo4j_client_factory,
+) -> None:
     from kairix.agents.curator.health import (
         format_report_json,
         format_report_text,
@@ -25,9 +38,7 @@ def _health_cmd(args: argparse.Namespace, *, neo4j_client: Any = None) -> None:
     )
 
     if neo4j_client is None:
-        from kairix.knowledge.graph.client import get_client
-
-        neo4j_client = get_client()
+        neo4j_client = client_factory()
 
     report = run_health_check(neo4j_client, staleness_days=args.staleness_days)
 
@@ -42,12 +53,19 @@ def _health_cmd(args: argparse.Namespace, *, neo4j_client: Any = None) -> None:
     sys.exit(0)
 
 
-def main(argv: list[str] | None = None, *, neo4j_client: Any = None) -> None:
+def main(
+    argv: list[str] | None = None,
+    *,
+    neo4j_client: Any = None,
+    client_factory: Callable[[], Any] = _default_neo4j_client_factory,
+) -> None:
     """Entry point for `kairix curator` subcommand.
 
     The ``neo4j_client`` keyword lets BDD/integration tests inject a
-    ``FakeNeo4jClient`` instead of letting the CLI call ``get_client()``
-    at the module boundary.
+    ``FakeNeo4jClient`` directly. The ``client_factory`` keyword is the
+    public DI seam for unit tests that want to exercise the
+    "no-injection → factory call" branch without monkey-patching the
+    ``get_client`` import inside :func:`_health_cmd`.
     """
     parser = argparse.ArgumentParser(
         prog="kairix curator",
@@ -84,7 +102,7 @@ def main(argv: list[str] | None = None, *, neo4j_client: Any = None) -> None:
 
     parsed = parser.parse_args(argv)
     if parsed.func is _health_cmd:
-        _health_cmd(parsed, neo4j_client=neo4j_client)
+        _health_cmd(parsed, neo4j_client=neo4j_client, client_factory=client_factory)
     else:  # pragma: no cover — only one subcommand today
         parsed.func(parsed)
 
