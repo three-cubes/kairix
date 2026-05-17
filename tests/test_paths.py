@@ -628,3 +628,123 @@ class TestEmbedVectorDimsFallback:
 
         monkeypatch.setenv("KAIRIX_EMBED_DIMS", "abc")
         assert embed_vector_dims(default=1536) == 1536
+
+
+class TestEmbedCoalesceWindowMs:
+    """Round-trip tests for ``embed_coalesce_window_ms`` (#288).
+
+    F2-clean here because this file is the baselined home for
+    kairix.paths env-var round-trip tests — env IS the public boundary
+    we're verifying.
+    """
+
+    @pytest.mark.unit
+    def test_default_when_unset(self, monkeypatch) -> None:
+        """Unset env → documented default 50.
+
+        Sabotage: change the default in ``embed_coalesce_window_ms``
+        from 50 to e.g. 5 and the documented behaviour drifts away
+        from the actual fall-back.
+        """
+        from kairix.paths import embed_coalesce_window_ms
+
+        monkeypatch.delenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", raising=False)
+        assert embed_coalesce_window_ms() == 50
+
+    @pytest.mark.unit
+    def test_valid_int_passes_through(self, monkeypatch) -> None:
+        """An in-range value comes back unchanged.
+
+        Sabotage: hard-code the return value and the operator's
+        configured 100ms window is silently ignored.
+        """
+        from kairix.paths import embed_coalesce_window_ms
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "100")
+        assert embed_coalesce_window_ms() == 100
+
+    @pytest.mark.unit
+    def test_oob_high_clamps_to_500(self, monkeypatch) -> None:
+        """Out-of-range high value clamps to the documented upper bound.
+
+        Sabotage: drop the ``min(500, value)`` clamp and an operator
+        typo (e.g. 99999) silently sets the window to 99 seconds —
+        every embed call appears to hang.
+        """
+        from kairix.paths import embed_coalesce_window_ms
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "99999")
+        assert embed_coalesce_window_ms() == 500
+
+    @pytest.mark.unit
+    def test_oob_low_clamps_to_zero(self, monkeypatch) -> None:
+        """Negative value clamps to 0 (which is the documented "disable" mode).
+
+        Sabotage: drop the ``max(0, ...)`` clamp and a negative window
+        causes Condition.wait to fire instantly — defeats coalescing.
+        """
+        from kairix.paths import embed_coalesce_window_ms
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "-100")
+        assert embed_coalesce_window_ms() == 0
+
+    @pytest.mark.unit
+    def test_invalid_falls_back_to_default(self, monkeypatch) -> None:
+        """Garbage → default. Sabotage: remove try/except → int() raises."""
+        from kairix.paths import embed_coalesce_window_ms
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "nope")
+        assert embed_coalesce_window_ms() == 50
+
+
+class TestEmbedCoalesceMaxBatch:
+    """Round-trip tests for ``embed_coalesce_max_batch`` (#288)."""
+
+    @pytest.mark.unit
+    def test_default_when_unset(self, monkeypatch) -> None:
+        """Unset env → documented default 16."""
+        from kairix.paths import embed_coalesce_max_batch
+
+        monkeypatch.delenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", raising=False)
+        assert embed_coalesce_max_batch() == 16
+
+    @pytest.mark.unit
+    def test_valid_int_passes_through(self, monkeypatch) -> None:
+        """In-range value comes back unchanged."""
+        from kairix.paths import embed_coalesce_max_batch
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "32")
+        assert embed_coalesce_max_batch() == 32
+
+    @pytest.mark.unit
+    def test_oob_high_clamps_to_64(self, monkeypatch) -> None:
+        """Out-of-range high value clamps to 64.
+
+        Sabotage: drop the ``min(64, value)`` clamp and an operator
+        typo enables a 1000-text batch — large response payloads slow
+        the dispatch loop and starve callers.
+        """
+        from kairix.paths import embed_coalesce_max_batch
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "999")
+        assert embed_coalesce_max_batch() == 64
+
+    @pytest.mark.unit
+    def test_oob_low_clamps_to_one(self, monkeypatch) -> None:
+        """A zero or negative max-batch clamps to 1 (minimum useful batch).
+
+        Sabotage: drop the ``max(1, ...)`` clamp and a 0 batch size
+        means the dispatcher never wakes via the batch-full path.
+        """
+        from kairix.paths import embed_coalesce_max_batch
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "0")
+        assert embed_coalesce_max_batch() == 1
+
+    @pytest.mark.unit
+    def test_invalid_falls_back_to_default(self, monkeypatch) -> None:
+        """Garbage → default. Sabotage: remove try/except → int() raises."""
+        from kairix.paths import embed_coalesce_max_batch
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "nope")
+        assert embed_coalesce_max_batch() == 16

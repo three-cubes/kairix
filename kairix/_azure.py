@@ -39,6 +39,10 @@ _DEFAULT_EMBED_DEPLOYMENT = "text-embedding-3-large"
 # Embedding API timeout (seconds)
 _EMBED_TIMEOUT_S = 30
 
+# F17: lift the "deployment" secrets-dict key so the same identifier
+# isn't duplicated across _get_secrets, embed_text, and _embed_batch_azure.
+_DEPLOYMENT_KEY = "deployment"
+
 
 def _resolve_secret(secret_name: str) -> str | None:
     """Resolve a single secret, returning None on any failure. Never raises or logs values."""
@@ -69,7 +73,7 @@ def _get_secrets() -> dict[str, str]:
         secrets: dict[str, str] = {
             "api_key": creds.api_key,
             "endpoint": creds.endpoint.rstrip("/"),
-            "deployment": creds.model or _DEFAULT_EMBED_DEPLOYMENT,
+            _DEPLOYMENT_KEY: creds.model or _DEFAULT_EMBED_DEPLOYMENT,
         }
         return secrets
     except Exception:
@@ -138,10 +142,26 @@ def embed_text(
     if cached is not None:
         return cached
 
+    # Route through the request coalescer (#288) when one is wired or
+    # when this is the production path (no explicit ``client=``).
+    # Concurrent callers fold into one batched Azure roundtrip.
+    #
+    # Tests that pre-install a coalescer singleton (via
+    # ``_route_through_coalescer``'s underlying ``setattr`` substitution
+    # — see the integration test in tests/integration/) always route
+    # through it, regardless of the ``client=`` kwarg. Tests that pass
+    # only ``client=`` and no coalescer fall through to the existing
+    # single-text dispatch unchanged.
+    coalesced = _route_through_coalescer(text, deployment, client=client)
+    if coalesced is not None:
+        if coalesced:
+            cache.put(text, coalesced)
+        return coalesced
+
     try:
         resolved_client = client if client is not None else _get_client()
         if deployment is None:
-            deployment = _get_secrets().get("deployment", _DEFAULT_EMBED_DEPLOYMENT)
+            deployment = _get_secrets().get(_DEPLOYMENT_KEY, _DEFAULT_EMBED_DEPLOYMENT)
         response = resolved_client.embeddings.create(
             model=deployment,
             input=[text],
@@ -157,6 +177,70 @@ def embed_text(
     if embedding:
         cache.put(text, embedding)
     return embedding
+
+
+def _embed_batch_azure(texts: list[str]) -> list[list[float]]:
+    """Single batched Azure embed request used by the coalescer dispatcher.
+
+    Resolves the production client + deployment via :func:`_get_client`
+    and :func:`_get_secrets` — same lookups as the single-text path, so
+    operator-rotated credentials apply identically. Any exception
+    propagates to the coalescer's ``_dispatch_batch`` which surfaces
+    ``[]`` per Future, honouring the embed_text "never raises" contract.
+    """
+    client = _get_client()
+    deployment = _get_secrets().get(_DEPLOYMENT_KEY, _DEFAULT_EMBED_DEPLOYMENT)
+    response = client.embeddings.create(
+        model=deployment,
+        input=texts,
+        dimensions=EMBED_DIMS,
+    )
+    return [list(item.embedding) for item in response.data]
+
+
+def _route_through_coalescer(text: str, deployment: str | None, *, client: Any | None) -> list[float] | None:
+    """Try the singleton coalescer; return ``None`` when not wired.
+
+    Routing policy:
+
+    * If a coalescer singleton is **already installed** (e.g. by a test
+      via setattr on ``_EMBED_COALESCER``), use it — irrespective of
+      whether ``client=`` was passed. This is the integration-test path
+      where the fake client is captured in the singleton's batch_fn
+      closure, and the production path once the lazy singleton has
+      built itself.
+    * If no singleton exists AND ``client=None`` (production), lazily
+      construct the singleton with the Azure batch dispatcher and route
+      through it.
+    * If no singleton exists AND ``client`` was passed (existing
+      single-text test path), return ``None`` so the caller falls
+      through to the per-call single-text dispatch using that client.
+
+    The ``deployment`` arg is intentionally unused — the Azure batch
+    dispatcher resolves the deployment from secrets per-batch (same as
+    the single-text path), and integration-test coalescers close over
+    their own deployment in the fake batch_fn.
+    """
+    del deployment  # F19: see docstring
+    from kairix.core.embed import embed_coalescer as embed_coalescer_mod
+    from kairix.core.embed.embed_coalescer import get_embed_coalescer
+
+    # If a singleton is already installed, use it — even if client= was
+    # passed (the singleton's batch_fn owns its own client/transport).
+    existing = embed_coalescer_mod._EMBED_COALESCER
+    if existing is not None:
+        return existing.embed(text)
+
+    # No singleton yet. If the caller passed an explicit client, this
+    # is a sequential / test path — fall through to single-text dispatch
+    # rather than lazily building a process-wide coalescer in test mode.
+    if client is not None:
+        return None
+
+    coalescer = get_embed_coalescer(embed_batch=_embed_batch_azure)
+    if coalescer is None:
+        return None
+    return coalescer.embed(text)
 
 
 def chat_completion(messages: list[dict[str, str]], max_tokens: int = 800) -> str:

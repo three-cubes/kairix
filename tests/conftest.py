@@ -85,6 +85,7 @@ pytest_plugins = [
     "tests.bdd.steps.query_cache_steps",
     "tests.bdd.steps.enrich_cache_steps",
     "tests.bdd.steps.embed_cache_steps",
+    "tests.bdd.steps.embed_coalescer_steps",
 ]
 
 # PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.
@@ -123,6 +124,22 @@ def no_azure_calls(monkeypatch, request):
     if "e2e" not in request.keywords:
         monkeypatch.delenv("KAIRIX_AZURE_API_KEY", raising=False)
         monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_embed_coalescer():
+    """Drop the process-shared embed coalescer between tests (#288).
+
+    The coalescer singleton owns a background dispatcher thread — if a
+    test triggers construction (via ``embed_text`` without a ``client=``
+    kwarg) the thread would survive into the next test and the next
+    test's batch dispatcher closure would be stale. Resetting on teardown
+    keeps each test's coalescer state isolated.
+    """
+    yield
+    from kairix.core.embed.embed_coalescer import reset_embed_coalescer
+
+    reset_embed_coalescer()
 
 
 @pytest.fixture

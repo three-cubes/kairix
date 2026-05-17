@@ -529,6 +529,51 @@ def embed_pool_expiry_s(default: float = 30.0) -> float:
         return default
 
 
+def embed_coalesce_window_ms(default: int = 50) -> int:
+    """Coalesce window (ms) for the embed request coalescer (#288).
+
+    Configurable via ``KAIRIX_EMBED_COALESCE_WINDOW_MS``. Range 0-500;
+    out-of-range values clamp to the bound. ``0`` disables the
+    coalescer entirely — useful for low-concurrency deployments and
+    debugging. Invalid (non-int) values fall back to ``default`` with
+    a logged warning so a typo can't crash the embed dispatch stage.
+    """
+    raw = os.environ.get("KAIRIX_EMBED_COALESCE_WINDOW_MS")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_EMBED_COALESCE_WINDOW_MS=%r is not an int; using default %d",
+            raw,
+            default,
+        )
+        return default
+    return max(0, min(500, value))
+
+
+def embed_coalesce_max_batch(default: int = 16) -> int:
+    """Max batch size for the embed request coalescer (#288).
+
+    Configurable via ``KAIRIX_EMBED_COALESCE_MAX_BATCH``. Range 1-64.
+    Invalid values fall back to ``default`` with a logged warning.
+    """
+    raw = os.environ.get("KAIRIX_EMBED_COALESCE_MAX_BATCH")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_EMBED_COALESCE_MAX_BATCH=%r is not an int; using default %d",
+            raw,
+            default,
+        )
+        return default
+    return max(1, min(64, value))
+
+
 def mcp_port(default: int = 8080) -> int:
     """Resolve the MCP server port from ``KAIRIX_MCP_PORT``, or ``default``.
 
