@@ -70,7 +70,7 @@ dev = [
     "types-requests>=2.33.0.20260408",
     "types-PyYAML>=6.0",
     # Linting (engineering hub: linting blocks merge)
-    "ruff==0.15.12",
+    "ruff==0.15.13",
     # Security (engineering hub: bandit zero HIGH/MEDIUM, pip-audit zero CVEs with fixes)
     "bandit[toml]>=1.7",
     "pip-audit>=2.10.0",
