@@ -934,6 +934,18 @@ class FakeProvider:
         (default: ok=True, endpoint=``"fake://provider"``).
       ``embed_empty`` — when True, ``embed_batch`` returns ``[]`` per text
         so callers can exercise the soft-failure branch.
+      ``embed_delay_s`` — per-call delay (seconds) applied inside
+        ``embed_batch`` via the injected ``sleep`` callable, used by
+        the ``transport_timeout`` BDD scenarios.
+      ``sleep`` — callable taking ``seconds: float``; defaults to
+        ``time.sleep``. Tests using :class:`FakeClock` pass
+        ``clock.sleep`` so delay assertions cost zero wall-clock.
+
+    Socket counters — extension for ``transport_timeout.feature``.
+    ``opened`` / ``closed`` / ``peak_open`` track FD usage; the
+    :class:`kairix.transport.timeout.SocketCounter` Protocol uses
+    these directly. Existing callers don't need to use the counters —
+    the additions are backwards-compatible.
     """
 
     def __init__(
@@ -945,7 +957,11 @@ class FakeProvider:
         chat_reply: str = "",
         health: Any = None,
         embed_empty: bool = False,
+        embed_delay_s: float = 0.0,
+        sleep: Any = None,
     ) -> None:
+        import time as _time
+
         from kairix.providers import ProviderHealth
 
         self.name = name
@@ -964,12 +980,23 @@ class FakeProvider:
             )
         )
         self._embed_empty = embed_empty
+        self._embed_delay_s = embed_delay_s
+        self._sleep = sleep if sleep is not None else _time.sleep
         self.embed_calls: list[list[str]] = []
         self.chat_calls: list[dict[str, Any]] = []
         self.dimension_calls: int = 0
         self.healthcheck_calls: int = 0
+        # Socket counters — see SocketCounter Protocol in
+        # kairix.transport.timeout. Bumped via open()/close() either by
+        # the FakeProvider itself or by a TimeoutBudget that wires the
+        # provider as its counter.
+        self.opened: int = 0
+        self.closed: int = 0
+        self.peak_open: int = 0
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if self._embed_delay_s > 0:
+            self._sleep(self._embed_delay_s)
         self.embed_calls.append(list(texts))
         if self._embed_empty:
             return [[] for _ in texts]
@@ -986,6 +1013,96 @@ class FakeProvider:
     def healthcheck(self) -> Any:
         self.healthcheck_calls += 1
         return self._health
+
+    # SocketCounter Protocol — used by kairix.transport.timeout when the
+    # provider doubles as the FD-accounting source. Thread-safe under the
+    # lock so concurrent dispatchers can't race the peak_open update.
+    def open(self) -> None:
+        """Record a socket open; bump ``peak_open`` if the running balance grew."""
+        # Lazy lock — only paid by tests that exercise the counter path.
+        import threading
+
+        lock = getattr(self, "_counter_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._counter_lock = lock
+        with lock:
+            self.opened += 1
+            running = self.opened - self.closed
+            if running > self.peak_open:
+                self.peak_open = running
+
+    def close(self) -> None:
+        """Record a socket close — must be called for every open()."""
+        import threading
+
+        lock = getattr(self, "_counter_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._counter_lock = lock
+        with lock:
+            self.closed += 1
+
+
+class FakeClock:
+    """Deterministic clock for retry / timeout BDD scenarios.
+
+    Replaces ``time.monotonic`` + ``time.sleep`` in tests that care
+    about backoff timing or timeout enforcement without paying real
+    wall-clock cost. Construct, pass ``clock.now`` and ``clock.sleep``
+    into the policy under test, then call :meth:`advance` to fast-forward.
+
+    Behaviour:
+
+    * ``now()`` — returns the current virtual time (seconds, float).
+    * ``advance(seconds)`` — advances virtual time by the supplied
+      delta. Equivalent to ``sleep`` for assertion purposes but
+      named to make the test intent explicit ("we are jumping the
+      clock") versus ``sleep`` ("the code under test asked us to wait").
+    * ``sleep(seconds)`` — records the wait elapsed (so tests can
+      assert "the policy did sleep N seconds") and advances the
+      virtual clock by the same amount. Does NOT block real time.
+    * ``waits`` — list of every recorded sleep duration in order.
+
+    Usage:
+        clock = FakeClock()
+        policy = RetryPolicy(max_attempts=3, backoff_factor=0.1,
+                             sleep=clock.sleep, clock=clock.now)
+        ... policy.with_retry(fn) ...
+        assert clock.waits == [0.1, 0.1]  # two retries waited 100ms each
+
+    The clock is NOT thread-safe in the strict sense, but each test
+    drives a single coroutine through the policy so there's no
+    contention to manage; concurrent producers should construct
+    their own clock per thread.
+    """
+
+    def __init__(self, start: float = 0.0) -> None:
+        self._now = float(start)
+        self.waits: list[float] = []
+
+    def now(self) -> float:
+        """Read the virtual clock (seconds)."""
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        """Fast-forward virtual time by ``seconds`` without recording a wait.
+
+        Use this when the test itself is manipulating the timeline
+        (e.g. "before the lonely-request flush fires we manually
+        advance past the coalesce window"). Use :meth:`sleep` instead
+        when the code under test is the one asking to wait.
+        """
+        if seconds < 0:
+            raise ValueError(f"cannot advance time by negative {seconds}")
+        self._now += float(seconds)
+
+    def sleep(self, seconds: float) -> None:
+        """Record a wait + advance the clock; does not block real time."""
+        if seconds < 0:
+            raise ValueError(f"cannot sleep for negative {seconds}")
+        self.waits.append(float(seconds))
+        self._now += float(seconds)
 
 
 class FakeProviderRegistry:

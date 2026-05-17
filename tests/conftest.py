@@ -88,6 +88,19 @@ pytest_plugins = [
     "tests.bdd.steps.embed_coalescer_steps",
     "tests.bdd.steps.vec_index_batched_metadata_steps",
     "tests.bdd.steps.transport_pool_steps",
+    # transport_bdd_steps covers all four transport_(cache|coalesce|retry|timeout)
+    # features in one module — several step phrases are shared across the
+    # features (e.g. "N callers concurrently request embeddings within the
+    # same M millisecond window" appears in both coalesce + timeout
+    # composition, "the caller dispatches one embed request" appears in
+    # both retry + timeout) and pytest-bdd's global step registry would
+    # otherwise let one definition shadow another at random.
+    # Registered AFTER transport_pool_steps so where the two modules
+    # share step text ("the fake provider reports {n} embed calls
+    # served" matches both transport_pool.feature line 30 and
+    # transport_cache.feature line 42), this module's dispatcher-aware
+    # step wins. The step impl forks on which fixture is live.
+    "tests.bdd.steps.transport_bdd_steps",
 ]
 
 # PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.

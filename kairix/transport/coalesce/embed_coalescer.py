@@ -257,31 +257,52 @@ class EmbedCoalescer:
         outside the lock so callers can keep enqueueing while the batch
         is in flight.
         """
-        while True:
-            with self._cv:
-                if self._stop:
-                    return
-                if not self._pending:
-                    # Wait for the first request to arrive, then start
-                    # the window timer on the next iteration.
-                    self._cv.wait()
-                    if self._stop:
-                        return
-                    continue
-
-                # Wait up to window_s for the batch to grow, OR for
-                # max_batch_size to be hit (caller .notify()s in that
-                # path). ``wait`` releases the lock for the duration.
-                self._cv.wait(timeout=self._window_s)
-                if self._stop:
-                    return
-
-                # Drain whatever has accumulated.
-                batch = self._pending
-                self._pending = []
-
+        while not self._stop:
+            batch = self._await_next_batch()
             if batch:
                 self._dispatch_batch(batch)
+
+    def _await_next_batch(self) -> list[tuple[str, Future[list[float]]]]:
+        """Block until the next batch is ready; return it (possibly empty).
+
+        Returns an empty list when ``shutdown()`` fires while waiting —
+        the caller's outer loop sees ``self._stop`` and exits cleanly.
+        """
+        with self._cv:
+            if self._stop:
+                return []
+            if not self._pending:
+                # No requests yet — wait for the first arrival before
+                # starting the window timer.
+                self._cv.wait()
+                if self._stop or not self._pending:
+                    return []
+            # Wait up to window_s for the batch to grow, OR for
+            # max_batch_size to be hit (caller .notify()s in that
+            # path). ``wait`` releases the lock for the duration.
+            self._cv.wait(timeout=self._window_s)
+            if self._stop:
+                return []
+            return self._drain_pending()
+
+    def _drain_pending(self) -> list[tuple[str, Future[list[float]]]]:
+        """Pop up to ``max_batch_size`` items from the buffer; caller owns the lock.
+
+        Splits an over-full buffer (e.g. 17 callers landing under a
+        max_batch_size of 16 in a single race window) into multiple
+        provider calls rather than one oversized batch. Trailing items
+        are picked up on the next loop iteration immediately (no
+        window wait — the buffer is non-empty), and we notify so the
+        loop doesn't pause for another full window.
+        """
+        if len(self._pending) > self._max_batch_size:
+            batch = self._pending[: self._max_batch_size]
+            self._pending = self._pending[self._max_batch_size :]
+            self._cv.notify()
+            return batch
+        batch = self._pending
+        self._pending = []
+        return batch
 
     def _dispatch_batch(self, batch: list[tuple[str, Future[list[float]]]]) -> None:
         """Call ``embed_batch_fn`` once with all texts; resolve each Future.

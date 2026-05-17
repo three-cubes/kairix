@@ -22,11 +22,14 @@ Class summary:
 - :class:`RateLimited` — upstream returned 429 / Retry-After.
 - :class:`AuthError` — upstream returned 401 / 403.
 - :class:`UpstreamError` — generic upstream 5xx with ``status_code``.
+- :class:`ClientError` — non-retryable 4xx response (bad creds / model /
+  endpoint URL). Distinct from :class:`AuthError` for cases the
+  transport retry policy needs to short-circuit on.
 - :class:`ProviderUnreachable` — connection refused / DNS failure.
 - :class:`EmbedNotSupported` — provider has no embed surface
   (e.g. ``anthropic``); names the provider in the message.
 - :class:`RetryExhausted` — transport's retry budget gave up; carries
-  the count of attempts.
+  the count of attempts and the last underlying cause.
 - :class:`TimeoutExceeded` — transport's timeout budget elapsed;
   carries the budget in milliseconds.
 """
@@ -61,9 +64,31 @@ class AuthError(ProviderError):
     """Upstream rejected the credential (HTTP 401 / 403).
 
     Surfaced to operators verbatim by ``kairix probe-config`` — the
-    typical resolution is rotating the secret in Azure Key Vault /
-    AWS Secrets Manager, not retrying.
+    typical resolution is rotating the secret in the operator's secrets
+    manager, not retrying.
     """
+
+
+class ClientError(ProviderError):
+    """Non-retryable 4xx response from the upstream (bad model id / URL / payload).
+
+    The retry policy distinguishes transient (5xx, connection-reset)
+    from client (4xx) failures: transient errors retry up to
+    ``max_attempts``, client errors short-circuit to the caller on
+    attempt 1. This is the typed error the caller sees for the latter,
+    so operator triage can distinguish "bad credentials / bad model"
+    from "endpoint overloaded". Distinct from :class:`AuthError` which
+    specifically signals credential rejection (401/403).
+    """
+
+    def __init__(self, status: int, message: str = "") -> None:
+        self.status = status
+        suffix = f": {message}" if message else ""
+        super().__init__(
+            f"Provider returned client error status {status}{suffix}. "
+            f"fix: check credentials / model id / endpoint URL — 4xx responses are "
+            f"not retried because they indicate a caller-side problem the policy can't recover from."
+        )
 
 
 class UpstreamError(ProviderError):
@@ -117,16 +142,21 @@ class RetryExhausted(ProviderError):  # noqa: N818 — ADR-pinned canonical name
     """The transport retry budget gave up after repeated upstream failures.
 
     Raised by ``kairix/transport/retry/`` once it has retried the
-    underlying provider call ``attempts_made`` times and the last
-    attempt still failed. The transport layer wraps the last seen
-    provider error and re-raises ``RetryExhausted`` so callers see one
-    typed terminal failure regardless of which transient class actually
-    triggered each retry.
+    underlying provider call ``attempts`` times and the last attempt
+    still failed. ``last_cause`` wraps the underlying transient
+    exception so operators can distinguish "retry policy gave up" from
+    "caller threw an unrecoverable error on attempt 1".
     """
 
-    def __init__(self, message: str = "", *, attempts_made: int) -> None:
-        self.attempts_made = attempts_made
-        super().__init__(message)
+    def __init__(self, attempts: int, last_cause: BaseException | None = None) -> None:
+        self.attempts = attempts
+        self.last_cause = last_cause
+        cause_repr = type(last_cause).__name__ if last_cause is not None else "no cause"
+        super().__init__(
+            f"Retry exhausted after {attempts} attempts (last cause: {cause_repr}). "
+            f"fix: investigate the underlying transient failure, then either raise the "
+            f"policy's max_attempts or escalate to a different provider endpoint."
+        )
 
 
 class TimeoutExceeded(ProviderError):  # noqa: N818 — ADR-pinned canonical name; see docs/architecture/provider-plugin-architecture.md
@@ -135,17 +165,23 @@ class TimeoutExceeded(ProviderError):  # noqa: N818 — ADR-pinned canonical nam
     Raised by ``kairix/transport/timeout/``; ``budget_ms`` is the
     configured timeout in milliseconds so the surfaced error tells
     operators the budget they hit (and which knob to tune). Distinct
-    from :class:`ProviderUnreachable` — the connection succeeded but the
-    response took too long; the request may well have hit the upstream.
+    from :class:`ProviderUnreachable` — the connection succeeded but
+    the response took too long; the request may well have hit the
+    upstream.
     """
 
-    def __init__(self, message: str = "", *, budget_ms: float) -> None:
+    def __init__(self, budget_ms: int) -> None:
         self.budget_ms = budget_ms
-        super().__init__(message)
+        super().__init__(
+            f"Provider call exceeded the configured {budget_ms} millisecond budget. "
+            f"fix: investigate provider latency (network / endpoint distance / cold start), "
+            f"or raise the budget for legitimately slow operations via the timeout policy."
+        )
 
 
 __all__ = [
     "AuthError",
+    "ClientError",
     "EmbedNotSupported",
     "ProviderError",
     "ProviderUnreachable",

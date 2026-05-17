@@ -36,6 +36,7 @@ from kairix.providers._base import (
 )
 from kairix.providers._errors import (
     AuthError,
+    ClientError,
     EmbedNotSupported,
     ProviderError,
     ProviderUnreachable,
@@ -48,6 +49,7 @@ from kairix.providers._errors import (
 __all__ = [
     "ENTRY_POINT_GROUP",
     "AuthError",
+    "ClientError",
     "EmbedNotSupported",
     "EntryPointRegistry",
     "Provider",
