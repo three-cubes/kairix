@@ -33,6 +33,10 @@ wire-shape contract this plugin pins.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
+from kairix.credentials import Credentials, get_credentials
 from kairix.providers._base import Provider
 from kairix.providers.azure_legacy.provider import (
     DEFAULT_CHAT_MAX_TOKENS,
@@ -42,32 +46,31 @@ from kairix.providers.azure_legacy.provider import (
 )
 
 
-def make_provider() -> Provider:
+def make_provider(
+    *,
+    credentials_resolver: Callable[[str], Any] = get_credentials,
+) -> Provider:
     """Construct the Azure-legacy :class:`Provider` for entry-point discovery.
 
-    Resolves the ``embed`` credential set via
-    :func:`kairix.credentials.get_credentials` (which already encodes
-    the vault-agent → env → Azure Key Vault fallback) and constructs
-    an :class:`AzureLegacyProvider` against it. The provider's transport
-    client is resolved lazily via :func:`kairix.transport.pool.get_client`
-    so the process-shared connection pool is reused across coalescer
-    batches.
+    Resolves the ``embed`` credential set via ``credentials_resolver``
+    (defaults to :func:`kairix.credentials.get_credentials`) and
+    constructs an :class:`AzureLegacyProvider` against it. The
+    provider's transport client is resolved lazily via
+    :func:`kairix.transport.pool.get_client` so the process-shared
+    connection pool is reused across coalescer batches.
 
-    Tests should NOT call ``make_provider()``; they construct
-    :class:`AzureLegacyProvider` directly with a
-    :class:`~kairix.credentials.Credentials` test instance and (where
-    relevant) a recording ``transport_client``. This factory exists
-    purely to satisfy the entry-point discovery contract.
+    Tests pass ``credentials_resolver=lambda purpose: Credentials(...)``
+    to inject a stub resolver — F1-clean (no internal patching) and
+    F6-clean (production default is a real callable, not ``None``).
     """
-    from kairix.credentials import Credentials, get_credentials
-
-    creds = get_credentials("embed")
+    creds = credentials_resolver("embed")
     if not isinstance(creds, Credentials):
         raise RuntimeError(
             "azure_legacy: embed credentials did not resolve to a Credentials "
             "instance. fix: configure kairix-embed-* or kairix-llm-* secrets "
             "per docs/operations/OPERATIONS.md; "
-            "next: re-run with KAIRIX_PROVIDER=azure_legacy once secrets are populated."
+            "next: set provider: azure_legacy in kairix.config.yaml once "
+            "secrets are populated."
         )
     return AzureLegacyProvider(credentials=creds)
 

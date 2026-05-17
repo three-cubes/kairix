@@ -1,45 +1,28 @@
 """Unit tests for :mod:`kairix.providers.azure_foundry` entry-point factory.
 
-Covers ``make_provider()`` — the entry-point discovery target.
-
-Test seam: direct attribute reassignment of
-``kairix.credentials.get_credentials`` (F1-clean / F2-clean).
+Covers ``make_provider()`` — the entry-point discovery target — through
+its ``credentials_resolver`` kwarg. Tests pass a stub resolver via the
+public kwarg; no module-attribute reassignment.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
-import kairix.credentials as credentials_module
 from kairix.credentials import Credentials
 from kairix.providers import Provider
 from kairix.providers.azure_foundry import AzureFoundryProvider, make_provider
 
 
-@pytest.fixture
-def _swap_get_credentials() -> Iterator[Any]:
-    saved = credentials_module.get_credentials
-
-    def _set(replacement: Any) -> None:
-        credentials_module.get_credentials = replacement
-
-    try:
-        yield _set
-    finally:
-        credentials_module.get_credentials = saved
-
-
 @pytest.mark.unit
-def test_make_provider_returns_azure_foundry_provider_on_happy_path(
-    _swap_get_credentials: Any,
-) -> None:
+def test_make_provider_returns_azure_foundry_provider_on_happy_path() -> None:
     """A resolved ``Credentials`` produces an ``AzureFoundryProvider``.
 
-    Sabotage-proof: comment the ``return AzureFoundryProvider(...)``
-    — function returns ``None`` and the isinstance assert fails.
+    To verify: comment out the ``return AzureFoundryProvider(...)``
+    line in ``make_provider`` — the isinstance assertion below fails
+    because the function falls off the end returning ``None``.
     """
     fake_creds = Credentials(
         api_key="foundry-key",  # pragma: allowlist secret
@@ -48,48 +31,45 @@ def test_make_provider_returns_azure_foundry_provider_on_happy_path(
         dims=1536,
     )
 
-    def _stub(purpose: str) -> Credentials:
+    def _resolver(purpose: str) -> Credentials:
         assert purpose == "embed", f"azure_foundry resolves embed purpose, got {purpose!r}"
         return fake_creds
 
-    _swap_get_credentials(_stub)
-
-    provider = make_provider()
-
+    provider = make_provider(credentials_resolver=_resolver)
     assert isinstance(provider, AzureFoundryProvider)
     assert isinstance(provider, Provider)
     assert provider.name == "azure_foundry"
 
 
 @pytest.mark.unit
-def test_make_provider_raises_when_resolver_returns_non_credentials(
-    _swap_get_credentials: Any,
-) -> None:
-    """Non-``Credentials`` resolver output trips the defensive guard.
+def test_make_provider_raises_runtime_error_when_resolver_returns_non_credentials() -> None:
+    """A non-``Credentials`` return value surfaces a typed ``RuntimeError``.
 
-    Sabotage-proof: removing the ``isinstance(creds, Credentials)``
-    guard silently passes ``None`` deep into the provider and breaks
-    later attribute access; the RuntimeError class assertion fails.
+    To verify: weaken the ``isinstance(creds, Credentials)`` guard to
+    ``True`` — the ``RuntimeError`` no longer fires and pytest.raises
+    misses its match, failing the assertion.
     """
-    _swap_get_credentials(lambda _purpose: None)
 
-    with pytest.raises(RuntimeError, match="fix: configure"):
-        make_provider()
+    def _resolver(_purpose: str) -> Any:
+        return None
+
+    with pytest.raises(RuntimeError, match="did not resolve to a Credentials"):
+        make_provider(credentials_resolver=_resolver)
 
 
 @pytest.mark.unit
-def test_make_provider_error_message_carries_affordance(
-    _swap_get_credentials: Any,
-) -> None:
-    """Message identifies the plugin and includes recovery affordance.
+def test_make_provider_error_message_carries_actionable_markers() -> None:
+    """The RuntimeError message includes ``fix:`` and ``next:`` markers per F21.
 
-    Sabotage-proof: dropping ``fix:`` / ``next:`` markers breaks the
-    F21 actionable-feedback contract.
+    To verify: drop the ``fix:`` / ``next:`` substrings from the
+    ``RuntimeError`` message — the assertions below fail.
     """
-    _swap_get_credentials(lambda _purpose: None)
+
+    def _resolver(_purpose: str) -> Any:
+        return None
 
     with pytest.raises(RuntimeError) as exc_info:
-        make_provider()
+        make_provider(credentials_resolver=_resolver)
 
     msg = str(exc_info.value)
     assert "azure_foundry" in msg

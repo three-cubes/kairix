@@ -37,6 +37,10 @@ wire-shape contract this plugin pins.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
+from kairix.credentials import Credentials, get_credentials
 from kairix.providers._base import Provider
 from kairix.providers.anthropic.provider import (
     ANTHROPIC_API_VERSION,
@@ -48,32 +52,31 @@ from kairix.providers.anthropic.provider import (
 )
 
 
-def make_provider() -> Provider:
+def make_provider(
+    *,
+    credentials_resolver: Callable[[str], Any] = get_credentials,
+) -> Provider:
     """Construct the Anthropic :class:`Provider` for entry-point discovery.
 
-    Resolves the ``llm`` credential set via
-    :func:`kairix.credentials.get_credentials` (which already encodes
-    the vault-agent → env → Azure Key Vault fallback) and constructs
-    an :class:`AnthropicProvider` against it. Anthropic is chat-LLM
-    (not embed) so we ask for ``llm`` rather than ``embed``; this is
-    the per-plugin credential pattern documented in the
-    provider-plugin ADR.
+    Resolves the ``llm`` credential set via ``credentials_resolver``
+    (defaults to :func:`kairix.credentials.get_credentials`) and
+    constructs an :class:`AnthropicProvider` against it. Anthropic is
+    chat-LLM (not embed) so the resolver is asked for ``llm`` rather
+    than ``embed`` — the per-plugin credential pattern documented in
+    the provider-plugin ADR.
 
-    Tests should NOT call ``make_provider()``; they construct
-    :class:`AnthropicProvider` directly with a
-    :class:`~kairix.credentials.Credentials` test instance and (where
-    relevant) a recording ``transport_client``. This factory exists
-    purely to satisfy the entry-point discovery contract.
+    Tests pass ``credentials_resolver=lambda purpose: Credentials(...)``
+    to inject a stub resolver — F1-clean (no internal patching) and
+    F6-clean (production default is a real callable, not ``None``).
     """
-    from kairix.credentials import Credentials, get_credentials
-
-    creds = get_credentials("llm")
+    creds = credentials_resolver("llm")
     if not isinstance(creds, Credentials):
         raise RuntimeError(
             "anthropic: llm credentials did not resolve to a Credentials "
             "instance. fix: configure kairix-llm-* secrets "
             "per docs/operations/OPERATIONS.md; "
-            "next: re-run with KAIRIX_PROVIDER=anthropic once secrets are populated."
+            "next: set provider: anthropic in kairix.config.yaml once "
+            "secrets are populated."
         )
     return AnthropicProvider(credentials=creds)
 
