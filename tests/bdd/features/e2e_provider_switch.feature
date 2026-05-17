@@ -5,6 +5,13 @@ Feature: Operator switches provider by config alone
   change, and a typo on the env var fails fast with a typed error
   listing the providers I actually have installed.
 
+  # The switch journey uses representative pairs across providers — it
+  # does not exhaustively cover every plugin in every row. The opt-out
+  # tags below acknowledge that the pair-based design intentionally
+  # omits azure_legacy / bedrock / anthropic; F28 honours these tags
+  # as explicit "not in this journey" markers rather than coverage gaps.
+  @azure_legacy_no_switch @bedrock_no_switch @anthropic_no_switch
+
   Background:
     Given the kairix provider registry is loaded from installed entry points
 

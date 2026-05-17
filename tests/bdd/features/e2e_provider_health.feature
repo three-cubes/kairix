@@ -36,6 +36,7 @@ Feature: Operator runs probe-config to verify provider health
     Examples: First-party providers
       | name          | key_env             | value_env             |
       | azure_foundry | AZURE_OPENAI_KEY    | fake-azure-key        |
+      | azure_legacy  | AZURE_OPENAI_KEY    | fake-azure-key        |
       | openai        | OPENAI_API_KEY      | fake-openai-key       |
       | bedrock       | AWS_ACCESS_KEY_ID   | fake-aws-key          |
       | ollama        | OLLAMA_HOST         | http://localhost:11434 |
