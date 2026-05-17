@@ -79,6 +79,14 @@ type Service struct {
 // Run executes the full deploy sequence. Never panics; every failure
 // is captured in Result.Success=false with an operator-readable Summary.
 func (s *Service) Run(ctx context.Context, version string) Result {
+	// Refresh /run/secrets/kairix.env BEFORE docker compose pulls/recreates
+	// the container. Without this, a Key Vault rotation needs a manual
+	// systemctl restart on the VM — the container would re-mount a stale
+	// secrets file and we'd ship the new image against the old endpoints
+	// (caught in the v2026.5.17a4 OpenRouter→Foundry migration).
+	if err := s.refreshSecrets(ctx); err != nil {
+		return Result{Success: false, Summary: "secrets refresh failed", Details: err.Error()}
+	}
 	if err := s.pullAndUp(ctx, version); err != nil {
 		return Result{Success: false, Summary: "docker pull/up failed", Details: err.Error()}
 	}
@@ -104,6 +112,38 @@ func (s *Service) Run(ctx context.Context, version string) Result {
 		Summary:       fmt.Sprintf("alpha %s validated — weighted=%.4f", version, wt),
 		WeightedTotal: wt,
 	}
+}
+
+// refreshSecrets re-runs the systemd oneshot that hydrates
+// /run/secrets/kairix.env from Azure Key Vault. We invoke it via the
+// systemctl restart of kairix-fetch-secrets.service (oneshot type, so
+// "restart" actually re-executes it). The service is documented in
+// docs/runbooks/kairix-systemd-update.md and ships as
+// scripts/install/kairix-fetch-secrets.service.example.
+//
+// On hosts where the unit isn't installed (e.g. dev VMs, fresh hosts
+// in setup), the systemctl restart returns non-zero. We don't fail the
+// deploy in that case — we log and continue, because forcing the unit
+// would block first-time setup. Hosts that need the propagation but
+// don't have the unit installed will surface the failure at the
+// subsequent onboard check (stale endpoints → 401/404 from the embed
+// provider), which is the right place for a configuration error to
+// halt the deploy.
+func (s *Service) refreshSecrets(ctx context.Context) error {
+	s.Logger.Info("kairix-fetch-secrets restart (Key Vault → /run/secrets/kairix.env)")
+	out, err := s.Runner.Run(ctx, s.ComposeDir,
+		"systemctl", "restart", "kairix-fetch-secrets.service")
+	if err != nil {
+		// Non-fatal: the unit may not be installed on dev/setup hosts.
+		// Log the failure with detail for triage and proceed; the
+		// subsequent onboard check will surface a real misconfiguration
+		// if the secrets file was actually stale.
+		s.Logger.Warn("kairix-fetch-secrets restart skipped (unit missing or systemctl unavailable)",
+			slog.String("error", err.Error()),
+			slog.String("output", truncate(out, 200)))
+		return nil
+	}
+	return nil
 }
 
 func (s *Service) pullAndUp(ctx context.Context, version string) error {
