@@ -936,10 +936,17 @@ class FakeProvider:
         so callers can exercise the soft-failure branch.
       ``embed_delay_s`` — per-call delay (seconds) applied inside
         ``embed_batch`` via the injected ``sleep`` callable, used by
-        the ``transport_timeout`` BDD scenarios.
+        the ``transport_timeout`` BDD scenarios with :class:`FakeClock`.
       ``sleep`` — callable taking ``seconds: float``; defaults to
         ``time.sleep``. Tests using :class:`FakeClock` pass
         ``clock.sleep`` so delay assertions cost zero wall-clock.
+      ``embed_latency_s`` — wall time the fake sleeps via real
+        ``time.sleep`` inside ``embed_batch`` (default ``0.0``). Used
+        by ``kairix probe-config`` tests where small real-time delays
+        feed warm/p95 timing assertions.
+      ``embed_raises`` — when not ``None``, every ``embed_batch`` call
+        raises this exception instead of returning. Used to drive the
+        ``unreachable`` status branch of ``probe-config``.
 
     Socket counters — extension for ``transport_timeout.feature``.
     ``opened`` / ``closed`` / ``peak_open`` track FD usage; the
@@ -959,6 +966,8 @@ class FakeProvider:
         embed_empty: bool = False,
         embed_delay_s: float = 0.0,
         sleep: Any = None,
+        embed_latency_s: float = 0.0,
+        embed_raises: BaseException | None = None,
     ) -> None:
         import time as _time
 
@@ -982,6 +991,8 @@ class FakeProvider:
         self._embed_empty = embed_empty
         self._embed_delay_s = embed_delay_s
         self._sleep = sleep if sleep is not None else _time.sleep
+        self._embed_latency_s = float(embed_latency_s)
+        self._embed_raises = embed_raises
         self.embed_calls: list[list[str]] = []
         self.chat_calls: list[dict[str, Any]] = []
         self.dimension_calls: int = 0
@@ -995,9 +1006,15 @@ class FakeProvider:
         self.peak_open: int = 0
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        import time as _time
+
+        self.embed_calls.append(list(texts))
+        if self._embed_raises is not None:
+            raise self._embed_raises
         if self._embed_delay_s > 0:
             self._sleep(self._embed_delay_s)
-        self.embed_calls.append(list(texts))
+        if self._embed_latency_s > 0:
+            _time.sleep(self._embed_latency_s)
         if self._embed_empty:
             return [[] for _ in texts]
         return [list(self._vector) for _ in texts]

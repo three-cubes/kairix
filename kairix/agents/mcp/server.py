@@ -642,6 +642,28 @@ def tool_probe_burst(
     )
 
 
+def tool_probe_config() -> dict[str, Any]:
+    """Stub for the probe-config capability — operator-only, escalation envelope.
+
+    ``kairix probe-config`` runs a small representative embed workload against
+    the operator's configured provider to verify the setup and emit tuning
+    recommendations. It is load-generating against the provider's real endpoint
+    and surfaces config-shaped advice an operator (not an agent) applies; agents
+    must escalate.
+    """
+    return _operator_only_envelope(
+        capability="probe-config",
+        operator_command="kairix probe-config",
+        reason=(
+            "probe-config runs an embed workload against the operator's configured "
+            "provider endpoint and surfaces config-tuning advice the operator applies. "
+            "Agents must escalate."
+        ),
+        expected_runtime_seconds=60,
+        see_also=[_RETRIEVAL_RUNBOOK],
+    )
+
+
 def tool_benchmark_run(suite: str = "reflib") -> dict[str, Any]:
     """Stub for the benchmark capability — operator-only, escalation envelope."""
     return _operator_only_envelope(
@@ -832,6 +854,13 @@ def tool_capabilities() -> dict[str, Any]:
                 cli="kairix probe burst",
                 category=CAP_CATEGORY_DIAGNOSTIC_OPERATOR_ONLY,
                 escalate_via="probe_burst",
+            ),
+            _cap(
+                name="probe_config",
+                mcp_tool=None,
+                cli="kairix probe-config",
+                category=CAP_CATEGORY_DIAGNOSTIC_OPERATOR_ONLY,
+                escalate_via="probe_config",
             ),
             # Knowledge-write operator-only
             _cap(
@@ -1138,6 +1167,18 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     ) -> dict[str, Any]:
         """Operator-only burst probe. Returns escalation envelope."""
         return tool_probe_burst(suite=suite, total_queries=total_queries, peak_concurrency=peak_concurrency)
+
+    @server.tool(
+        description=(
+            "Probe-config escalation — runs an embed workload against the configured "
+            "provider endpoint and emits tuning advice the operator applies. Returns the "
+            "OperatorOnlyCapability envelope with the exact `kairix probe-config` command."
+        )
+    )
+    @async_tool_handler
+    def probe_config() -> dict[str, Any]:
+        """Operator-only probe-config. Returns escalation envelope."""
+        return tool_probe_config()
 
     @server.tool(
         description=(

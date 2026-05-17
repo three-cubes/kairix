@@ -20,6 +20,7 @@ Subcommands:
   usage-guide Read the kairix agent usage guide (full text or topic-filtered)
   benchmark   Run retrieval quality benchmark
   probe       Concurrent-load latency probe (decide which Tier 1 tuning lever to pull)
+  probe-config  Probe the configured provider for health + tuning recommendations
   soak        Repeat a workload and assert it holds together (memory, log volume, fd, determinism)
   warm        Pre-load caches + pay factory-init costs (run at container start, before /healthz/ready=200)
   wikilinks   Inject [[wikilinks]] on first mention in agent-written document store files
@@ -44,6 +45,7 @@ COMMANDS: dict[str, tuple[str, str, bool]] = {
     "search": ("kairix.core.search.cli", "main", True),
     "benchmark": ("kairix.quality.benchmark.cli", "main", True),
     "probe": ("kairix.quality.probe.cli", "main", True),
+    "probe-config": ("kairix.quality.probe.config_cli", "main", True),
     "soak": ("kairix.quality.soak.cli", "main", True),
     "warm": ("kairix.platform.warm.cli", "main", True),
     "summarise": ("kairix.knowledge.summaries.cli", "main", True),

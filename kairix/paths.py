@@ -460,6 +460,24 @@ def boards_dir_override() -> Path | None:
     return Path(raw) if raw else None
 
 
+def provider_name() -> str | None:
+    """Configured provider plugin name from ``KAIRIX_PROVIDER``, or ``None``.
+
+    Canonical reader for the env var that picks a provider plugin
+    (azure_foundry / openai / bedrock / ollama / anthropic /
+    litellm_proxy / a third-party plugin). Consumed by
+    ``kairix probe-config`` and any other operator-facing surface that
+    needs to know which provider is configured without hard-coding a
+    default. Returns ``None`` when unset so callers can surface an
+    actionable "no provider configured" error themselves.
+
+    Lives in :mod:`kairix.paths` per F4 — no other module may read
+    ``KAIRIX_*`` env vars.
+    """
+    value = os.environ.get("KAIRIX_PROVIDER")
+    return value if value else None
+
+
 def azure_api_version(default: str = "2024-12-01-preview") -> str:
     """Azure OpenAI API version — configurable via ``KAIRIX_AZURE_API_VERSION``."""
     return os.environ.get("KAIRIX_AZURE_API_VERSION", default)

@@ -107,6 +107,8 @@ pytest_plugins = [
     "tests.bdd.steps.e2e_provider_embed_steps",
     "tests.bdd.steps.e2e_provider_health_steps",
     "tests.bdd.steps.e2e_provider_switch_steps",
+    # probe-config health-check end-user CLI.
+    "tests.bdd.steps.probe_config_health_steps",
 ]
 
 # PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.
