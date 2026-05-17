@@ -425,3 +425,27 @@ def test_pool_size_invalid_falls_back_to_default(monkeypatch, caplog) -> None:
     pool = client._client._transport._pool
     assert pool._max_connections == 20
     assert any("KAIRIX_EMBED_POOL_SIZE" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.unit
+def test_explicit_pool_kwarg_overrides_env_value(monkeypatch) -> None:
+    """``pool_max_connections=99`` kwarg wins even when env sets a different value.
+
+    Pins the precedence contract: explicit kwargs beat env fallback.
+    Tests at this site (not in integration) because this file is the
+    F2-baselined home for env-monkeypatch tests over kairix.credentials
+    — env IS the public secret-interface here. The kwarg-precedence rule
+    lives in production code (``_resolve_pool_config`` uses ``... if
+    pool_max_connections is None else pool_max_connections``).
+
+    Sabotage: invert that conditional so env beats kwarg, and the kwarg's
+    99 value loses to the env's 7.
+    """
+    monkeypatch.setenv("KAIRIX_EMBED_POOL_SIZE", "7")
+    client = make_openai_client(
+        api_key="test-key",  # pragma: allowlist secret
+        endpoint="https://api.openai.com/v1",
+        pool_max_connections=99,
+    )
+    pool = client._client._transport._pool
+    assert pool._max_connections == 99

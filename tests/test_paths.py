@@ -514,3 +514,117 @@ class TestEntityOverridesPath:
         result = entity_overrides_path()
         assert "~" not in str(result)
         assert str(result).endswith("overrides.md")
+
+
+# ---------------------------------------------------------------------------
+# Typed env helpers — read_int_env / read_float_env / embed_pool_* /
+# embed_vector_dims invalid-input branches.
+#
+# These tests sit at the bottom of the test pyramid for kairix.paths. The
+# operator-visible behaviour of "I tune pool config via env vars" is
+# pinned by BDD (tests/bdd/features/embed_pool_config.feature) +
+# integration (tests/integration/test_embed_pool_config_e2e.py); both
+# exercise the happy path through real make_openai_client + httpx flow.
+# The defensive try/except branches below (invalid integer/float values
+# from misconfigured Key Vault secrets) don't surface a user-visible
+# change beyond a logged warning, so they need targeted unit coverage to
+# pin the operator-misconfig guard behaviour the layer above relies on.
+# ---------------------------------------------------------------------------
+
+
+class TestReadIntEnv:
+    @pytest.mark.unit
+    def test_returns_int_when_set_valid(self, monkeypatch) -> None:
+        """Set env → parsed int. Sabotage: replace return int(raw) with default → fails."""
+        from kairix.paths import read_int_env
+
+        monkeypatch.setenv("KAIRIX_TEST_INT", "42")
+        assert read_int_env("KAIRIX_TEST_INT", default=10) == 42
+
+    @pytest.mark.unit
+    def test_returns_default_when_unset(self, monkeypatch) -> None:
+        """Unset env → default. Sabotage: drop the None early-return → int(None) raises."""
+        from kairix.paths import read_int_env
+
+        monkeypatch.delenv("KAIRIX_TEST_INT", raising=False)
+        assert read_int_env("KAIRIX_TEST_INT", default=7) == 7
+
+    @pytest.mark.unit
+    def test_returns_default_when_invalid(self, monkeypatch) -> None:
+        """Garbage → default + warning. Sabotage: remove try/except → int('abc') crashes."""
+        from kairix.paths import read_int_env
+
+        monkeypatch.setenv("KAIRIX_TEST_INT", "not-an-int")
+        assert read_int_env("KAIRIX_TEST_INT", default=99) == 99
+
+
+class TestReadFloatEnv:
+    @pytest.mark.unit
+    def test_returns_float_when_set_valid(self, monkeypatch) -> None:
+        """Set env → parsed float. Sabotage: change return to default."""
+        from kairix.paths import read_float_env
+
+        monkeypatch.setenv("KAIRIX_TEST_FLOAT", "3.5")
+        assert read_float_env("KAIRIX_TEST_FLOAT", default=1.0) == 3.5
+
+    @pytest.mark.unit
+    def test_returns_default_when_unset(self, monkeypatch) -> None:
+        """Unset → default. Sabotage: drop None early-return → float(None) raises."""
+        from kairix.paths import read_float_env
+
+        monkeypatch.delenv("KAIRIX_TEST_FLOAT", raising=False)
+        assert read_float_env("KAIRIX_TEST_FLOAT", default=2.5) == 2.5
+
+    @pytest.mark.unit
+    def test_returns_default_when_invalid(self, monkeypatch) -> None:
+        """Garbage → fallback. Sabotage: remove try/except → ValueError on float('xyz')."""
+        from kairix.paths import read_float_env
+
+        monkeypatch.setenv("KAIRIX_TEST_FLOAT", "xyz")
+        assert read_float_env("KAIRIX_TEST_FLOAT", default=0.5) == 0.5
+
+
+class TestEmbedPoolKeepalive:
+    @pytest.mark.unit
+    def test_valid_env_returns_set_value(self, monkeypatch) -> None:
+        """KAIRIX_EMBED_POOL_KEEPALIVE=25 → 25. Sabotage: ignore env → default."""
+        from kairix.paths import embed_pool_keepalive
+
+        monkeypatch.setenv("KAIRIX_EMBED_POOL_KEEPALIVE", "25")
+        assert embed_pool_keepalive(10) == 25
+
+    @pytest.mark.unit
+    def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
+        """Garbage → default + warning. Sabotage: remove try/except → int() raises."""
+        from kairix.paths import embed_pool_keepalive
+
+        monkeypatch.setenv("KAIRIX_EMBED_POOL_KEEPALIVE", "bad")
+        assert embed_pool_keepalive(10) == 10
+
+
+class TestEmbedPoolExpiry:
+    @pytest.mark.unit
+    def test_valid_env_returns_set_value(self, monkeypatch) -> None:
+        """KAIRIX_EMBED_POOL_EXPIRY_S=45.5 → 45.5. Sabotage: ignore env → default."""
+        from kairix.paths import embed_pool_expiry_s
+
+        monkeypatch.setenv("KAIRIX_EMBED_POOL_EXPIRY_S", "45.5")
+        assert embed_pool_expiry_s(30.0) == 45.5
+
+    @pytest.mark.unit
+    def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
+        """Garbage → default. Sabotage: remove try/except → float() raises."""
+        from kairix.paths import embed_pool_expiry_s
+
+        monkeypatch.setenv("KAIRIX_EMBED_POOL_EXPIRY_S", "nope")
+        assert embed_pool_expiry_s(30.0) == 30.0
+
+
+class TestEmbedVectorDimsFallback:
+    @pytest.mark.unit
+    def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
+        """KAIRIX_EMBED_DIMS=abc → default + warning. Sabotage: remove try/except → int() raises."""
+        from kairix.paths import embed_vector_dims
+
+        monkeypatch.setenv("KAIRIX_EMBED_DIMS", "abc")
+        assert embed_vector_dims(default=1536) == 1536

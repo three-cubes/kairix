@@ -71,18 +71,26 @@ def _build_http_client(
     return httpx.Client(limits=limits, timeout=timeout)
 
 
-def _resolve_pool_config() -> tuple[int, int, float]:
-    """Resolve the pool-size triple from kairix.paths (F4 boundary).
+def _resolve_pool_config(
+    pool_max_connections: int | None = None,
+    pool_max_keepalive: int | None = None,
+    pool_expiry_s: float | None = None,
+) -> tuple[int, int, float]:
+    """Resolve the pool-size triple, preferring explicit kwargs over env reads.
 
-    Reads ``KAIRIX_EMBED_POOL_SIZE`` / ``KAIRIX_EMBED_POOL_KEEPALIVE`` /
-    ``KAIRIX_EMBED_POOL_EXPIRY_S`` through the paths helpers — invalid
-    values fall back to the module-level defaults with a logged warning
-    rather than crashing the embed dispatch stage.
+    Production callers leave all three None and the function reads from
+    kairix.paths (F4 boundary — env reads stay there). Tests pass explicit
+    values to drive ``make_openai_client`` without going through
+    ``monkeypatch.setenv`` (F2 — env state shouldn't leak between tests).
+
+    Invalid env values fall back to the module-level defaults with a
+    logged warning rather than crashing the embed dispatch stage; that
+    fallback behaviour is unit-tested in tests/test_paths.py.
     """
     return (
-        _embed_pool_size(EMBED_POOL_MAX_CONNECTIONS),
-        _embed_pool_keepalive(EMBED_POOL_MAX_KEEPALIVE),
-        _embed_pool_expiry_s(EMBED_POOL_KEEPALIVE_EXPIRY_S),
+        _embed_pool_size(EMBED_POOL_MAX_CONNECTIONS) if pool_max_connections is None else pool_max_connections,
+        _embed_pool_keepalive(EMBED_POOL_MAX_KEEPALIVE) if pool_max_keepalive is None else pool_max_keepalive,
+        _embed_pool_expiry_s(EMBED_POOL_KEEPALIVE_EXPIRY_S) if pool_expiry_s is None else pool_expiry_s,
     )
 
 
@@ -154,6 +162,9 @@ def make_openai_client(
     *,
     max_retries: int = 5,
     timeout: float = 30.0,
+    pool_max_connections: int | None = None,
+    pool_max_keepalive: int | None = None,
+    pool_expiry_s: float | None = None,
 ) -> Any:
     """Create an OpenAI-compatible client for any of the three endpoint shapes.
 
@@ -161,8 +172,13 @@ def make_openai_client(
     branches (Foundry / legacy Azure / OpenAI-direct). The Foundry branch
     uses the ``/openai/v1`` alias so the openai SDK can call AI Foundry
     without a Microsoft-specific SDK dependency.
+
+    Pool config (``pool_max_connections`` / ``pool_max_keepalive`` /
+    ``pool_expiry_s``) — when None (production default), reads from
+    ``kairix.paths`` env helpers. Tests pass explicit values directly to
+    avoid ``monkeypatch.setenv`` (F2).
     """
-    max_conns, max_keepalive, expiry_s = _resolve_pool_config()
+    max_conns, max_keepalive, expiry_s = _resolve_pool_config(pool_max_connections, pool_max_keepalive, pool_expiry_s)
     http_client = _build_http_client(max_conns, max_keepalive, expiry_s, timeout)
 
     if _is_foundry_endpoint(endpoint):

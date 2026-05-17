@@ -80,6 +80,8 @@ pytest_plugins = [
     "tests.bdd.steps.bootstrap_steps",
     "tests.bdd.steps.usage_guide_steps",
     "tests.bdd.steps.classify_steps",
+    "tests.bdd.steps.embed_pool_config_steps",
+    "tests.bdd.steps.query_cache_steps",
 ]
 
 # PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.
