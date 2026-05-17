@@ -1489,3 +1489,169 @@ def test_run_benchmark_writes_json_result_when_output_dir_set(tmp_path: Any) -> 
     # Payload carries the documented top-level keys.
     assert set(payload.keys()) == {"meta", "summary", "diagnostics", "cases"}
     assert payload["summary"]["weighted_total"] == pytest.approx(0.25)  # recall@1.0 * 0.25
+
+
+# ---------------------------------------------------------------------------
+# #275 — benchmark loop must not drown stderr with legacy-collection
+# deprecation warnings, and must always progress to a BenchmarkResult.
+#
+# Two paired properties:
+#   (a) Modern (multi-path) agent config → run_benchmark completes AND no
+#       deprecation warning fires across the case loop.
+#   (b) Legacy (collection:) agent config re-parsed per case (the
+#       pre-#279 cache-miss class) → exactly one deprecation per
+#       (agent, candidate) for the whole loop AND the run still
+#       completes.
+#
+# Together these pin both halves of the regression: the dedup at
+# kairix.core.search.registry._resolve_legacy_collection_name AND the
+# fact that the deprecation is non-fatal (logger.warning, not
+# warnings.warn that could become an error under -W error).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_run_benchmark_legacy_agent_config_emits_deprecation_once_and_completes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Legacy ``collection:`` agents re-parsed per case → one warning per agent.
+
+    Simulates the pre-#279 cache-miss class where the eval-path's
+    pipeline builder re-parsed the agent registry on every benchmark
+    case. Wires a ``BenchmarkDeps.retrieve`` callable that re-invokes
+    ``parse_agent_registry`` with a legacy ``collection:`` YAML before
+    returning paths — the warning must dedupe across the whole loop,
+    and the benchmark must terminate.
+
+    Sabotage-prove: remove the per-process ``_LEGACY_COLLECTION_WARNED``
+    guard in ``_resolve_legacy_collection_name`` and the assertion
+    ``len(deprecation_records) == 2`` fails because each case re-emits
+    both warnings (yielding 6 records for 3 cases).
+    """
+    import logging
+    import uuid
+
+    from kairix.core.search.registry import parse_agent_registry
+    from kairix.quality.benchmark.runner import BenchmarkDeps, BenchmarkResult, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkSuite
+
+    # Unique-per-run names so prior test dedup state never bleeds into
+    # this run. (F5: no internal-name imports.)
+    suffix = uuid.uuid4().hex[:8]
+    name_a = f"bench-legacy-shape-{suffix}"
+    name_b = f"bench-legacy-builder-{suffix}"
+    legacy_yaml = {
+        "agents": [
+            {"name": name_a, "collection": f"{name_a}-memory", "write_path": f"agents/{name_a}"},
+            {"name": name_b, "collection": f"{name_b}-memory", "write_path": f"agents/{name_b}"},
+        ]
+    }
+
+    def _retrieve_with_registry_reparse(**_kw: Any) -> tuple[list[str], list[str], dict[str, Any]]:
+        # Re-parse on every case — the exact pattern the pre-#279
+        # cache-miss path produced.
+        parse_agent_registry(legacy_yaml)
+        return ["vault/x.md"], ["snippet"], {"intent": "semantic"}
+
+    suite = BenchmarkSuite(
+        meta={"name": "legacy-config-suite", "version": "1.0", "agent": "t"},
+        cases=[
+            _bench_case("R01", "recall", "vault/x.md"),
+            _bench_case("R02", "recall", "vault/x.md"),
+            _bench_case("R03", "recall", "vault/x.md"),
+        ],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = run_benchmark(
+            suite,
+            system="hybrid",
+            agent="t",
+            deps=BenchmarkDeps(retrieve=_retrieve_with_registry_reparse),
+        )
+
+    # (a) Run progressed — three cases scored, no hang.
+    assert isinstance(result, BenchmarkResult)
+    assert len(result.cases) == 3
+
+    # (b) Deprecation fired exactly once per (agent, candidate) pair
+    # across the whole loop — even though the registry was re-parsed
+    # 3 times. Scope to our uniquely-suffixed names so concurrent tests
+    # logging the same warning don't pollute the assertion.
+    deprecation_records = [
+        r for r in caplog.records if "is deprecated" in r.message and r.args and r.args[0] in (name_a, name_b)
+    ]
+    assert len(deprecation_records) == 2, (
+        f"expected exactly 2 deprecation warnings (one per legacy agent) "
+        f"across a 3-case run; got {len(deprecation_records)}: "
+        f"{[r.getMessage() for r in deprecation_records]}"
+    )
+    names_warned = {r.args[0] for r in deprecation_records}
+    assert names_warned == {name_a, name_b}, f"expected one warning per legacy agent; got {names_warned}"
+
+
+@pytest.mark.unit
+def test_run_benchmark_modern_agent_config_emits_no_deprecation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Multi-path (paths:) agent config → no deprecation warning, run completes.
+
+    Pins the inverse of the legacy-config regression: an operator who
+    has migrated to ``paths:`` must NOT see the deprecation warning
+    even when ``parse_agent_registry`` runs per-case.
+
+    Sabotage-prove: change ``_resolve_legacy_collection_name`` to emit
+    the deprecation on the ``paths:``-only path (e.g. drop the
+    ``if "collection" in item:`` guard) and this test fails because
+    the modern-config run would emit warnings just like the legacy
+    one.
+    """
+    import logging
+    import uuid
+
+    from kairix.core.search.registry import parse_agent_registry
+    from kairix.quality.benchmark.runner import BenchmarkDeps, BenchmarkResult, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkSuite
+
+    suffix = uuid.uuid4().hex[:8]
+    name_a = f"bench-modern-shape-{suffix}"
+    name_b = f"bench-modern-builder-{suffix}"
+    modern_yaml = {
+        "agents": [
+            {"name": name_a, "paths": [f"agents/{name_a}"], "write_path": f"agents/{name_a}"},
+            {"name": name_b, "paths": [f"agents/{name_b}"], "write_path": f"agents/{name_b}"},
+        ]
+    }
+
+    def _retrieve_with_registry_reparse(**_kw: Any) -> tuple[list[str], list[str], dict[str, Any]]:
+        parse_agent_registry(modern_yaml)
+        return ["vault/x.md"], ["snippet"], {"intent": "semantic"}
+
+    suite = BenchmarkSuite(
+        meta={"name": "modern-config-suite", "version": "1.0", "agent": "t"},
+        cases=[
+            _bench_case("R01", "recall", "vault/x.md"),
+            _bench_case("R02", "recall", "vault/x.md"),
+        ],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = run_benchmark(
+            suite,
+            system="hybrid",
+            agent="t",
+            deps=BenchmarkDeps(retrieve=_retrieve_with_registry_reparse),
+        )
+
+    # Run progressed.
+    assert isinstance(result, BenchmarkResult)
+    assert len(result.cases) == 2
+
+    # No deprecation fired for our agents — modern schema is the happy path.
+    deprecation_records = [
+        r for r in caplog.records if "is deprecated" in r.message and r.args and r.args[0] in (name_a, name_b)
+    ]
+    assert deprecation_records == [], (
+        f"modern (paths:) config should not trigger deprecation warning; got: "
+        f"{[r.getMessage() for r in deprecation_records]}"
+    )
