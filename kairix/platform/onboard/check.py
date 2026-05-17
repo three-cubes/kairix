@@ -987,14 +987,20 @@ ALL_CHECKS: list[Callable[..., CheckResult]] = [
 ]
 
 
-def run_all_checks() -> list[CheckResult]:
+def run_all_checks(*, checks: list[Callable[..., CheckResult]] | None = None) -> list[CheckResult]:
     """Run all deployment checks in order. Returns results for all checks.
 
     Checks are ordered by dependency: PATH → secrets → vault → search → graph.
     A failure in an early check usually explains failures in later checks.
+
+    ``checks`` is the public DI seam — tests pass a fake check list to
+    drive the runner's collation logic without monkey-patching the
+    module-level ``ALL_CHECKS`` registry. Production callers leave it
+    ``None`` and the runner uses the canonical registry.
     """
+    effective = checks if checks is not None else ALL_CHECKS
     results: list[CheckResult] = []
-    for check_fn in ALL_CHECKS:
+    for check_fn in effective:
         try:
             results.append(check_fn())
         except Exception as exc:
@@ -1009,7 +1015,7 @@ def run_all_checks() -> list[CheckResult]:
     return results
 
 
-def run_onboard_check() -> OnboardResult:
+def run_onboard_check(*, checks: list[Callable[..., CheckResult]] | None = None) -> OnboardResult:
     """Run all deployment checks and return a structured OnboardResult.
 
     Canonical surface for:
@@ -1020,9 +1026,10 @@ def run_onboard_check() -> OnboardResult:
     Each failed check produces a CheckFailure with a populated, non-empty
     ``remediation`` string sourced from _CANONICAL_REMEDIATIONS. The set of
     checks (and their order) is identical to run_all_checks() — this
-    function only restructures the output.
+    function only restructures the output. ``checks`` forwards through to
+    ``run_all_checks`` as the public DI seam.
     """
-    results = run_all_checks()
+    results = run_all_checks(checks=checks)
     failures = [
         CheckFailure(
             check=r.name,
