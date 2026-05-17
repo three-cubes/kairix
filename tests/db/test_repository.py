@@ -136,17 +136,15 @@ def test_search_fts_returns_empty_when_open_db_swap_raises(db_path: Path, repo: 
     module load, so the binding lives on the repository module — we
     swap it there.
     """
-    from kairix.core.db import repository as repo_mod
-
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated open failure")
 
-    real = repo_mod.open_db
-    repo_mod.open_db = _boom
+    repo._opener = _boom
     try:
         result = repo.search_fts("anything")
     finally:
-        repo_mod.open_db = real
+        from kairix.core.db import open_db as _real_open_db
+        repo._opener = _real_open_db
 
     assert result == []
 
@@ -260,17 +258,15 @@ def test_get_by_path_returns_none_when_open_db_raises(db_path: Path, repo: SQLit
     """Drives lines 100-102 — sqlite3 / OS error during ``open_db`` is
     caught and the repo returns ``None``.
     """
-    from kairix.core.db import repository as repo_mod
-
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated open failure")
 
-    real = repo_mod.open_db
-    repo_mod.open_db = _boom
+    repo._opener = _boom
     try:
         result = repo.get_by_path("docs/a.md")
     finally:
-        repo_mod.open_db = real
+        from kairix.core.db import open_db as _real_open_db
+        repo._opener = _real_open_db
 
     assert result is None
 
@@ -348,17 +344,15 @@ def test_get_chunk_dates_returns_empty_when_open_db_raises(
     The except clause catches sqlite3.Error / OSError so the embedding
     pipeline can survive a transient DB failure.
     """
-    from kairix.core.db import repository as repo_mod
-
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated open failure")
 
-    real = repo_mod.open_db
-    repo_mod.open_db = _boom
+    repo._opener = _boom
     try:
         result = repo.get_chunk_dates(["docs/anything.md"])
     finally:
-        repo_mod.open_db = real
+        from kairix.core.db import open_db as _real_open_db
+        repo._opener = _real_open_db
 
     assert result == {}
 
@@ -407,18 +401,17 @@ def test_insert_or_update_swallows_open_db_failure(
     swallowed so the embed pipeline can surface a single warning
     rather than crash the whole run.
     """
-    from kairix.core.db import repository as repo_mod
-
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated insert failure")
 
-    real = repo_mod.open_db
-    repo_mod.open_db = _boom
+    repo._opener = _boom
     try:
         # Must not raise.
         repo.insert_or_update("docs/y.md", "notes", "Y", "body", "hash-y")
     finally:
-        repo_mod.open_db = real
+        from kairix.core.db import open_db as _real_open_db
+
+        repo._opener = _real_open_db
 
 
 # ── get_chunk_dates LRU cache (W1D SQLite WAL contention fix) ────────

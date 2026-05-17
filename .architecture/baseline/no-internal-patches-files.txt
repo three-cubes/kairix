@@ -1,5 +1,4 @@
 tests/core/test_factory.py
-tests/db/test_repository.py
 tests/embed/test_cli_unit.py
 tests/embed/test_deps.py
 tests/embed/test_use_cases_defaults.py
