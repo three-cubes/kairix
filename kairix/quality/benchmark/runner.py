@@ -144,11 +144,66 @@ def _default_retrieve(
     )
 
 
-def _default_chat_backend() -> ChatBackend:
-    """Construct the production chat backend — Azure-hosted gpt-4o-mini."""
-    from kairix._azure import AzureChatBackend
+class _LazyDefaultChatBackend:
+    """Production chat backend that defers provider resolution to call-time.
 
-    return AzureChatBackend()
+    Constructed eagerly (``BenchmarkDeps.chat_backend`` is a dataclass
+    ``default_factory`` — the field is built every time ``BenchmarkDeps()``
+    runs, even in tests that override the field via constructor kwarg),
+    but the underlying ``kairix.config.yaml`` lookup + provider plugin
+    resolution happens on first ``complete()`` call. This preserves the
+    historical contract (``BenchmarkDeps()`` constructs cheaply; the chat
+    backend only fails when actually used and credentials / config are
+    missing) while routing the production path through the provider plugin.
+
+    The wider ``llm_judge`` try/except swallows the ValueError on
+    ``complete()`` and returns 0.0, matching the historical credential-
+    failure behaviour.
+    """
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        api_key: str,
+        endpoint: str,
+        deployment: str,
+        system: str | None = None,
+        temperature: float = 0.0,
+        timeout_s: float = 30.0,
+    ) -> str:
+        from kairix.paths import provider_name
+        from kairix.platform.llm.backends import ProviderEvalChatBackend
+        from kairix.providers import get_provider
+
+        name = provider_name()
+        if name is None:
+            raise ValueError(
+                "kairix.config.yaml is missing the required 'provider:' field. "
+                "fix: set 'provider: <plugin-name>' in kairix.config.yaml. "
+                "next: see docs/architecture/provider-plugin-architecture.md."
+            )
+        backend = ProviderEvalChatBackend(get_provider(name))
+        return backend.complete(
+            prompt,
+            api_key=api_key,
+            endpoint=endpoint,
+            deployment=deployment,
+            system=system,
+            temperature=temperature,
+            timeout_s=timeout_s,
+        )
+
+
+def _default_chat_backend() -> ChatBackend:
+    """Construct the production chat backend — backed by the configured provider plugin.
+
+    Returns a :class:`_LazyDefaultChatBackend` that resolves the plugin from
+    ``kairix.config.yaml``'s ``provider:`` field on the first ``complete()``
+    call (deferred so ``BenchmarkDeps()`` stays cheap to construct even
+    when the config is incomplete).
+    """
+    return _LazyDefaultChatBackend()
 
 
 @dataclass
@@ -253,7 +308,8 @@ def llm_judge(
                       ``run-benchmark-hybrid.py`` scorer for cross-run
                       comparability.
         chat_backend: ``ChatBackend`` protocol implementation. Defaults to
-                      ``AzureChatBackend`` constructed lazily.
+                      ``_default_chat_backend()`` constructed lazily (resolves
+                      the configured provider plugin from ``kairix.config.yaml``).
 
     Returns 0.0 on any failure (API error, parse error, timeout).
     """
@@ -264,11 +320,9 @@ def llm_judge(
         if chat_backend is None:
             # Lazy production default — covered by a unit test that drops
             # the kwarg and asserts the wider try/except returns 0.0 on
-            # the inevitable credential-resolution failure. Tests that
-            # exercise the success path inject FakeChatBackend.
-            from kairix._azure import AzureChatBackend
-
-            chat_backend = AzureChatBackend()
+            # the inevitable plugin / credential resolution failure. Tests
+            # that exercise the success path inject FakeChatBackend.
+            chat_backend = _default_chat_backend()
 
         # Match the original run-benchmark-hybrid.py scorer — paths only, 6-point scale.
         # This ensures scores are comparable across runs.

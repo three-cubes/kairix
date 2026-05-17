@@ -5,7 +5,10 @@ Provides a ``LLMBackend`` protocol so kairix components can call
 chat/embed APIs without a hard dependency on any specific provider.
 
 Built-in backends:
-  AzureOpenAIBackend — wraps kairix._azure (Azure OpenAI, Key Vault secrets)
+  AzureOpenAIBackend — historical name retained; delegates to the
+  ``Provider`` plugin configured via ``kairix.config.yaml``'s
+  ``provider:`` field (Azure / OpenAI / AWS Bedrock / LiteLLM proxy /
+  custom plugin). Credential resolution is owned by the plugin.
 
 Usage::
 
@@ -16,8 +19,8 @@ Usage::
 
 Or inject a specific backend for testing::
 
-    from kairix.platform.llm.backends import AzureOpenAIBackend
-    backend = AzureOpenAIBackend()
+    from kairix.platform.llm.backends import AzureOpenAIBackend, LLMBackendDeps
+    backend = AzureOpenAIBackend(deps=LLMBackendDeps(chat=fake_chat))
 """
 
 from kairix.platform.llm.backends import AzureOpenAIBackend
@@ -27,5 +30,5 @@ __all__ = ["AzureOpenAIBackend", "LLMBackend", "get_default_backend"]
 
 
 def get_default_backend() -> LLMBackend:
-    """Return the default backend (Azure OpenAI via _azure.py)."""
+    """Return the default backend backed by the configured provider plugin."""
     return AzureOpenAIBackend()

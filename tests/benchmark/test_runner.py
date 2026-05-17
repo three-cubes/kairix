@@ -1038,15 +1038,21 @@ def test_default_content_classifier_classify_with_llm_fires_when_rules_return_un
 
 @pytest.mark.unit
 def test_llm_judge_lazy_default_chat_backend_returns_zero_on_credential_failure() -> None:
-    """``llm_judge`` without ``chat_backend=`` constructs ``AzureChatBackend``.
+    """``llm_judge`` without ``chat_backend=`` lazily resolves the provider plugin.
 
-    The test environment doesn't resolve Azure credentials, so the constructed
-    backend's ``complete()`` raises and the wrapping try/except returns 0.0.
-    The lazy default-construction branch is what's covered — the score being
-    0.0 (rather than IndexError or NameError) is the receipt that the import
-    plus construction succeeded and the exception path handled the failure.
+    The test environment has no ``provider:`` field in ``kairix.config.yaml``,
+    so ``_default_chat_backend()`` raises ValueError. The wrapping try/except
+    inside ``llm_judge`` swallows it and returns 0.0. The lazy
+    default-construction branch is what's covered — the score being 0.0
+    (rather than ValueError propagating, IndexError, or NameError) is the
+    receipt that the resolution failure is handled gracefully.
+
+    Sabotage: remove the outer ``try/except`` in ``llm_judge`` — the
+    ValueError from the unresolved provider would propagate and the test
+    fails with an exception instead of asserting 0.0.
     """
-    # No chat_backend kwarg → the AzureChatBackend factory inside llm_judge runs.
+    # No chat_backend kwarg → _default_chat_backend() factory runs and raises;
+    # llm_judge's outer try/except returns 0.0.
     score = llm_judge(query="q", paths=["doc.md"], snippets=["snippet"])
     assert score == pytest.approx(0.0)
 
