@@ -7,6 +7,60 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
+## [2026.5.17] - 2026-05-17 — Faster searches under concurrent load + foundation for any LLM provider
+
+> **Upgrading?** Drop-in. No public API breaks. **New for agents**: searches and embeds feel faster when several agents work at the same time — the system now bundles concurrent requests into one network round-trip and keeps the connection to the model warm between calls. **New for operators**: the new `kairix probe-config` command checks your configured endpoint after setup and recommends concrete tuning. **Internal**: a clean three-layer split (domain / transport / providers) lays the groundwork for plug-in support for any LLM/embed endpoint — Bedrock, Ollama, OpenAI direct, LiteLLM proxy, Anthropic — which lands in 2026.5.18.
+
+### New for agents
+
+- **Searches feel faster under concurrent load.** Probe data on the reference-library suite shows mean latency at concurrency 10 dropped from 1452 ms to 804 ms across the dev cycle, with further headroom from the connection-pool fix in this release. The remaining latency tail is the focus of 2026.5.18. (closes #281, #282, #287, #288)
+- **Ten agents asking different questions at the same time pay one network round-trip.** Concurrent embed calls in a 50 ms window fold into one batched request. (closes #288)
+- **A second ask for the same text comes back from cache.** Same text → same vector, regardless of which agent or scope asked. (closes #281, #285)
+- **Vector lookups got 13× faster.** One batched database query instead of N+1 per result — `vector_ann` stage dropped from ~440 ms to ~34 ms at concurrency 10. (closes #287)
+- **Probe reports per-stage timings** for every query — classify, resolve, BM25, vector embed, vector ANN, fuse, enrich, boost — so you can see where time goes. (closes #282)
+
+### New for operators
+
+- **`kairix probe-config`** — runs cold + warm + concurrent calls against your configured endpoint and emits a JSON report: status (healthy / degraded / unreachable), latencies, cache hit rate, and concrete tuning recommendations. Share the file with support if anything looks off. Privacy-safe: the report includes the endpoint hostname only — no full URLs, no credentials.
+- **`kairix entity count` / `audit` / `purge`** — fast entity-graph readout plus cleanup tools for stale entries. (closes #259, #260, #261)
+- **Embed connection pool is now tunable.** `KAIRIX_EMBED_POOL_SIZE` / `_KEEPALIVE_CONNECTIONS` / `_EXPIRY_S` match the pool to your team size and endpoint distance. (closes #280)
+- **Release pipeline gates stable releases on alpha.** Every `v2026.5.17` cannot publish without a successful `v2026.5.17-alpha` first. Alpha tags auto-deploy to your alpha host via a Go-built webhook. (closes #272)
+- **Search pipeline pre-warms at container start** so the first request doesn't pay the 192 MB factory-init tax. (closes #278, #279)
+- **Benchmark resolves bundled suites by name.** `kairix benchmark run reflib` works from any directory. (closes #268)
+- **`kairix --version` works inside Docker.** Build passes the version so reports show the real release. (closes #267)
+
+### Internal (the foundation for 2026.5.18)
+
+- **Three-layer architecture** in [`docs/architecture/provider-plugin-architecture.md`](docs/architecture/provider-plugin-architecture.md). Domain (`kairix/core/`) talks to universal endpoint concerns (`kairix/transport/`: pool / retry / coalesce / cache / timeout) and per-endpoint plugins (`kairix/providers/<name>/`) only via Protocols.
+- **Stops rebuilding the model connection on every batch.** Each concurrent embed batch was setting up a fresh TLS connection (~300-500 ms cold). The new `ClientPool` keeps one warm connection for the container's life.
+- **F26–F29 fitness functions** lock the split: domain can't import transport or providers, no cross-provider imports, every plugin needs BDD coverage, performance code stays in `kairix/quality/probe/`.
+- **Provider plugin discovery via Python entry points.** `KAIRIX_PROVIDER=foo` selects the plugin. Third parties ship `pip install kairix-provider-foo`. Azure Foundry and OpenAI plugins wired against the contract today; Bedrock / Ollama / LiteLLM-proxy / Anthropic ship in 2026.5.18. (partial: #285)
+- **F21–F25 quality rules** (actionable-feedback markers, path naming, README resolvers, no `tests.*` imports in production, every CLI has an MCP affordance).
+- **Cognitive-complexity burndown** across chunker / reflib / sweep / entities / contradict / temporal — every flagged function now under 15. (closes #250)
+- **MCP retroactively exposes safe read-only operational capabilities** — onboard check, capability introspection. (closes #277)
+- **Performance + soak test suite** catches regressions like the embed-pipeline class in CI. (closes #276)
+
+### Fixed
+
+- **Worker survives `SystemExit` from helpers.** Recall-gate alerts no longer crash the container. (closes #270)
+- **MCP entity lookup checks aliases.** Lookups find the entity even when the canonical name differs from the alias asked for. (closes #253)
+- **`prep` (L0 summary) returns grounded content.** No more generic responses when the knowledge store has the answer. (closes #254)
+- **Eval module security hardening** — path confinement, prompt-injection guards, finite-score validation. (closes #143)
+- **Per-collection retrieval overrides** apply to single-collection MCP and benchmark calls. (closes #274)
+- **Reflib benchmarks captured per release** for quality regression tracking. (closes #271)
+- **Retrieval health & recovery runbook** added for operators. (closes #252)
+- **Python 3.14 + numpy + pytest-cov** import-order error worked around. (closes #211)
+
+### Still open / next release
+
+- Multi-provider plugin implementations: Bedrock, Ollama, OpenAI direct, LiteLLM proxy, Anthropic (#285)
+- PVT MCP HTTP test harness (#284)
+- Probe burst warmup detection (#283)
+- SonarCloud check status mismatch (#269)
+- Webhook auto-deploy on release (#286)
+
+---
+
 ## [2026.5.15] - 2026-05-14 — Agent-first kairix + worker observability + F-rule legacy fully burned
 
 > **Upgrading?** Drop-in. No public API breaks. **New for agents**: `kairix bootstrap <agent>` returns a session-start orientation envelope; every MCP tool now includes a `health` field that tells agents what's offline and what to do next; `kairix onboard check --json` is the canonical "is kairix working" probe with per-check remediation strings. **New for operators**: worker pause/resume + observable phase state + skip-on-idle maintenance. **Internal**: 7 fitness-function baselines burned to zero (F1, F3, F4, F5, F6, F7, F9); per-file coverage floor ratcheted 85% → 90%; 10 shim modules deleted; 22 env-var helpers centralised in `paths.py`/`secrets.py`.
