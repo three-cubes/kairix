@@ -48,7 +48,7 @@ nlp = [
 ]
 rerank = [
     # Cross-encoder re-ranking (post-RRF semantic pass). CPU-only, ~22 MB model.
-    "sentence-transformers>=3.0,<4",
+    "sentence-transformers>=3.0,<6",
 ]
 bedrock = [
     # AWS SDK — required only when KAIRIX_PROVIDER=bedrock. boto3 is heavy
