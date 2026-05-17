@@ -280,3 +280,104 @@ def test_validate_schema_compat_overlay_none_passes() -> None:
     """If there's no overlay at all, no schema-compat check is meaningful."""
     base = {"_schema_version": 1}
     validate_schema_compat(base, None)
+
+
+def test_validate_schema_compat_non_int_overlay_required_min_raises() -> None:
+    """Non-integer overlay ``_schema_version_required_min`` raises
+    ConfigValidationError with an actionable message — the loader must
+    not silently accept garbage in the schema-version-required-min field
+    because the comparison would be unsafe.
+
+    Sabotage: drop the ``try/except (TypeError, ValueError)`` around
+    ``int(required_min)`` and the function ``ValueError``s with a Python
+    message that doesn't tell the operator what to fix.
+    """
+    base = {"_schema_version": 1}
+    overlay = {"_schema_version_required_min": "not-a-number"}
+
+    with pytest.raises(ConfigValidationError) as info:
+        validate_schema_compat(base, overlay)
+
+    msg = str(info.value)
+    assert "_schema_version_required_min" in msg
+    assert "integer" in msg.lower()
+    assert "fix:" in msg or "next:" in msg, "F21 action marker required"
+
+
+# ---------------------------------------------------------------------------
+# resolve_layered_paths — error-path coverage for missing files
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_layered_paths_base_path_missing_returns_none(tmp_path: Path) -> None:
+    """When KAIRIX_CONFIG_BASE_PATH points at a non-existent file, the
+    resolver logs a warning and returns (None, overlay) — the loader then
+    falls through to defaults rather than crashing.
+
+    Sabotage: drop the ``if not base_p.is_file()`` guard in
+    ``_resolve_layered_base`` and the resolver returns a Path that points
+    at a file that doesn't exist — downstream ``open()`` blows up.
+    """
+    overlay = _write(tmp_path / "overlay.yaml", "provider: ollama\n")
+    env = {
+        "KAIRIX_CONFIG_BASE_PATH": str(tmp_path / "missing-base.yaml"),
+        "KAIRIX_CONFIG_OVERLAY_PATH": str(overlay),
+    }
+
+    resolved_base, resolved_overlay = resolve_layered_paths(env=env)
+
+    assert resolved_base is None
+    assert resolved_overlay == overlay
+
+
+def test_resolve_layered_paths_overlay_path_missing_logs_and_returns_none(tmp_path: Path) -> None:
+    """When KAIRIX_CONFIG_OVERLAY_PATH points at a non-existent file, the
+    resolver returns (base, None) — the loader still loads the base alone
+    rather than crashing on missing-overlay.
+
+    Sabotage: drop the ``if not overlay_p.is_file()`` guard in
+    ``_resolve_layered_overlay`` and the resolver returns a Path the
+    YAML loader can't open.
+    """
+    base = _write(tmp_path / "base.yaml", "_schema_version: 1\nprovider: azure_foundry\n")
+    env = {
+        "KAIRIX_CONFIG_BASE_PATH": str(base),
+        "KAIRIX_CONFIG_OVERLAY_PATH": str(tmp_path / "missing-overlay.yaml"),
+    }
+
+    resolved_base, resolved_overlay = resolve_layered_paths(env=env)
+
+    assert resolved_base == base
+    assert resolved_overlay is None
+
+
+def test_resolve_layered_paths_legacy_path_missing_returns_none_none(tmp_path: Path) -> None:
+    """Legacy KAIRIX_CONFIG_PATH pointing at a missing file → (None, None) +
+    warning. The loader then falls through to defaults; we don't crash.
+
+    Sabotage: drop the ``if legacy_p.is_file()`` check in
+    ``_resolve_legacy_or_cwd`` and the resolver returns a non-existent Path
+    that downstream chokes on.
+    """
+    env = {"KAIRIX_CONFIG_PATH": str(tmp_path / "missing.yaml")}
+
+    resolved_base, resolved_overlay = resolve_layered_paths(env=env)
+
+    assert resolved_base is None
+    assert resolved_overlay is None
+
+
+def test_resolve_layered_paths_cwd_discovery_finds_kairix_config(tmp_path: Path, monkeypatch) -> None:
+    """When no env vars are set and ``./kairix.config.yaml`` exists in cwd,
+    the resolver returns it as the base path with no overlay.
+
+    Sabotage: drop the ``if cwd_p.is_file()`` check and the resolver
+    returns a path that may not exist in the operator's cwd.
+    """
+    cwd_config = _write(tmp_path / "kairix.config.yaml", "provider: ollama\n")
+    monkeypatch.chdir(tmp_path)
+
+    resolved_base, resolved_overlay = resolve_layered_paths(env={})
+
+    assert resolved_base == cwd_config
+    assert resolved_overlay is None

@@ -566,6 +566,29 @@ def test_guide_error_when_guide_source_missing(tmp_path, capsys) -> None:
 
 
 @pytest.mark.unit
+def test_guide_falls_back_to_kairix_pkg_root_when_pkg_root_kwarg_unset(tmp_path, capsys) -> None:
+    """Production path: ``main(["guide"])`` without ``pkg_root=`` injection
+    derives the package root from ``Path(kairix.__file__).parent.parent``.
+
+    The in-tree probe `<repo>/docs/agent-usage-guide.md` doesn't exist (real
+    location is `<repo>/docs/user-guide/agent-usage-guide.md`), so the
+    fallback path is exercised and the "guide not found" error fires.
+
+    Sabotage-prove: skip the import-kairix fallback (force ``pkg_root = None``
+    past the in-tree check) and the function ``UnboundLocalError`` on the
+    ``guide_src`` line below.
+    """
+    doc_root = tmp_path / "vault"
+    doc_root.mkdir()
+
+    rc = main(["guide", "--document-root", str(doc_root)])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "not found" in captured.err.lower()
+
+
+@pytest.mark.unit
 def test_guide_writes_to_default_path_when_agent_knowledge_dir_exists(
     guide_source_in_pkg_root, tmp_path, capsys
 ) -> None:
