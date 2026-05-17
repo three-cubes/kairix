@@ -1510,7 +1510,7 @@ harness/orchestrator (no per-rule remediation of their own).
 
 #### Why
 
-Convergence with tc-agent-zone (issue #258). A check that fails with
+Convergence with sibling-repo fitness functions (issue #258). A check that fails with
 "AssertionError" or a REMEDIATION that only describes the offence
 wastes one full agent loop while the cure is re-derived. The markers
 turn the failure into an actionable instruction. The verbose
@@ -1597,7 +1597,7 @@ wins):
 
 Files outside every registered tree (top-level config, `.github/`,
 `docker/`, `reference-library/`, etc.) are not constrained by F22.
-Convergence with tc-agent-zone's `path_naming.py` (issue #258);
+Convergence with a sibling repo's `path_naming.py` check (issue #258);
 kairix uses its own repo layout.
 
 #### Why
@@ -1661,7 +1661,7 @@ allow-list (intentionally narrow) covers `.git`, `.github`,
 `coverage`, `dist`, `build`, and any directory whose name starts
 with `.` (dotfile config trees in general).
 
-Convergence with tc-agent-zone's `repo_ia.py` IA1 check (issue #258).
+Convergence with a sibling repo's `repo_ia.py` IA1 check (issue #258).
 
 #### Why
 

@@ -130,7 +130,7 @@ authoritative spec without forcing them to run on every CI invocation.
 The PVT layer is invoked by:
 
 - **Operators**, ad-hoc, to triage "is production slow today" questions.
-  Run with `KAIRIX_PVT=1 pytest tests/pvt/ -m pvt --pvt-target=https://shape.threecubes.ai/mcp`.
+  Run with `KAIRIX_PVT=1 pytest tests/pvt/ -m pvt --pvt-target=https://your-kairix-host.example.com/mcp`.
 - **The release pipeline**, post-deploy, to verify alpha tags against the
   live deployment before promoting. Wired into the alpha-deploy webhook
   as a follow-on step (future).

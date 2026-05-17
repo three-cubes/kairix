@@ -138,7 +138,7 @@ Security:
 
 **Phase 3 — first real binary (kicks off [#272](https://github.com/three-cubes/kairix/issues/272) Phase 4)**
 - [ ] `services/alpha-deploy-webhook/` — receives signed POSTs from `release-vm-deploy.yml`, pulls alpha Docker image, runs onboard check + reflib benchmark, posts back via GitHub commit status.
-- [ ] Deploy to VM via systemd unit. Cross-repo: tc-agent-zone owns the deploy mechanics; this repo owns the binary.
+- [ ] Deploy to VM via systemd unit. Cross-repo: your sibling infrastructure repo owns the deploy mechanics (e.g. a separate ops repo with systemd units + apply scripts); this repo owns the binary.
 
 **Phase 4 — additional fitness functions (rolled in as the Go surface grows)**
 - [ ] G1 (`--version` flag), G2 (error wrap), G6 (no `panic` outside main), G8 (`log/slog`), G10 (dependency rationale).

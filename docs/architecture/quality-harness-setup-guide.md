@@ -1,6 +1,6 @@
 # Quality harness setup guide
 
-How to stand up the kairix quality harness on a new repo (e.g. `tc-agent-zone`). This guide focuses on the **specific configuration nuances** that take time to discover. The canonical *what* and *why* lives in [`fitness-functions.md`](./fitness-functions.md); this is the *how-to-set-up*.
+How to stand up the kairix quality harness on a new repo (e.g. a sibling infrastructure or services repo). This guide focuses on the **specific configuration nuances** that take time to discover. The canonical *what* and *why* lives in [`fitness-functions.md`](./fitness-functions.md); this is the *how-to-set-up*.
 
 Everything in this document is the lived experience of getting the harness green on kairix — every gotcha section corresponds to a real failure that bit us during the rollout.
 
