@@ -131,6 +131,88 @@ def _make_card_id(source_path: str, column: str, index: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _build_card_chunk(path: str, col: str, status: str, buf: list[str], idx: int) -> TemporalChunk | None:
+    """Convert buffered card lines into a TemporalChunk, or None when empty."""
+    if not buf:
+        return None
+    card_text = "\n".join(buf).strip()
+    card_date, date_field = _extract_date_from_card(card_text)
+    card_id = _make_card_id(path, col, idx)
+
+    meta: dict = {
+        "status": status,
+        "column": col,
+        "card_id": card_id,
+    }
+    if date_field:
+        meta["date_field"] = date_field
+
+    return TemporalChunk(
+        text=card_text,
+        date=card_date,
+        source_path=path,
+        chunk_type="board_card",
+        metadata=meta,
+    )
+
+
+def _is_card_continuation(line: str) -> bool:
+    """Lines that continue the active card: blank or indented (2-space / tab)."""
+    return line.strip() == "" or line.startswith(("  ", "\t"))
+
+
+@dataclass
+class _BoardParseState:
+    """Mutable state for ``chunk_board``'s line-by-line state machine.
+
+    Extracted from ``chunk_board`` so each transition (heading / card-line /
+    continuation / terminator) is one method, and the top-level routine is a
+    flat dispatch over line shape. Drops cognitive complexity below F16.
+    """
+
+    path: str
+    chunks: list[TemporalChunk] = field(default_factory=list)
+    current_column: str = "backlog"
+    current_status: str = "backlog"
+    card_buffer: list[str] = field(default_factory=list)
+    card_index: int = 0
+
+    def _flush(self) -> None:
+        chunk = _build_card_chunk(
+            self.path,
+            self.current_column,
+            self.current_status,
+            self.card_buffer,
+            self.card_index,
+        )
+        if chunk is not None:
+            self.chunks.append(chunk)
+
+    def on_heading(self, heading_text: str) -> None:
+        self._flush()
+        self.card_buffer = []
+        self.card_index += 1
+        self.current_column = heading_text
+        self.current_status = _normalise_column(heading_text)
+
+    def on_card_line(self, line: str) -> None:
+        self._flush()
+        self.card_buffer = [line]
+        self.card_index += 1
+
+    def on_continuation(self, line: str) -> None:
+        if not self.card_buffer:
+            return
+        if _is_card_continuation(line):
+            self.card_buffer.append(line)
+        else:
+            self._flush()
+            self.card_buffer = []
+
+    def finish(self) -> None:
+        self._flush()
+
+
 def chunk_board(path: str) -> list[TemporalChunk]:
     """
     Parse a Kanban board file into per-card TemporalChunk objects.
@@ -154,75 +236,21 @@ def chunk_board(path: str) -> list[TemporalChunk]:
     # Strip kanban plugin frontmatter if present
     content = strip_frontmatter(content)
 
-    chunks: list[TemporalChunk] = []
+    state = _BoardParseState(path=path)
 
-    # Split the document into column sections by ## headings
-    # We keep the heading text along with the section body
-    lines = content.splitlines()
-
-    current_column: str = "backlog"
-    current_status: str = "backlog"
-    card_buffer: list[str] = []
-    card_index: int = 0
-
-    def _flush_card(col: str, status: str, buf: list[str], idx: int) -> None:
-        """Convert buffered card lines into a TemporalChunk and append to chunks."""
-        if not buf:
-            return
-        card_text = "\n".join(buf).strip()
-        card_date, date_field = _extract_date_from_card(card_text)
-        card_id = _make_card_id(path, col, idx)
-
-        meta: dict = {
-            "status": status,
-            "column": col,
-            "card_id": card_id,
-        }
-        if date_field:
-            meta["date_field"] = date_field
-
-        chunks.append(
-            TemporalChunk(
-                text=card_text,
-                date=card_date,
-                source_path=path,
-                chunk_type="board_card",
-                metadata=meta,
-            )
-        )
-
-    for line in lines:
+    for line in content.splitlines():
         h2_match = _SECTION_H2_RE.match(line)
         if h2_match:
-            _flush_card(current_column, current_status, card_buffer, card_index)
-            card_buffer = []
-            card_index += 1
-            heading_text = h2_match.group(1).strip()
-            current_column = heading_text
-            current_status = _normalise_column(heading_text)
-            continue
-
-        if _CARD_LINE_RE.match(line):
-            _flush_card(current_column, current_status, card_buffer, card_index)
-            card_buffer = [line]
-            card_index += 1
-            continue
-
-        if not card_buffer:
-            continue
-
-        # Continuation: indented / blank lines stay with the card; anything
-        # else terminates the card buffer.
-        if line.strip() == "" or line.startswith(("  ", "\t")):
-            card_buffer.append(line)
+            state.on_heading(h2_match.group(1).strip())
+        elif _CARD_LINE_RE.match(line):
+            state.on_card_line(line)
         else:
-            _flush_card(current_column, current_status, card_buffer, card_index)
-            card_buffer = []
+            state.on_continuation(line)
 
-    _flush_card(current_column, current_status, card_buffer, card_index)
+    state.finish()
 
-    logger.debug("chunk_board: %r → %d chunks", path, len(chunks))
-    return chunks
+    logger.debug("chunk_board: %r → %d chunks", path, len(state.chunks))
+    return state.chunks
 
 
 # ---------------------------------------------------------------------------
