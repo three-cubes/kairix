@@ -7,55 +7,9 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
-### Operations & deployment
+## [2026.5.17] - 2026-05-18 — Faster searches under concurrent load + plug-in support for any LLM provider + shadow-mount config fix
 
-- **Layered config: image-bundled base + sparse operator overlay.** Closes the
-  shadow-mount class of bug that broke `v2026.5.17a9` on the alpha host. The
-  Docker image now ships a complete canonical config at
-  `/opt/kairix/kairix.config.yaml` (every required key, including `provider:`
-  and a `_schema_version: 1` stamp). Operators stop bind-mounting OVER that
-  file; instead they point `KAIRIX_CONFIG_OVERLAY_PATH` at a sparse host-side
-  YAML containing only the keys they want to override (vault paths, agent
-  registry, retrieval tuning). At startup kairix deep-merges overlay on top
-  of base — required keys can't silently vanish because the operator forgot
-  to copy them forward when upgrading. Overlays may pin a minimum schema
-  with `_schema_version_required_min: N`; kairix refuses to start if the
-  image-bundled base ships a lower version, with an actionable error
-  pointing at the upgrade runbook. Legacy single-file `KAIRIX_CONFIG_PATH`
-  remains supported for existing deployments. See
-  [`docs/operations/runbooks/config-overlay-upgrade.md`](docs/operations/runbooks/config-overlay-upgrade.md).
-- **`alpha-deploy-webhook` always force-recreates the container.** Previous
-  releases used `docker compose up -d --wait` which sees a
-  running-but-unhealthy container as "running" and skips the restart — so
-  a config patch on a bind-mounted host file silently failed to take effect
-  until the operator restarted the container by hand. The webhook now passes
-  `--force-recreate`, costing ~10 s per deploy in exchange for eliminating
-  the stale-container trap. Diagnosed during the `v2026.5.17a9` recovery.
-
-### Engineering
-
-- **F1 baseline shrunk from 26 → 9 files (-17, ~65%)** — the F1 fitness
-  function forbids `@patch`/`monkeypatch.setattr` on kairix internals so
-  tests can't reach past public seams. Seventeen test modules graduated
-  off the baseline by adding **public DI keyword-argument seams** on the
-  production code they exercised (CLIs, repositories, caches, resolvers,
-  pool builders, onboard checks, setup wizard, audit, warm runner) and
-  rewiring the tests to inject `tests/fakes.py` implementations through
-  those kwargs. Each refactor was sabotage-proofed (mutate production →
-  confirm fail → restore → confirm pass). The detector also grew a narrow
-  exemption for `with pytest.raises(...)` blocks that assign to
-  frozen-dataclass attributes — those are contract assertions, not
-  monkey-patches.
-- **New behaviour coverage piled on alongside the refactors.** BDD:
-  `classify.feature`, `config_layering.feature` (operator-language
-  scenarios for the layered loader, including the exact `a9` failure
-  mode). Integration: `test_classify_cli_e2e.py`,
-  `test_config_layering_e2e.py`. Architecture: detector test for the new
-  `pytest.raises` exemption.
-
-## [2026.5.17] - 2026-05-17 — Faster searches under concurrent load + plug-in support for any LLM provider
-
-> **Upgrading?** **One required config change**: add `provider: <name>` to the top of your `kairix.config.yaml` before pulling this version. The runtime fails fast at startup if the field is missing and lists the installed plugin names so you can pick. See [`docs/operations/runbooks/how-to-upgrade-kairix.md`](docs/operations/runbooks/how-to-upgrade-kairix.md) for the one-line edit. **New for agents**: searches and embeds feel faster when several agents work at the same time — the system bundles concurrent requests into one network round-trip and keeps the connection to the model warm between calls. **New for operators**: the new `kairix probe-config` command checks your configured endpoint after setup and recommends concrete tuning; seven first-party plug-ins ship today (Azure Foundry, Azure Legacy, OpenAI direct, Bedrock, Ollama, LiteLLM proxy, Anthropic) and a clean three-layer split (domain / transport / providers) makes adding more an additive change.
+> **Upgrading?** **One required config change**: add `provider: <name>` to the top of your `kairix.config.yaml` before pulling this version. The runtime fails fast at startup if the field is missing and lists the installed plugin names so you can pick. See [`docs/operations/runbooks/how-to-upgrade-kairix.md`](docs/operations/runbooks/how-to-upgrade-kairix.md) for the one-line edit. **Operators who bind-mounted `kairix.config.yaml` over the image's config** should migrate to the new overlay pattern before pulling — see [`docs/operations/runbooks/config-overlay-upgrade.md`](docs/operations/runbooks/config-overlay-upgrade.md). **New for agents**: searches and embeds feel faster when several agents work at the same time — the system bundles concurrent requests into one network round-trip and keeps the connection to the model warm between calls. **New for operators**: the new `kairix probe-config` command checks your configured endpoint after setup and recommends concrete tuning; seven first-party plug-ins ship today (Azure Foundry, Azure Legacy, OpenAI direct, Bedrock, Ollama, LiteLLM proxy, Anthropic) and a clean three-layer split (domain / transport / providers) makes adding more an additive change.
 
 ### New for agents
 
@@ -74,6 +28,8 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 - **Search pipeline pre-warms at container start** so the first request doesn't pay the 192 MB factory-init tax. (closes #278, #279)
 - **Benchmark resolves bundled suites by name.** `kairix benchmark run reflib` works from any directory. (closes #268)
 - **`kairix --version` works inside Docker.** Build passes the version so reports show the real release. (closes #267)
+- **Layered config: image-bundled base + sparse operator overlay.** Closes the shadow-mount class of bug that broke `v2026.5.17a9` on the alpha host. The Docker image now ships a complete canonical config at `/opt/kairix/kairix.config.yaml` (every required key, including `provider:` and a `_schema_version: 1` stamp). Operators stop bind-mounting OVER that file; instead they point `KAIRIX_CONFIG_OVERLAY_PATH` at a sparse host-side YAML containing only the keys they want to override (vault paths, agent registry, retrieval tuning). At startup kairix deep-merges overlay on top of base — required keys can't silently vanish because the operator forgot to copy them forward when upgrading. Overlays may pin a minimum schema with `_schema_version_required_min: N`; kairix refuses to start if the image-bundled base ships a lower version, with an actionable error pointing at the upgrade runbook. Legacy single-file `KAIRIX_CONFIG_PATH` remains supported for existing deployments. See [`docs/operations/runbooks/config-overlay-upgrade.md`](docs/operations/runbooks/config-overlay-upgrade.md).
+- **`alpha-deploy-webhook` always force-recreates the container.** Previous releases used `docker compose up -d --wait` which sees a running-but-unhealthy container as "running" and skips the restart — so a config patch on a bind-mounted host file silently failed to take effect until the operator restarted the container by hand. The webhook now passes `--force-recreate`, costing ~10 s per deploy in exchange for eliminating the stale-container trap. Diagnosed during the `v2026.5.17a9` recovery.
 
 ### Internal (the foundation for multi-provider deployments)
 
@@ -85,6 +41,16 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 - **Cognitive-complexity burndown** across chunker / reflib / sweep / entities / contradict / temporal — every flagged function now under 15. (closes #250)
 - **MCP retroactively exposes safe read-only operational capabilities** — onboard check, capability introspection. (closes #277)
 - **Performance + soak test suite** catches regressions like the embed-pipeline class in CI. (closes #276)
+- **F1 baseline shrunk 26 → 9 files (-17, ~65%)** — the F1 fitness function forbids `@patch`/`monkeypatch.setattr` on kairix internals so tests can't reach past public seams. Seventeen test modules graduated off the baseline by adding **public DI keyword-argument seams** on the production code they exercised (CLIs, repositories, caches, resolvers, pool builders, onboard checks, setup wizard, audit, warm runner) and rewiring the tests to inject `tests/fakes.py` implementations through those kwargs. Each refactor was sabotage-proofed (mutate production → confirm fail → restore → confirm pass). The detector also grew a narrow exemption for `with pytest.raises(...)` blocks that assign to frozen-dataclass attributes — those are contract assertions, not monkey-patches.
+- **New behaviour coverage piled on alongside the F1 refactors.** BDD: `classify.feature`, `config_layering.feature` (operator-language scenarios for the layered loader, including the exact `a9` failure mode). Integration: `test_classify_cli_e2e.py`, `test_config_layering_e2e.py`. Architecture: detector test for the new `pytest.raises` exemption.
+
+### Dependency updates
+
+- `docker/login-action` 3.7.0 → 4.1.0 (#290)
+- `actions/download-artifact` 4.3.0 → 8.0.1 (#291)
+- `actions/checkout` 4 → 6 (#292)
+- `ruff` 0.15.12 → 0.15.13 (dev) (#293)
+- `sentence-transformers` requirement widened `>=3.0,<4` → `>=3.0,<6` (#294)
 
 ### Fixed
 
