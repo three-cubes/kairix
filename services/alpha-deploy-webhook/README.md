@@ -48,10 +48,29 @@ process state never carries them. The systemd unit can mount
 
 ## Deploy
 
-Built in CI by `.github/workflows/go-quality.yml` (build-matrix
-linux/arm64). Distributed via the same release pipeline as the docker
-image. systemd unit + apply script live in your sibling infrastructure
-repo (cross-repo; see kairix#272 Phase 4 follow-ups).
+Built in CI by `.github/workflows/go-quality.yml` on every push (build-
+matrix linux/amd64 + linux/arm64 + darwin/amd64 + darwin/arm64), and
+re-built + **attached as a GitHub Release asset** by
+`.github/workflows/release-webhook.yml` on every release (`release:
+[created]` — stable and alpha pre-release alike). Closes #286: before
+this, the binary was hand-shipped via scp + az run-command and the
+binary on the VM would lag develop by days. Now every tagged release
+ships a fresh binary.
+
+Pull URLs (substitute `<tag>` for the release tag, e.g. `v2026.5.16a1`
+or `v2026.5.17`; substitute `<arch>` for `amd64` or `arm64`):
+
+```
+https://github.com/three-cubes/kairix/releases/download/<tag>/alpha-deploy-webhook-linux-<arch>
+https://github.com/three-cubes/kairix/releases/download/<tag>/alpha-deploy-webhook-linux-<arch>.sha256
+```
+
+Both assets are public; no GitHub PAT is required to download. The
+operator-side install script (lives in the sibling infrastructure
+repo) should: `curl` both files, `sha256sum -c` the checksum, atomic-
+swap into `/opt/kairix/bin/alpha-deploy-webhook`, then `systemctl
+restart kairix-alpha-deploy-webhook.service`. systemd unit + apply
+script remain cross-repo (see kairix#272 Phase 4 follow-ups).
 
 ## Run locally
 
