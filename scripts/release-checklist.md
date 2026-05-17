@@ -51,14 +51,17 @@ The workflow:
 ## Deployment
 
 ```bash
+# Substitute <your-deploy-host> with whatever SSH alias / hostname targets your
+# kairix VM (e.g. an entry in ~/.ssh/config, or a DNS name).
+
 # Pull image on the VM
-ssh threecubes 'docker pull ghcr.io/three-cubes/kairix:vYYYY.M.D'
+ssh <your-deploy-host> 'docker pull ghcr.io/three-cubes/kairix:vYYYY.M.D'
 
 # Restart the kairix container (preserves /data/kairix mounts)
-ssh threecubes 'cd /opt/kairix && docker compose pull && docker compose up -d'
+ssh <your-deploy-host> 'cd /opt/kairix && docker compose pull && docker compose up -d'
 
 # Verify health
-ssh threecubes 'curl -fsS http://127.0.0.1:8182/healthz'
+ssh <your-deploy-host> 'curl -fsS http://127.0.0.1:8182/healthz'
 ```
 
 ## UAT

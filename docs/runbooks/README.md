@@ -8,7 +8,7 @@ These are the **VM-facing** runbooks. Docker-compose and how-to-style operationa
 |---|---|---|
 | Search wrong / empty, recall canary regressed, `kairix onboard check` reports failures | [kairix-retrieval-health](kairix-retrieval-health.md) | Diagnosis tree by failed subsystem (secrets → vector → BM25/FTS → agent knowledge → chunk_date → Neo4j); per-failure recovery; full reset; recall-canary regression triage |
 | Package upgrade, unit-file change, secrets-fetcher change on a systemd-managed VM | [kairix-systemd-update](kairix-systemd-update.md) | Safe update sequence, in-flight drain, rollback, verification |
-| Alpha-tag gate from `release-vm-deploy.yml` failing or stuck pending | [kairix-alpha-deploy-webhook](kairix-alpha-deploy-webhook.md) (lives in `three-cubes/tc-agent-zone`) | Bootstrap, install, triage for the VM-side webhook that runs onboard-check + benchmark on each alpha tag |
+| Alpha-tag gate from `release-vm-deploy.yml` failing or stuck pending | `kairix-alpha-deploy-webhook` runbook (lives in your sibling infrastructure repo, alongside the systemd unit + apply script for the webhook) | Bootstrap, install, triage for the VM-side webhook that runs onboard-check + benchmark on each alpha tag |
 
 ## Pre-flight before any recovery
 
