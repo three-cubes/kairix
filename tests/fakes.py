@@ -913,3 +913,105 @@ class FakeRetriever:
         from types import SimpleNamespace
 
         return SimpleNamespace(results=[], vec_failed=False)
+
+
+class FakeProvider:
+    """Configurable ``Provider`` for transport / provider-registry tests.
+
+    Implements ``kairix.providers.Provider``: ``embed_batch``, ``chat``,
+    ``dimension``, ``healthcheck``, plus the ``name`` attribute. Counts
+    every call so transport tests can assert pool / coalescer / cache
+    semantics (e.g. "embed_batch called once for N coalesced texts").
+
+    Configuration:
+      ``name`` — provider name attribute (default ``"fake"``).
+      ``vector`` — fixed embedding vector returned per text
+        (default ``[0.0] * dim``).
+      ``dim`` — embedding dimension reported by ``dimension()``
+        (default ``3``).
+      ``chat_reply`` — fixed string returned from ``chat`` (default ``""``).
+      ``health`` — ``ProviderHealth`` returned by ``healthcheck``
+        (default: ok=True, endpoint=``"fake://provider"``).
+      ``embed_empty`` — when True, ``embed_batch`` returns ``[]`` per text
+        so callers can exercise the soft-failure branch.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str = "fake",
+        vector: list[float] | None = None,
+        dim: int = 3,
+        chat_reply: str = "",
+        health: Any = None,
+        embed_empty: bool = False,
+    ) -> None:
+        from kairix.providers import ProviderHealth
+
+        self.name = name
+        self._vector = list(vector) if vector is not None else [0.0] * dim
+        self._dim = dim
+        self._chat_reply = chat_reply
+        self._health = (
+            health
+            if health is not None
+            else ProviderHealth(
+                ok=True,
+                endpoint="fake://provider",
+                cold_ms=0.0,
+                warm_ms=0.0,
+                error=None,
+            )
+        )
+        self._embed_empty = embed_empty
+        self.embed_calls: list[list[str]] = []
+        self.chat_calls: list[dict[str, Any]] = []
+        self.dimension_calls: int = 0
+        self.healthcheck_calls: int = 0
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        self.embed_calls.append(list(texts))
+        if self._embed_empty:
+            return [[] for _ in texts]
+        return [list(self._vector) for _ in texts]
+
+    def chat(self, messages: list[dict[str, Any]], *, max_tokens: int = 800) -> str:
+        self.chat_calls.append({"messages": list(messages), "max_tokens": max_tokens})
+        return self._chat_reply
+
+    def dimension(self) -> int:
+        self.dimension_calls += 1
+        return self._dim
+
+    def healthcheck(self) -> Any:
+        self.healthcheck_calls += 1
+        return self._health
+
+
+class FakeProviderRegistry:
+    """In-memory ``ProviderRegistry`` for tests.
+
+    Implements ``kairix.providers.ProviderRegistry``: ``resolve(name)``
+    and ``available()``. Takes a name→Provider mapping at construction;
+    unknown names raise ``ProviderNotRegistered`` with the populated
+    ``available`` list.
+
+    Example:
+        registry = FakeProviderRegistry({"openai": FakeProvider(name="openai")})
+        provider = get_provider("openai", registry=registry)
+    """
+
+    def __init__(self, providers: dict[str, Any] | None = None) -> None:
+        self._providers = dict(providers or {})
+        self.resolve_calls: list[str] = []
+
+    def resolve(self, name: str) -> Any:
+        self.resolve_calls.append(name)
+        if name not in self._providers:
+            from kairix.providers import ProviderNotRegistered
+
+            raise ProviderNotRegistered(name=name, available=self.available())
+        return self._providers[name]
+
+    def available(self) -> list[str]:
+        return sorted(self._providers)

@@ -72,6 +72,22 @@ dev = [
 [project.scripts]
 kairix = "kairix.cli:main"
 
+# Provider plugin discovery — name-filtered Python entry points.
+# Operators select a provider by config string (KAIRIX_PROVIDER), not by
+# import statement. Third parties ship their own pip distribution that
+# declares the same group; ``pip install kairix-provider-foo`` then
+# ``KAIRIX_PROVIDER=foo`` works with zero kairix code change. See
+# docs/architecture/provider-plugin-architecture.md § Plugin discovery.
+# Wave-1 factories raise NotImplementedError; Wave 2+ fills them in.
+[project.entry-points."kairix.providers"]
+azure_foundry = "kairix.providers.azure_foundry:make_provider"
+azure_legacy  = "kairix.providers.azure_legacy:make_provider"
+openai        = "kairix.providers.openai:make_provider"
+bedrock       = "kairix.providers.bedrock:make_provider"
+ollama        = "kairix.providers.ollama:make_provider"
+litellm_proxy = "kairix.providers.litellm_proxy:make_provider"
+anthropic     = "kairix.providers.anthropic:make_provider"
+
 [project.urls]
 Homepage = "https://github.com/three-cubes/kairix"
 Issues = "https://github.com/three-cubes/kairix/issues"
