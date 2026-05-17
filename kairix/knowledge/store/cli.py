@@ -16,19 +16,12 @@ from collections.abc import Callable
 from typing import Any
 
 
-def _default_crawl_fn(**kwargs: Any) -> Any:
-    """Production crawl adapter — defers the heavy crawler import until call time."""
-    from kairix.knowledge.store.crawler import crawl
-
-    return crawl(**kwargs)
-
-
 def main(
     argv: list[str] | None = None,
     *,
     neo4j_client: Any = None,
     noninteractive: bool | None = None,
-    crawl_fn: Callable[..., Any] = _default_crawl_fn,
+    crawler: Callable[..., Any] | None = None,
 ) -> None:
     """Entry point for `kairix store`.
 
@@ -43,11 +36,16 @@ def main(
     pipelines. Tests pass an explicit bool to exercise both paths without
     monkeypatching the environment.
 
-    ``crawl_fn`` is the public DI seam for the crawl adapter. Production
-    callers leave it at :func:`_default_crawl_fn`; tests pass a stub to
-    drive ``_cmd_crawl`` without monkey-patching
-    ``kairix.knowledge.store.crawler.crawl``.
+    ``crawler`` is the public DI seam for the crawl adapter. Production
+    callers leave it ``None`` and the CLI lazy-imports
+    ``kairix.knowledge.store.crawler.crawl``; tests pass a stub to drive
+    ``_cmd_crawl`` without monkey-patching the crawler.
     """
+    if crawler is None:
+        from kairix.knowledge.store.crawler import crawl
+
+        crawler = crawl
+
     parser = argparse.ArgumentParser(
         prog="kairix store",
         description="Document store operations: crawl entities into Neo4j, health check",
@@ -86,7 +84,7 @@ def main(
     args = parser.parse_args(argv)
 
     if args.subcommand == "crawl":
-        _cmd_crawl(args, neo4j_client=neo4j_client, noninteractive=noninteractive, crawl_fn=crawl_fn)
+        _cmd_crawl(args, neo4j_client=neo4j_client, noninteractive=noninteractive, crawler=crawler)
     elif args.subcommand == "health":
         _cmd_health(args, neo4j_client=neo4j_client)
     else:
@@ -207,9 +205,14 @@ def _cmd_crawl(
     *,
     neo4j_client: Any = None,
     noninteractive: bool | None = None,
-    crawl_fn: Callable[..., Any] = _default_crawl_fn,
+    crawler: Callable[..., Any] | None = None,
 ) -> None:
     import logging
+
+    if crawler is None:
+        from kairix.knowledge.store.crawler import crawl
+
+        crawler = crawl
 
     level = logging.DEBUG if args.verbose else logging.WARNING
     logging.basicConfig(level=level, format="%(levelname)s %(message)s")
@@ -230,7 +233,7 @@ def _cmd_crawl(
 
     overrides = _resolve_overrides(document_root)
 
-    report = crawl_fn(
+    report = crawler(
         document_root=document_root,
         neo4j_client=neo4j_client,
         dry_run=args.dry_run,

@@ -249,6 +249,87 @@ def test_crawl_non_dry_run_prints_upsert_counts(monkeypatch, tmp_path: Path) -> 
     assert "Edges:         4 found, 4 upserted" in stdout
 
 
+def test_crawl_prints_override_coverage_summary(tmp_path: Path) -> None:
+    """When the crawl report carries override_coverage, the CLI prints the summary lines.
+
+    Drives ``main()`` through the public ``crawler`` seam (no monkey-patching).
+    Sabotage: drop ``_print_override_coverage(report)`` from ``_print_crawl_report``
+    and the override-coverage line disappears from stdout.
+    """
+    from types import SimpleNamespace
+
+    fake_report = SimpleNamespace(
+        dry_run=True,
+        organisations_found=1,
+        organisations_upserted=0,
+        persons_found=0,
+        persons_upserted=0,
+        outcomes_found=0,
+        outcomes_upserted=0,
+        edges_found=0,
+        edges_upserted=0,
+        errors=[],
+        override_coverage=SimpleNamespace(
+            matched=3,
+            total_overrides=5,
+            never_matched=["alpha-org", "beta-org"],
+        ),
+        override_coverage_path="/tmp/override-coverage.json",
+    )
+
+    def _fake_crawl(**_kw: Any) -> Any:
+        return fake_report
+
+    stdout, _stderr, code = _drive(
+        ["crawl", "--document-root", str(tmp_path), "--dry-run"],
+        neo4j_client=FakeNeo4jClient(entities=[]),
+        crawler=_fake_crawl,
+    )
+    assert code == 0
+    assert "Override coverage: 3/5 overrides matched (2 never used)" in stdout
+    assert "Never-matched: ['alpha-org', 'beta-org']" in stdout
+    assert "Coverage report written: /tmp/override-coverage.json" in stdout
+
+
+def test_crawl_override_coverage_truncates_long_never_matched_list(tmp_path: Path) -> None:
+    """Override-coverage prints first 10 never-matched names + "+N more" suffix.
+
+    Sabotage: remove the ``suffix = "" if len(never) <= 10`` line and a list
+    of 12 names prints all 12 without the "+2 more" tail.
+    """
+    from types import SimpleNamespace
+
+    never = [f"org-{i:02d}" for i in range(12)]
+    fake_report = SimpleNamespace(
+        dry_run=True,
+        organisations_found=0,
+        organisations_upserted=0,
+        persons_found=0,
+        persons_upserted=0,
+        outcomes_found=0,
+        outcomes_upserted=0,
+        edges_found=0,
+        edges_upserted=0,
+        errors=[],
+        override_coverage=SimpleNamespace(
+            matched=0,
+            total_overrides=12,
+            never_matched=never,
+        ),
+        override_coverage_path=None,
+    )
+
+    def _fake_crawl(**_kw: Any) -> Any:
+        return fake_report
+
+    stdout, _stderr, _code = _drive(
+        ["crawl", "--document-root", str(tmp_path), "--dry-run"],
+        neo4j_client=FakeNeo4jClient(entities=[]),
+        crawler=_fake_crawl,
+    )
+    assert "+2 more" in stdout
+
+
 # ---------------------------------------------------------------------------
 # _cmd_health branches
 # ---------------------------------------------------------------------------

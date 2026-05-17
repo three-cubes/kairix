@@ -18,34 +18,42 @@ from collections.abc import Callable
 from typing import Any
 
 
-def _default_rule_classifier(content: str, *, agent: str) -> Any:
-    """Production rule-based classifier — defers the heavy import until call time."""
-    from kairix.core.classify.rules import classify_content
+def _resolve_classifiers(
+    rule_classifier: Callable[..., Any] | None,
+    llm_classifier: Callable[..., Any] | None,
+) -> tuple[Callable[..., Any], Callable[..., Any]]:
+    """Resolve the production rule + LLM classifier when callers leave them ``None``.
 
-    return classify_content(content, agent=agent)
+    Lazy-imports keep heavy modules out of the CLI's import path until
+    actually invoked; tests inject fakes through the public seams.
+    """
+    if rule_classifier is None:
+        from kairix.core.classify.rules import classify_content
 
+        rule_classifier = classify_content
+    if llm_classifier is None:
+        from kairix.core.classify.judge import classify_with_llm
 
-def _default_llm_classifier(content: str, *, agent: str) -> Any:
-    """Production LLM-fallback classifier — defers the heavy import until call time."""
-    from kairix.core.classify.judge import classify_with_llm
-
-    return classify_with_llm(content, agent=agent)
+        llm_classifier = classify_with_llm
+    return rule_classifier, llm_classifier
 
 
 def main(
     args: list[str] | None = None,
     *,
-    rule_classifier: Callable[..., Any] = _default_rule_classifier,
-    llm_classifier: Callable[..., Any] = _default_llm_classifier,
+    rule_classifier: Callable[..., Any] | None = None,
+    llm_classifier: Callable[..., Any] | None = None,
 ) -> None:
     """Entry point for `kairix classify`.
 
     ``rule_classifier`` and ``llm_classifier`` are the public DI seams for
     tests that want to drive error paths through the public CLI surface
     instead of monkey-patching the classify-module imports. Production
-    callers leave them at the defaults.
+    callers leave them at ``None`` and the CLI lazy-imports the real ones.
     """
     import argparse
+
+    rule_classifier, llm_classifier = _resolve_classifiers(rule_classifier, llm_classifier)
 
     if args is None:
         args = sys.argv[2:]  # strip 'kairix classify'

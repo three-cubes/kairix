@@ -37,20 +37,20 @@ def _drive(
     *,
     neo4j_client: Any,
     noninteractive: bool | None = None,
-    crawl_fn: Any = None,
+    crawler: Any = None,
 ) -> tuple[str, str, int]:
     """Invoke ``store_cli.main`` and capture stdout/stderr/exit-code.
 
-    When ``crawl_fn`` is supplied (typically the recorder returned by
-    :func:`_stub_crawl`), it threads through the public ``crawl_fn`` DI
+    When ``crawler`` is supplied (typically the recorder returned by
+    :func:`_stub_crawl`), it threads through the public ``crawler`` DI
     seam on :func:`store_cli.main` so tests drive the crawler stub
     without monkey-patching the crawler module.
     """
     out, err = io.StringIO(), io.StringIO()
     code = 0
     kwargs: dict[str, Any] = {"neo4j_client": neo4j_client, "noninteractive": noninteractive}
-    if crawl_fn is not None:
-        kwargs["crawl_fn"] = crawl_fn
+    if crawler is not None:
+        kwargs["crawler"] = crawler
     try:
         with redirect_stdout(out), redirect_stderr(err):
             store_cli.main(args, **kwargs)
@@ -62,8 +62,8 @@ def _drive(
 def _stub_crawl(**extra: Any) -> tuple[list[dict[str, Any]], Any]:
     """Build a recorder + canned-report stub for the crawl adapter.
 
-    Returns ``(captured, crawl_fn)``: the kwargs-recorder list and the
-    callable to pass via the public ``crawl_fn`` DI seam on
+    Returns ``(captured, crawler)``: the kwargs-recorder list and the
+    callable to pass via the public ``crawler`` DI seam on
     :func:`store_cli.main`. Extra report fields can be supplied via
     ``**extra`` (e.g. ``reset_nodes_deleted=...``) without touching every
     test's default report.
@@ -109,14 +109,14 @@ def _stub_crawl(**extra: Any) -> tuple[list[dict[str, Any]], Any]:
 
 def test_reset_without_confirm_refuses_in_interactive_mode(tmp_path: Path) -> None:
     """``--reset`` alone, no env var set, must refuse with exit 2 and an actionable message."""
-    captured, crawl_fn = _stub_crawl()
+    captured, crawler = _stub_crawl()
     fake = FakeNeo4jClient(entities=[{"id": "x", "name": "x", "label": "Organisation"}])
 
     stdout, stderr, code = _drive(
         ["crawl", "--document-root", str(tmp_path), "--reset"],
         neo4j_client=fake,
         noninteractive=False,
-        crawl_fn=crawl_fn,
+        crawler=crawler,
     )
 
     assert code == 2, f"expected refusal exit 2, got {code}"
@@ -131,14 +131,14 @@ def test_reset_without_confirm_refuses_in_interactive_mode(tmp_path: Path) -> No
 
 def test_reset_with_confirm_invokes_reset_graph_and_reports_counts(tmp_path: Path) -> None:
     """``--reset --confirm`` invokes ``reset_graph()`` and the summary prints the deletion counts."""
-    captured, crawl_fn = _stub_crawl()
+    captured, crawler = _stub_crawl()
     fake = FakeNeo4jClient(entities=[{"id": "x", "name": "x", "label": "Organisation"}])
 
     stdout, _stderr, code = _drive(
         ["crawl", "--document-root", str(tmp_path), "--reset", "--confirm"],
         neo4j_client=fake,
         noninteractive=False,
-        crawl_fn=crawl_fn,
+        crawler=crawler,
     )
 
     assert code == 0
@@ -157,14 +157,14 @@ def test_reset_noninteractive_kwarg_bypasses_confirm_requirement(tmp_path: Path)
     This is the F2-clean replacement for ``monkeypatch.setenv("KAIRIX_NONINTERACTIVE", "1")``
     — tests pass the bool directly through the documented seam.
     """
-    captured, crawl_fn = _stub_crawl()
+    captured, crawler = _stub_crawl()
     fake = FakeNeo4jClient(entities=[{"id": "x", "name": "x", "label": "Organisation"}])
 
     stdout, _stderr, code = _drive(
         ["crawl", "--document-root", str(tmp_path), "--reset"],
         neo4j_client=fake,
         noninteractive=True,
-        crawl_fn=crawl_fn,
+        crawler=crawler,
     )
 
     assert code == 0, "noninteractive bypass should let --reset through with exit 0"
@@ -175,14 +175,14 @@ def test_reset_noninteractive_kwarg_bypasses_confirm_requirement(tmp_path: Path)
 
 def test_reset_dry_run_does_not_invoke_reset_graph(tmp_path: Path) -> None:
     """``--reset --confirm --dry-run`` reports intent but never touches the live graph."""
-    captured, crawl_fn = _stub_crawl()
+    captured, crawler = _stub_crawl()
     fake = FakeNeo4jClient(entities=[{"id": "x", "name": "x", "label": "Organisation"}])
 
     stdout, _stderr, code = _drive(
         ["crawl", "--document-root", str(tmp_path), "--reset", "--confirm", "--dry-run"],
         neo4j_client=fake,
         noninteractive=False,
-        crawl_fn=crawl_fn,
+        crawler=crawler,
     )
 
     assert code == 0
@@ -194,14 +194,14 @@ def test_reset_dry_run_does_not_invoke_reset_graph(tmp_path: Path) -> None:
 
 def test_crawl_without_reset_flag_leaves_graph_untouched(tmp_path: Path) -> None:
     """A plain ``kairix store crawl`` must not touch ``reset_graph``."""
-    captured, crawl_fn = _stub_crawl()
+    captured, crawler = _stub_crawl()
     fake = FakeNeo4jClient(entities=[{"id": "x", "name": "x", "label": "Organisation"}])
 
     _stdout, _stderr, code = _drive(
         ["crawl", "--document-root", str(tmp_path)],
         neo4j_client=fake,
         noninteractive=False,
-        crawl_fn=crawl_fn,
+        crawler=crawler,
     )
 
     assert code == 0
