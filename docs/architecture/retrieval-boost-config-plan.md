@@ -135,7 +135,7 @@ class ProceduralBoostConfig:
     )
     # path_patterns: tuple of regex strings matched against result.path
     # Extend with deployment-specific naming conventions
-    
+
     def compiled_patterns(self) -> list[re.Pattern[str]]:
         return [re.compile(p, re.IGNORECASE) for p in self.path_patterns]
 
@@ -160,18 +160,18 @@ class TemporalBoostConfig:
 class RetrievalConfig:
     """
     Controls all corpus-adaptive behaviour in hybrid_search().
-    
+
     Instantiate with defaults for a consulting-style knowledge base.
     Override fields for different corpus types. See docs/architecture/retrieval-boost-config-plan.md.
-    
+
     Usage:
         # Default (consulting-tuned)
         config = RetrievalConfig.defaults()
         results = hybrid_search(query, agent=agent, config=config)
-        
+
         # Date-named file corpus (daily journals)
         config = RetrievalConfig.for_daily_log_corpus()
-        
+
         # Minimal / unknown corpus
         config = RetrievalConfig.minimal()
     """
@@ -424,17 +424,17 @@ def load_retrieval_config(path: Path | None = None) -> RetrievalConfig:
     global _cached
     if _cached is not None:
         return _cached
-    
+
     config_path = (
         path
         or (Path(os.environ["KAIRIX_CONFIG_PATH"]) if "KAIRIX_CONFIG_PATH" in os.environ else None)
         or Path("kairix.config.yaml")
     )
-    
+
     if not config_path.exists():
         _cached = RetrievalConfig.defaults()
         return _cached
-    
+
     try:
         import yaml
         raw = yaml.safe_load(config_path.read_text())
@@ -445,7 +445,7 @@ def load_retrieval_config(path: Path | None = None) -> RetrievalConfig:
             "Failed to load %s — using defaults: %s", config_path, e
         )
         _cached = RetrievalConfig.defaults()
-    
+
     return _cached
 ```
 
