@@ -31,11 +31,19 @@ def test_make_provider_returns_azure_foundry_provider_on_happy_path() -> None:
         dims=1536,
     )
 
+    seen_purposes: list[str] = []
+
     def _resolver(purpose: str) -> Credentials:
-        assert purpose == "embed", f"azure_foundry resolves embed purpose, got {purpose!r}"
+        seen_purposes.append(purpose)
+        assert purpose in ("embed", "llm"), f"azure_foundry resolves embed + llm purposes, got {purpose!r}"
         return fake_creds
 
     provider = make_provider(credentials_resolver=_resolver)
+    assert "embed" in seen_purposes, "make_provider must resolve embed credentials"
+    assert "llm" in seen_purposes, (
+        "make_provider must resolve llm credentials so chat() can use the LLM endpoint+model "
+        "(separate from embed for project-scoped Foundry deployments)"
+    )
     assert isinstance(provider, AzureFoundryProvider)
     assert isinstance(provider, Provider)
     assert provider.name == "azure_foundry"

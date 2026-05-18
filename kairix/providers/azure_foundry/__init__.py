@@ -52,6 +52,13 @@ def make_provider(
     encodes the vault-agent → env → Azure Key Vault fallback) and
     constructs an :class:`AzureFoundryProvider` against it.
 
+    Also resolves the ``llm`` credential set so chat-completions calls
+    use the LLM endpoint+model, not the embed endpoint+model. New
+    Foundry project-scoped deployments expose chat-completions on a
+    different base URL than embeddings on the same resource — without
+    the split, ``chat()`` posts to the embed endpoint with the embed
+    model name and Azure returns 400 "operation is unsupported".
+
     Tests pass ``credentials_resolver=lambda purpose: Credentials(...)``
     to inject a stub resolver — F1-clean (no internal patching) and
     F6-clean (production default is a real callable, not ``None``).
@@ -65,7 +72,9 @@ def make_provider(
             "next: set provider: azure_foundry in kairix.config.yaml once "
             "secrets are populated."
         )
-    return AzureFoundryProvider(credentials=creds)
+    llm_creds_raw = credentials_resolver("llm")
+    llm_creds = llm_creds_raw if isinstance(llm_creds_raw, Credentials) else None
+    return AzureFoundryProvider(credentials=creds, llm_credentials=llm_creds)
 
 
 __all__ = [

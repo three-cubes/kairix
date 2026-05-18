@@ -234,8 +234,18 @@ class AzureFoundryProvider:
         self,
         credentials: Credentials,
         transport_client: Any | None = None,
+        *,
+        llm_credentials: Credentials | None = None,
     ) -> None:
         self._credentials = credentials
+        # New Foundry "project"-scoped deployments expose chat-completions
+        # on a *different* base URL than embeddings on the same Azure
+        # resource (e.g. embed at /openai/v1 on the resource root, chat
+        # at /api/projects/<proj>/openai/v1). When ``llm_credentials`` is
+        # provided, ``chat()`` uses those; ``embed_batch()`` keeps using
+        # ``credentials``. Falls back to ``credentials`` for back-compat
+        # with single-endpoint installs and existing tests.
+        self._llm_credentials = llm_credentials if llm_credentials is not None else credentials
         self._transport_client = transport_client
         # Last-known embed dimension; populated from the first successful
         # embed response so ``dimension()`` reflects what the deployed
@@ -247,23 +257,31 @@ class AzureFoundryProvider:
     # Internal: transport client resolution
     # ------------------------------------------------------------------
 
-    def _client(self) -> Any:
+    def _client(self, *, purpose: str = "embed") -> Any:
         """Return the configured transport client, lazily building one.
+
+        ``purpose`` selects which credential bundle backs the client:
+        ``"embed"`` (default) uses the embed credentials passed to the
+        constructor; ``"llm"`` uses :attr:`_llm_credentials` (split
+        endpoint/model for project-scoped Foundry deployments).
 
         Production callers don't pass ``transport_client``; the plugin
         builds an openai-compat client via
         :func:`kairix.credentials.make_openai_client` which already
         encodes the Foundry URL-suffix detection and pool configuration.
         Tests pass an explicit fake recording client and this lazy
-        construction is skipped entirely.
+        construction is skipped entirely — the test fake is shared
+        across both embed and chat paths because tests inject one
+        recording transport for both.
         """
         if self._transport_client is not None:
             return self._transport_client
         from kairix.credentials import make_openai_client
 
+        creds = self._llm_credentials if purpose == "llm" else self._credentials
         return make_openai_client(
-            self._credentials.api_key,
-            self._credentials.endpoint,
+            creds.api_key,
+            creds.endpoint,
         )
 
     # ------------------------------------------------------------------
@@ -329,13 +347,13 @@ class AzureFoundryProvider:
 
         Maps transport failures via :func:`_map_transport_error`.
         """
-        client = self._client()
+        client = self._client(purpose="llm")
         kwargs: dict[str, Any] = {
-            "model": self._credentials.model,
+            "model": self._llm_credentials.model,
             "messages": list(messages),
             "temperature": 0.3,
         }
-        if _uses_max_completion_tokens(self._credentials.model):
+        if _uses_max_completion_tokens(self._llm_credentials.model):
             kwargs["max_completion_tokens"] = max_tokens
         else:
             kwargs["max_tokens"] = max_tokens
