@@ -6,6 +6,7 @@ All methods return safe defaults on failure ([] or None) and never raise.
 
 from __future__ import annotations
 
+import functools
 import logging
 import sqlite3
 from pathlib import Path
@@ -15,6 +16,12 @@ from kairix.core.db import open_db
 
 logger = logging.getLogger(__name__)
 
+# Bound on the per-repo chunk-date LRU. Sized larger than any reasonable
+# bm25_limit + vector_limit sum so a single search's enrich call never
+# evicts the prior search's batch under conc>=5 traffic — eviction under
+# load drives SQLite-WAL-lock contention on the enrich path.
+_CHUNK_DATES_CACHE_MAX = 256
+
 
 class SQLiteDocumentRepository:
     """DocumentRepository implementation backed by SQLite + FTS5.
@@ -22,8 +29,21 @@ class SQLiteDocumentRepository:
     Satisfies kairix.core.protocols.DocumentRepository.
     """
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, opener: Any = None) -> None:
         self._db_path = db_path
+        # Public DI seam — production callers omit ``opener`` and the
+        # repo uses the module-level ``open_db``. Tests inject a fake
+        # opener to drive open-failure / cursor-failure branches without
+        # monkey-patching the repository module's ``open_db`` binding.
+        self._opener = opener if opener is not None else open_db
+        # Bounded LRU around the per-batch chunk-date lookup. The cache key
+        # is the frozenset of paths (order-independent); the value is the
+        # path -> chunk_date dict. Cache invalidates on process restart,
+        # which matches the chunk_date update cycle (re-embed rewrites the
+        # row).  The instance-attribute pattern (rather than decorating the
+        # bound method) keeps ``self`` out of the cache key, so the LRU is
+        # per-repo and ``self`` is not weakly held by ``functools``.
+        self._chunk_dates_cache = functools.lru_cache(maxsize=_CHUNK_DATES_CACHE_MAX)(self._get_chunk_dates_uncached)
 
     def _log_fts_operational_error(self, exc: sqlite3.OperationalError) -> None:
         """Log a SQLite OperationalError with severity based on missing-table vs other.
@@ -78,7 +98,7 @@ class SQLiteDocumentRepository:
             return []
 
         try:
-            db = open_db(Path(self._db_path))
+            db = self._opener(Path(self._db_path))
             db.row_factory = sqlite3.Row
         except Exception as e:
             logger.warning("SQLiteDocumentRepository.search_fts: cannot open DB — %s", e)
@@ -104,7 +124,7 @@ class SQLiteDocumentRepository:
     def get_by_path(self, path: str) -> dict[str, Any] | None:
         """Look up a document by its path. Returns None if not found."""
         try:
-            db = open_db(Path(self._db_path))
+            db = self._opener(Path(self._db_path))
             db.row_factory = sqlite3.Row
             row = db.execute(
                 "SELECT d.path, d.collection, d.title, d.hash, COALESCE(c.doc, '') AS content "
@@ -123,22 +143,38 @@ class SQLiteDocumentRepository:
     def get_chunk_dates(self, paths: list[str]) -> dict[str, str]:
         """Return {path: chunk_date} for paths that have a chunk_date.
 
-        Uses LIKE suffix match because DB stores absolute paths while callers
-        may use collection-relative paths.
+        Delegates to the per-instance LRU cache keyed on ``frozenset(paths)``
+        so that overlapping result sets (the common case when the BM25 and
+        vector legs return many of the same hits across concurrent queries)
+        do not repeatedly acquire the SQLite WAL reader lock.
+
+        Order-independent: ``["a", "b"]`` and ``["b", "a"]`` resolve to the
+        same cache entry. The empty-path short-circuit stays here rather
+        than in the cached call so we never waste a cache slot on it.
         """
         if not paths:
             return {}
+        return self._chunk_dates_cache(frozenset(paths))
 
+    def _get_chunk_dates_uncached(self, paths: frozenset[str]) -> dict[str, str]:
+        """SQL backend for :meth:`get_chunk_dates`. Only called on cache miss.
+
+        Uses LIKE suffix match because the DB stores absolute paths while
+        callers may use collection-relative paths.
+        """
+        # Materialise once so the SQL parameter list and the LIKE-clause
+        # generator iterate the same elements in the same order.
+        path_list = list(paths)
         try:
-            db = open_db(Path(self._db_path))
+            db = self._opener(Path(self._db_path))
             try:
-                like_clauses = " OR ".join("d.path LIKE ?" for _ in paths)
+                like_clauses = " OR ".join("d.path LIKE ?" for _ in path_list)
                 rows = db.execute(
                     f"SELECT d.path, cv.chunk_date "
                     f"FROM content_vectors cv "
                     f"JOIN documents d ON d.hash = cv.hash "
                     f"WHERE cv.chunk_date IS NOT NULL AND ({like_clauses})",
-                    [f"%{p}" for p in paths],
+                    [f"%{p}" for p in path_list],
                 ).fetchall()
             finally:
                 db.close()
@@ -151,6 +187,16 @@ class SQLiteDocumentRepository:
             result[path] = chunk_date
         return result
 
+    def clear_chunk_dates_cache(self) -> None:
+        """Drop all cached chunk-date entries.
+
+        Call this after any mutation that can change the answer to a prior
+        ``get_chunk_dates`` query (e.g. ``kairix embed`` rewrites
+        ``content_vectors.chunk_date``). Also used by tests to verify that
+        ``cache_clear`` correctly resets state.
+        """
+        self._chunk_dates_cache.cache_clear()
+
     def insert_or_update(
         self,
         path: str,
@@ -161,7 +207,7 @@ class SQLiteDocumentRepository:
     ) -> None:
         """Insert or update a document and its content."""
         try:
-            db = open_db(Path(self._db_path))
+            db = self._opener(Path(self._db_path))
             try:
                 db.execute(
                     "INSERT OR REPLACE INTO content (hash, doc) VALUES (?, ?)",

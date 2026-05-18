@@ -15,21 +15,27 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _default_chat(prompt: str, api_key: str, endpoint: str) -> str:  # pragma: no cover — prod Azure wrapper
-    """Production chat callable — wraps ``kairix._azure.chat_completion``.
+def _default_chat(prompt: str, api_key: str, endpoint: str) -> str:  # pragma: no cover — prod provider wrapper
+    """Production chat callable — wraps the configured provider plugin.
 
     Kept as a top-level function so ``OnboardingAgentDeps.chat`` has a
-    stable, typed default that doesn't import ``kairix._azure`` at
+    stable, typed default that doesn't resolve the plugin at
     module-import time.
 
     The ``api_key`` and ``endpoint`` args are part of the chat-callable
-    interface for symmetry with test fakes; the real ``chat_completion``
-    resolves credentials internally via the kairix paths layer.
+    interface for symmetry with test fakes; the real provider plugin
+    resolves credentials internally (Key Vault, Secrets Manager, etc.).
     """
-    del api_key, endpoint  # the prod path resolves Azure creds internally
-    from kairix._azure import chat_completion
+    del api_key, endpoint  # the prod path resolves provider creds internally
+    from kairix.paths import provider_name
+    from kairix.providers import get_provider
+    from kairix.transport.embed_service import ProviderChatBackend
 
-    return chat_completion(
+    name = provider_name()
+    if name is None:
+        raise ValueError("kairix.config.yaml is missing the required 'provider:' field")
+    backend = ProviderChatBackend(get_provider(name))
+    return backend.chat(
         [{"role": "user", "content": prompt}],
         max_tokens=200,
     )
@@ -42,7 +48,8 @@ class OnboardingAgentDeps:
     F1/F6-clean: tests pass ``OnboardingAgentDeps(chat=fake)`` instead
     of patching ``kairix.platform.setup.agent._call_llm`` or threading
     a ``*_fn=None`` kwarg. Production callers leave the kwarg unset and
-    the default factory wires the real Azure chat backend.
+    the default factory wires a ``ProviderChatBackend`` over the
+    configured provider plugin.
     """
 
     chat: Callable[[str, str, str], str] = field(default_factory=lambda: _default_chat)
@@ -135,8 +142,8 @@ def _call_llm(
 
     ``chat`` is the injected backend callable (typed shape:
     ``(prompt, api_key, endpoint) -> str``). Production callers wire
-    the real Azure chat backend via ``OnboardingAgentDeps``; tests pass
-    a fake chat callable.
+    a ``ProviderChatBackend`` over the configured plugin via
+    ``OnboardingAgentDeps``; tests pass a fake chat callable.
     """
     prompt = (
         f"I have a knowledge base with {total_docs} documents. "

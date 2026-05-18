@@ -47,7 +47,7 @@ def _config(*shared_names: str, pattern: str = "{agent}-memory") -> CollectionsC
 #
 # The resolver's public ``resolve()`` is the boundary that converts the
 # string-typed scope into a ``Scope`` member; these probes pin that
-# coercion, since other modules historically passed plain strings.
+# coercion so callers can keep passing the documented string spellings.
 # ---------------------------------------------------------------------------
 
 

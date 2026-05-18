@@ -136,17 +136,17 @@ def test_search_fts_returns_empty_when_open_db_swap_raises(db_path: Path, repo: 
     module load, so the binding lives on the repository module — we
     swap it there.
     """
-    from kairix.core.db import repository as repo_mod
 
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated open failure")
 
-    real = repo_mod.open_db
-    repo_mod.open_db = _boom
+    repo._opener = _boom
     try:
         result = repo.search_fts("anything")
     finally:
-        repo_mod.open_db = real
+        from kairix.core.db import open_db as _real_open_db
+
+        repo._opener = _real_open_db
 
     assert result == []
 
@@ -260,17 +260,17 @@ def test_get_by_path_returns_none_when_open_db_raises(db_path: Path, repo: SQLit
     """Drives lines 100-102 — sqlite3 / OS error during ``open_db`` is
     caught and the repo returns ``None``.
     """
-    from kairix.core.db import repository as repo_mod
 
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated open failure")
 
-    real = repo_mod.open_db
-    repo_mod.open_db = _boom
+    repo._opener = _boom
     try:
         result = repo.get_by_path("docs/a.md")
     finally:
-        repo_mod.open_db = real
+        from kairix.core.db import open_db as _real_open_db
+
+        repo._opener = _real_open_db
 
     assert result is None
 
@@ -348,17 +348,17 @@ def test_get_chunk_dates_returns_empty_when_open_db_raises(
     The except clause catches sqlite3.Error / OSError so the embedding
     pipeline can survive a transient DB failure.
     """
-    from kairix.core.db import repository as repo_mod
 
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated open failure")
 
-    real = repo_mod.open_db
-    repo_mod.open_db = _boom
+    repo._opener = _boom
     try:
         result = repo.get_chunk_dates(["docs/anything.md"])
     finally:
-        repo_mod.open_db = real
+        from kairix.core.db import open_db as _real_open_db
+
+        repo._opener = _real_open_db
 
     assert result == {}
 
@@ -407,21 +407,163 @@ def test_insert_or_update_swallows_open_db_failure(
     swallowed so the embed pipeline can surface a single warning
     rather than crash the whole run.
     """
-    from kairix.core.db import repository as repo_mod
 
     def _boom(path: Path | None = None) -> sqlite3.Connection:
         raise sqlite3.OperationalError("simulated insert failure")
 
-    real = repo_mod.open_db
-    repo_mod.open_db = _boom
+    repo._opener = _boom
     try:
         # Must not raise.
         repo.insert_or_update("docs/y.md", "notes", "Y", "body", "hash-y")
     finally:
-        repo_mod.open_db = real
+        from kairix.core.db import open_db as _real_open_db
+
+        repo._opener = _real_open_db
 
 
-# ── search_fts result-shape regression: score normalisation ──────────
+# ── get_chunk_dates LRU cache (W1D SQLite WAL contention fix) ────────
+
+
+def _seed_chunk_dated(db_path: Path, *, path: str, chunk_date: str, content_hash: str) -> None:
+    """Seed a document + content + content_vectors row with a chunk_date."""
+    repo = SQLiteDocumentRepository(db_path=db_path)
+    repo.insert_or_update(path, "notes", "T", "body", content_hash)
+    db = open_db(db_path)
+    try:
+        db.execute(
+            "INSERT INTO content_vectors (hash, seq, pos, model, embedded_at, chunk_date) VALUES (?, ?, ?, ?, ?, ?)",
+            (content_hash, 0, 0, "model", 1000, chunk_date),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+@pytest.mark.unit
+def test_get_chunk_dates_returns_expected_dict(db_path: Path, repo: SQLiteDocumentRepository) -> None:
+    """Happy path through the cache: the dict shape matches the legacy direct-SQL path.
+
+    Sabotage: if the cache-miss path returned ``{}`` instead of running the
+    SQL, this assertion would fail with an empty dict.
+    """
+    _seed_chunk_dated(db_path, path="/abs/d1.md", chunk_date="2026-05-01", content_hash="h-d1")
+
+    result = repo.get_chunk_dates(["d1.md"])
+
+    assert result == {"/abs/d1.md": "2026-05-01"}
+
+
+@pytest.mark.unit
+def test_get_chunk_dates_caches_by_path_set(db_path: Path, repo: SQLiteDocumentRepository) -> None:
+    """Two calls with the same path set return the identical dict object.
+
+    ``functools.lru_cache`` returns the cached value by reference, so the
+    second call must yield the exact same dict instance — proving the SQL
+    backend was not re-entered.
+
+    Sabotage: if the cache were removed (``get_chunk_dates`` straight-piping
+    to the SQL helper every call), each call would build a fresh dict and
+    the ``is`` check would fail.
+    """
+    _seed_chunk_dated(db_path, path="/abs/d2.md", chunk_date="2026-05-02", content_hash="h-d2")
+
+    first = repo.get_chunk_dates(["d2.md"])
+    second = repo.get_chunk_dates(["d2.md"])
+
+    assert first is second
+
+
+@pytest.mark.unit
+def test_get_chunk_dates_cache_independent_of_path_order(db_path: Path, repo: SQLiteDocumentRepository) -> None:
+    """``["a", "b"]`` and ``["b", "a"]`` produce the same cache entry.
+
+    The key is ``frozenset(paths)`` which is order-independent; this test
+    pins that invariant.
+
+    Sabotage: if the cache key used ``tuple(paths)`` (order-sensitive), the
+    second call would miss the cache and yield a fresh dict.
+    """
+    _seed_chunk_dated(db_path, path="/abs/a.md", chunk_date="2026-05-03", content_hash="h-a")
+    _seed_chunk_dated(db_path, path="/abs/b.md", chunk_date="2026-05-04", content_hash="h-b")
+
+    forward = repo.get_chunk_dates(["a.md", "b.md"])
+    reverse = repo.get_chunk_dates(["b.md", "a.md"])
+
+    assert forward is reverse
+
+
+@pytest.mark.unit
+def test_get_chunk_dates_disjoint_paths_dont_collide(db_path: Path, repo: SQLiteDocumentRepository) -> None:
+    """Disjoint path sets produce separate cache entries with their own dicts.
+
+    Sabotage: if the cache collapsed everything onto one key, the second
+    call would return ``forward``'s dict and the ``is not`` assertion would
+    fail.
+    """
+    _seed_chunk_dated(db_path, path="/abs/x.md", chunk_date="2026-05-05", content_hash="h-x")
+    _seed_chunk_dated(db_path, path="/abs/y.md", chunk_date="2026-05-06", content_hash="h-y")
+
+    only_x = repo.get_chunk_dates(["x.md"])
+    only_y = repo.get_chunk_dates(["y.md"])
+
+    assert only_x is not only_y
+    assert only_x == {"/abs/x.md": "2026-05-05"}
+    assert only_y == {"/abs/y.md": "2026-05-06"}
+
+
+@pytest.mark.unit
+def test_cache_clear_resets_state(db_path: Path, repo: SQLiteDocumentRepository) -> None:
+    """After ``clear_chunk_dates_cache()`` the next call re-queries the SQL.
+
+    We prove "re-queries SQL" by mutating the underlying row between the
+    first and second call: with the cache, the second call returns the
+    stale value; after cache_clear, the second call sees the new value.
+
+    Sabotage: if ``clear_chunk_dates_cache`` were a no-op, the second
+    assertion would still return the stale ``"2026-05-07"`` and fail.
+    """
+    _seed_chunk_dated(db_path, path="/abs/c.md", chunk_date="2026-05-07", content_hash="h-c")
+
+    first = repo.get_chunk_dates(["c.md"])
+    assert first == {"/abs/c.md": "2026-05-07"}
+
+    # Mutate the chunk_date underneath the cache.
+    db = open_db(db_path)
+    try:
+        db.execute("UPDATE content_vectors SET chunk_date = ? WHERE hash = ?", ("2026-05-08", "h-c"))
+        db.commit()
+    finally:
+        db.close()
+
+    # Without cache_clear, the cached value still wins.
+    cached_again = repo.get_chunk_dates(["c.md"])
+    assert cached_again == {"/abs/c.md": "2026-05-07"}
+
+    repo.clear_chunk_dates_cache()
+    fresh = repo.get_chunk_dates(["c.md"])
+    assert fresh == {"/abs/c.md": "2026-05-08"}
+
+
+@pytest.mark.unit
+def test_cache_miss_invokes_sql_exactly_once_per_unique_pathset(db_path: Path, repo: SQLiteDocumentRepository) -> None:
+    """The cached call dispatches to the SQL helper exactly once per unique
+    ``frozenset(paths)``. Verified via ``CacheInfo`` from the LRU wrapper.
+
+    Sabotage: if the cache were bypassed, ``hits`` would stay at 0 and the
+    assertion ``hits == 2`` would fail.
+    """
+    _seed_chunk_dated(db_path, path="/abs/p.md", chunk_date="2026-05-09", content_hash="h-p")
+
+    repo.get_chunk_dates(["p.md"])  # miss
+    repo.get_chunk_dates(["p.md"])  # hit
+    repo.get_chunk_dates(["p.md"])  # hit
+
+    info = repo._chunk_dates_cache.cache_info()
+    assert info.misses == 1
+    assert info.hits == 2
+
+
+# ── search_fts result-shape contract: score normalisation ───────────
 
 
 @pytest.mark.unit

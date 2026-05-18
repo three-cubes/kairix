@@ -4,7 +4,7 @@
 
 You are the operator (human or agent) pushing a new kairix package version, a unit-file change, or a secrets-fetcher change onto a systemd-managed VM. This runbook is the safe path for update plus rollback. Every step ends with a concrete next action — if a step does not give you one, stop and escalate.
 
-Closes [#257](https://github.com/three-cubes/kairix/issues/257) (migrated from tc-agent-zone#140).
+Closes [#257](https://github.com/three-cubes/kairix/issues/257) (migrated from a sibling infrastructure repo issue).
 
 ---
 
@@ -12,7 +12,7 @@ Closes [#257](https://github.com/three-cubes/kairix/issues/257) (migrated from t
 
 Reach for this runbook when you are about to:
 
-- Bump the installed kairix package version (`pip install --upgrade kairix==<version>`, or `kairix-deploy.sh` from tc-agent-zone).
+- Bump the installed kairix package version (`pip install --upgrade kairix==<version>`, or your operator-owned `kairix-deploy.sh` from a sibling infrastructure repo).
 - Change the `kairix-mcp.service` unit file (ports, environment, `ExecStart`, `Restart=` policy).
 - Change the `kairix-fetch-secrets.service` unit file or its rendered `/run/secrets/kairix.env` writer (the docker-compose `vault-agent` analogue for the VM).
 - Land a `kairix-worker.service` unit file once #243 ships — the SRE worker is planned but not yet on the VM; use the worker-CLI procedure here in the interim.
@@ -75,7 +75,8 @@ kairix worker status
 Use whichever path your operator config supports. Both are safe at this point because the worker is paused.
 
 ```bash
-# Preferred — operator-owned deploy script (tc-agent-zone).
+# Preferred — operator-owned deploy script (lives in your infrastructure repo,
+# not in the kairix repo — e.g. a separate ops repo with systemd units + apply scripts).
 sudo /opt/kairix/bin/kairix-deploy.sh --version <NEW_VERSION>
 
 # Fallback — direct pip into the kairix virtualenv.
@@ -85,7 +86,7 @@ sudo /opt/kairix/.venv/bin/pip install --upgrade kairix==<NEW_VERSION>
 kairix --version
 ```
 
-**Known gap:** today `kairix-deploy.sh` ignores the `kairix onboard check` exit code and has no `--rollback` flag. Track the fix at [tc-agent-zone#144](https://github.com/three-cubes/tc-agent-zone/issues/144); until it lands, you are the gate — run §3 step 4 manually and refuse to proceed if it is not 9/9.
+**Known gap:** today `kairix-deploy.sh` (whatever your equivalent is called) typically ignores the `kairix onboard check` exit code and has no `--rollback` flag. Track the fix in your infrastructure repo's issue tracker; until it lands, you are the gate — run §3 step 4 manually and refuse to proceed if it is not 9/9.
 
 **Next action:** confirm `kairix --version` prints the target version. If pip silently kept the old version (cached wheel), re-run with `--force-reinstall --no-deps`.
 
@@ -232,7 +233,7 @@ See [`kairix-retrieval-health.md`](kairix-retrieval-health.md) §4 ("No vectors 
 
 ## 5. Rollback
 
-Rollback today is manual — there is no `kairix-deploy.sh --rollback` flag yet. The gap is tracked at [tc-agent-zone#144](https://github.com/three-cubes/tc-agent-zone/issues/144); the existing operator-facing checklist lives at `infra/config/kairix-deployment-checklist.md` in tc-agent-zone and uses the same procedure below.
+Rollback today is manual — there is no `kairix-deploy.sh --rollback` flag yet. Track the gap in your infrastructure repo's issue tracker. If your operator-side checklist for deployment lives in that sibling repo (e.g. `infra/config/kairix-deployment-checklist.md`), it should follow the same procedure below.
 
 Use rollback when:
 
@@ -278,7 +279,7 @@ kairix benchmark compare \
 
 **Next action:** confirm rollback restored `fully_passed: true` and the benchmark is back at baseline. File an incident issue per §6 with both pre-update and post-update onboard envelopes attached so the regression can be triaged before re-attempting the update.
 
-**Forward link:** once tc-agent-zone#144 lands, rollback becomes `sudo /opt/kairix/bin/kairix-deploy.sh --rollback`; this section will collapse to that one command and the gating sequence above will move into the script.
+**Forward link:** once your infrastructure repo's deploy-script gap is closed, rollback becomes `sudo /opt/kairix/bin/kairix-deploy.sh --rollback` (or your equivalent); this section will collapse to that one command and the gating sequence above will move into the script.
 
 ---
 
@@ -335,6 +336,6 @@ If rollback restores the package but onboard check still cannot return 9/9, the 
 - [`kairix-entity-audit.md`](../operations/runbooks/kairix-entity-audit.md) — audit the entity graph if entity-driven queries regress post-update.
 - [`how-to-upgrade-kairix.md`](../operations/runbooks/how-to-upgrade-kairix.md) — Docker-compose upgrade procedure; this runbook is the systemd-on-VM counterpart.
 - [`runbook-benchmark-regression.md`](../operations/runbooks/runbook-benchmark-regression.md) — bisect workflow when §3 step 6 or §5 step 6 shows a regression.
-- [tc-agent-zone#144](https://github.com/three-cubes/tc-agent-zone/issues/144) — `kairix-deploy.sh` resilience: rollback flag, onboard-check exit-code gating.
+- Your infrastructure repo's `kairix-deploy.sh` resilience tracker — rollback flag, onboard-check exit-code gating.
 - [kairix#243](https://github.com/three-cubes/kairix/issues/243) — SRE worker design: collapses `kairix-fetch-secrets.service` into a managed step inside `kairix-worker.service`, eliminating the disabled-after-reboot failure mode in §4.
 - `kairix-secrets-rotation.md` — the next runbook the operator owes; covers `KAIRIX_LLM_API_KEY` / `KAIRIX_LLM_ENDPOINT` rotation without a package change. Will live in this same directory.

@@ -237,11 +237,11 @@ def run_embed(deps: WorkerDeps | None = None) -> bool:
     KEEP RUNNING on a schedule; the embed use case's job is to do the
     work and report what happened.
 
-    The pre-v2026.5.10 worker called the embed CLI which used
-    ``sys.exit()`` to signal recall-gate failures. ``SystemExit`` is
-    not caught by ``except Exception``, so any gate alert killed the
-    worker process. That coupling is removed here: the use case
-    returns a ``EmbedPipelineResult`` dataclass; we inspect it and log.
+    The embed use case returns an ``EmbedPipelineResult`` dataclass that
+    the worker inspects and logs — it must NOT call a code path that uses
+    ``sys.exit()`` (e.g. the embed CLI) because ``SystemExit`` is not
+    caught by ``except Exception`` and any gate alert would kill the
+    worker process.
 
     ``deps.embed`` is the injection seam: tests pass a callable returning
     either the result dataclass or None (legacy). Production passes
@@ -270,6 +270,16 @@ def compute_embed_interval(base: int, noop_streak: int) -> int:
 def run_entity_seed(deps: WorkerDeps | None = None) -> None:
     """Run entity relationship seeding from document store structure.
 
+    Treats every outcome as non-fatal: the underlying store-crawl CLI
+    (``kairix.knowledge.store.cli``) calls ``sys.exit(0)`` on success
+    and ``sys.exit(1)`` on error. ``SystemExit`` does NOT inherit from
+    ``Exception``, so catching only ``Exception`` lets a "successful"
+    ``sys.exit(0)`` propagate out and terminate the worker process —
+    that's the #270 regression where the kairix-worker container exits
+    0 every cycle and Docker restarts it on a loop. Same
+    ``(Exception, SystemExit)`` discipline as ``run_embed`` and
+    ``run_wikilinks_inject``.
+
     Args:
         deps: Injectable worker dependencies. Tests construct
               ``WorkerDeps(entity_seed=fake)``; production omits the
@@ -281,8 +291,8 @@ def run_entity_seed(deps: WorkerDeps | None = None) -> None:
         logger.info("worker: starting entity seed")
         deps.entity_seed()
         logger.info("worker: entity seed complete")
-    except Exception as exc:
-        logger.warning("worker: entity seed failed — %s", exc)
+    except (Exception, SystemExit) as exc:
+        logger.warning("worker: entity seed raised — %s", exc)
 
 
 def run_wikilinks_inject(deps: WorkerDeps | None = None) -> None:
@@ -313,6 +323,13 @@ def run_wikilinks_inject(deps: WorkerDeps | None = None) -> None:
 def run_health_check(deps: WorkerDeps | None = None) -> None:
     """Log a health check.
 
+    Treats every outcome as non-fatal — including ``SystemExit`` —
+    for the same reason as ``run_entity_seed``: a maintenance helper
+    that calls ``sys.exit`` must not terminate the worker process.
+    See #270 for the entity-seed regression and the (Exception,
+    SystemExit) tuple discipline the worker enforces at every CLI
+    boundary.
+
     Args:
         deps: Injectable worker dependencies. Tests construct
               ``WorkerDeps(health_check=fake)``; production omits the
@@ -324,8 +341,8 @@ def run_health_check(deps: WorkerDeps | None = None) -> None:
         passed = sum(1 for r in results if r.ok)
         total = len(results)
         logger.info("worker: health check %d/%d passed", passed, total)
-    except Exception as exc:
-        logger.warning("worker: health check failed — %s", exc)
+    except (Exception, SystemExit) as exc:
+        logger.warning("worker: health check raised — %s", exc)
 
 
 @dataclass
@@ -445,6 +462,39 @@ def _run_maintenance_task(
     transition(WorkerPhase.IDLE)
 
 
+def _maybe_run_maintenance_cycle(
+    *,
+    deps: WorkerDeps,
+    transition: Callable[[WorkerPhase], None],
+    now: float,
+    maintenance_active: bool,
+    last_entity: float,
+    last_health: float,
+    last_wikilinks: float,
+    schedule: _Schedule,
+) -> tuple[float, float, float]:
+    """Run any maintenance task whose interval has elapsed; return updated timestamps.
+
+    Three near-identical "if interval elapsed → run task → record timestamp"
+    blocks collapsed into a dispatch loop to keep ``main``'s cognitive
+    complexity under the F16 / S3776 limit (#250 follow-up).
+    """
+    if not maintenance_active:
+        return (last_entity, last_health, last_wikilinks)
+
+    tasks = (
+        ("entity", schedule.entity, last_entity, run_entity_seed),
+        ("health", schedule.health, last_health, run_health_check),
+        ("wikilinks", schedule.wikilinks, last_wikilinks, run_wikilinks_inject),
+    )
+    new_times: dict[str, float] = {"entity": last_entity, "health": last_health, "wikilinks": last_wikilinks}
+    for name, interval, last_run, task in tasks:
+        if now - last_run >= interval:
+            _run_maintenance_task(deps, transition, task)
+            new_times[name] = now
+    return (new_times["entity"], new_times["health"], new_times["wikilinks"])
+
+
 def main(
     *,
     deps: WorkerDeps | None = None,
@@ -550,17 +600,16 @@ def main(
             maintenance_active, previously_skipping_maint, consecutive_embed_noops
         )
 
-        if maintenance_active and now - last_entity >= schedule.entity:
-            _run_maintenance_task(deps, _transition, run_entity_seed)
-            last_entity = now
-
-        if maintenance_active and now - last_health >= schedule.health:
-            _run_maintenance_task(deps, _transition, run_health_check)
-            last_health = now
-
-        if maintenance_active and now - last_wikilinks >= schedule.wikilinks:
-            _run_maintenance_task(deps, _transition, run_wikilinks_inject)
-            last_wikilinks = now
+        last_entity, last_health, last_wikilinks = _maybe_run_maintenance_cycle(
+            deps=deps,
+            transition=_transition,
+            now=now,
+            maintenance_active=maintenance_active,
+            last_entity=last_entity,
+            last_health=last_health,
+            last_wikilinks=last_wikilinks,
+            schedule=schedule,
+        )
 
         # Sleep 60 seconds between checks
         for _ in range(60):

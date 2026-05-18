@@ -2,12 +2,14 @@
 LLMBackend protocol — provider-agnostic interface for chat and embedding.
 
 All kairix code that calls an LLM should accept a ``LLMBackend`` rather
-than importing ``kairix._azure`` directly.  This decouples the engine
-from the Azure-specific implementation and enables:
+than importing a concrete provider directly.  This decouples the engine
+from any specific implementation and enables:
 
-  - Swapping providers (Azure → Anthropic, local models, etc.)
-  - Clean repo boundary: Azure credentials stay in the private repo
-  - Easy test doubles (MockLLMBackend)
+  - Swapping providers (Azure → Anthropic, local models, etc.) by
+    changing the ``provider:`` field in ``kairix.config.yaml``.
+  - Clean repo boundary: provider credentials stay inside the configured
+    plugin (resolved via :func:`kairix.providers.get_provider`).
+  - Easy test doubles (``FakeLLMBackend`` in ``tests/fakes.py``).
 """
 
 from __future__ import annotations

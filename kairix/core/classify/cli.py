@@ -14,11 +14,46 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
+from typing import Any
 
 
-def main(args: list[str] | None = None) -> None:
-    """Entry point for `kairix classify`."""
+def _resolve_classifiers(
+    rule_classifier: Callable[..., Any] | None,
+    llm_classifier: Callable[..., Any] | None,
+) -> tuple[Callable[..., Any], Callable[..., Any]]:
+    """Resolve the production rule + LLM classifier when callers leave them ``None``.
+
+    Lazy-imports keep heavy modules out of the CLI's import path until
+    actually invoked; tests inject fakes through the public seams.
+    """
+    if rule_classifier is None:
+        from kairix.core.classify.rules import classify_content
+
+        rule_classifier = classify_content
+    if llm_classifier is None:
+        from kairix.core.classify.judge import classify_with_llm
+
+        llm_classifier = classify_with_llm
+    return rule_classifier, llm_classifier
+
+
+def main(
+    args: list[str] | None = None,
+    *,
+    rule_classifier: Callable[..., Any] | None = None,
+    llm_classifier: Callable[..., Any] | None = None,
+) -> None:
+    """Entry point for `kairix classify`.
+
+    ``rule_classifier`` and ``llm_classifier`` are the public DI seams for
+    tests that want to drive error paths through the public CLI surface
+    instead of monkey-patching the classify-module imports. Production
+    callers leave them at ``None`` and the CLI lazy-imports the real ones.
+    """
     import argparse
+
+    rule_classifier, llm_classifier = _resolve_classifiers(rule_classifier, llm_classifier)
 
     if args is None:
         args = sys.argv[2:]  # strip 'kairix classify'
@@ -64,8 +99,7 @@ def main(args: list[str] | None = None) -> None:
 
     # Run classification
     try:
-        from kairix.core.classify.judge import classify_with_llm
-        from kairix.core.classify.rules import VALID_AGENTS, classify_content
+        from kairix.core.classify.rules import VALID_AGENTS
 
         if agent not in VALID_AGENTS:
             print(
@@ -74,11 +108,11 @@ def main(args: list[str] | None = None) -> None:
             )
             sys.exit(1)
 
-        result = classify_content(content, agent=agent)
+        result = rule_classifier(content, agent=agent)
 
         # If rule didn't match, try LLM judge
         if result.type == "unknown" and use_llm:
-            result = classify_with_llm(content, agent=agent)
+            result = llm_classifier(content, agent=agent)
 
         output: dict = {
             "type": result.type,

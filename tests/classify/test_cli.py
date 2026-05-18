@@ -163,52 +163,49 @@ class TestClassifyCLIStdinAndArgv:
 
 @pytest.mark.unit
 class TestClassifyCLIErrors:
+    """CLI error paths driven through the public ``rule_classifier`` /
+    ``llm_classifier`` DI kwargs on :func:`kairix.core.classify.cli.main`.
+
+    The CLI lazy-imports ``classify_content`` and ``classify_with_llm`` from
+    the kairix internals; tests inject fakes through the kwarg seam instead
+    of monkey-patching those modules. The kwargs are the public production
+    contract — see the docstring on ``main``.
+    """
+
     @pytest.mark.unit
-    def test_value_error_exits_one(self, monkeypatch):
-        """ValueError raised by classify_content surfaces as exit 1 with JSON error."""
+    def test_value_error_exits_one(self) -> None:
+        """ValueError raised by the rule classifier surfaces as exit 1 with JSON error."""
         import io
 
         from kairix.core.classify import cli as cli_mod
 
-        def _raise_value_error(content, agent):
+        def _raise_value_error(content: str, *, agent: str) -> None:
             raise ValueError("bad agent state")
-
-        # Substitute classify_content used by the CLI's local import.
-        # Module is imported inside main(), so we monkeypatch the rules module.
-        monkeypatch.setattr(
-            "kairix.core.classify.rules.classify_content",
-            _raise_value_error,
-        )
 
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
         with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
             with pytest.raises(SystemExit) as exc:
-                cli_mod.main(["test content", "--no-llm"])
+                cli_mod.main(["test content", "--no-llm"], rule_classifier=_raise_value_error)
         assert exc.value.code == 1
         err_json = json.loads(stderr_capture.getvalue().strip())
         assert "error" in err_json
 
     @pytest.mark.unit
-    def test_unexpected_exception_exits_one(self, monkeypatch):
+    def test_unexpected_exception_exits_one(self) -> None:
         """Generic Exception surfaces as exit 1 with masked error."""
         import io
 
         from kairix.core.classify import cli as cli_mod
 
-        def _raise_runtime(content, agent):
+        def _raise_runtime(content: str, *, agent: str) -> None:
             raise RuntimeError("boom")
-
-        monkeypatch.setattr(
-            "kairix.core.classify.rules.classify_content",
-            _raise_runtime,
-        )
 
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
         with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
             with pytest.raises(SystemExit) as exc:
-                cli_mod.main(["test content", "--no-llm"])
+                cli_mod.main(["test content", "--no-llm"], rule_classifier=_raise_runtime)
         assert exc.value.code == 1
         err_json = json.loads(stderr_capture.getvalue().strip())
         assert "error" in err_json
@@ -216,11 +213,12 @@ class TestClassifyCLIErrors:
         assert "boom" not in err_json["error"]
 
     @pytest.mark.unit
-    def test_llm_fallback_when_rule_unknown(self, monkeypatch):
-        """When rule classification returns 'unknown' and --no-llm not set,
-        the LLM judge is invoked."""
+    def test_llm_fallback_when_rule_unknown(self) -> None:
+        """When rule classification returns 'unknown' and ``--no-llm`` is not set,
+        the LLM classifier is invoked through the public kwarg seam."""
         import io
         from dataclasses import dataclass
+        from typing import Any
 
         from kairix.core.classify import cli as cli_mod
 
@@ -232,7 +230,7 @@ class TestClassifyCLIErrors:
             reason: str
             needs_confirmation: bool = False
 
-        def _fake_llm(content, agent):
+        def _fake_llm(content: str, *, agent: str) -> Any:
             return _FakeResult(
                 type="semantic-decision",
                 target_path=f"04-Agent-Knowledge/{agent}/decisions.md",
@@ -240,8 +238,7 @@ class TestClassifyCLIErrors:
                 reason="llm fallback hit",
             )
 
-        # Force rule result to 'unknown'
-        def _rule_unknown(content, agent):
+        def _rule_unknown(content: str, *, agent: str) -> Any:
             return _FakeResult(
                 type="unknown",
                 target_path="",
@@ -250,18 +247,13 @@ class TestClassifyCLIErrors:
                 needs_confirmation=True,
             )
 
-        monkeypatch.setattr(
-            "kairix.core.classify.rules.classify_content",
-            _rule_unknown,
-        )
-        monkeypatch.setattr(
-            "kairix.core.classify.judge.classify_with_llm",
-            _fake_llm,
-        )
-
         stdout_capture = io.StringIO()
         with redirect_stdout(stdout_capture):
-            cli_mod.main(["arbitrary content"])
+            cli_mod.main(
+                ["arbitrary content"],
+                rule_classifier=_rule_unknown,
+                llm_classifier=_fake_llm,
+            )
         parsed = json.loads(stdout_capture.getvalue().strip())
         assert parsed["type"] == "semantic-decision"
         assert parsed["reason"] == "llm fallback hit"

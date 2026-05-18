@@ -102,6 +102,68 @@ def test_tool_entity_neo4j_exception_returns_error() -> None:
     assert result["id"] == ""
 
 
+class AliasAwareFakeNeo4jClient:
+    """Fake that evaluates the entity-card cypher against in-memory rows.
+
+    Only honours the alias-match branch when the cypher string actually
+    contains the ``any(alias IN coalesce(n.aliases, ...))`` clause — so
+    reverting that clause in ``_ENTITY_CARD_CYPHER`` makes the alias
+    lookup miss, which is what sabotage-proves the #253 fix.
+    """
+
+    def __init__(self, entities: list[dict]):
+        self._entities = entities
+        self.available = True
+
+    def cypher(self, query: str, params: dict | None = None) -> list[dict]:
+        params = params or {}
+        target_id = (params.get("id") or "").lower()
+        target_name = (params.get("name") or "").lower()
+        cypher_checks_aliases = "alias IN coalesce(n.aliases" in query
+        for e in self._entities:
+            aliases = [a.lower() for a in (e.get("aliases") or [])]
+            id_hit = e.get("id", "").lower() == target_id
+            name_hit = e.get("name", "").lower() == target_name
+            alias_hit = cypher_checks_aliases and target_name in aliases
+            if id_hit or name_hit or alias_hit:
+                return [e]
+        return []
+
+
+@pytest.mark.unit
+def test_tool_entity_finds_entity_by_alias() -> None:
+    """#253: looking up by an alias returns the canonical entity.
+
+    The crawler stores aliases on entities; agents often know an entity
+    by an alias rather than its canonical name. Before the fix the
+    cypher only checked ``n.id`` and ``n.name``, so alias lookups
+    silently returned not-found.
+    """
+    fake = AliasAwareFakeNeo4jClient(
+        [
+            {
+                "id": "acme-inc",
+                "name": "Acme Inc",
+                "aliases": ["Acme", "ACME Corporation"],
+                "type": "Organisation",
+                "vault_path": "02-Areas/00-Clients/Acme/Acme.md",
+                "role": None,
+                "org": None,
+                "tier": None,
+                "engagement_status": None,
+                "domain": None,
+                "industry": None,
+                "category": None,
+            }
+        ]
+    )
+    result = tool_entity(name="Acme", neo4j_client=fake)
+
+    assert result["error"] == "", f"alias lookup returned error: {result['error']!r}"
+    assert result["id"] == "acme-inc"
+    assert result["name"] == "Acme Inc"
+
+
 @pytest.mark.unit
 def test_tool_entity_summary_includes_category_when_present() -> None:
     """An entity row carrying a ``category`` field appears in the summary string."""

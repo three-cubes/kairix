@@ -34,8 +34,9 @@ def _cmd_generate(args: argparse.Namespace) -> int:
         print("Running calibration anchors...")
 
     # Construct SuiteGenerator with default protocol implementations
-    # (LLMJudge wrapping AzureChatBackend; default Retriever; default
-    # QueryGenerator). Tests construct SuiteGenerator with FakeXxx fakes.
+    # (LLMJudge wrapping ProviderEvalChatBackend; default Retriever;
+    # default QueryGenerator). Tests construct SuiteGenerator with
+    # FakeXxx fakes.
     suite_gen = SuiteGenerator()
     result = suite_gen.generate_suite(
         db_path=args.db,
@@ -172,9 +173,9 @@ def _cmd_build_gold(args: argparse.Namespace) -> int:
     print(f"Judge runs: {args.judge_runs}")
 
     # Construct GoldBuilder with default protocol implementations
-    # (LLMJudge wrapping AzureChatBackend; default Retriever wrapping
-    # the production hybrid-search pipeline). Tests construct GoldBuilder
-    # with FakeLLMJudge / FakeRetriever for isolation.
+    # (LLMJudge wrapping ProviderEvalChatBackend; default Retriever
+    # wrapping the production hybrid-search pipeline). Tests construct
+    # GoldBuilder with FakeLLMJudge / FakeRetriever for isolation.
     gold_builder = GoldBuilder()
     report = gold_builder.build_independent_gold(
         suite_path=Path(args.suite),

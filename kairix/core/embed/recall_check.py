@@ -9,9 +9,9 @@ Adaptive mode: when the database is provided and contains indexed
 documents, the recall queries are derived from a random sample of
 document titles. The sample is **persisted** to
 ``~/.cache/kairix/recall-canaries.json`` on first build and reused on
-every subsequent run. Without persistence, each run picks a different
-random sample and the run-over-run delta is meaningless — that was
-the design bug behind the worker restart-loop fixed in v2026.5.10.
+every subsequent run. Persistence is load-bearing: without it, each run
+picks a different random sample and the run-over-run delta is comparing
+unrelated query sets rather than recall regression.
 
 The static ``DEFAULT_RECALL_QUERIES`` are used when the database has
 no indexed documents (no corpus to sample from).

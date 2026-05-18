@@ -2,6 +2,18 @@
 """
 prune-entities.py — Remove stale/noise entity nodes from Neo4j.
 
+DEPRECATED (2026-05-14): superseded by ``kairix entity audit`` (#260) +
+``kairix entity purge`` (#261). The new commands share the same audit
+shape and are protocol-driven / unit-tested at the F7 90% floor.
+
+Migration:
+    kairix entity audit --mode all --format json --output /tmp/audit.json
+    kairix entity purge --audit-report /tmp/audit.json --dry-run
+    kairix entity purge --audit-report /tmp/audit.json --execute
+
+This script remains as a thin compatibility shim for operators with
+existing automation. It will be removed in a future release.
+
 An entity node is stale if its vault_path property points to a file that no
 longer exists on disk, or if it has no vault_path and no summary (never enriched).
 

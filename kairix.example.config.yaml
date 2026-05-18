@@ -8,6 +8,36 @@
 #
 # Set KAIRIX_CONFIG_PATH=/path/to/kairix.config.yaml to use a custom location.
 
+# ── Provider ────────────────────────────────────────────────────────────────
+# Which LLM/embed plugin to load. Each plugin owns its own credential-
+# retrieval pattern (Azure → Key Vault; AWS → Secrets Manager; etc.)
+# so you don't configure secrets here — the plugin reads them from
+# wherever its operator runbook says.
+#
+# Installed plugins (run `kairix probe-config` to verify your choice
+# resolves):
+#   azure_foundry  — Azure AI Foundry endpoint (default for existing deploys)
+#   openai         — OpenAI direct (api.openai.com or compatible base_url)
+#
+# Plugins shipping in v2026.5.18:
+#   azure_legacy / bedrock / ollama / litellm_proxy / anthropic
+#
+# Operators upgrading from v2026.5.16 or earlier MUST set this field —
+# the env-var fallback (KAIRIX_PROVIDER) was retired in v2026.5.17 so
+# the plugin is the only embed/chat path. See
+# docs/operations/runbooks/how-to-upgrade-kairix.md for the migration
+# step.
+#
+# Schema version of THIS bundled config. Operators running a host-side
+# overlay via KAIRIX_CONFIG_OVERLAY_PATH may pin a minimum schema with
+# `_schema_version_required_min: N` — kairix refuses to start if the
+# image-bundled base has a lower `_schema_version` than the overlay
+# requires. Bump this value when a required key is added (e.g. `provider:`
+# in v2026.5.17) and document the bump in CHANGELOG + the upgrade runbook.
+_schema_version: 1
+
+provider: azure_foundry
+
 # ── Paths ───────────────────────────────────────────────────────────────────
 # Where your documents and data live. Defaults work for most setups.
 # Environment variables (KAIRIX_DOCUMENT_ROOT, KAIRIX_DB_PATH, etc.) take
@@ -59,23 +89,24 @@
 #       path: "reference-library"
 #       glob: "**/*.md"
 #       in_default: false
-#       # The reference library has its own retrieval baseline — derived
-#       # from a hybrid sweep against the shipped corpus. Operators who
-#       # don't override this block get the global retrieval config when
-#       # they search reflib explicitly. The values below match the
-#       # known-good baseline (REFLIB_RETRIEVAL_CONFIG).
+#       # The reference library has its own retrieval baseline. The
+#       # values below produce the pinned baseline at
+#       # benchmark-results/reflib-gold-v3-baseline.json (weighted=0.901
+#       # NDCG@10=0.990 Hit@5=0.990). The corpus is keyword-sparse and
+#       # vector-rich (abstract titles + paraphrase queries), so it
+#       # depends on cross-list agreement — RRF with k=10 weights
+#       # agreement strongly. Operators who don't override get the
+#       # global retrieval config when they search reflib explicitly.
 #       retrieval:
-#         fusion_strategy: bm25_primary
+#         fusion_strategy: rrf
+#         rrf_k: 10
 #         bm25_limit: 20
-#         vec_limit: 5
+#         vec_limit: 10
 #         boosts:
 #           entity:
-#             enabled: true
-#             factor: 0.20
-#             cap: 2.0
+#             enabled: false
 #           procedural:
-#             enabled: true
-#             factor: 1.4
+#             enabled: false
 #
 #   # Per-agent collections — each agent gets its own memory scope.
 #   # Default agent_pattern still applies for legacy single-collection deployments.

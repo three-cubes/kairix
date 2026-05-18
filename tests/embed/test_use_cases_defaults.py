@@ -278,3 +278,347 @@ def test_embed_pipeline_result_default_diagnostics_empty() -> None:
         timestamp=0,
     )
     assert result.diagnostics == []
+
+
+# ---------------------------------------------------------------------------
+# _default_scan_documents — wraps DocumentScanner + collection config loader.
+#
+# This wrapper is the production hook ``PipelineDeps`` points at by default.
+# It composes five collaborators (DocumentScanner, load_collections,
+# resolve_config_path, agent registry, reference-library probe) plus an
+# optional FTS rebuild. We drive each branch via ``monkeypatch.setattr``
+# on the modules the wrapper lazy-imports — F2 only prohibits
+# ``monkeypatch.setenv("KAIRIX_*")``, plain attr swaps on kairix modules
+# are the canonical injection seam for these lazy-import wrappers and
+# match the pattern used by the other ``_default_*`` tests above.
+# ---------------------------------------------------------------------------
+
+
+class _FakeScanReport:
+    """Stand-in for ``kairix.core.db.scanner.ScanReport`` — only the
+    fields :func:`_default_scan_documents` reads."""
+
+    def __init__(self, *, new: int = 0, updated: int = 0, unchanged: int = 0, errors: int = 0) -> None:
+        self.new = new
+        self.updated = updated
+        self.unchanged = unchanged
+        self.errors = errors
+
+
+class _FakeScanner:
+    """Stand-in for ``DocumentScanner`` — records the collections passed
+    to ``scan()`` and returns a configurable ``_FakeScanReport``."""
+
+    def __init__(self, report: _FakeScanReport) -> None:
+        self._report = report
+        self.collections_scanned: list[Any] = []
+        self.constructor_kwargs: dict[str, Any] = {}
+
+    def scan(self, collections: list[Any]) -> _FakeScanReport:
+        self.collections_scanned = collections
+        return self._report
+
+
+def _install_scan_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    report: _FakeScanReport,
+    collections_cfg: Any = None,
+    config_path: Any = None,
+    registry_agents: list[str] | None = None,
+    reflib_is_dir: bool = False,
+    raw_yaml: Any = None,
+    yaml_raises: BaseException | None = None,
+    rebuild_fts_count: int = 0,
+) -> tuple[_FakeScanner, dict[str, Any]]:
+    """Wire stand-ins for every collaborator ``_default_scan_documents`` uses.
+
+    Returns the installed ``_FakeScanner`` plus a dict of recorders the
+    test can assert against (FTS calls, registry calls, etc.).
+    """
+    import kairix.core.db.fts as fts_mod
+    import kairix.core.db.scanner as scanner_mod
+    import kairix.core.search.config_loader as cfg_mod
+    import kairix.core.search.registry as registry_mod
+    import kairix.paths as paths_mod
+
+    fake_scanner = _FakeScanner(report)
+    recorders: dict[str, Any] = {"fts_calls": [], "registry_calls": [], "scanner_kwargs": {}}
+
+    def _fake_doc_scanner(db: Any, *, document_root: Any, agent_owner_resolver: Any) -> _FakeScanner:
+        recorders["scanner_kwargs"] = {
+            "db": db,
+            "document_root": document_root,
+            "agent_owner_resolver": agent_owner_resolver,
+        }
+        return fake_scanner
+
+    monkeypatch.setattr(scanner_mod, "DocumentScanner", _fake_doc_scanner)
+
+    # CollectionConfig is re-imported inside the wrapper — keep the real
+    # class; the wrapper constructs it from the loaded yaml. Don't patch.
+
+    monkeypatch.setattr(cfg_mod, "load_collections", lambda: collections_cfg)
+    monkeypatch.setattr(cfg_mod, "resolve_config_path", lambda: config_path)
+
+    class _FakeRegistry:
+        def __init__(self, agents: list[str] | None) -> None:
+            self._agents = agents or []
+
+        def list_agents(self) -> list[str]:
+            return list(self._agents)
+
+    def _fake_parse(raw: Any, *, default_pattern: str = "{agent}-memory") -> _FakeRegistry:
+        # default_pattern is part of the real signature; preserved here for arity.
+        _ = default_pattern
+        recorders["registry_calls"].append(raw)
+        return _FakeRegistry(registry_agents)
+
+    monkeypatch.setattr(registry_mod, "parse_agent_registry", _fake_parse)
+    monkeypatch.setattr(registry_mod, "build_agent_owner_resolver", lambda reg: ("resolver", reg))
+
+    # Stub out paths.
+    monkeypatch.setattr(paths_mod, "document_root", lambda: Path("/tmp/fake-doc-root"))
+
+    class _FakeReflibRoot:
+        def __str__(self) -> str:
+            return "/tmp/fake-reflib"
+
+        def is_dir(self) -> bool:
+            return reflib_is_dir
+
+    monkeypatch.setattr(paths_mod, "reference_library_root", _FakeReflibRoot)
+
+    # Stub out yaml when raw_yaml is set; the wrapper imports yaml lazily.
+    if config_path is not None:
+        import yaml as yaml_mod
+
+        def _fake_safe_load(_stream: Any) -> Any:
+            if yaml_raises is not None:
+                raise yaml_raises
+            return raw_yaml
+
+        monkeypatch.setattr(yaml_mod, "safe_load", _fake_safe_load)
+
+    def _fake_rebuild_fts(db: Any) -> int:
+        recorders["fts_calls"].append(db)
+        return rebuild_fts_count
+
+    monkeypatch.setattr(fts_mod, "rebuild_fts", _fake_rebuild_fts)
+    return fake_scanner, recorders
+
+
+class _FakePathForYaml:
+    """Minimal ``Path``-shaped stand-in for ``resolve_config_path()``.
+
+    Only the ``.open(encoding=...)`` context manager surface is exercised
+    by the wrapper; we yield a dummy stream that yaml.safe_load never
+    actually reads (the safe_load stub returns the canned dict).
+    """
+
+    def open(self, encoding: str = "utf-8") -> Any:
+        # encoding is part of pathlib.Path.open's surface; preserved for parity.
+        _ = encoding
+
+        class _Ctx:
+            def __enter__(self) -> Any:
+                return object()
+
+            def __exit__(self, *exc: Any) -> None:
+                # Context manager exit — no cleanup required for the stub.
+                _ = exc
+
+        return _Ctx()
+
+
+def test_default_scan_documents_no_config_no_reflib_no_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No collections.yml, no reference-library, no new docs → returns zeros.
+
+    Sabotage-prove: if the wrapper miscounted scan_report fields (e.g.
+    swapped new/updated) the tuple shape assertion below would fail.
+    """
+    report = _FakeScanReport(new=0, updated=0, unchanged=0, errors=0)
+    scanner, recorders = _install_scan_stubs(monkeypatch, report=report)
+
+    diagnostics: list[str] = []
+    new, updated, errors = uc_mod._default_scan_documents(object(), diagnostics)
+
+    assert (new, updated, errors) == (0, 0, 0)
+    # Default branch when no config: a single "default" collection rooted at ".".
+    assert len(scanner.collections_scanned) == 1
+    assert scanner.collections_scanned[0].name == "default"
+    assert recorders["fts_calls"] == [], "FTS rebuild should NOT run when scan has no new/updated"
+    # No diagnostic when resolve_config_path returns None — agent registry path is skipped.
+    assert diagnostics == []
+
+
+def test_default_scan_documents_loads_shared_collections_from_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured shared collections override the implicit "default" one.
+
+    Sabotage-prove: if the wrapper ignored the loaded ``collections_cfg``
+    the assertion that "alpha" appears in scanned collection names fails.
+    """
+    from kairix.core.search.config_loader import CollectionDef, CollectionsConfig
+
+    cfg = CollectionsConfig(
+        shared=(
+            CollectionDef(name="alpha", path="alpha/", glob="**/*.md"),
+            CollectionDef(name="beta", path="beta/", glob="**/*.txt"),
+        ),
+    )
+    report = _FakeScanReport(new=0, updated=0, unchanged=5, errors=0)
+    scanner, _ = _install_scan_stubs(monkeypatch, report=report, collections_cfg=cfg)
+
+    diagnostics: list[str] = []
+    uc_mod._default_scan_documents(object(), diagnostics)
+
+    names = sorted(c.name for c in scanner.collections_scanned)
+    assert names == ["alpha", "beta"]
+
+
+def test_default_scan_documents_appends_reflib_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ``reference_library_root()`` is a real dir, it joins the scan list."""
+    report = _FakeScanReport(new=0, updated=0)
+    scanner, _ = _install_scan_stubs(monkeypatch, report=report, reflib_is_dir=True)
+
+    uc_mod._default_scan_documents(object(), [])
+
+    names = [c.name for c in scanner.collections_scanned]
+    # The reference-library collection is appended after the default.
+    assert "reference-library" in names
+    reflib_cfg = next(c for c in scanner.collections_scanned if c.name == "reference-library")
+    assert reflib_cfg.glob == "**/*.md"
+
+
+def test_default_scan_documents_rebuilds_fts_when_new_or_updated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When scan reports any new or updated doc the wrapper rebuilds FTS.
+
+    Sabotage-prove: if the rebuild guard were dropped to ``if True`` the
+    FTS rebuild would run with every empty scan and double-count; if
+    inverted to ``< 0`` it would never run. The recorders confirm exactly
+    one rebuild fires when new=1.
+    """
+    report = _FakeScanReport(new=1, updated=0, unchanged=10, errors=0)
+    _, recorders = _install_scan_stubs(monkeypatch, report=report, rebuild_fts_count=42)
+
+    db_sentinel = object()
+    new, updated, errors = uc_mod._default_scan_documents(db_sentinel, [])
+
+    assert (new, updated, errors) == (1, 0, 0)
+    assert recorders["fts_calls"] == [db_sentinel], "FTS rebuild must run with the same db handle"
+
+
+def test_default_scan_documents_rebuilds_fts_when_only_updated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``updated > 0`` alone also triggers rebuild — covers the OR branch."""
+    report = _FakeScanReport(new=0, updated=3, unchanged=0, errors=0)
+    _, recorders = _install_scan_stubs(monkeypatch, report=report, rebuild_fts_count=7)
+
+    uc_mod._default_scan_documents(object(), [])
+
+    assert len(recorders["fts_calls"]) == 1
+
+
+def test_default_scan_documents_builds_agent_resolver_from_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config_path with at least one registered agent wires a resolver.
+
+    Sabotage-prove: if the wrapper passed ``agent_owner_resolver=None``
+    even when the registry had agents, the assertion that the resolver
+    sentinel propagates to DocumentScanner would fail.
+    """
+    report = _FakeScanReport(new=0, updated=0)
+    _, recorders = _install_scan_stubs(
+        monkeypatch,
+        report=report,
+        config_path=_FakePathForYaml(),
+        registry_agents=["alpha", "beta"],
+        raw_yaml={"agents": [{"name": "alpha"}, {"name": "beta"}]},
+    )
+
+    uc_mod._default_scan_documents(object(), [])
+
+    # The build_agent_owner_resolver stub returns a tuple sentinel ("resolver", reg);
+    # we just need to know the wrapper used it (vs. None).
+    resolver = recorders["scanner_kwargs"]["agent_owner_resolver"]
+    assert resolver is not None
+    assert isinstance(resolver, tuple) and resolver[0] == "resolver"
+
+
+def test_default_scan_documents_skips_resolver_when_registry_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config_path with no registered agents skips resolver construction.
+
+    Sabotage-prove: if the wrapper blindly built a resolver for any
+    non-None registry, the scanner kwargs would not be None.
+    """
+    report = _FakeScanReport(new=0, updated=0)
+    _, recorders = _install_scan_stubs(
+        monkeypatch,
+        report=report,
+        config_path=_FakePathForYaml(),
+        registry_agents=[],
+        raw_yaml={"agents": []},
+    )
+
+    uc_mod._default_scan_documents(object(), [])
+
+    assert recorders["scanner_kwargs"]["agent_owner_resolver"] is None
+
+
+def test_default_scan_documents_appends_diagnostic_on_resolver_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When agent-resolver construction raises, the wrapper logs a diagnostic
+    and continues with ``agent_owner_resolver=None``.
+
+    Sabotage-prove: if the wrapper let the exception escape, this call
+    would raise instead of returning the scan tuple.
+    """
+    report = _FakeScanReport(new=0, updated=0)
+    _, recorders = _install_scan_stubs(
+        monkeypatch,
+        report=report,
+        config_path=_FakePathForYaml(),
+        yaml_raises=RuntimeError("yaml exploded"),
+    )
+
+    diagnostics: list[str] = []
+    new, updated, errors = uc_mod._default_scan_documents(object(), diagnostics)
+
+    assert (new, updated, errors) == (0, 0, 0)
+    assert recorders["scanner_kwargs"]["agent_owner_resolver"] is None
+    assert any("agent_resolver_unavailable" in msg for msg in diagnostics)
+    assert any("yaml exploded" in msg for msg in diagnostics)
+
+
+def test_default_scan_documents_handles_yaml_returning_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config file present but empty (``yaml.safe_load`` → None) is
+    treated as ``{}`` — the wrapper still calls ``parse_agent_registry``
+    with an empty dict and continues."""
+    report = _FakeScanReport(new=0, updated=0)
+    _, recorders = _install_scan_stubs(
+        monkeypatch,
+        report=report,
+        config_path=_FakePathForYaml(),
+        registry_agents=[],
+        raw_yaml=None,
+    )
+
+    uc_mod._default_scan_documents(object(), [])
+
+    # registry was constructed with {} (the wrapper's ``or {}`` fallback).
+    assert recorders["registry_calls"] == [{}]

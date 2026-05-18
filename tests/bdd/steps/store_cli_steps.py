@@ -58,7 +58,7 @@ def _given_one_doc(store_cli_ctx: _StoreCliCtx) -> None:
     # to the filename stem.
     doc = store_cli_ctx.document_root / "Network" / "People-Notes" / "Jordan-Blake.md"
     doc.parent.mkdir(parents=True, exist_ok=True)
-    doc.write_text("---\nname: Jordan Blake\nrole: Engineer\n---\n\nEngineer at Three Cubes.\n")
+    doc.write_text("---\nname: Jordan Blake\nrole: Engineer\n---\n\nEngineer at Example Corp.\n")
 
 
 # ---------------------------------------------------------------------------

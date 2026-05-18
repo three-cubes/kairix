@@ -1,0 +1,144 @@
+name: "2a · Release (alpha tag from develop)"
+
+# Manual-dispatch alpha release workflow (Phase 1 of #272). Tags the
+# current develop HEAD as vYYYY.M.D[.N]aN, creates a GitHub pre-release,
+# and fans out to docker-publish + publish-pypi with the is_alpha flag
+# set so downstream workflows skip the :latest tag / stable PyPI index.
+#
+# Pre-requisite: the develop HEAD SHA must have a successful CI gate
+# run; otherwise the alpha is rejected before any tag is pushed.
+#
+# All input values are passed through env: bindings before being used
+# in run: scripts (avoids workflow-injection via input string).
+
+on:
+  workflow_dispatch:
+    inputs:
+      date_version:
+        description: 'CalVer date portion (e.g. 2026.5.15 or 2026.5.15.1 for same-day alpha of patch)'
+        required: true
+        type: string
+      alpha_n:
+        description: 'Alpha sequence number (1, 2, 3, ...)'
+        required: false
+        default: '1'
+        type: string
+
+permissions:
+  contents: write   # required to create tags + pre-releases
+  actions: write    # required to dispatch downstream publish workflows
+
+jobs:
+  cut-alpha:
+    name: Tag develop + create alpha pre-release
+    runs-on: ubuntu-latest
+    # Restrict to develop branch — alpha is an in-flight signal, not a
+    # branch-agnostic release artefact.
+    if: github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Validate inputs
+        env:
+          DATE_VERSION: ${{ inputs.date_version }}
+          ALPHA_N: ${{ inputs.alpha_n }}
+        run: |
+          if ! echo "$DATE_VERSION" | grep -Eq '^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(\.[0-9]+)?$'; then
+            echo "::error::date_version '$DATE_VERSION' does not match CalVer pattern YYYY.M.D[.N]"
+            echo "::error::fix: pass date_version like '2026.5.15' or '2026.5.15.1' (no leading 'v', no 'a' suffix)"
+            exit 1
+          fi
+          if ! echo "$ALPHA_N" | grep -Eq '^[0-9]+$'; then
+            echo "::error::alpha_n '$ALPHA_N' must be a positive integer"
+            echo "::error::fix: pass alpha_n like '1', '2', '3'"
+            exit 1
+          fi
+          TAG="v${DATE_VERSION}a${ALPHA_N}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::tag '$TAG' already exists"
+            echo "::error::next: bump alpha_n (e.g. $((ALPHA_N + 1))) and re-run"
+            exit 1
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Validate CI gate passed on develop HEAD
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          LAST_SUCCESS_SHA="$(gh run list \
+              --workflow=ci.yml \
+              --branch=develop \
+              --status=success \
+              --limit=1 \
+              --json headSha \
+              --jq '.[0].headSha // empty')"
+          if [ -z "$LAST_SUCCESS_SHA" ]; then
+            echo "::error::no successful CI gate run found on develop"
+            echo "::error::next: push a fix to develop, wait for CI to go green, then re-run this workflow"
+            exit 1
+          fi
+          if [ "$LAST_SUCCESS_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::develop HEAD ($HEAD_SHA) has not passed the CI gate"
+            echo "::error::last green SHA: $LAST_SUCCESS_SHA"
+            echo "::error::next: wait for CI to complete on $HEAD_SHA (or push the missing commits), then re-run"
+            exit 1
+          fi
+          echo "CI gate verified green on $HEAD_SHA"
+
+      - name: Tag develop HEAD
+        env:
+          DATE_VERSION: ${{ inputs.date_version }}
+          ALPHA_N: ${{ inputs.alpha_n }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          TAG="v${DATE_VERSION}a${ALPHA_N}"
+          git tag -a "$TAG" -m "kairix alpha $TAG"
+          git push origin "$TAG"
+
+      - name: Create GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DATE_VERSION: ${{ inputs.date_version }}
+          ALPHA_N: ${{ inputs.alpha_n }}
+        run: |
+          TAG="v${DATE_VERSION}a${ALPHA_N}"
+          gh release create "$TAG" \
+              --title "kairix $TAG (alpha)" \
+              --notes "Alpha pre-release for validation. Do not use in production." \
+              --prerelease \
+              --verify-tag
+
+      - name: Fan out to docker-publish + publish-pypi (alpha mode)
+        # Both downstream workflows receive is_alpha=true so they skip
+        # the :latest Docker tag and the stable PyPI index respectively.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DATE_VERSION: ${{ inputs.date_version }}
+          ALPHA_N: ${{ inputs.alpha_n }}
+        run: |
+          TAG="v${DATE_VERSION}a${ALPHA_N}"
+          gh workflow run docker-publish.yml --ref develop -f ref="$TAG" -f is_alpha=true
+          gh workflow run publish-pypi.yml   --ref develop -f ref="$TAG" -f is_alpha=true
+
+      - name: Summary
+        env:
+          DATE_VERSION: ${{ inputs.date_version }}
+          ALPHA_N: ${{ inputs.alpha_n }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+        run: |
+          TAG="v${DATE_VERSION}a${ALPHA_N}"
+          {
+            echo "## Alpha $TAG created"
+            echo ""
+            echo "- Tag pushed: [\`$TAG\`]($SERVER/$REPO/releases/tag/$TAG)"
+            echo "- GitHub pre-release created"
+            echo "- Downstream publishes dispatched (is_alpha=true):"
+            echo "  - 3 · Docker publish (release)"
+            echo "  - 4 · PyPI publish (release)"
+          } >> "$GITHUB_STEP_SUMMARY"

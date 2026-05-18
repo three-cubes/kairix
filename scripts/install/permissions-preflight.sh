@@ -2,18 +2,18 @@
 # permissions-preflight.sh — idempotent host-side preflight for kairix.
 #
 # Runs as ExecStartPre= for kairix.service. Verifies and (where safe)
-# fixes the host-side prerequisites that have historically caused
-# kairix to crash-loop after reboot:
+# fixes the host-side prerequisites that, if missing, cause kairix to
+# crash-loop after reboot:
 #
 #   1. /opt/kairix/app/.env is readable by the kairix service user.
 #      Symptom when broken: docker compose exits with
 #      "open /opt/kairix/app/.env: permission denied" and systemd
-#      restart-loops every 10 seconds (#167 evidence).
+#      restart-loops every 10 seconds.
 #
 #   2. /run/secrets/kairix.env exists and is non-empty.
 #      Symptom when broken: kairix.service starts, MCP server reports
 #      ready=true on /healthz, but vector search returns 0 hits because
-#      embedding credentials are missing (#167 evidence).
+#      embedding credentials are missing.
 #
 #   3. Required environment variables are populated when the secrets
 #      file is read together with /opt/kairix/service.env.

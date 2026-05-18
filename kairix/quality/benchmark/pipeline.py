@@ -21,21 +21,25 @@ from kairix.quality.benchmark.suite import BenchmarkSuite
 logger = logging.getLogger(__name__)
 
 
-def _default_search(**kwargs: Any) -> Any:
-    """Default search backend — lazy-imports and runs the production
-    search pipeline. Mirrors ``SearchPipeline.search``'s signature via
-    ``**kwargs`` so callers route ``query``/``budget``/``agent``/``scope``
-    through unchanged.
+def _make_default_search() -> Callable[..., Any]:
+    """Default ``search_fn`` factory for :class:`BenchmarkPipeline`.
 
-    The retrieval layer (``runner.retrieve_case``) owns the actual call
-    today, so this default is only invoked when a future caller wires
-    ``BenchmarkPipeline.search_fn`` into a custom flow. Mirrors the F6
-    pattern proven by ``WorkerDeps`` (kairix/worker.py).
+    Returns a callable that lazy-builds the production search pipeline.
+    The retrieval layer (``runner.retrieve_case``) owns the live call
+    today, so this default is dormant — exercised only when a future
+    caller wires ``BenchmarkPipeline.search_fn`` into a custom flow.
+
+    Mirrors ``SearchPipeline.search``'s signature via ``**kwargs`` so
+    callers route ``query``/``budget``/``agent``/``scope`` through
+    unchanged.
     """
-    from kairix.core.factory import build_search_pipeline
 
-    pipeline = build_search_pipeline()
-    return pipeline.search(**kwargs)
+    def search(**kwargs: Any) -> Any:  # pragma: no cover — dormant; runner.retrieve_case owns live retrieval today
+        from kairix.core.factory import build_search_pipeline
+
+        return build_search_pipeline().search(**kwargs)
+
+    return search
 
 
 @dataclass
@@ -54,7 +58,7 @@ class BenchmarkPipeline:
         fusion_override:  Override fusion strategy.
     """
 
-    search_fn: Callable[..., Any] = field(default_factory=lambda: _default_search)
+    search_fn: Callable[..., Any] = field(default_factory=_make_default_search)
     system: str = "hybrid"
     agent: str | None = None
     output_dir: str | None = None

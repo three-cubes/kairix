@@ -11,6 +11,7 @@ BM25Result is a TypedDict for lightweight, serialisable results.
 """
 
 import logging
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any, TypedDict
@@ -243,6 +244,27 @@ def _build_bm25_query(
     return sql, params
 
 
+def _coerce_finite_score(score: Any, *, path: str) -> float:
+    """Cast a score to ``float`` and clamp non-finite values to 0.
+
+    Defence-in-depth for the doc_repo seam — even if a repository emits
+    NaN / inf (pathological backend, bug, malicious test fake), the public
+    surface must never propagate a non-finite score into RRF fusion.
+    """
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value):
+        logger.warning(
+            "bm25: non-finite score %r for path=%r via doc_repo; clamping to 0",
+            score,
+            path,
+        )
+        return 0.0
+    return value
+
+
 def _bm25_via_doc_repo(
     doc_repo: object,
     query: str,
@@ -253,16 +275,18 @@ def _bm25_via_doc_repo(
     """Delegate BM25 to a DocumentRepository; map raw dicts to BM25Result."""
     try:
         raw = doc_repo.search_fts(query, collections=collections, limit=limit)  # type: ignore[union-attr] — duck-typed seam; mypy can't see through `object`
-        results = [
-            BM25Result(
-                file=r.get("file", r.get("path", "")),
-                title=r.get("title", ""),
-                snippet=r.get("snippet", r.get("content", "")[:300]),
-                score=r.get("score", 0.0),
-                collection=r.get("collection", ""),
+        results = []
+        for r in raw:
+            file_path = r.get("file", r.get("path", ""))
+            results.append(
+                BM25Result(
+                    file=file_path,
+                    title=r.get("title", ""),
+                    snippet=r.get("snippet", r.get("content", "")[:300]),
+                    score=_coerce_finite_score(r.get("score", 0.0), path=file_path),
+                    collection=r.get("collection", ""),
+                )
             )
-            for r in raw
-        ]
         if date_filter_paths:
             results = [r for r in results if r["file"] in date_filter_paths]
         return results
@@ -279,14 +303,33 @@ def _extract_snippet(doc_text: str) -> str:
     return parts[2].strip()[:300] if len(parts) >= 3 else doc_text[:300]
 
 
+def _normalise_bm25_score(raw_score: float, *, path: str = "") -> float:
+    """Normalise a raw BM25 score into the closed interval [0, 1].
+
+    Maps ``|s| / (1 + |s|)``. Non-finite inputs (``nan`` / ``+inf`` /
+    ``-inf``) are clamped to 0 with a logged warning — empty documents or
+    a pathological FTS state can otherwise propagate ``nan`` through RRF
+    fusion and silently rank-poison the pipeline.
+    """
+    if not math.isfinite(raw_score):
+        logger.warning(
+            "bm25: non-finite raw score %r for path=%r; clamping to 0",
+            raw_score,
+            path,
+        )
+        return 0.0
+    return abs(raw_score) / (1.0 + abs(raw_score))
+
+
 def _row_to_bm25_result(row: Any) -> BM25Result:
     """Map a single SQLite row from the FTS query into a BM25Result."""
     raw_score = float(row["bm25_score"])
+    path = str(row["path"])
     return BM25Result(
-        file=str(row["path"]),
+        file=path,
         title=str(row["title"] or ""),
         snippet=_extract_snippet(row["doc"] or ""),
-        score=abs(raw_score) / (1.0 + abs(raw_score)),
+        score=_normalise_bm25_score(raw_score, path=path),
         collection=str(row["collection"]),
     )
 

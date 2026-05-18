@@ -80,6 +80,21 @@ class HealthReport:
         return self.issue_count == 0
 
 
+def _row_to_health_issue(row: dict[str, Any], default_detail: str) -> HealthIssue | None:
+    """Convert one Cypher row to a HealthIssue, or None when neither id nor name is set.
+
+    When the row carries ``last_seen`` (stale-entity queries), the detail
+    field is overridden with a human-readable last-seen marker.
+    """
+    eid = str(row.get("id") or "")
+    name = str(row.get("name") or "")
+    if not (eid or name):
+        return None
+    label = str(row.get("label") or "unknown")
+    detail = f"last seen: {row.get('last_seen') or 'never'}" if "last_seen" in row else default_detail
+    return HealthIssue(entity_id=eid, name=name, entity_type=label.lower(), detail=detail)
+
+
 def _query_entity_issues(
     neo4j_client: Any,
     cypher: str,
@@ -95,28 +110,16 @@ def _query_entity_issues(
 
     Returns [] on query failure (logged at log_level).
     """
-    issues: list[HealthIssue] = []
     try:
         rows = neo4j_client.cypher(cypher, params) if params else neo4j_client.cypher(cypher)
-        for r in rows:
-            eid = str(r.get("id") or "")
-            name = str(r.get("name") or "")
-            label = str(r.get("label") or "unknown")
-            if not (eid or name):
-                continue
-            row_detail = detail
-            if "last_seen" in r:
-                row_detail = f"last seen: {r.get('last_seen') or 'never'}"
-            issues.append(
-                HealthIssue(
-                    entity_id=eid,
-                    name=name,
-                    entity_type=label.lower(),
-                    detail=row_detail,
-                )
-            )
     except Exception as exc:
         getattr(logger, log_level)("health: %s query failed — %s", log_label, exc)
+        return []
+    issues: list[HealthIssue] = []
+    for row in rows:
+        issue = _row_to_health_issue(row, detail)
+        if issue is not None:
+            issues.append(issue)
     return issues
 
 
@@ -227,6 +230,40 @@ def _format_issue_section(heading: str, issues: list[HealthIssue]) -> list[str]:
     return lines
 
 
+def _format_entity_counts(report: HealthReport) -> list[str]:
+    """Render the entity-count table (or empty-state line)."""
+    if not report.entities_by_type:
+        return ["_No entities found._"]
+    lines = ["| Type | Count |", "|------|-------|"]
+    for etype, cnt in sorted(report.entities_by_type.items()):
+        lines.append(f"| {etype} | {cnt} |")
+    return lines
+
+
+def _format_neo4j_section(report: HealthReport) -> list[str]:
+    """Render the Neo4j availability + node-count line."""
+    if not report.neo4j_available:
+        return ["⚠ Unavailable."]
+    if report.neo4j_node_counts:
+        node_summary = ", ".join(f"{cnt} {label}" for label, cnt in sorted(report.neo4j_node_counts.items()))
+        return [f"✅ Connected — {node_summary}"]
+    return ["✅ Connected — no nodes found"]
+
+
+def _format_status_footer(report: HealthReport) -> list[str]:
+    """Render the trailing status line; lists the failure dimensions when not OK."""
+    if report.ok:
+        return ["**Status: ✅ HEALTHY** — no issues found"]
+    parts: list[str] = []
+    if report.synthesis_failures:
+        parts.append(f"{len(report.synthesis_failures)} synthesis failure(s)")
+    if report.stale_entities:
+        parts.append(f"{len(report.stale_entities)} stale")
+    if report.missing_vault_path:
+        parts.append(f"{len(report.missing_vault_path)} missing vault path")
+    return [f"**Status: ⚠ ISSUES FOUND** — {', '.join(parts)}"]
+
+
 def format_report_text(report: HealthReport) -> str:
     """Format a HealthReport as vault-ready Markdown."""
     lines: list[str] = [
@@ -236,14 +273,7 @@ def format_report_text(report: HealthReport) -> str:
         f"## Entity Counts (total: {report.total_entities})",
         "",
     ]
-
-    if report.entities_by_type:
-        lines += ["| Type | Count |", "|------|-------|"]
-        for etype, cnt in sorted(report.entities_by_type.items()):
-            lines.append(f"| {etype} | {cnt} |")
-    else:
-        lines.append("_No entities found._")
-
+    lines += _format_entity_counts(report)
     lines += _format_issue_section(
         f"## Synthesis Failures ({len(report.synthesis_failures)})",
         report.synthesis_failures,
@@ -256,30 +286,10 @@ def format_report_text(report: HealthReport) -> str:
         f"## Missing Vault Path ({len(report.missing_vault_path)})",
         report.missing_vault_path,
     )
-
     lines += ["", "## Graph (Neo4j)", ""]
-    if report.neo4j_available:
-        if report.neo4j_node_counts:
-            node_summary = ", ".join(f"{cnt} {label}" for label, cnt in sorted(report.neo4j_node_counts.items()))
-            lines.append(f"✅ Connected — {node_summary}")
-        else:
-            lines.append("✅ Connected — no nodes found")
-    else:
-        lines.append("⚠ Unavailable.")
-
+    lines += _format_neo4j_section(report)
     lines += ["", "---"]
-    if report.ok:
-        lines.append("**Status: ✅ HEALTHY** — no issues found")
-    else:
-        parts = []
-        if report.synthesis_failures:
-            parts.append(f"{len(report.synthesis_failures)} synthesis failure(s)")
-        if report.stale_entities:
-            parts.append(f"{len(report.stale_entities)} stale")
-        if report.missing_vault_path:
-            parts.append(f"{len(report.missing_vault_path)} missing vault path")
-        lines.append(f"**Status: ⚠ ISSUES FOUND** — {', '.join(parts)}")
-
+    lines += _format_status_footer(report)
     return "\n".join(lines) + "\n"
 
 

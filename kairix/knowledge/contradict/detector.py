@@ -70,6 +70,37 @@ class ContradictDetectorDeps:
     extractor: Any = field(default_factory=EntityDensityClaimExtractor)
 
 
+def _gather_candidates(
+    claims: list[str],
+    search: Callable[..., Any],
+    search_kwargs: dict[str, Any],
+    top_k: int,
+) -> dict[str, tuple[str, Any]]:
+    """Run search across all claims and dedupe candidates by doc path."""
+    seen: dict[str, tuple[str, Any]] = {}
+    for claim in claims:
+        try:
+            sr = search(query=claim[:500], **search_kwargs)
+        except Exception as exc:
+            logger.warning("contradict: hybrid search failed for claim — %s", exc)
+            continue
+        for bundle in sr.results[:top_k]:
+            path = bundle.result.path
+            if path not in seen:
+                seen[path] = (claim, bundle)
+    return seen
+
+
+def _build_search_kwargs(agent: str | None, scope: Any) -> dict[str, Any]:
+    """Construct kwargs forwarded to the search backend; only sets explicit fields."""
+    kwargs: dict[str, Any] = {"budget": 5000}
+    if agent is not None:
+        kwargs["agent"] = agent
+    if scope is not None:
+        kwargs["scope"] = scope
+    return kwargs
+
+
 def check_contradiction(
     content: str,
     llm: Any,
@@ -81,8 +112,7 @@ def check_contradiction(
     top_claims: int = 3,
     deps: ContradictDetectorDeps | None = None,
 ) -> list[ContradictionResult]:
-    """
-    Check whether *content* contradicts existing knowledge in the document store.
+    """Check whether ``content`` contradicts existing knowledge in the document store.
 
     Args:
         content:    The new content to check (claim, note, decision, etc.).
@@ -104,32 +134,10 @@ def check_contradiction(
         when no contradictions found or on any failure.
     """
     d = deps if deps is not None else ContradictDetectorDeps()
-    search = d.search
     scorer = d.scorer if d.scorer is not None else default_contradiction_scorer(llm)
-    extractor = d.extractor
 
-    claims = extractor.extract(content, top_n=top_claims) or [content[:500]]
-
-    # Union candidates across all claims, deduping on doc_path so a doc that
-    # surfaced for two claims is scored once against the most-relevant claim.
-    # Build search kwargs — agent and scope only forwarded when explicitly set
-    # so callers passing fakes that don't accept those kwargs aren't broken.
-    search_kwargs: dict[str, Any] = {"budget": 5000}
-    if agent is not None:
-        search_kwargs["agent"] = agent
-    if scope is not None:
-        search_kwargs["scope"] = scope
-
-    seen_paths: dict[str, tuple[str, Any]] = {}
-    for claim in claims:
-        try:
-            sr = search(query=claim[:500], **search_kwargs)
-            for bundle in sr.results[:top_k]:
-                path = bundle.result.path
-                if path not in seen_paths:
-                    seen_paths[path] = (claim, bundle)
-        except Exception as exc:
-            logger.warning("contradict: hybrid search failed for claim — %s", exc)
+    claims = d.extractor.extract(content, top_n=top_claims) or [content[:500]]
+    seen_paths = _gather_candidates(claims, d.search, _build_search_kwargs(agent, scope), top_k)
 
     logger.info(
         "contradict: extracted %d claims, retrieved %d unique candidates (threshold=%.2f)",

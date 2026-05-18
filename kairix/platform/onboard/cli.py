@@ -20,8 +20,11 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from kairix.paths import document_root_override, env_file_override
 
 if TYPE_CHECKING:
     from kairix.platform.onboard.check import CheckResult
@@ -29,6 +32,19 @@ if TYPE_CHECKING:
 # Canonical filename for the agent usage guide installed into the shared
 # knowledge base by `kairix onboard guide`.
 _AGENT_USAGE_GUIDE_FILENAME = "kairix-usage.md"
+
+
+def _default_run_all_checks(*args: Any, **kwargs: Any) -> Any:
+    """Production seam — defers `run_all_checks` import to call time.
+
+    Lazy because ``kairix.platform.onboard.check`` pulls in heavy
+    dependencies (Neo4j client, sqlite, secrets); we don't want them at
+    CLI module-import time when the operator might only run ``--help``.
+    """
+    from kairix.platform.onboard.check import run_all_checks
+
+    return run_all_checks(*args, **kwargs)
+
 
 # ---------------------------------------------------------------------------
 # Env self-loader (ERR-003 fix)
@@ -66,7 +82,12 @@ def _load_env_file(path: str) -> list[str]:
     return loaded
 
 
-def _self_load_env(explicit_path: str | None) -> tuple[str | None, list[str]]:
+def _self_load_env(
+    explicit_path: str | None,
+    *,
+    env_file_override_fn: Callable[[], str | None] = env_file_override,
+    known_env_paths: tuple[str, ...] | None = None,
+) -> tuple[str | None, list[str]]:
     """
     Attempt to self-load production env files before running checks.
 
@@ -76,24 +97,71 @@ def _self_load_env(explicit_path: str | None) -> tuple[str | None, list[str]]:
       3. Known production paths (tried in order, first existing wins)
 
     Returns (source_path_or_None, list_of_keys_loaded).
+
+    Test seams:
+      ``env_file_override_fn`` overrides the production
+      ``kairix.paths.env_file_override`` lookup; when ``None`` the
+      production function is used.
+      ``known_env_paths`` overrides the module-level ``_KNOWN_ENV_PATHS``
+      tuple; when ``None`` the production constant is used.
     """
     if explicit_path:
         loaded = _load_env_file(explicit_path)
         return (explicit_path, loaded)
 
-    from kairix.paths import env_file_override
-
-    env_var_path = env_file_override() or ""
+    env_var_path = env_file_override_fn() or ""
     if env_var_path:
         loaded = _load_env_file(env_var_path)
         return (env_var_path, loaded)
 
-    for probe in _KNOWN_ENV_PATHS:
+    probes = known_env_paths if known_env_paths is not None else _KNOWN_ENV_PATHS
+    for probe in probes:
         if Path(probe).exists():
             loaded = _load_env_file(probe)
             return (probe, loaded)
 
     return (None, [])
+
+
+# ---------------------------------------------------------------------------
+# ready subcommand — deploy-time readiness probe
+# ---------------------------------------------------------------------------
+
+
+def _default_warm_state_is_warm() -> bool:
+    """Production seam — checks the cross-process warm flag.
+
+    The healthcheck runs in a separate ``docker exec`` shell, so the
+    in-process ``is_warm()`` flag from the MCP server isn't visible.
+    Reads ``is_warm_persisted()`` which checks for the flag file the
+    MCP process writes once warm.
+    """
+    from kairix.platform.warm.state import is_warm_persisted
+
+    return is_warm_persisted()
+
+
+def cmd_ready(args: argparse.Namespace) -> int:
+    """Readiness probe for deploy tooling — exits 0 only when kairix is warm.
+
+    Distinct from ``cmd_check`` (which probes infrastructure config — secrets,
+    paths, neo4j, embed pipeline). ``ready`` answers the narrower question
+    "will the next agent call succeed without hitting a cold-start envelope?".
+
+    Used as the Docker compose healthcheck so ``docker compose up --wait``
+    blocks until kairix has actually finished warming, not just until the
+    process binds its port.
+
+    Tests pass ``_is_warm_fn`` via the public ``is_warm_fn`` kwarg on
+    ``main()`` to drive both branches without monkey-patching
+    ``kairix.platform.warm.state``.
+    """
+    is_warm_fn = getattr(args, "_is_warm_fn", _default_warm_state_is_warm)
+    if is_warm_fn():
+        print("ready")
+        return 0
+    print("not-ready: kairix is still warming up", file=sys.stderr)
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -103,26 +171,60 @@ def _self_load_env(explicit_path: str | None) -> tuple[str | None, list[str]]:
 
 def cmd_check(args: argparse.Namespace) -> int:
     # Self-load env files so check results are context-independent (ERR-003)
-    env_source, env_keys = _self_load_env(getattr(args, "env_file", None))
+    env_source, env_keys = _self_load_env(
+        getattr(args, "env_file", None),
+        env_file_override_fn=getattr(args, "_env_file_override_fn", env_file_override),
+        known_env_paths=getattr(args, "_known_env_paths", None),
+    )
 
+    run_all_checks_fn = getattr(args, "_run_all_checks_fn", _default_run_all_checks)
     if args.json:
-        return _render_check_json(env_source)
-    return _render_check_human(env_source, env_keys)
+        return _render_check_json(env_source, run_all_checks_fn=run_all_checks_fn)
+    return _render_check_human(env_source, env_keys, run_all_checks_fn=run_all_checks_fn)
 
 
-def _render_check_json(env_source: str | None) -> int:
+def _render_check_json(
+    env_source: str | None,
+    *,
+    run_all_checks_fn: Callable[..., Any] = _default_run_all_checks,
+) -> int:
     """Emit the structured JSON surface and return the exit code.
 
     Shape: ``{passed, total, fully_passed, failures: [...], env_source}``.
     ``env_source`` is operator metadata, not part of ``OnboardResult``,
     surfaced here so an admin running ``--json`` sees which env file was
     loaded.
+
+    The OnboardResult is rebuilt from the ``CheckResult`` list returned
+    by ``run_all_checks_fn`` so production and tests share one assembly
+    path — no second registry call for production, no shape divergence.
     """
     from dataclasses import asdict
 
-    from kairix.platform.onboard.check import run_onboard_check
+    from kairix.platform.onboard.check import (
+        CheckFailure,
+        OnboardResult,
+        _remediation_for,
+    )
 
-    outcome = run_onboard_check()
+    results = run_all_checks_fn()
+    failures = [
+        CheckFailure(
+            check=r.name,
+            detail=r.detail,
+            remediation=_remediation_for(r.name, r.fix),
+        )
+        for r in results
+        if not r.ok
+    ]
+    passed = sum(1 for r in results if r.ok)
+    total = len(results)
+    outcome = OnboardResult(
+        passed=passed,
+        total=total,
+        failures=failures,
+        fully_passed=passed == total,
+    )
     output = {
         "passed": outcome.passed,
         "total": outcome.total,
@@ -134,15 +236,18 @@ def _render_check_json(env_source: str | None) -> int:
     return 0 if outcome.fully_passed else 1
 
 
-def _render_check_human(env_source: str | None, env_keys: list[str]) -> int:
+def _render_check_human(
+    env_source: str | None,
+    env_keys: list[str],
+    *,
+    run_all_checks_fn: Callable[..., Any] = _default_run_all_checks,
+) -> int:
     """Emit the human-readable surface and return the exit code.
 
     Renders from ``CheckResult`` (which carries the multi-line fix
     guidance); JSON renders from ``OnboardResult`` (one-line remediation).
     """
-    from kairix.platform.onboard.check import run_all_checks
-
-    results = run_all_checks()
+    results = run_all_checks_fn()
     passed = sum(1 for r in results if r.ok)
     total = len(results)
     all_ok = passed == total
@@ -201,54 +306,100 @@ def _print_check_summary(*, passed: int, total: int, all_ok: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def cmd_guide(args: argparse.Namespace) -> int:
-    """Install the agent usage guide into the document store's shared knowledge base."""
-    from kairix.paths import document_root_override
+def _resolve_doc_root(args: argparse.Namespace) -> Path | None:
+    """Resolve and validate the document root for ``cmd_guide``.
 
-    doc_root = args.document_root or document_root_override() or ""
+    Prints an error to ``stderr`` and returns ``None`` when the doc
+    root is unset or points at a non-existent directory; callers
+    convert ``None`` into a non-zero exit.
+    """
+    doc_root = args.document_root or getattr(args, "_document_root_override_fn", document_root_override)() or ""
     if not doc_root:
         print(
             "Error: --document-root is required (or set KAIRIX_DOCUMENT_ROOT)",
             file=sys.stderr,
         )
-        return 1
+        return None
 
     doc_path = Path(doc_root)
     if not doc_path.exists():
         print(f"Error: document root does not exist: {doc_root}", file=sys.stderr)
-        return 1
+        return None
+    return doc_path
 
-    # Find the guide source in the kairix package
-    guide_src = Path(__file__).parent.parent.parent / "docs" / "agent-usage-guide.md"
-    if not guide_src.exists():
-        # Fallback: look relative to the installed package
+
+def _resolve_guide_src(args: argparse.Namespace) -> Path | None:
+    """Locate the bundled agent usage guide markdown.
+
+    Tries the in-tree source layout first, then falls back to the
+    installed-package layout. Returns ``None`` and prints an error
+    when neither candidate exists.
+    """
+    # The in-tree source layout (``<repo>/docs/agent-usage-guide.md``)
+    # and the installed-package layout (``<site-packages>/docs/...``)
+    # both terminate at ``Path(kairix.__file__).parent.parent``. Threading
+    # ``pkg_root`` through ``args`` (set by ``main()``'s public DI seam)
+    # lets tests pin a tmp-path layout without monkey-patching kairix.__file__.
+    pkg_root = getattr(args, "_pkg_root", None)
+    if pkg_root is None:
+        in_tree = Path(__file__).parent.parent.parent / "docs" / "agent-usage-guide.md"
+        if in_tree.exists():
+            return in_tree
         import kairix
 
         pkg_root = Path(kairix.__file__).parent.parent
-        guide_src = pkg_root / "docs" / "agent-usage-guide.md"
 
-    if not guide_src.exists():
-        print(f"Error: agent usage guide not found at {guide_src}", file=sys.stderr)
-        print("Check your kairix installation is complete.", file=sys.stderr)
+    guide_src = pkg_root / "docs" / "agent-usage-guide.md"
+    if guide_src.exists():
+        return guide_src
+
+    print(f"Error: agent usage guide not found at {guide_src}", file=sys.stderr)
+    print("Check your kairix installation is complete.", file=sys.stderr)
+    return None
+
+
+def _resolve_guide_dest(args: argparse.Namespace, doc_path: Path) -> Path:
+    """Choose the install destination for the agent usage guide.
+
+    Honours ``--output`` when set; otherwise probes the PARA-style
+    shared-knowledge candidates and falls back to ``doc_path`` root.
+    """
+    if args.output:
+        return Path(args.output)
+
+    candidates = [
+        doc_path / "04-Agent-Knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
+        doc_path / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
+        doc_path / "agent-knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
+    ]
+    for candidate in candidates:
+        if candidate.parent.exists():
+            return candidate
+    return doc_path / _AGENT_USAGE_GUIDE_FILENAME
+
+
+def _print_guide_install_success(dest: Path) -> None:
+    """Print the success banner + follow-up steps after a guide install."""
+    print(f"Agent usage guide installed at: {dest}")
+    print()
+    print("Agents can now find this guide via:")
+    print('  kairix search "how do I use kairix" --agent <name>')
+    print()
+    print("Re-embed to make the guide searchable:")
+    print("  kairix embed --changed")
+
+
+def cmd_guide(args: argparse.Namespace) -> int:
+    """Install the agent usage guide into the document store's shared knowledge base."""
+    doc_path = _resolve_doc_root(args)
+    if doc_path is None:
         return 1
 
-    # Target: vault/04-Agent-Knowledge/shared/kairix-usage.md (standard PARA path)
-    # Allow override via --output
-    if args.output:
-        dest = Path(args.output)
-    else:
-        # Try to find the shared knowledge directory
-        candidates = [
-            doc_path / "04-Agent-Knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
-            doc_path / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
-            doc_path / "agent-knowledge" / "shared" / _AGENT_USAGE_GUIDE_FILENAME,
-        ]
-        dest_or_none: Path | None = None
-        for c in candidates:
-            if c.parent.exists():
-                dest_or_none = c
-                break
-        dest = dest_or_none if dest_or_none is not None else doc_path / _AGENT_USAGE_GUIDE_FILENAME
+    guide_src = _resolve_guide_src(args)
+    if guide_src is None:
+        return 1
+
+    dest = _resolve_guide_dest(args, doc_path)
 
     if args.dry_run:
         print("Would install agent usage guide:")
@@ -258,14 +409,7 @@ def cmd_guide(args: argparse.Namespace) -> int:
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(guide_src.read_text(encoding="utf-8"), encoding="utf-8")
-    print(f"Agent usage guide installed at: {dest}")
-    print()
-    print("Agents can now find this guide via:")
-    print('  kairix search "how do I use kairix" --agent <name>')
-    print()
-    print("Re-embed to make the guide searchable:")
-    print("  kairix embed --changed")
-
+    _print_guide_install_success(dest)
     return 0
 
 
@@ -276,7 +420,8 @@ def cmd_guide(args: argparse.Namespace) -> int:
 
 def cmd_verify(args: argparse.Namespace) -> int:
     """Run the acceptance test suite against the live deployment."""
-    script = Path(__file__).parent.parent.parent / "scripts" / "verify-search.py"
+    script_root = getattr(args, "_script_root", None) or Path(__file__).parent.parent.parent
+    script = script_root / "scripts" / "verify-search.py"
     if not script.exists():
         print(f"Error: verify-search.py not found at {script}", file=sys.stderr)
         return 1
@@ -298,7 +443,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    env_file_override_fn: Callable[[], str | None] = env_file_override,
+    known_env_paths: tuple[str, ...] | None = None,
+    document_root_override_fn: Callable[[], str | None] = document_root_override,
+    script_root: Path | None = None,
+    run_all_checks_fn: Callable[..., Any] = _default_run_all_checks,
+    pkg_root: Path | None = None,
+    is_warm_fn: Callable[[], bool] = _default_warm_state_is_warm,
+) -> int:
     """`kairix onboard` entry point.
 
     Returns the exit code (0 = success, 1 = failure) rather than calling
@@ -306,6 +461,11 @@ def main(argv: list[str] | None = None) -> int:
     the return value without catching SystemExit. The package-level
     entry point in ``kairix/cli.py`` is responsible for translating this
     int into the process exit code.
+
+    Public DI seams (production callers leave them ``None``):
+      ``env_file_override_fn`` — overrides ``kairix.paths.env_file_override``
+      ``known_env_paths`` — overrides module-level ``_KNOWN_ENV_PATHS``
+      ``document_root_override_fn`` — overrides ``kairix.paths.document_root_override``
     """
     parser = argparse.ArgumentParser(
         prog="kairix onboard",
@@ -338,7 +498,22 @@ def main(argv: list[str] | None = None) -> int:
     p_verify.add_argument("--agent", default="builder", help="Agent name for scoped tests")
     p_verify.add_argument("--json", action="store_true", help="Output as JSON")
 
+    # ready — narrow readiness probe used as the Docker compose healthcheck
+    sub.add_parser(
+        "ready",
+        help="Exit 0 when kairix is warm; exit 1 while still warming (Docker healthcheck target).",
+    )
+
     args = parser.parse_args(argv)
+    # Thread the DI seams onto the args namespace so the sub-command
+    # helpers pick them up through getattr in their existing signatures.
+    args._env_file_override_fn = env_file_override_fn
+    args._known_env_paths = known_env_paths
+    args._document_root_override_fn = document_root_override_fn
+    args._script_root = script_root
+    args._run_all_checks_fn = run_all_checks_fn
+    args._pkg_root = pkg_root
+    args._is_warm_fn = is_warm_fn
 
     if args.subcommand == "check":
         return cmd_check(args)
@@ -346,6 +521,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_guide(args)
     if args.subcommand == "verify":
         return cmd_verify(args)
+    if args.subcommand == "ready":
+        return cmd_ready(args)
     # argparse with required=True makes this unreachable in practice;
     # surface as a non-zero exit if argparse semantics ever change.
     return 2

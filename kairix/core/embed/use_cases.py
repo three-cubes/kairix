@@ -8,12 +8,12 @@ structured ``EmbedPipelineResult``. Two consumers:
   - ``kairix worker`` (background daemon) calls the function directly,
     inspects the result, logs alerts, and continues to the next interval.
 
-Before this module existed, the worker called ``embed_main()`` from the
-CLI. The CLI raises ``SystemExit`` on recall-gate failure; the worker's
-``except Exception`` did not catch SystemExit, so any gate alert killed
-the worker process. This made the recall gate's job (fire an alert) and
-the worker's job (stay alive and run on a schedule) collide via process
-semantics rather than data flow. See v2026.5.10 fix-notes.
+This use case exists to keep the recall gate's job (fire an alert) and
+the worker's job (stay alive and run on a schedule) communicating via
+data flow rather than process semantics: the gate's outcome is reported
+in the returned dataclass and the caller decides what to do, instead of
+the recall-gate code raising ``SystemExit`` and tearing down the worker
+(``except Exception`` does not catch ``SystemExit``).
 
 Design notes:
   - The recall gate is an **alert**, not a fatal error. The use case

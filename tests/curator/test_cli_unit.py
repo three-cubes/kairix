@@ -70,23 +70,26 @@ def test_health_writes_output_file_json_format(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_health_resolves_default_client_when_none_injected(monkeypatch) -> None:
-    """When called with no neo4j_client kw, the CLI must call get_client.
+def test_health_resolves_default_client_via_client_factory_kwarg() -> None:
+    """When neo4j_client is None, the CLI must invoke ``client_factory``.
 
-    We swap the ``get_client`` symbol *on the kairix.knowledge.graph.client*
-    module so the lazy import inside ``_health_cmd`` resolves to our fake
-    factory. This is not patching kairix internals — we're configuring the
-    boundary collaborator the production code is explicitly designed to
-    look up by name.
+    Drives the public ``client_factory`` kwarg seam: the test passes a
+    counting factory and asserts it was called exactly once. Exercises
+    the "neo4j_client is None → factory()" branch without monkey-patching
+    the lazy ``get_client`` import inside _health_cmd, and the
+    call-count assertion catches any sabotage that bypasses the kwarg.
     """
-    import kairix.knowledge.graph.client as graph_client
-
     fake = FakeNeo4jClient(entities=[])
-    monkeypatch.setattr(graph_client, "get_client", lambda: fake)
+    call_count = 0
 
-    stdout, _stderr, code = _drive(["health", "--format", "json"])
+    def counting_factory() -> Any:
+        nonlocal call_count
+        call_count += 1
+        return fake
+
+    stdout, _stderr, code = _drive(["health", "--format", "json"], client_factory=counting_factory)
     assert code == 0
-    # The fake produced a non-error report (no entities → empty health body).
+    assert call_count == 1, f"client_factory must be invoked exactly once; got {call_count}"
     import json
 
     parsed = json.loads(stdout)

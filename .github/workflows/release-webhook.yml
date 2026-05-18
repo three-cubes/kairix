@@ -1,0 +1,165 @@
+name: "6 · Release (alpha-deploy-webhook binary publish)"
+
+# Closes #286. Builds the services/alpha-deploy-webhook Go binary on
+# every GitHub Release (stable AND alpha pre-release) and attaches the
+# linux/amd64 + linux/arm64 binaries as Release assets, so the
+# operator-side install script (lives in the sibling infra repo) can
+# `curl` a stable URL of the form:
+#
+#   https://github.com/<owner>/<repo>/releases/download/<tag>/alpha-deploy-webhook-linux-<arch>
+#
+# Before #286 the binary on `vm-openclaw` was shipped manually via scp
+# + az run-command; every webhook code change required a human ops
+# touch and webhook-side fixes (e.g. the docker-compose --wait fix in
+# a0272d6e) sat unused in develop. This workflow closes that loop.
+#
+# Asset venue: GitHub Release. Matches the existing publish pattern
+# (Docker image -> GHCR, Python wheel -> PyPI). Zero new infra; the
+# release asset URL is stable and PAT-pullable.
+#
+# Out of scope: the VM-side pull script that downloads + atomic-swap +
+# restarts kairix-alpha-deploy-webhook.service. That lives in the
+# operator's sibling infrastructure repo (cross-repo, see kairix#272
+# Phase 4 follow-ups + services/alpha-deploy-webhook/README.md).
+#
+# Security: every github.event-derived value and every matrix value
+# referenced in `run:` blocks is routed through an `env:` binding
+# first, mirroring the workflow-injection hardening practice already
+# applied across .github/workflows/ (see go-quality.yml, release.yml,
+# release-vm-deploy.yml).
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    # Manual entrypoint for backfilling a release that was created
+    # before this workflow existed, or for re-attaching a binary that
+    # was deleted. Caller picks the tag; the workflow checks out that
+    # ref and rebuilds.
+    inputs:
+      ref:
+        description: 'Git tag to build + attach (e.g. v2026.5.16a1 or v2026.5.17)'
+        required: true
+        type: string
+
+permissions:
+  contents: write   # required to attach assets to the GitHub Release
+
+concurrency:
+  # Allow parallel builds across different releases (each tag has its
+  # own release object) but never two for the same ref simultaneously.
+  group: release-webhook-${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-attach:
+    name: "Build + attach alpha-deploy-webhook binary"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+    env:
+      MODULE_DIR: services/alpha-deploy-webhook
+      TARGET_GOOS: ${{ matrix.target.goos }}
+      TARGET_GOARCH: ${{ matrix.target.goarch }}
+      # github.event.release.tag_name fires for `release` events;
+      # inputs.ref fires for workflow_dispatch backfill. Either way we
+      # check out the tagged commit so the build SHA matches the
+      # release. Bound to env at job level so `run:` scripts read $REF_NAME
+      # rather than expanding ${{ ... }} inline (workflow-injection
+      # hardening).
+      REF_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.REF_NAME }}
+          fetch-depth: 1
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: ${{ env.MODULE_DIR }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ env.MODULE_DIR }}/go.sum
+
+      - name: Cross-compile alpha-deploy-webhook
+        # Mirrors the build flags in .github/workflows/go-quality.yml's
+        # build-matrix job — same -trimpath, same -ldflags shape, same
+        # CGO_ENABLED=0 (we publish a static binary so the operator
+        # doesn't need libc compatibility on the VM).
+        run: |
+          set -euo pipefail
+          cd "$MODULE_DIR"
+          export GOOS="$TARGET_GOOS"
+          export GOARCH="$TARGET_GOARCH"
+          export CGO_ENABLED=0
+          mkdir -p dist
+          out="dist/alpha-deploy-webhook-${GOOS}-${GOARCH}"
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${REF_NAME}" \
+            -o "$out" ./cmd/alpha-deploy-webhook
+          ls -lh "$out"
+
+      - name: Verify --version reports the release tag
+        # Smoke-test that the ldflags injection worked. We can only run
+        # the native build (linux/amd64 on the ubuntu-latest runner);
+        # for the linux/arm64 build we skip the runtime probe — the
+        # cross-compile target byte-checks identically and the
+        # equivalent injection works on the amd64 binary, which proves
+        # the build recipe.
+        if: matrix.target.goarch == 'amd64'
+        run: |
+          set -euo pipefail
+          cd "$MODULE_DIR"
+          out="./dist/alpha-deploy-webhook-${TARGET_GOOS}-${TARGET_GOARCH}"
+          observed=$("$out" --version)
+          expected="alpha-deploy-webhook ${REF_NAME}"
+          if [ "$observed" != "$expected" ]; then
+            echo "::error::--version mismatch: got '$observed', expected '$expected'"
+            echo "fix: check the -X main.version=... ldflag in the Cross-compile step;"
+            echo "     it must match the variable name in cmd/alpha-deploy-webhook/main.go ('var version = ...')."
+            exit 1
+          fi
+          echo "::notice::--version verified: $observed"
+
+      - name: Compute SHA256 checksum for the binary
+        # Operator pulls the binary on the VM via the install script in
+        # the sibling infra repo. The checksum file lets that script
+        # verify integrity before the atomic swap + systemd restart.
+        run: |
+          set -euo pipefail
+          cd "$MODULE_DIR/dist"
+          out="alpha-deploy-webhook-${TARGET_GOOS}-${TARGET_GOARCH}"
+          sha256sum "$out" > "${out}.sha256"
+          cat "${out}.sha256"
+
+      - name: Attach binary + checksum to GitHub Release
+        # Uses `gh release upload` rather than softprops/action-gh-release —
+        # gh is already installed on ubuntu-latest, no new action
+        # dependency to vet, and the auth model (GITHUB_TOKEN) is the
+        # same one release.yml + release-alpha.yml use for `gh release
+        # create`. --clobber so backfill via workflow_dispatch can
+        # overwrite an existing partial upload.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$MODULE_DIR/dist"
+          out="alpha-deploy-webhook-${TARGET_GOOS}-${TARGET_GOARCH}"
+          gh release upload "$REF_NAME" "$out" "${out}.sha256" --clobber
+          echo "::notice::Attached $out + ${out}.sha256 to release $REF_NAME"
+
+      - name: Summary
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "## alpha-deploy-webhook $REF_NAME ($TARGET_GOOS/$TARGET_GOARCH)"
+            echo
+            echo "- Built from tag: \`$REF_NAME\`"
+            echo "- Asset: \`alpha-deploy-webhook-${TARGET_GOOS}-${TARGET_GOARCH}\`"
+            echo "- Checksum: \`alpha-deploy-webhook-${TARGET_GOOS}-${TARGET_GOARCH}.sha256\`"
+            echo "- Pull URL: \`https://github.com/${REPO}/releases/download/${REF_NAME}/alpha-deploy-webhook-${TARGET_GOOS}-${TARGET_GOARCH}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -2,8 +2,9 @@
 
 Exercises ``LLMJudge.grade`` and ``LLMJudge.calibrate`` directly with the
 production wiring (via ``FakeChatBackend`` from tests/fakes.py — no
-monkeypatch). Closes the integration-coverage gap: previously the judge was
-only reached transitively through the SuiteGenerator pipeline.
+monkeypatch), so the judge is covered by integration tests as a public
+surface in its own right rather than only transitively through
+SuiteGenerator.
 """
 
 from __future__ import annotations

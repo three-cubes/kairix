@@ -11,6 +11,13 @@ BDD step modules must be declared as pytest_plugins at the root conftest level
 (pytest restriction: pytest_plugins in sub-conftest files is not supported).
 """
 
+# Early numpy import — pre-loads the C extension before pytest-cov starts
+# instrumenting test modules. Python 3.14 + numpy 2.4 + pytest-cov hit a
+# "cannot load module more than once per process" ImportError when numpy
+# is first imported AFTER coverage tracing has begun (#211). Loading it
+# here ensures numpy is in ``sys.modules`` before the first test module
+# loads, so subsequent ``import numpy`` calls are pure dict lookups.
+import numpy  # noqa: F401 — pre-load only; see #211
 import pytest
 
 # BDD step definition modules — registered here so pytest-bdd can discover them
@@ -61,11 +68,63 @@ pytest_plugins = [
     "tests.bdd.steps.setup_cli_steps",
     "tests.bdd.steps.wikilinks_cli_steps",
     "tests.bdd.steps.entity_cli_steps",
+    "tests.bdd.steps.entity_audit_steps",
     "tests.bdd.steps.curator_cli_steps",
     "tests.bdd.steps.mcp_cli_steps",
     "tests.bdd.steps.embed_cli_steps",
     "tests.bdd.steps.timeline_cli_steps",
+    "tests.bdd.steps.soak_steps",
+    "tests.bdd.steps.warm_steps",
+    "tests.bdd.steps.probe_steps",
+    "tests.bdd.steps.probe_per_query_telemetry_steps",
+    "tests.bdd.steps.worker_steps",
+    "tests.bdd.steps.bootstrap_steps",
+    "tests.bdd.steps.usage_guide_steps",
+    "tests.bdd.steps.classify_steps",
+    "tests.bdd.steps.classify_error_steps",
+    "tests.bdd.steps.embed_pool_config_steps",
+    "tests.bdd.steps.query_cache_steps",
+    "tests.bdd.steps.enrich_cache_steps",
+    "tests.bdd.steps.embed_cache_steps",
+    "tests.bdd.steps.embed_coalescer_steps",
+    "tests.bdd.steps.vec_index_batched_metadata_steps",
+    "tests.bdd.steps.transport_pool_steps",
+    # transport_bdd_steps covers all four transport_(cache|coalesce|retry|timeout)
+    # features in one module — shared step phrases would otherwise be
+    # registered ambiguously across separate per-feature modules.
+    "tests.bdd.steps.transport_bdd_steps",
+    # Provider plugin BDD step modules. Five Wave-4 providers carry
+    # skeleton skips until their implementations land.
+    "tests.bdd.steps.provider_anthropic_steps",
+    "tests.bdd.steps.provider_azure_foundry_steps",
+    "tests.bdd.steps.provider_azure_legacy_steps",
+    "tests.bdd.steps.provider_bedrock_steps",
+    "tests.bdd.steps.provider_litellm_proxy_steps",
+    "tests.bdd.steps.provider_ollama_steps",
+    "tests.bdd.steps.provider_openai_steps",
+    "tests.bdd.steps.provider_wire_common_steps",
+    # E2E provider journey step modules.
+    "tests.bdd.steps.e2e_provider_chat_steps",
+    "tests.bdd.steps.e2e_provider_embed_steps",
+    "tests.bdd.steps.e2e_provider_health_steps",
+    "tests.bdd.steps.e2e_provider_switch_steps",
+    # probe-config health-check end-user CLI.
+    "tests.bdd.steps.probe_config_health_steps",
+    # Layered config loader — image-bundled base + sparse operator overlay.
+    "tests.bdd.steps.config_layering_steps",
 ]
+
+# PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.
+# Gated on ``KAIRIX_PVT=1`` so the regex-catch-all parser doesn't intercept
+# every Given/When/Then across the layer-2 BDD suite when PVT is off (the
+# default). The tests/pvt/conftest.py autoskip is the primary defence — it
+# skips PVT-marked items at collection time; this catch-all is the secondary
+# defence that the PVT brief reserves for the ``KAIRIX_PVT=1`` mode where
+# the autoskip is intentionally bypassed.
+import os as _os  # noqa: E402 — keep pytest_plugins assembly above other imports
+
+if _os.environ.get("KAIRIX_PVT") == "1":
+    pytest_plugins.append("tests.pvt.steps.pvt_placeholder_steps")
 
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
 from tests.fixtures.neo4j_mock import FakeNeo4jClient  # noqa: E402
@@ -91,6 +150,41 @@ def no_azure_calls(monkeypatch, request):
     if "e2e" not in request.keywords:
         monkeypatch.delenv("KAIRIX_AZURE_API_KEY", raising=False)
         monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_embed_coalescer():
+    """Drop the process-shared embed coalescer between tests (#288).
+
+    The coalescer singleton owns a background dispatcher thread — if a
+    test triggers construction (via ``embed_text`` without a ``client=``
+    kwarg) the thread would survive into the next test and the next
+    test's batch dispatcher closure would be stale. Resetting on teardown
+    keeps each test's coalescer state isolated.
+    """
+    yield
+    from kairix.transport.coalesce import reset_embed_coalescer
+
+    reset_embed_coalescer()
+
+
+@pytest.fixture(autouse=True)
+def _reset_client_pool():
+    """Drop the process-shared transport client between tests.
+
+    The :mod:`kairix.transport.pool` singleton caches the built
+    OpenAI-compatible client process-wide so coalescer batches reuse
+    one ``httpx.Client`` connection pool. Tests that exercise that
+    path through the production accessor (``_get_client``) would
+    otherwise inherit a client from a previous test — including one
+    built against now-deleted Azure credentials. Resetting on
+    teardown keeps each test's pool state isolated, matching the
+    pattern established by ``_reset_embed_coalescer``.
+    """
+    yield
+    from kairix.transport.pool import reset_client_cache
+
+    reset_client_cache()
 
 
 @pytest.fixture

@@ -1,16 +1,10 @@
-"""Source-string regression guard against re-introducing hardcoded ``reference-library`` policy.
+"""Source-string contract: the resolver and config loader must not hardcode ``reference-library``.
 
-The 2026-05-05 reflib-pollution incident produced a hardcoded
-``_RESERVED_COLLECTIONS = {"reference-library"}`` carve-out in
-``kairix/core/search/resolver.py`` and a ``if target == "reference-library":``
-branch in ``kairix/core/search/config_loader.py``. Both were deleted in
-v2026.5.4 in favour of an operator-yaml-driven ``in_default`` flag.
-
-This test asserts the literal string ``reference-library`` does not
-re-appear in either source file — it is acceptable in docstrings and
-comments only when *explaining* the historical context, but should never
-be referenced in policy code. If you need to assert the literal name in
-new code, you are about to re-create the foot-gun.
+Reference-library treatment is an operator-yaml policy decision driven
+by the ``in_default`` flag on the collection. The resolver and config
+loader are policy-neutral surfaces that must not branch on the literal
+collection name; that asymmetry has previously regressed into hidden
+behaviour where one corpus was treated specially.
 
 Justified callers that still legitimately reference the literal:
   - ``kairix/core/embed/cli.py`` — embed harness auto-injects a
@@ -38,10 +32,9 @@ def test_resolver_source_does_not_reference_reflib_literal() -> None:
     """``DefaultCollectionResolver`` must not reference the literal collection name."""
     source = Path(resolver_module.__file__).read_text(encoding="utf-8")
     assert "reference-library" not in source, (
-        "kairix/core/search/resolver.py reintroduces the hardcoded "
-        "'reference-library' policy that was deliberately removed in "
-        "v2026.5.4. Use the in_default flag on the collection in yaml; "
-        "do NOT add new reserved-collection logic to the resolver."
+        "kairix/core/search/resolver.py hardcodes the 'reference-library' "
+        "collection name. Use the in_default flag on the collection in yaml; "
+        "do NOT add reserved-collection logic to the resolver."
     )
 
 

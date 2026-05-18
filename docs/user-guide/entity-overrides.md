@@ -73,7 +73,7 @@ Lines that don't start with `- ` are ignored, so you can mix prose,
 headings, and entries freely:
 
 ```markdown
-# Three Cubes — entity overrides
+# Example Corp — entity overrides
 
 ## Banks
 - "YYY": ORG

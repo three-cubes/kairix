@@ -54,21 +54,92 @@ class TestChatBackendContract:
             backend.complete("p", api_key="k", endpoint="e", deployment="d")
 
     def test_production_chat_backend_satisfies_protocol(self) -> None:
-        """The production chat-backend factory returns a ``ChatBackend``.
+        """The provider-backed eval ``ChatBackend`` adapter satisfies the protocol.
 
-        Phase 2a adds the adapter so production callers can inject a
-        ``ChatBackend`` rather than calling ``chat_completion`` directly.
+        :class:`~kairix.quality.eval.chat_backend.ProviderEvalChatBackend`
+        wraps a :class:`kairix.providers.Provider` plugin and exposes
+        the ``ChatBackend.complete`` shape. The adapter is constructed
+        directly with a ``FakeProvider`` so the test does not depend on
+        ``kairix.config.yaml``.
 
-        F5-clean: drive through the public ``default_chat_backend()``
-        factory rather than importing the concrete adapter class from the
-        private ``kairix._azure`` module. The concrete class is an
-        implementation detail; what callers depend on is the protocol
-        surface.
+        Sabotage proof: dropping the ``complete`` method (or changing
+        its signature off the protocol shape) would fail the
+        ``isinstance(...)`` assertion since ``ChatBackend`` is
+        ``runtime_checkable``.
         """
-        from kairix.quality.eval.generate import default_chat_backend
+        from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
+        from tests.fakes import FakeProvider
 
-        backend = default_chat_backend()
+        backend = ProviderEvalChatBackend(FakeProvider(chat_reply="ok"))
         assert isinstance(backend, ChatBackend)
+
+    def test_provider_eval_chat_backend_routes_complete_through_provider(self) -> None:
+        """``ProviderEvalChatBackend.complete`` delegates to ``Provider.chat``.
+
+        Pins the wiring contract: the adapter must call the configured
+        provider's ``chat`` method (with messages built from ``system`` +
+        ``prompt``) and return its reply verbatim.
+
+        Sabotage proof: rerouting ``complete`` to a different provider
+        method (e.g. ``embed``) or hard-coding an empty string would
+        fail the ``"ok"`` equality assertion AND the call-count check.
+        """
+        from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
+        from tests.fakes import FakeProvider
+
+        provider = FakeProvider(chat_reply="ok")
+        backend = ProviderEvalChatBackend(provider)
+
+        reply = backend.complete(
+            "the prompt",
+            api_key="ignored",  # pragma: allowlist secret
+            endpoint="ignored",
+            deployment="ignored",
+            system="you are a judge",
+        )
+
+        assert reply == "ok"
+        assert len(provider.chat_calls) == 1
+        messages = provider.chat_calls[0]["messages"]
+        assert messages[0] == {"role": "system", "content": "you are a judge"}
+        assert messages[1] == {"role": "user", "content": "the prompt"}
+
+    def test_provider_eval_chat_backend_swallows_provider_errors(self) -> None:
+        """The adapter returns ``""`` when the provider raises.
+
+        Matches the never-raises contract that eval callers (LLMJudge,
+        QueryGenerator) depend on so they can short-circuit on an empty
+        reply rather than aborting the surrounding workflow. Uses
+        a hand-rolled provider object that raises on ``chat`` — the
+        ``FakeProvider`` in ``tests/fakes.py`` exposes ``embed_raises``
+        but not a chat-side raise hook.
+
+        Sabotage proof: removing the try/except around ``provider.chat``
+        would let the RuntimeError propagate and fail the assertion that
+        ``reply == ""``.
+        """
+        from kairix.providers import ProviderHealth
+        from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
+
+        class _BoomProvider:
+            name = "boom"
+
+            def embed_batch(self, texts: list[str]) -> list[list[float]]:
+                return [[] for _ in texts]
+
+            def chat(self, messages: list[dict[str, object]], *, max_tokens: int = 800) -> str:
+                del messages, max_tokens
+                raise RuntimeError("provider broke")
+
+            def dimension(self) -> int:
+                return 0
+
+            def healthcheck(self) -> ProviderHealth:
+                return ProviderHealth(ok=False, endpoint="boom://", cold_ms=0.0, warm_ms=0.0, error="boom")
+
+        backend = ProviderEvalChatBackend(_BoomProvider())
+        reply = backend.complete("p", api_key="", endpoint="", deployment="")
+        assert reply == ""
 
 
 @pytest.mark.contract

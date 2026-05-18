@@ -48,7 +48,16 @@ nlp = [
 ]
 rerank = [
     # Cross-encoder re-ranking (post-RRF semantic pass). CPU-only, ~22 MB model.
-    "sentence-transformers>=3.0,<4",
+    "sentence-transformers>=3.0,<6",
+]
+bedrock = [
+    # AWS SDK — required only when KAIRIX_PROVIDER=bedrock. boto3 is heavy
+    # (~50 MB with botocore + s3transfer transitive deps) so operators not
+    # on AWS opt out by skipping this extra. The bedrock plugin imports
+    # boto3 lazily inside its credential resolver so installs without this
+    # extra raise a clear "fix:" error only when the plugin is actually
+    # selected, never at module import time.
+    "boto3>=1.34,<2",
 ]
 dev = [
     # Test runner
@@ -61,7 +70,7 @@ dev = [
     "types-requests>=2.33.0.20260408",
     "types-PyYAML>=6.0",
     # Linting (engineering hub: linting blocks merge)
-    "ruff==0.15.12",
+    "ruff==0.15.13",
     # Security (engineering hub: bandit zero HIGH/MEDIUM, pip-audit zero CVEs with fixes)
     "bandit[toml]>=1.7",
     "pip-audit>=2.10.0",
@@ -71,6 +80,22 @@ dev = [
 
 [project.scripts]
 kairix = "kairix.cli:main"
+
+# Provider plugin discovery — name-filtered Python entry points.
+# Operators select a provider by config string (KAIRIX_PROVIDER), not by
+# import statement. Third parties ship their own pip distribution that
+# declares the same group; ``pip install kairix-provider-foo`` then
+# ``KAIRIX_PROVIDER=foo`` works with zero kairix code change. See
+# docs/architecture/provider-plugin-architecture.md § Plugin discovery.
+# Wave-1 factories raise NotImplementedError; Wave 2+ fills them in.
+[project.entry-points."kairix.providers"]
+azure_foundry = "kairix.providers.azure_foundry:make_provider"
+azure_legacy  = "kairix.providers.azure_legacy:make_provider"
+openai        = "kairix.providers.openai:make_provider"
+bedrock       = "kairix.providers.bedrock:make_provider"
+ollama        = "kairix.providers.ollama:make_provider"
+litellm_proxy = "kairix.providers.litellm_proxy:make_provider"
+anthropic     = "kairix.providers.anthropic:make_provider"
 
 [project.urls]
 Homepage = "https://github.com/three-cubes/kairix"
@@ -87,6 +112,7 @@ markers = [
     "integration: multi-component with real database and usearch index",
     "e2e: full pipeline against live Azure API (requires KAIRIX_E2E=1)",
     "bdd: behaviour-driven acceptance tests (pytest-bdd feature files)",
+    "pvt: production-verification scenarios against a live MCP server (requires KAIRIX_PVT=1; see docs/architecture/performance-testing-approach.md)",
     "slow: tests taking >5s",
 ]
 timeout = 60  # Per-test timeout default (seconds)
@@ -96,9 +122,6 @@ source = ["kairix"]
 relative_files = true
 omit = [
     "tests/*",
-    # External I/O adapter — Azure API client; uncovered branches are
-    # error paths only reachable with a live Azure endpoint.
-    "kairix/_azure.py",
     # Neo4j driver wrapper — connection/session paths require a live
     # Neo4j instance; the testable surface (FakeNeo4jClient-driven repo
     # methods) has its own coverage in kairix.knowledge.graph.repository.
@@ -188,7 +211,6 @@ ignore = [
 "tests/e2e/*" = ["S", "T20", "I001"]  # E2E tests: inline imports required for lazy loading
 "kairix/**/cli.py" = ["T201", "S108", "S110", "E501"] # CLI modules: allow print for user output
 "kairix/cli.py" = ["T201"]
-"kairix/_azure.py" = ["S603", "S607"]  # Azure CLI subprocess (az keyvault) is intentional
 "kairix/platform/onboard/check.py" = ["S607"]  # Trusted system binaries (openclaw, systemctl)
 "scripts/*" = ["S", "T20", "B007"]    # Scripts: allow subprocess, print, unused loop vars
 

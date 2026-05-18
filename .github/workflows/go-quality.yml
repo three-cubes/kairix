@@ -1,0 +1,200 @@
+name: "Go quality"
+
+# Runs format / vet / lint / test / build for every services/<name>/ that has
+# a go.mod. Per-service module discovery so one binary's failure doesn't
+# block another. Paired with docs/architecture/go-integration-plan.md.
+#
+# Security: every github.event-derived / inputs.* / matrix value referenced
+# in a `run:` block is routed through an `env:` binding first. Pattern
+# matches the existing kairix workflow injection-hardening practice (see
+# .github/workflows/publish-pypi.yml).
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - "services/**"
+      - "tools/**"
+      - ".golangci.yml"
+      - ".github/workflows/go-quality.yml"
+      - "scripts/checks/check_go_*.py"
+      - "scripts/checks/check_go_*.sh"
+  pull_request:
+    paths:
+      - "services/**"
+      - "tools/**"
+      - ".golangci.yml"
+      - ".github/workflows/go-quality.yml"
+      - "scripts/checks/check_go_*.py"
+      - "scripts/checks/check_go_*.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    name: Discover Go modules
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.scan.outputs.modules }}
+      has_modules: ${{ steps.scan.outputs.has_modules }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: scan
+        name: Find every services/*/go.mod
+        run: |
+          set -euo pipefail
+          # JSON-array list of relative directories containing a go.mod.
+          # Empty array when no Go service has landed yet — downstream
+          # jobs skip via the has_modules gate.
+          modules=$(find services -mindepth 2 -maxdepth 2 -name go.mod -printf '%h\n' 2>/dev/null | jq -R . | jq -sc . || echo '[]')
+          if [ -z "$modules" ] || [ "$modules" = "[]" ]; then
+            echo "modules=[]" >> "$GITHUB_OUTPUT"
+            echo "has_modules=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "modules=$modules" >> "$GITHUB_OUTPUT"
+            echo "has_modules=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Discovered modules: $modules"
+
+  quality:
+    name: "Go quality"
+    needs: discover
+    if: needs.discover.outputs.has_modules == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJson(needs.discover.outputs.modules) }}
+    env:
+      MODULE_DIR: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+
+      - name: gofmt (no diff allowed)
+        run: |
+          set -euo pipefail
+          cd "$MODULE_DIR"
+          diff=$(gofmt -l -s .)
+          if [ -n "$diff" ]; then
+            echo "::error::gofmt -s reports diff in $MODULE_DIR:"
+            echo "$diff"
+            echo "fix: run 'gofmt -s -w .' in $MODULE_DIR"
+            exit 1
+          fi
+
+      - name: go vet
+        run: |
+          set -euo pipefail
+          cd "$MODULE_DIR"
+          go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
+        with:
+          version: latest
+          working-directory: ${{ matrix.module }}
+          args: --config=${{ github.workspace }}/.golangci.yml --timeout=5m
+
+      - name: go test -race -cover
+        run: |
+          set -euo pipefail
+          cd "$MODULE_DIR"
+          go test -race -covermode=atomic -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -1
+
+      - name: Coverage floor (>=80% per-binary)
+        run: |
+          set -euo pipefail
+          cd "$MODULE_DIR"
+          # Coverage floor matches the Phase 1 starting point in
+          # docs/architecture/go-integration-plan.md. Ratchets to 90% as
+          # the surface matures (mirrors F7's path).
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | tr -d '%')
+          floor=80.0
+          if awk -v t="$total" -v f="$floor" 'BEGIN { exit (t+0 >= f+0) ? 0 : 1 }'; then
+            echo "Coverage $total% >= $floor%"
+          else
+            echo "::error::Coverage $total% below floor $floor% in $MODULE_DIR"
+            echo "fix: add unit tests until per-binary coverage clears $floor% (mirrors F7 for Python)"
+            exit 1
+          fi
+
+  build-matrix:
+    name: "Go build"
+    needs: discover
+    if: needs.discover.outputs.has_modules == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJson(needs.discover.outputs.modules) }}
+        target:
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    env:
+      MODULE_DIR: ${{ matrix.module }}
+      TARGET_GOOS: ${{ matrix.target.goos }}
+      TARGET_GOARCH: ${{ matrix.target.goarch }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: Cross-compile
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd "$MODULE_DIR"
+          # GOOS/GOARCH come from the matrix via TARGET_GOOS / TARGET_GOARCH
+          # (env-bound; the matrix values never expand inline in the script body).
+          export GOOS="$TARGET_GOOS"
+          export GOARCH="$TARGET_GOARCH"
+          export CGO_ENABLED=0
+          version="${REF_NAME:-dev}"
+          for cmd in cmd/*/; do
+            name=$(basename "$cmd")
+            mkdir -p dist
+            out="dist/${name}-${GOOS}-${GOARCH}"
+            # -trimpath strips the build host filesystem layout; -ldflags
+            # wires the module-version stamp (mirrors setuptools-scm).
+            go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "$out" "./$cmd"
+            ls -lh "$out"
+          done
+
+  gate:
+    name: "Go gate"
+    if: always()
+    needs: [discover, quality, build-matrix]
+    runs-on: ubuntu-latest
+    env:
+      HAS_MODULES: ${{ needs.discover.outputs.has_modules }}
+      QUALITY_RESULT: ${{ needs.quality.result }}
+      BUILD_RESULT: ${{ needs.build-matrix.result }}
+    steps:
+      - name: Aggregate
+        run: |
+          set -euo pipefail
+          if [ "$HAS_MODULES" = "false" ]; then
+            echo "No Go modules present — gate green by default."
+            exit 0
+          fi
+          if [ "$QUALITY_RESULT" != "success" ] || [ "$BUILD_RESULT" != "success" ]; then
+            echo "::error::Go gate failed — quality=$QUALITY_RESULT build=$BUILD_RESULT"
+            exit 1
+          fi
+          echo "Go gate green."

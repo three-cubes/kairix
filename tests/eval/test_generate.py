@@ -385,9 +385,17 @@ def test_suite_generator_process_sampled_docs_with_no_docs_returns_zero() -> Non
 def test_suite_generator_falls_back_to_free_judge_batch_when_no_llm_judge_injected() -> None:
     """When llm_judge is None, SuiteGenerator routes judging through ``judge_batch``.
 
-    Empty credentials force judge_batch's never-raise contract to return all-zero
-    grades, so the case is rejected — exercising the n_rejected branch and the
-    free-function fallback inside SuiteGenerator._judge.
+    Without a configured provider in ``kairix.config.yaml``, the free
+    ``judge_batch`` shim's lazy default construction
+    (``ProviderEvalChatBackend.from_config()``) raises ``ValueError``
+    with an actionable affordance. That error propagates out of
+    ``process_sampled_docs`` — pinning the production "fail fast on
+    missing provider" contract.
+
+    Sabotage proof: regressing the SuiteGenerator to silently swallow the
+    fallback's exception (e.g. wrapping ``_judge`` in a broad try/except)
+    would let this test fall through without raising; pinned by the
+    explicit ``pytest.raises(ValueError)`` match here.
     """
     mock_query = GeneratedQuery(
         query="q1",
@@ -400,11 +408,8 @@ def test_suite_generator_falls_back_to_free_judge_batch_when_no_llm_judge_inject
     suite_gen = SuiteGenerator(query_generator=qg, llm_judge=None, retriever=retriever)
     docs = [{"path": "docs/x.md", "title": "Doc", "collection": "shared", "body": "x" * 500}]
 
-    accepted, rejected, failed, _ = suite_gen.process_sampled_docs(docs, 5, ["recall"], api_key="", endpoint="")
-    # Empty creds → judge_batch returns all-zero grades → no grade-2 → rejected
-    assert accepted == []
-    assert rejected == 1
-    assert failed == 0
+    with pytest.raises(ValueError, match="provider:"):
+        suite_gen.process_sampled_docs(docs, 5, ["recall"], api_key="", endpoint="")
 
 
 @pytest.mark.unit
@@ -434,14 +439,21 @@ def test_suite_generator_falls_back_to_free_retrieve_when_no_retriever_injected(
 def test_suite_generator_falls_back_to_free_generate_queries_when_no_query_generator() -> None:
     """When query_generator is None, SuiteGenerator routes to ``generate_queries``.
 
-    Empty creds make generate_queries return [] (never-raise contract), so the
-    pipeline produces no cases — exercising the fallback branch in _generate_queries.
+    Without a configured provider, the free ``generate_queries``'s lazy
+    default backend (``ProviderEvalChatBackend.from_config()``) raises
+    ``ValueError`` and the error propagates out — pinning the production
+    "fail fast on missing provider" contract for the query-generator
+    fallback branch in ``_generate_queries``.
+
+    Sabotage proof: regressing the SuiteGenerator to silently swallow the
+    fallback's exception would let this test fall through; pinned by
+    ``pytest.raises(ValueError)``.
     """
     suite_gen = SuiteGenerator(query_generator=None)
     docs = [{"path": "docs/x.md", "title": "Doc", "collection": "shared", "body": "x" * 500}]
 
-    accepted, _rejected, _failed, _ = suite_gen.process_sampled_docs(docs, 5, ["recall"], api_key="", endpoint="")
-    assert accepted == []
+    with pytest.raises(ValueError, match="provider:"):
+        suite_gen.process_sampled_docs(docs, 5, ["recall"], api_key="", endpoint="")
 
 
 @pytest.mark.unit
@@ -491,9 +503,20 @@ def test_suite_generator_generate_suite_returns_error_on_calibration_failure(tmp
 
 @pytest.mark.unit
 def test_suite_generator_generate_suite_falls_back_to_default_db_path_when_empty(tmp_path: Path) -> None:
-    """db_path='' triggers the lazy default-db-path lookup branch."""
+    """db_path='' triggers the lazy default-db-path lookup branch.
+
+    Inject fakes for ``query_generator`` / ``llm_judge`` / ``retriever`` so
+    the production-default fallbacks (which now eagerly construct a
+    provider-backed ``ChatBackend`` via ``ProviderEvalChatBackend.from_config()``)
+    are bypassed — the test pins ``if not db_path: db_path = _get_db_path_str()``,
+    not the chat-backend resolution path.
+    """
     output = tmp_path / "out.yaml"
-    suite_gen = SuiteGenerator()
+    suite_gen = SuiteGenerator(
+        query_generator=FakeQueryGenerator(queries_by_title={}),
+        llm_judge=FakeLLMJudge(grades_by_query={}),
+        retriever=FakeRetriever(results_by_query={}),
+    )
     # An empty db_path string forces the `if not db_path: db_path = _get_db_path_str()`
     # branch. We expect it to return an empty result without raising.
     result = suite_gen.generate_suite(
@@ -679,20 +702,27 @@ def test_suite_generator_enrich_suite_appends_error_on_unwritable_output(tmp_pat
 def test_suite_generator_calibrate_falls_back_to_free_calibrate_when_no_judge(tmp_path: Path) -> None:
     """When llm_judge=None and calibrate_first=True, _calibrate falls through to ``calibrate``.
 
-    Empty creds make calibrate's anchors all return 0 → JudgeCalibrationError is
-    raised → captured by generate_suite as an error in the result.
+    Without a configured provider, the free ``calibrate`` shim's lazy default
+    backend (``ProviderEvalChatBackend.from_config()``) raises ``ValueError``.
+    ``generate_suite`` only catches ``JudgeCalibrationError`` from the
+    ``_calibrate`` step, so the ValueError propagates — pinning the production
+    "fail fast on missing provider" contract for the calibrate fallback.
+
+    Sabotage proof: regressing ``_calibrate`` to silently mask the fallback's
+    exception (e.g. broad try/except returning ``False``) would let this test
+    fall through without raising; pinned by ``pytest.raises(ValueError)``.
     """
     output = tmp_path / "out.yaml"
     suite_gen = SuiteGenerator(llm_judge=None)
-    result = suite_gen.generate_suite(
-        db_path=str(tmp_path / "noop.sqlite"),
-        output_path=str(output),
-        n_cases=1,
-        api_key="k",  # pragma: allowlist secret
-        endpoint="https://ep",
-        calibrate_first=True,
-    )
-    assert any("calibration" in err.lower() for err in result.errors)
+    with pytest.raises(ValueError, match="provider:"):
+        suite_gen.generate_suite(
+            db_path=str(tmp_path / "noop.sqlite"),
+            output_path=str(output),
+            n_cases=1,
+            api_key="k",  # pragma: allowlist secret
+            endpoint="https://ep",
+            calibrate_first=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -845,24 +875,12 @@ def test_suite_generator_enrich_skips_case_when_no_relevant_doc(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Phase 0-deferred regression tests
+# Credential-failure handling — pipeline-level coverage
 #
-# The original Phase 0 PR landed credential-handling fixes without unit-level
-# regression tests because both required substituting the module-level
-# ``fetch_llm_credentials`` callable — the smell this initiative is removing.
-#
-# Status after Phase 2b:
-#   - ``resolve_credentials`` caller-wins semantics still tests cleanest with
-#     a substituted ``fetch_llm_credentials``. Phase 3 will inject this as a
-#     constructor seam on ``SuiteGenerator``; we DEFER the unit-level test
-#     until then to avoid introducing monkeypatch.
-#   - ``enrich_suite`` credential-failure handling is verified at the broader
-#     pipeline level: passing both ``api_key`` and ``endpoint`` as non-empty
-#     strings means ``resolve_credentials`` is never called, and the rest of
-#     the pipeline runs through the injected protocol fakes.
-#
-# Both deferrals are explicit in the PR body for #143 Phase 2b.
+# ``enrich_suite`` credential-failure handling is verified at the pipeline
+# level: passing both ``api_key`` and ``endpoint`` as non-empty strings means
+# ``resolve_credentials`` is never called, and the rest of the pipeline runs
+# through the injected protocol fakes.
 # ---------------------------------------------------------------------------
 
 
@@ -870,15 +888,10 @@ def test_suite_generator_enrich_skips_case_when_no_relevant_doc(tmp_path: Path) 
 def test_enrich_suite_handles_runtime_failure_via_chat_backend(tmp_path: Path) -> None:
     """enrich_suite returns EnrichmentResult (not raises) when the judge backend errors.
 
-    This is the broader credential-failure-shape coverage the Phase 0 deferral
-    asked for: any RuntimeError from the LLM call path (which a credential
-    rejection from the API would surface as) is captured and surfaced via
-    result.errors / n_failed rather than propagating.
-
-    NOTE: Tests the LLM-failure branch via FakeLLMJudge wired to a chat
-    backend that always raises. The credential-fetch failure branch in
-    `resolve_credentials` itself remains a Phase 3 deferral — see module
-    docstring above.
+    Any RuntimeError from the LLM call path (which a credential rejection from
+    the API would surface as) is captured and surfaced via result.errors /
+    n_failed rather than propagating. The branch is driven via FakeLLMJudge
+    wired to a chat backend that always raises.
     """
     input_suite = {
         "meta": {},
@@ -1099,16 +1112,22 @@ def test_empty_generation_result_returns_zero_counts() -> None:
 
 
 @pytest.mark.unit
-def test_default_chat_backend_returns_protocol_compliant_object() -> None:
-    """Production fallback returns an object satisfying the ChatBackend
-    protocol (has a ``complete`` callable).
+def test_default_chat_backend_raises_value_error_when_no_provider_configured() -> None:
+    """Production fallback constructs a provider-backed ``ChatBackend``.
 
-    F5-clean: assert protocol shape rather than importing from the private
-    ``kairix._azure`` module. The concrete class is an implementation
-    detail; what callers depend on is the protocol surface.
+    Without a configured provider in ``kairix.config.yaml`` (the default
+    test-environment shape), ``default_chat_backend()`` raises
+    ``ValueError`` with an actionable ``fix:`` affordance pointing the
+    operator at the missing ``provider:`` field. F5-clean: the test
+    exercises the public factory's failure contract, not the concrete
+    adapter class.
+
+    Sabotage proof: regressing the factory to silently return a stub
+    (e.g. ``object()``) would skip the raise and fail the
+    ``pytest.raises`` assertion.
     """
-    backend = default_chat_backend()
-    assert callable(getattr(backend, "complete", None))
+    with pytest.raises(ValueError, match="provider:"):
+        default_chat_backend()
 
 
 # ---------------------------------------------------------------------------
@@ -1130,20 +1149,27 @@ def test_sample_documents_returns_empty_when_db_path_invalid(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
-def test_generate_queries_constructs_default_backend_when_no_chat_backend_or_llm_fn() -> None:
-    """When neither chat_backend nor llm_fn is supplied, the function builds an
-    AzureChatBackend lazily — empty creds force the early ``ValueError`` path so
-    no network call happens, but the default-backend branch is exercised.
+def test_generate_queries_raises_when_default_backend_has_no_provider_configured() -> None:
+    """When neither chat_backend nor llm_fn is supplied, the function calls
+    ``default_chat_backend()`` which constructs a provider-backed adapter
+    via ``ProviderEvalChatBackend.from_config()``. Without a configured
+    provider, that factory raises ``ValueError`` and the error propagates
+    out of ``generate_queries`` rather than being swallowed.
+
+    Sabotage proof: regressing the function to swallow construction
+    errors (e.g. wrapping the lazy default in a broad try/except returning
+    ``[]``) would let this test fall through silently — pinned by the
+    explicit ``pytest.raises(ValueError)`` here.
     """
-    queries = generate_queries(
-        doc_title="t",
-        doc_body="b" * 200,
-        n=1,
-        categories=["recall"],
-        api_key="",
-        endpoint="",
-    )
-    assert queries == []
+    with pytest.raises(ValueError, match="provider:"):
+        generate_queries(
+            doc_title="t",
+            doc_body="b" * 200,
+            n=1,
+            categories=["recall"],
+            api_key="",
+            endpoint="",
+        )
 
 
 @pytest.mark.unit

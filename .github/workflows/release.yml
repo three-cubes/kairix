@@ -29,11 +29,86 @@ permissions:
   actions: write   # required to dispatch downstream publish workflows (#230)
 
 jobs:
-  release:
-    name: Tag main + create GitHub Release
+  check-alpha-gate:
+    # #272 Phase 5: refuse to tag stable unless (a) an alpha tag exists
+    # for the same compute-version AND (b) that alpha SHA has a green
+    # `vm-reflib-regression` commit status from release-vm-deploy.yml.
+    # Phase 4 landed that webhook + status posting, so the gate now
+    # actually proves the alpha PASSED its VM regression check, not
+    # merely that an operator cut a tag.
+    name: "5a · Alpha-gate (must precede stable)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Verify alpha tag exists + has green vm-reflib-regression status
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Strip the leading "v" then look for any v${stripped}a* alpha tag.
+          # e.g. v2026.5.15 → looks for v2026.5.15a1, v2026.5.15a2, ...
+          #      v2026.5.15.1 → looks for v2026.5.15.1a1, v2026.5.15.1a2, ...
+          stripped="${VERSION#v}"
+          git fetch --tags origin
+          matches=$(git tag --list "v${stripped}a*" | sort -V)
+          if [ -z "$matches" ]; then
+            echo "::error::No alpha tag found for $VERSION. Run release-alpha.yml first."
+            echo ""
+            echo "fix: dispatch the '2a · Release (alpha tag from develop)' workflow with date_version=${stripped} and alpha_n=1."
+            echo "  next: once the alpha lands, release-vm-deploy.yml runs automatically; re-run this workflow when its commit-status goes green."
+            echo "  run:  gh workflow run release-alpha.yml --ref develop -f date_version=${stripped} -f alpha_n=1"
+            exit 1
+          fi
+          latest_alpha=$(echo "$matches" | tail -1)
+          echo "alpha-gate: stable $VERSION requires alpha — found $latest_alpha"
+
+          # Resolve the alpha tag's commit SHA (tag may be annotated).
+          ref_json=$(gh api "repos/${REPO}/git/refs/tags/${latest_alpha}")
+          alpha_sha=$(echo "$ref_json" | jq -r '.object.sha')
+          ref_type=$(echo "$ref_json" | jq -r '.object.type')
+          if [ "$ref_type" = "tag" ]; then
+            alpha_sha=$(gh api "repos/${REPO}/git/tags/${alpha_sha}" --jq '.object.sha')
+          fi
+          echo "alpha-gate: $latest_alpha -> $alpha_sha"
+
+          # Read the latest vm-reflib-regression status for that SHA.
+          status_json=$(gh api "repos/${REPO}/commits/${alpha_sha}/statuses" \
+            --jq '[.[] | select(.context == "vm-reflib-regression")] | sort_by(.updated_at) | last')
+          if [ -z "$status_json" ] || [ "$status_json" = "null" ]; then
+            echo "::error::No vm-reflib-regression status on $latest_alpha ($alpha_sha)."
+            echo ""
+            echo "fix: dispatch release-vm-deploy.yml for the alpha. The webhook will post-back the status."
+            echo "  run:  gh workflow run release-vm-deploy.yml --ref develop -f tag=${latest_alpha}"
+            echo "  next: once the status is success, re-run this workflow."
+            exit 1
+          fi
+          state=$(echo "$status_json" | jq -r '.state')
+          desc=$(echo "$status_json" | jq -r '.description')
+          echo "vm-reflib-regression on $latest_alpha: state=$state desc=$desc"
+          if [ "$state" != "success" ]; then
+            echo "::error::Alpha $latest_alpha has vm-reflib-regression state=$state (not 'success'). Refusing to tag stable."
+            echo ""
+            echo "fix: investigate the alpha-deploy failure on the VM hosting the webhook —"
+            echo "     journalctl -u kairix-alpha-deploy-webhook.service --no-pager -n 100"
+            echo "     (run from the VM where the alpha-deploy webhook is installed; see"
+            echo "     docs/runbooks/kairix-retrieval-health.md for triage steps)."
+            echo "     Once the underlying regression is fixed and a new alpha cut + passed, re-run this workflow."
+            exit 1
+          fi
+          echo "::notice::Alpha gate cleared: $latest_alpha has vm-reflib-regression=success ($desc)"
+
+  release:
+    name: Tag main + create GitHub Release
+    needs: check-alpha-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: main
           fetch-depth: 0

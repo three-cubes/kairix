@@ -67,30 +67,8 @@ class StoreHealthReport:
         )
 
 
-def run_store_health(
-    neo4j_client: Any,
-    document_root: str | None = None,
-) -> StoreHealthReport:
-    """
-    Run document store + entity graph health check.
-
-    Args:
-        neo4j_client: Neo4jClient instance. When unavailable, returns minimal report.
-        document_root: Optional document root for file-system checks (not yet used in v0).
-
-    Returns:
-        StoreHealthReport describing entity graph state.
-    """
-    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    report = StoreHealthReport(generated_at=generated_at)
-
-    if not neo4j_client.available:
-        report.issues.append("Neo4j unavailable — graph health check skipped")
-        return report
-
-    report.neo4j_available = True
-
-    # ── Node counts ───────────────────────────────────────────────────────────
+def _populate_node_counts(neo4j_client: Any, report: StoreHealthReport) -> None:
+    """Fill organisation/person/outcome counts from a single COUNT-by-label query."""
     try:
         rows = neo4j_client.cypher(
             "MATCH (n) WHERE labels(n)[0] IN ['Organisation','Person','Outcome'] "
@@ -109,59 +87,73 @@ def run_store_health(
         logger.warning("store health: node count query failed — %s", exc)
         report.issues.append(f"Node count query failed: {exc}")
 
-    # ── Property completeness ─────────────────────────────────────────────────
-    try:
-        rows = neo4j_client.cypher(
-            "MATCH (n:Organisation) WHERE n.vault_path IS NULL OR n.vault_path = '' RETURN COUNT(n) AS cnt"
-        )
-        if rows:
-            report.orgs_missing_vault_path = int(rows[0].get("cnt", 0))
-    except Exception as exc:
-        logger.warning("store health: org vault_path check failed — %s", exc)
 
+def _run_count_query(neo4j_client: Any, query: str, params: dict[str, Any] | None, label: str) -> int | None:
+    """Run a COUNT(n) Cypher query and return the first row's cnt as int, or None on failure."""
     try:
-        rows = neo4j_client.cypher(
-            "MATCH (n:Person) WHERE n.vault_path IS NULL OR n.vault_path = '' RETURN COUNT(n) AS cnt"
-        )
-        if rows:
-            report.persons_missing_vault_path = int(rows[0].get("cnt", 0))
+        rows = neo4j_client.cypher(query, params) if params else neo4j_client.cypher(query)
     except Exception as exc:
-        logger.warning("store health: person vault_path check failed — %s", exc)
+        logger.warning("store health: %s check failed — %s", label, exc)
+        return None
+    if not rows:
+        return None
+    return int(rows[0].get("cnt", 0))
 
-    try:
-        rows = neo4j_client.cypher(
+
+def _populate_property_gaps(neo4j_client: Any, report: StoreHealthReport) -> None:
+    """Fill orgs/persons missing-vault_path and missing-summary counts."""
+    checks: list[tuple[str, str, dict[str, Any] | None, str]] = [
+        (
+            "orgs_missing_vault_path",
+            "MATCH (n:Organisation) WHERE n.vault_path IS NULL OR n.vault_path = '' RETURN COUNT(n) AS cnt",
+            None,
+            "org vault_path",
+        ),
+        (
+            "persons_missing_vault_path",
+            "MATCH (n:Person) WHERE n.vault_path IS NULL OR n.vault_path = '' RETURN COUNT(n) AS cnt",
+            None,
+            "person vault_path",
+        ),
+        (
+            "orgs_missing_summary",
             "MATCH (n:Organisation) WHERE n.summary IS NULL OR size(n.summary) < $min_len RETURN COUNT(n) AS cnt",
             {"min_len": _MIN_SUMMARY_LENGTH},
-        )
-        if rows:
-            report.orgs_missing_summary = int(rows[0].get("cnt", 0))
-    except Exception as exc:
-        logger.warning("store health: org summary check failed — %s", exc)
-
-    try:
-        rows = neo4j_client.cypher(
+            "org summary",
+        ),
+        (
+            "persons_missing_summary",
             "MATCH (n:Person) WHERE n.summary IS NULL OR size(n.summary) < $min_len RETURN COUNT(n) AS cnt",
             {"min_len": _MIN_SUMMARY_LENGTH},
-        )
-        if rows:
-            report.persons_missing_summary = int(rows[0].get("cnt", 0))
-    except Exception as exc:
-        logger.warning("store health: person summary check failed — %s", exc)
+            "person summary",
+        ),
+    ]
+    for attr, query, params, label in checks:
+        value = _run_count_query(neo4j_client, query, params, label)
+        if value is not None:
+            setattr(report, attr, value)
 
-    # ── Relationship density ──────────────────────────────────────────────────
-    for rel_type, attr in [
+
+def _populate_relationship_counts(neo4j_client: Any, report: StoreHealthReport) -> None:
+    """Fill the three relationship edge-count fields."""
+    edges = (
         ("WORKS_AT", "works_at_edge_count"),
         ("KNOWS", "knows_edge_count"),
         ("MENTIONS", "mentions_edge_count"),
-    ]:
-        try:
-            rows = neo4j_client.cypher(f"MATCH ()-[r:{rel_type}]->() RETURN COUNT(r) AS cnt")
-            if rows:
-                setattr(report, attr, int(rows[0].get("cnt", 0)))
-        except Exception as exc:
-            logger.warning("store health: %s edge count failed — %s", rel_type, exc)
+    )
+    for rel_type, attr in edges:
+        value = _run_count_query(
+            neo4j_client,
+            f"MATCH ()-[r:{rel_type}]->() RETURN COUNT(r) AS cnt",
+            None,
+            f"{rel_type} edge count",
+        )
+        if value is not None:
+            setattr(report, attr, value)
 
-    # ── Surface issues ────────────────────────────────────────────────────────
+
+def _surface_issues(report: StoreHealthReport) -> None:
+    """Append operator-facing diagnostic strings to ``report.issues``."""
     if report.total_entities == 0:
         report.issues.append("No entity nodes found in Neo4j — run `kairix store crawl` first")
     if report.orgs_missing_vault_path > 0:
@@ -171,6 +163,33 @@ def run_store_health(
     if report.persons_missing_vault_path > 0:
         report.issues.append(f"{report.persons_missing_vault_path} person(s) missing vault_path — re-run store crawl")
 
+
+def run_store_health(
+    neo4j_client: Any,
+    document_root: str | None = None,
+) -> StoreHealthReport:
+    """Run document store + entity graph health check.
+
+    Args:
+        neo4j_client: Neo4jClient instance. When unavailable, returns minimal report.
+        document_root: Optional document root for file-system checks (not yet used in v0).
+
+    Returns:
+        StoreHealthReport describing entity graph state.
+    """
+    _ = document_root  # reserved for v1 file-system checks
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    report = StoreHealthReport(generated_at=generated_at)
+
+    if not neo4j_client.available:
+        report.issues.append("Neo4j unavailable — graph health check skipped")
+        return report
+
+    report.neo4j_available = True
+    _populate_node_counts(neo4j_client, report)
+    _populate_property_gaps(neo4j_client, report)
+    _populate_relationship_counts(neo4j_client, report)
+    _surface_issues(report)
     return report
 
 

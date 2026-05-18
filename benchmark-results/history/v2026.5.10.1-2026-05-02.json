@@ -1,0 +1,37 @@
+{
+  "meta": {
+    "name": "reflib-gold-v3",
+    "system": "hybrid",
+    "tag": "v2026.5.10.1",
+    "generated": "2026-05-02",
+    "suite": "suites/reflib-gold-v3.yaml",
+    "collection": "reference-library",
+    "config": {
+      "fusion_strategy": "rrf",
+      "rrf_k": 10,
+      "entity_boost": false,
+      "procedural_boost": false,
+      "vec_limit": 10,
+      "bm25_limit": 20
+    },
+    "notes": "Backfill of the single pinned reflib-gold-v3 baseline as the first per-release history entry. Captured 2026-05-02 against the production reference-library index (38-config hybrid sweep winner)."
+  },
+  "summary": {
+    "weighted_total": 0.901,
+    "ndcg_at_10": 0.990,
+    "hit_rate_at_5": 0.990,
+    "mrr_at_10": 0.917,
+    "category_scores": {
+      "recall": 0.929,
+      "temporal": 0.702,
+      "entity": 0.860,
+      "conceptual": 0.979,
+      "multi_hop": 1.000,
+      "procedural": 1.038
+    }
+  },
+  "thresholds": {
+    "weighted_total_min": 0.80,
+    "regression_tolerance": 0.05
+  }
+}

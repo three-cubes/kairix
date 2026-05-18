@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # the value is followed by a percent sign.
 _CONFIDENCE_PATTERN = re.compile(
     r"""
-    (?:["']?confidence["']?)       # 'confidence' optionally quoted
+    ["']?confidence["']?            # 'confidence' optionally quoted
     \s*                             # optional whitespace
     (?:[:=]|\bis\b)                 # ':', '=', or the word 'is'
     \s*                             # optional whitespace

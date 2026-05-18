@@ -3,7 +3,14 @@
 try:
     from importlib.metadata import version
 
-    __version__ = version("kairix")
+    # The distribution name in pyproject.toml is
+    # "Kairix-agentic-knowledge-mgt", not "kairix" — querying the wrong
+    # name silently fell through to the 0.0.0 fallback in every install,
+    # which surfaced as `kairix --version` reporting `kairix 0.0.0`
+    # everywhere (Docker, pip install, editable). The Dockerfile passes
+    # SETUPTOOLS_SCM_PRETEND_VERSION so the wheel's metadata carries the
+    # real version; this lookup just had to ask for the right name (#267).
+    __version__ = version("Kairix-agentic-knowledge-mgt")
 except Exception:
     __version__ = "0.0.0"  # fallback for editable installs without metadata
 

@@ -30,6 +30,84 @@ class SuggestedEntity:
     context: str = ""  # Surrounding sentence for review
 
 
+_NER_LABELS_KEPT = frozenset({"ORG", "PERSON", "GPE", "PRODUCT", "WORK_OF_ART"})
+
+
+def _load_nlp_or_none(nlp: Any) -> Any:
+    """Return the passed-in nlp pipeline, or lazy-load en_core_web_sm.
+
+    Returns ``None`` when spaCy is missing the model (caller treats this as
+    "no NER available" and returns empty results). Raises ``ImportError``
+    when spaCy itself is unavailable — that's an operator install gap.
+    """
+    if nlp is not None:
+        return nlp
+    try:
+        import spacy  # lazy import — optional dependency  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "spaCy is required for entity suggestion. Install it with:\n"
+            "  pip install 'kairix[nlp]'\n"
+            "  python -m spacy download en_core_web_sm"
+        ) from exc
+    try:
+        return _load_model()
+    except Exception as exc:
+        logger.warning("suggest_entities: spaCy load failed — %s", exc)
+        return None
+
+
+def _extract_ner_suggestions(doc: Any) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """First pass — collect unique surface forms + their context sentences."""
+    ner_suggestions: list[dict[str, Any]] = []
+    context_map: dict[str, str] = {}
+    for sent in doc.sents:
+        for ent in sent.ents:
+            if ent.label_ not in _NER_LABELS_KEPT:
+                continue
+            key = ent.text.strip()
+            if not key or key in context_map:
+                continue
+            context_map[key] = sent.text.strip()[:200]
+            ner_suggestions.append(
+                {
+                    "text": key,
+                    "label": ent.label_,
+                    "source": "ner",
+                    "confidence": 1.0,
+                }
+            )
+    return ner_suggestions, context_map
+
+
+def _resolve_filter_chain(filter_chain: Any) -> Any:
+    """Return the caller's chain, or build the default one."""
+    if filter_chain is not None:
+        return filter_chain
+    from kairix.knowledge.entities.filters import default_suggestion_filter_chain
+
+    return default_suggestion_filter_chain()
+
+
+def _lookup_existing_entity(
+    neo4j_client: Any, surface_form: str, input_text: str
+) -> tuple[str | None, str | None, bool]:
+    """Return ``(existing_id, existing_name, is_new)`` from a Neo4j find-by-name lookup."""
+    try:
+        rows = neo4j_client.find_by_name(surface_form)
+    except Exception as exc:
+        logger.debug("suggest_entities: Neo4j lookup for %r failed — %s", surface_form, exc)
+        return (None, None, True)
+    phantom_filtered = _filter_phantom_rows(rows, surface_form=surface_form, input_text=input_text)
+    if not phantom_filtered:
+        return (None, None, True)
+    return (
+        str(phantom_filtered[0].get("id", "")),
+        str(phantom_filtered[0].get("name", "")),
+        False,
+    )
+
+
 def suggest_entities(
     text: str,
     neo4j_client: Any,
@@ -37,8 +115,7 @@ def suggest_entities(
     filter_chain: Any = None,
     nlp: Any = None,
 ) -> list[SuggestedEntity]:
-    """
-    Extract named entities from text and cross-reference against Neo4j.
+    """Extract named entities from text and cross-reference against Neo4j.
 
     Args:
         text: Freetext input (document body, meeting notes, etc.)
@@ -60,21 +137,9 @@ def suggest_entities(
         logger.warning("suggest_entities: Neo4j unavailable — returning empty list")
         return []
 
+    nlp = _load_nlp_or_none(nlp)
     if nlp is None:
-        try:
-            import spacy  # lazy import — optional dependency  # noqa: F401
-        except ImportError as exc:
-            raise ImportError(
-                "spaCy is required for entity suggestion. Install it with:\n"
-                "  pip install 'kairix[nlp]'\n"
-                "  python -m spacy download en_core_web_sm"
-            ) from exc
-
-        try:
-            nlp = _load_model()
-        except Exception as exc:
-            logger.warning("suggest_entities: spaCy load failed — %s", exc)
-            return []
+        return []
 
     try:
         doc = nlp(text)
@@ -82,31 +147,8 @@ def suggest_entities(
         logger.warning("suggest_entities: spaCy processing failed — %s", exc)
         return []
 
-    # NER pass: collect unique surface forms with labels and context sentences.
-    # ner_suggestions is the list passed to the filter chain; context_map is
-    # consulted after filtering to attach the original sentence to each survivor.
-    ner_suggestions: list[dict[str, Any]] = []
-    context_map: dict[str, str] = {}
-    for sent in doc.sents:
-        for ent in sent.ents:
-            if ent.label_ in {"ORG", "PERSON", "GPE", "PRODUCT", "WORK_OF_ART"}:
-                key = ent.text.strip()
-                if key and key not in context_map:
-                    context_map[key] = sent.text.strip()[:200]
-                    ner_suggestions.append(
-                        {
-                            "text": key,
-                            "label": ent.label_,
-                            "source": "ner",
-                            "confidence": 1.0,
-                        }
-                    )
-
-    # Apply filter chain: drop role phrases, promote allowlist, correct labels.
-    if filter_chain is None:
-        from kairix.knowledge.entities.filters import default_suggestion_filter_chain
-
-        filter_chain = default_suggestion_filter_chain()
+    ner_suggestions, context_map = _extract_ner_suggestions(doc)
+    filter_chain = _resolve_filter_chain(filter_chain)
     filtered = filter_chain.apply(ner_suggestions, context=text)
 
     results: list[SuggestedEntity] = []
@@ -114,32 +156,15 @@ def suggest_entities(
         surface_form = suggestion.get("text", "")
         if not surface_form:
             continue
-        label = suggestion.get("label", "")
-        # NER hits have a context sentence; allowlist promotions don't (their
-        # surface form was found via substring match against the full text).
-        context = context_map.get(surface_form, "")
-
-        existing_id = None
-        existing_name = None
-        is_new = True
-        try:
-            rows = neo4j_client.find_by_name(surface_form)
-            phantom_filtered = _filter_phantom_rows(rows, surface_form=surface_form, input_text=text)
-            if phantom_filtered:
-                existing_id = str(phantom_filtered[0].get("id", ""))
-                existing_name = str(phantom_filtered[0].get("name", ""))
-                is_new = False
-        except Exception as exc:
-            logger.debug("suggest_entities: Neo4j lookup for %r failed — %s", surface_form, exc)
-
+        existing_id, existing_name, is_new = _lookup_existing_entity(neo4j_client, surface_form, text)
         results.append(
             SuggestedEntity(
                 text=surface_form,
-                label=label,
+                label=suggestion.get("label", ""),
                 existing_id=existing_id,
                 existing_name=existing_name,
                 is_new=is_new,
-                context=context,
+                context=context_map.get(surface_form, ""),
             )
         )
 

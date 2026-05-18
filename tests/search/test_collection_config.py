@@ -140,9 +140,8 @@ class TestResolveRetrievalConfig:
     def test_reflib_without_override_uses_global(self) -> None:
         """When no per-collection block is set, reflib gets the global config like any other collection.
 
-        The hardcoded ``if target == "reference-library":`` branch was deleted
-        in v2026.5.4 — reflib's retrieval shape now lives in operator yaml
-        (or in a shipped example), not in source.
+        Reflib's retrieval shape lives in operator yaml (or a shipped
+        example), not as a hardcoded branch on the collection name.
         """
         global_cfg = RetrievalConfig.defaults()
         result = resolve_retrieval_config(

@@ -25,7 +25,7 @@ Streamable HTTP makes each tool call a normal HTTP request/response. The gateway
 
 ## What does NOT change
 
-- The host and port — still whatever your kairix is listening on (e.g. `127.0.0.1:8090` or `mcp.threecubes.ai`).
+- The host and port — still whatever your kairix is listening on (e.g. `127.0.0.1:8090` or `your-mcp-host.example.com`).
 - Tool names — `search`, `entity`, `prep`, `timeline`, `research`, `contradict`, `usage_guide`. All seven still there.
 - Tool parameters — same JSON schema, same defaults.
 - Authentication — if your gateway uses Cloudflare Access, OAuth, or anything else, that all carries over to `/mcp` unchanged.

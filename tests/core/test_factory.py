@@ -38,7 +38,7 @@ from kairix.core.search.config import (
     TemporalBoostConfig,
 )
 from kairix.core.search.fusion import BM25PrimaryFusion, RRFFusion
-from tests.fakes import FakeGraphRepository
+from tests.fakes import FakeGraphRepository, FakeProvider, FakeProviderRegistry
 
 # ── select_boosts — on/off matrix and ordering ────────────────────────
 
@@ -46,6 +46,35 @@ from tests.fakes import FakeGraphRepository
 @pytest.fixture
 def fake_graph() -> FakeGraphRepository:
     return FakeGraphRepository(available=True)
+
+
+def _provider_registry() -> FakeProviderRegistry:
+    """Production-shaped FakeProviderRegistry for factory-wiring tests.
+
+    The factory requires an explicit provider (the legacy fallback was
+    deleted in v2026.5.17). Every ``build_search_pipeline(config=cfg)``
+    call in this module is exercising the pipeline-composition surface —
+    the embed provider's identity isn't load-bearing for those scenarios —
+    so we hand it the canonical ``FakeProvider`` from ``tests/fakes.py``
+    and let the factory finish its happy-path wiring.
+
+    Tests that pin embed-service identity (e.g. ``ProviderEmbeddingService``
+    vs the typed error path) construct their own registry inline.
+    """
+    return FakeProviderRegistry({"fake": FakeProvider(name="fake", vector=[0.1, 0.2, 0.3], dim=3)})
+
+
+def _wire_cfg(cfg: RetrievalConfig) -> RetrievalConfig:
+    """Attach ``provider="fake"`` so the factory's required-provider gate passes.
+
+    Used by every factory test that constructs a ``RetrievalConfig`` for
+    pipeline-composition assertions (fusion type, boost wiring, etc.).
+    The provider identity isn't the test subject — we just need the
+    factory to reach the rest of its wiring without raising ``ValueError``.
+    """
+    from dataclasses import replace
+
+    return replace(cfg, provider="fake") if cfg.provider is None else cfg
 
 
 def _cfg(
@@ -158,7 +187,7 @@ def test_build_search_pipeline_returns_search_pipeline_with_rrf_fusion() -> None
     would catch the wrong fusion type.
     """
     cfg = RetrievalConfig(fusion_strategy="rrf", rrf_k=42)
-    pipeline = build_search_pipeline(config=cfg)
+    pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
 
     assert isinstance(pipeline.fusion, RRFFusion)
     # rrf_k threads through to the fusion strategy (private attr access
@@ -170,7 +199,7 @@ def test_build_search_pipeline_returns_search_pipeline_with_rrf_fusion() -> None
 def test_build_search_pipeline_with_bm25_primary_fusion() -> None:
     """``fusion_strategy="bm25_primary"`` selects BM25PrimaryFusion."""
     cfg = RetrievalConfig(fusion_strategy="bm25_primary")
-    pipeline = build_search_pipeline(config=cfg)
+    pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
 
     assert isinstance(pipeline.fusion, BM25PrimaryFusion)
 
@@ -181,7 +210,7 @@ def test_build_search_pipeline_with_unknown_fusion_falls_back_to_bm25_primary() 
     fusion-strategy switch and yields ``BM25PrimaryFusion``.
     """
     cfg = RetrievalConfig(fusion_strategy="not-a-real-strategy")
-    pipeline = build_search_pipeline(config=cfg)
+    pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
 
     assert isinstance(pipeline.fusion, BM25PrimaryFusion)
 
@@ -194,8 +223,8 @@ def test_build_search_pipeline_threads_config_through_to_pipeline() -> None:
     constructed a fresh default instead, the rrf_k=99 sentinel would
     not survive.
     """
-    cfg = RetrievalConfig(fusion_strategy="rrf", rrf_k=99)
-    pipeline = build_search_pipeline(config=cfg)
+    cfg = RetrievalConfig(provider="fake", fusion_strategy="rrf", rrf_k=99)
+    pipeline = build_search_pipeline(config=cfg, registry=_provider_registry())
 
     assert pipeline.config is cfg
     assert pipeline.config.rrf_k == 99
@@ -215,7 +244,7 @@ def test_build_search_pipeline_with_all_boosts_enabled_wires_full_chain() -> Non
             chunk_date_boost_enabled=True,
         ),
     )
-    pipeline = build_search_pipeline(config=cfg)
+    pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
 
     boost_types = [type(b) for b in pipeline.boosts]
     assert boost_types == [
@@ -236,7 +265,7 @@ def test_build_search_pipeline_classifier_dispatches_to_intent_module() -> None:
     always returned ``None``, the QueryIntent assertion would fail.
     """
     cfg = RetrievalConfig(fusion_strategy="rrf")
-    pipeline = build_search_pipeline(config=cfg)
+    pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
 
     classifier = pipeline.classifier
     # ``SearchPipeline.classifier`` is typed as ``object`` (structural
@@ -282,7 +311,7 @@ def test_build_search_pipeline_resolver_honours_extra_collections_env() -> None:
     paths_mod.os = fake_os  # type: ignore[assignment]  # stdlib substitution at the paths.py boundary
     try:
         cfg = RetrievalConfig(fusion_strategy="rrf")
-        pipeline = build_search_pipeline(config=cfg)
+        pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
     finally:
         paths_mod.os = real_paths_os
 
@@ -325,7 +354,7 @@ def test_build_search_pipeline_uses_docker_log_path_when_dockerenv_marker_presen
     paths_mod.os = fake_os  # type: ignore[assignment]  # stdlib substitution at the paths.py boundary
     try:
         cfg = RetrievalConfig(fusion_strategy="rrf")
-        pipeline = build_search_pipeline(config=cfg)
+        pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
     finally:
         paths_mod.os = real_paths_os
 
@@ -348,7 +377,7 @@ def test_build_search_pipeline_with_no_config_loads_via_config_loader() -> None:
     constructed a fresh ``RetrievalConfig()``, the pipeline's config
     would not match ``RetrievalConfig.defaults()``.
     """
-    pipeline = build_search_pipeline(config=None)
+    pipeline = build_search_pipeline(config=RetrievalConfig(provider="fake"), registry=_provider_registry())
 
     # Pipeline got *some* RetrievalConfig — exact contents depend on
     # whether a kairix.config.yaml is on disk in the test cwd. We assert
@@ -380,7 +409,7 @@ def test_build_search_pipeline_uses_real_vector_index_when_available() -> None:
     vec_index_mod.get_vector_index = lambda *a, **kw: _StandInIndex()
     try:
         cfg = RetrievalConfig(fusion_strategy="rrf")
-        pipeline = build_search_pipeline(config=cfg)
+        pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
     finally:
         vec_index_mod.get_vector_index = real
 
@@ -412,7 +441,7 @@ def test_build_search_pipeline_falls_back_when_get_vector_index_raises() -> None
     vec_index_mod.get_vector_index = _boom
     try:
         cfg = RetrievalConfig(fusion_strategy="rrf")
-        pipeline = build_search_pipeline(config=cfg)
+        pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
     finally:
         vec_index_mod.get_vector_index = real
 
@@ -448,7 +477,7 @@ def test_build_search_pipeline_uses_neo4j_graph_when_client_available() -> None:
     client_mod.get_client = lambda: _StandInClient()  # type: ignore[assignment, return-value]  # structural stand-in for boundary type check; not callable in test path
     try:
         cfg = RetrievalConfig(fusion_strategy="rrf")
-        pipeline = build_search_pipeline(config=cfg)
+        pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
     finally:
         client_mod.get_client = real
 
@@ -499,7 +528,7 @@ agents:
     saved = os.environ.pop("KAIRIX_CONFIG_PATH", None)
     config_loader.load_cached.cache_clear()
     try:
-        pipeline = build_search_pipeline(config=None)
+        pipeline = build_search_pipeline(config=RetrievalConfig(provider="fake"), registry=_provider_registry())
     finally:
         if saved is not None:
             os.environ["KAIRIX_CONFIG_PATH"] = saved
@@ -532,7 +561,7 @@ def test_build_search_pipeline_falls_back_to_fake_graph_when_get_client_raises()
     client_mod.get_client = _boom
     try:
         cfg = RetrievalConfig(fusion_strategy="rrf")
-        pipeline = build_search_pipeline(config=cfg)
+        pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
     finally:
         client_mod.get_client = real
 
@@ -581,7 +610,7 @@ def test_build_search_pipeline_tolerates_agent_registry_parse_exception(
     registry_mod.parse_agent_registry = _boom
 
     try:
-        pipeline = build_search_pipeline(config=None)
+        pipeline = build_search_pipeline(config=RetrievalConfig(provider="fake"), registry=_provider_registry())
     finally:
         registry_mod.parse_agent_registry = real_parse
         if saved is not None:
@@ -611,9 +640,121 @@ def test_build_search_pipeline_tolerates_load_collections_exception(
     cl.load_collections = _boom
     try:
         cfg = RetrievalConfig(fusion_strategy="rrf")
-        pipeline = build_search_pipeline(config=cfg)
+        pipeline = build_search_pipeline(config=_wire_cfg(cfg), registry=_provider_registry())
     finally:
         cl.load_collections = real
 
     # Sabotage proof: pipeline still constructed despite the failure.
     assert isinstance(pipeline.config, RetrievalConfig)
+
+
+# ── plugin-driven embedding service wiring ────────────────────────────
+
+
+@pytest.mark.unit
+def test_build_search_pipeline_wires_provider_embedding_service_from_registry() -> None:
+    """When ``cfg.provider`` names an installed plugin, the factory builds
+    a ``ProviderEmbeddingService`` wrapping that plugin. The registry
+    seam lets us inject a ``FakeProviderRegistry`` without touching env
+    vars or patching ``kairix`` internals (F1/F2 clean).
+
+    Sabotage proof: rewire the factory to swallow the resolved name and
+    construct ``ProviderEmbeddingService`` from a hard-coded default
+    plugin and this test fails because the embed-service no longer
+    threads back to the ``FakeProvider`` we supplied via the registry.
+    """
+    from kairix.transport.embed_service import ProviderEmbeddingService
+    from tests.fakes import FakeProvider, FakeProviderRegistry
+
+    fake_provider = FakeProvider(name="fake", vector=[0.1, 0.2, 0.3], dim=3)
+    registry = FakeProviderRegistry({"fake": fake_provider})
+
+    cfg = RetrievalConfig(fusion_strategy="rrf", provider="fake")
+    pipeline = build_search_pipeline(config=cfg, registry=registry)
+
+    embed_service = pipeline.vector._embedding
+    assert isinstance(embed_service, ProviderEmbeddingService)
+    # The registry's resolve() was driven exactly once, with our name.
+    assert registry.resolve_calls == ["fake"]
+
+
+@pytest.mark.unit
+def test_build_search_pipeline_provider_embedding_service_routes_through_plugin() -> None:
+    """End-to-end behavioural pin: the embed call dispatches into the
+    plugin's ``embed_batch``. Confirms the ProviderEmbeddingService →
+    Provider wiring is live, not just the type assertion.
+
+    Sabotage proof: if the factory wired a dud plugin or wrapped a
+    different provider, the recorded ``embed_calls`` would not match
+    the text we submitted.
+    """
+    from tests.fakes import FakeProvider, FakeProviderRegistry
+
+    fake_provider = FakeProvider(name="fake", vector=[0.4, 0.5, 0.6], dim=3)
+    registry = FakeProviderRegistry({"fake": fake_provider})
+
+    cfg = RetrievalConfig(fusion_strategy="rrf", provider="fake")
+    pipeline = build_search_pipeline(config=cfg, registry=registry)
+
+    vec = pipeline.vector._embedding.embed("hello")
+    assert vec == [0.4, 0.5, 0.6]
+    # The plugin saw exactly one call carrying our text — either directly
+    # or via the coalescer-batched path; both shapes resolve to a single
+    # entry in embed_calls.
+    assert fake_provider.embed_calls
+    assert "hello" in fake_provider.embed_calls[-1]
+
+
+@pytest.mark.unit
+def test_build_search_pipeline_raises_value_error_when_no_provider_configured() -> None:
+    """``cfg.provider=None`` and no YAML provider field → typed ValueError.
+
+    The transitional fallback to the legacy direct-SDK code was removed
+    in v2026.5.17. The factory now requires an explicit provider;
+    operators see the misconfiguration at pipeline-build time rather
+    than discovering an inert embed surface at query time.
+
+    The error message points to the YAML field, the probe-config
+    command, and lists the registry's currently-installed plugins so
+    operators have an actionable next step.
+
+    Sabotage proof: re-add a fallback branch (returning some default
+    embed service when ``name is None``) and this
+    ``pytest.raises(ValueError, ...)`` clause fails because the factory
+    returns a pipeline instead of raising.
+    """
+    from tests.fakes import FakeProvider, FakeProviderRegistry
+
+    registry = FakeProviderRegistry({"fake": FakeProvider(name="fake")})
+    cfg = RetrievalConfig(fusion_strategy="rrf")
+    assert cfg.provider is None, "test premise: cfg has no provider configured"
+
+    with pytest.raises(ValueError, match="missing the required 'provider:' field") as excinfo:
+        build_search_pipeline(config=cfg, registry=registry)
+
+    # Operators see the installed-plugin list so they can pick a valid name.
+    assert "fake" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_build_search_pipeline_propagates_provider_not_registered() -> None:
+    """When the configured provider name is unknown to the registry,
+    the factory surfaces the typed ``ProviderNotRegistered`` error
+    rather than silently degrading. Operators see the installed-plugins
+    list in the error message.
+
+    Sabotage proof: swallowing the registry error and falling back
+    silently would mask config typos; this test asserts the typed
+    exception propagates.
+    """
+    from kairix.providers import ProviderNotRegistered
+    from tests.fakes import FakeProvider, FakeProviderRegistry
+
+    registry = FakeProviderRegistry({"fake": FakeProvider(name="fake")})
+    cfg = RetrievalConfig(fusion_strategy="rrf", provider="nonexistent")
+
+    with pytest.raises(ProviderNotRegistered) as excinfo:
+        build_search_pipeline(config=cfg, registry=registry)
+
+    assert excinfo.value.name == "nonexistent"
+    assert "fake" in excinfo.value.available

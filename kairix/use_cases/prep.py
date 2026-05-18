@@ -25,17 +25,62 @@ _L0_MAX_TOKENS = 150
 _L1_MAX_TOKENS = 600
 
 
-def _default_search(**kwargs: Any) -> Any:
+def _build_production_search_pipeline() -> Any:
     from kairix.core.factory import build_search_pipeline
 
-    pipeline = build_search_pipeline()
+    return build_search_pipeline()
+
+
+def _resolve_production_provider_name() -> str | None:
+    from kairix.paths import provider_name
+
+    return provider_name()
+
+
+def _resolve_production_provider(name: str) -> Any:
+    from kairix.providers import get_provider
+
+    return get_provider(name)
+
+
+def default_search_callable(
+    *,
+    pipeline_factory: Callable[[], Any] = _build_production_search_pipeline,
+    **kwargs: Any,
+) -> Any:
+    """Production search adapter used by ``PrepDeps`` when no override is passed.
+
+    The ``pipeline_factory`` kwarg is the public DI seam: tests pass a fake
+    factory returning a stub pipeline whose ``.search(**kwargs)`` returns the
+    desired ``SearchResult`` shape, exercising this adapter end-to-end.
+    """
+    pipeline = pipeline_factory()
     return pipeline.search(**kwargs)
 
 
-def _default_chat(**kwargs: Any) -> str:
-    from kairix._azure import chat_completion
+def default_chat_callable(
+    *,
+    provider_name_fn: Callable[[], str | None] = _resolve_production_provider_name,
+    provider_resolver: Callable[[str], Any] = _resolve_production_provider,
+    chat_backend_factory: Callable[[Any], Any] | None = None,
+    **kwargs: Any,
+) -> str:
+    """Production chat adapter used by ``PrepDeps`` when no override is passed.
 
-    return chat_completion(**kwargs)
+    Resolves the configured plugin via ``provider_name_fn`` + ``provider_resolver``,
+    wraps it in :class:`ProviderChatBackend` (override via ``chat_backend_factory``
+    for tests), and forwards ``**kwargs`` to ``backend.chat``. Raises ``ValueError``
+    when no provider is configured — surfacing a config error at the boundary
+    rather than letting the call vanish into a generic plugin failure.
+    """
+    from kairix.transport.embed_service import ProviderChatBackend
+
+    name = provider_name_fn()
+    if name is None:
+        raise ValueError("kairix.config.yaml is missing the required 'provider:' field")
+    provider = provider_resolver(name)
+    backend = (chat_backend_factory or ProviderChatBackend)(provider)
+    return backend.chat(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -72,8 +117,16 @@ class PrepDeps:
     the production callables defined above.
     """
 
-    search_fn: Callable[..., Any] = field(default_factory=lambda: _default_search)
-    chat_fn: Callable[..., str] = field(default_factory=lambda: _default_chat)
+    search_fn: Callable[..., Any] = field(default_factory=lambda: default_search_callable)
+    chat_fn: Callable[..., str] = field(default_factory=lambda: default_chat_callable)
+
+
+_GROUND_RULES = (
+    "If the documents do not contain information about the topic, "
+    'reply with exactly: "No relevant content found in the knowledge store." '
+    "Do NOT fabricate, infer, or fill in plausible-sounding details. "
+    "Do NOT add information that is not in the documents."
+)
 
 
 def _build_messages(query: str, tier: str, context: str) -> list[dict[str, str]]:
@@ -81,13 +134,13 @@ def _build_messages(query: str, tier: str, context: str) -> list[dict[str, str]]
         system = (
             "You are a concise knowledge assistant. Based ONLY on the provided documents, "
             "summarise what is known about the topic in 2-3 sentences. "
-            "Do not add information that is not in the documents."
+            f"{_GROUND_RULES}"
         )
     else:
         system = (
             "You are a knowledge assistant. Based ONLY on the provided documents, "
             "provide a structured overview of the topic. "
-            "Do not add information that is not in the documents."
+            f"{_GROUND_RULES}"
         )
     return [
         {"role": "system", "content": system},
@@ -95,8 +148,23 @@ def _build_messages(query: str, tier: str, context: str) -> list[dict[str, str]]
     ]
 
 
+# Without this floor, a top-5 hit with a 12-character snippet ("see ref-001")
+# gets fed to the LLM as "context" — the model treats it as authoritative and
+# hallucinates to fill the gap (#254 dogfood). 40 chars is empirical: an actual
+# sentence-worth of grounding; anything shorter is title-equivalent.
+_MIN_USEFUL_SNIPPET_CHARS = 40
+
+
 def _format_context(search_result: Any) -> tuple[str, list[str]]:
-    """Project a SearchResult's top 5 hits into a context string + source titles."""
+    """Project a SearchResult's top 5 hits into a context string + source titles.
+
+    Only hits with non-trivial snippet content (≥ ``_MIN_USEFUL_SNIPPET_CHARS``)
+    are included in the LLM context. Hits with empty/title-only content are
+    still returned in ``sources`` if at least one usable hit exists, so the
+    operator can see what the retrieval found even when its content was thin.
+    Returns ``("", [])`` when no hit has usable snippet content — the caller
+    treats this as "no relevant documents" rather than calling the LLM.
+    """
     parts: list[str] = []
     sources: list[str] = []
     for budgeted in getattr(search_result, "results", [])[:5]:
@@ -104,7 +172,9 @@ def _format_context(search_result: Any) -> tuple[str, list[str]]:
         if inner is None:
             continue
         title = getattr(inner, "title", "") or getattr(inner, "path", "")
-        snippet = getattr(budgeted, "content", "") or ""
+        snippet = (getattr(budgeted, "content", "") or "").strip()
+        if len(snippet) < _MIN_USEFUL_SNIPPET_CHARS:
+            continue
         parts.append(f"[{title}]\n{snippet[:500]}")
         sources.append(str(title))
     return ("\n\n---\n\n".join(parts) if parts else ""), sources

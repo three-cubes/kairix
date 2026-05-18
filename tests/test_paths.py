@@ -426,14 +426,8 @@ class TestShippedAssetPaths:
         assert reference_library_root() == Path("/custom/reflib")
 
     @pytest.mark.unit
-    def test_bundled_suites_root_default(self, monkeypatch) -> None:
-        """Without KAIRIX_SUITES_ROOT set, returns the in-container default."""
-        monkeypatch.delenv("KAIRIX_SUITES_ROOT", raising=False)
-        assert bundled_suites_root() == Path("suites")
-
-    @pytest.mark.unit
     def test_bundled_suites_root_env_override(self, monkeypatch) -> None:
-        """KAIRIX_SUITES_ROOT overrides the default."""
+        """KAIRIX_SUITES_ROOT overrides every other lookup (step 1 of #268 resolution)."""
         monkeypatch.setenv("KAIRIX_SUITES_ROOT", "/custom/suites")
         assert bundled_suites_root() == Path("/custom/suites")
 
@@ -520,3 +514,237 @@ class TestEntityOverridesPath:
         result = entity_overrides_path()
         assert "~" not in str(result)
         assert str(result).endswith("overrides.md")
+
+
+# ---------------------------------------------------------------------------
+# Typed env helpers — read_int_env / read_float_env / embed_pool_* /
+# embed_vector_dims invalid-input branches.
+#
+# These tests sit at the bottom of the test pyramid for kairix.paths. The
+# operator-visible behaviour of "I tune pool config via env vars" is
+# pinned by BDD (tests/bdd/features/embed_pool_config.feature) +
+# integration (tests/integration/test_embed_pool_config_e2e.py); both
+# exercise the happy path through real make_openai_client + httpx flow.
+# The defensive try/except branches below (invalid integer/float values
+# from misconfigured Key Vault secrets) don't surface a user-visible
+# change beyond a logged warning, so they need targeted unit coverage to
+# pin the operator-misconfig guard behaviour the layer above relies on.
+# ---------------------------------------------------------------------------
+
+
+class TestReadIntEnv:
+    @pytest.mark.unit
+    def test_returns_int_when_set_valid(self, monkeypatch) -> None:
+        """Set env → parsed int. Sabotage: replace return int(raw) with default → fails."""
+        from kairix.paths import read_int_env
+
+        monkeypatch.setenv("KAIRIX_TEST_INT", "42")
+        assert read_int_env("KAIRIX_TEST_INT", default=10) == 42
+
+    @pytest.mark.unit
+    def test_returns_default_when_unset(self, monkeypatch) -> None:
+        """Unset env → default. Sabotage: drop the None early-return → int(None) raises."""
+        from kairix.paths import read_int_env
+
+        monkeypatch.delenv("KAIRIX_TEST_INT", raising=False)
+        assert read_int_env("KAIRIX_TEST_INT", default=7) == 7
+
+    @pytest.mark.unit
+    def test_returns_default_when_invalid(self, monkeypatch) -> None:
+        """Garbage → default + warning. Sabotage: remove try/except → int('abc') crashes."""
+        from kairix.paths import read_int_env
+
+        monkeypatch.setenv("KAIRIX_TEST_INT", "not-an-int")
+        assert read_int_env("KAIRIX_TEST_INT", default=99) == 99
+
+
+class TestReadFloatEnv:
+    @pytest.mark.unit
+    def test_returns_float_when_set_valid(self, monkeypatch) -> None:
+        """Set env → parsed float. Sabotage: change return to default."""
+        from kairix.paths import read_float_env
+
+        monkeypatch.setenv("KAIRIX_TEST_FLOAT", "3.5")
+        assert read_float_env("KAIRIX_TEST_FLOAT", default=1.0) == 3.5
+
+    @pytest.mark.unit
+    def test_returns_default_when_unset(self, monkeypatch) -> None:
+        """Unset → default. Sabotage: drop None early-return → float(None) raises."""
+        from kairix.paths import read_float_env
+
+        monkeypatch.delenv("KAIRIX_TEST_FLOAT", raising=False)
+        assert read_float_env("KAIRIX_TEST_FLOAT", default=2.5) == 2.5
+
+    @pytest.mark.unit
+    def test_returns_default_when_invalid(self, monkeypatch) -> None:
+        """Garbage → fallback. Sabotage: remove try/except → ValueError on float('xyz')."""
+        from kairix.paths import read_float_env
+
+        monkeypatch.setenv("KAIRIX_TEST_FLOAT", "xyz")
+        assert read_float_env("KAIRIX_TEST_FLOAT", default=0.5) == 0.5
+
+
+class TestEmbedPoolKeepalive:
+    @pytest.mark.unit
+    def test_valid_env_returns_set_value(self, monkeypatch) -> None:
+        """KAIRIX_EMBED_POOL_KEEPALIVE=25 → 25. Sabotage: ignore env → default."""
+        from kairix.paths import embed_pool_keepalive
+
+        monkeypatch.setenv("KAIRIX_EMBED_POOL_KEEPALIVE", "25")
+        assert embed_pool_keepalive(10) == 25
+
+    @pytest.mark.unit
+    def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
+        """Garbage → default + warning. Sabotage: remove try/except → int() raises."""
+        from kairix.paths import embed_pool_keepalive
+
+        monkeypatch.setenv("KAIRIX_EMBED_POOL_KEEPALIVE", "bad")
+        assert embed_pool_keepalive(10) == 10
+
+
+class TestEmbedPoolExpiry:
+    @pytest.mark.unit
+    def test_valid_env_returns_set_value(self, monkeypatch) -> None:
+        """KAIRIX_EMBED_POOL_EXPIRY_S=45.5 → 45.5. Sabotage: ignore env → default."""
+        from kairix.paths import embed_pool_expiry_s
+
+        monkeypatch.setenv("KAIRIX_EMBED_POOL_EXPIRY_S", "45.5")
+        assert embed_pool_expiry_s(30.0) == 45.5
+
+    @pytest.mark.unit
+    def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
+        """Garbage → default. Sabotage: remove try/except → float() raises."""
+        from kairix.paths import embed_pool_expiry_s
+
+        monkeypatch.setenv("KAIRIX_EMBED_POOL_EXPIRY_S", "nope")
+        assert embed_pool_expiry_s(30.0) == 30.0
+
+
+class TestEmbedVectorDimsFallback:
+    @pytest.mark.unit
+    def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
+        """KAIRIX_EMBED_DIMS=abc → default + warning. Sabotage: remove try/except → int() raises."""
+        from kairix.paths import embed_vector_dims
+
+        monkeypatch.setenv("KAIRIX_EMBED_DIMS", "abc")
+        assert embed_vector_dims(default=1536) == 1536
+
+
+class TestEmbedCoalesceWindowMs:
+    """Round-trip tests for ``embed_coalesce_window_ms`` (#288).
+
+    F2-clean here because this file is the baselined home for
+    kairix.paths env-var round-trip tests — env IS the public boundary
+    we're verifying.
+    """
+
+    @pytest.mark.unit
+    def test_default_when_unset(self, monkeypatch) -> None:
+        """Unset env → documented default 50.
+
+        Sabotage: change the default in ``embed_coalesce_window_ms``
+        from 50 to e.g. 5 and the documented behaviour drifts away
+        from the actual fall-back.
+        """
+        from kairix.paths import embed_coalesce_window_ms
+
+        monkeypatch.delenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", raising=False)
+        assert embed_coalesce_window_ms() == 50
+
+    @pytest.mark.unit
+    def test_valid_int_passes_through(self, monkeypatch) -> None:
+        """An in-range value comes back unchanged.
+
+        Sabotage: hard-code the return value and the operator's
+        configured 100ms window is silently ignored.
+        """
+        from kairix.paths import embed_coalesce_window_ms
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "100")
+        assert embed_coalesce_window_ms() == 100
+
+    @pytest.mark.unit
+    def test_oob_high_clamps_to_500(self, monkeypatch) -> None:
+        """Out-of-range high value clamps to the documented upper bound.
+
+        Sabotage: drop the ``min(500, value)`` clamp and an operator
+        typo (e.g. 99999) silently sets the window to 99 seconds —
+        every embed call appears to hang.
+        """
+        from kairix.paths import embed_coalesce_window_ms
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "99999")
+        assert embed_coalesce_window_ms() == 500
+
+    @pytest.mark.unit
+    def test_oob_low_clamps_to_zero(self, monkeypatch) -> None:
+        """Negative value clamps to 0 (which is the documented "disable" mode).
+
+        Sabotage: drop the ``max(0, ...)`` clamp and a negative window
+        causes Condition.wait to fire instantly — defeats coalescing.
+        """
+        from kairix.paths import embed_coalesce_window_ms
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "-100")
+        assert embed_coalesce_window_ms() == 0
+
+    @pytest.mark.unit
+    def test_invalid_falls_back_to_default(self, monkeypatch) -> None:
+        """Garbage → default. Sabotage: remove try/except → int() raises."""
+        from kairix.paths import embed_coalesce_window_ms
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "nope")
+        assert embed_coalesce_window_ms() == 50
+
+
+class TestEmbedCoalesceMaxBatch:
+    """Round-trip tests for ``embed_coalesce_max_batch`` (#288)."""
+
+    @pytest.mark.unit
+    def test_default_when_unset(self, monkeypatch) -> None:
+        """Unset env → documented default 16."""
+        from kairix.paths import embed_coalesce_max_batch
+
+        monkeypatch.delenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", raising=False)
+        assert embed_coalesce_max_batch() == 16
+
+    @pytest.mark.unit
+    def test_valid_int_passes_through(self, monkeypatch) -> None:
+        """In-range value comes back unchanged."""
+        from kairix.paths import embed_coalesce_max_batch
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "32")
+        assert embed_coalesce_max_batch() == 32
+
+    @pytest.mark.unit
+    def test_oob_high_clamps_to_64(self, monkeypatch) -> None:
+        """Out-of-range high value clamps to 64.
+
+        Sabotage: drop the ``min(64, value)`` clamp and an operator
+        typo enables a 1000-text batch — large response payloads slow
+        the dispatch loop and starve callers.
+        """
+        from kairix.paths import embed_coalesce_max_batch
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "999")
+        assert embed_coalesce_max_batch() == 64
+
+    @pytest.mark.unit
+    def test_oob_low_clamps_to_one(self, monkeypatch) -> None:
+        """A zero or negative max-batch clamps to 1 (minimum useful batch).
+
+        Sabotage: drop the ``max(1, ...)`` clamp and a 0 batch size
+        means the dispatcher never wakes via the batch-full path.
+        """
+        from kairix.paths import embed_coalesce_max_batch
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "0")
+        assert embed_coalesce_max_batch() == 1
+
+    @pytest.mark.unit
+    def test_invalid_falls_back_to_default(self, monkeypatch) -> None:
+        """Garbage → default. Sabotage: remove try/except → int() raises."""
+        from kairix.paths import embed_coalesce_max_batch
+
+        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "nope")
+        assert embed_coalesce_max_batch() == 16

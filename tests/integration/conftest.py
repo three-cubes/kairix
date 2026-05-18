@@ -86,6 +86,21 @@ def _roll_memory_dates_to_today(tmp_root: Path) -> None:
             tmp.rename(path.with_name(new_name))
 
 
+@pytest.fixture(autouse=True)
+def _pre_warm_mcp_state() -> None:
+    """Pre-mark kairix as warm so existing integration tests hit the
+    production tool path, not the ColdStart envelope (#278).
+
+    A separate test asserts the cold path explicitly — see
+    test_mcp_cold_start.py.
+    """
+    from kairix.platform.warm.state import mark_warm, reset_warm_state
+
+    mark_warm()
+    yield
+    reset_warm_state()
+
+
 @pytest.fixture(scope="session")
 def _integration_env(
     tmp_path_factory: pytest.TempPathFactory,

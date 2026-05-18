@@ -157,51 +157,99 @@ def merge_within_groups(
     return merged
 
 
+_FUZZY_SKIP_TYPES = frozenset({"Concept", "Document"})
+_FUZZY_TYPE_SIZE_CAP = 2000
+_FUZZY_SIM_THRESHOLD = 0.85
+
+
+def _group_keys_by_type(
+    merged: dict[tuple[str, str], ResolvedEntity],
+) -> dict[str, list[tuple[str, str]]]:
+    """Index merged keys by their entity-type field for per-type fuzzy passes."""
+    by_type: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for key in merged:
+        by_type[key[1]].append(key)
+    return by_type
+
+
+def _pick_winner(
+    a_key: tuple[str, str],
+    b_key: tuple[str, str],
+    merged: dict[tuple[str, str], ResolvedEntity],
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Return ``(victim, winner)`` where the winner has more source_docs."""
+    a = merged[a_key]
+    b = merged[b_key]
+    if len(b.source_docs) > len(a.source_docs):
+        return (a_key, b_key)
+    return (b_key, a_key)
+
+
+def _build_merge_map_for_type(
+    slugs: list[tuple[str, str]],
+    merged: dict[tuple[str, str], ResolvedEntity],
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """O(n^2) Levenshtein scan inside one entity type; returns victim→winner map."""
+    type_map: dict[tuple[str, str], tuple[str, str]] = {}
+    for i in range(len(slugs)):
+        if slugs[i] in type_map:
+            continue
+        for j in range(i + 1, len(slugs)):
+            if slugs[j] in type_map:
+                continue
+            if _similarity(slugs[i][0], slugs[j][0]) < _FUZZY_SIM_THRESHOLD:
+                continue
+            victim, winner = _pick_winner(slugs[i], slugs[j], merged)
+            type_map[victim] = winner
+    return type_map
+
+
+def _resolve_winner(start: tuple[str, str], merge_map: dict[tuple[str, str], tuple[str, str]]) -> tuple[str, str]:
+    """Follow victim→winner chains until we hit a non-mapped winner."""
+    winner = start
+    while winner in merge_map:
+        winner = merge_map[winner]
+    return winner
+
+
+def _apply_merge(
+    merged: dict[tuple[str, str], ResolvedEntity],
+    victim: tuple[str, str],
+    winner: tuple[str, str],
+) -> None:
+    """Fold the victim entity into the winner in-place; victim popped from ``merged``."""
+    v = merged.pop(victim)
+    w = merged[winner]
+    w.source_docs = _merge_lists(w.source_docs, v.source_docs)
+    w.domains = _merge_lists(w.domains, v.domains)
+    w.aliases = _merge_lists(w.aliases, [v.canonical_name], v.aliases)
+    w.confidence = max(w.confidence, v.confidence)
+    if len(v.description) > len(w.description):
+        w.description = v.description
+
+
 def fuzzy_match_and_merge_same_type(
     merged: dict[tuple[str, str], ResolvedEntity],
 ) -> dict[tuple[str, str], ResolvedEntity]:
     """O(n^2) fuzzy dedup within each entity type using Levenshtein similarity."""
-    skip_fuzzy_types = {"Concept", "Document"}
-
-    by_type: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    for key in merged:
-        by_type[key[1]].append(key)
-
+    by_type = _group_keys_by_type(merged)
     merge_map: dict[tuple[str, str], tuple[str, str]] = {}
 
     for etype, keys in by_type.items():
-        if etype in skip_fuzzy_types:
+        if etype in _FUZZY_SKIP_TYPES:
             continue
         slugs = sorted(keys, key=lambda k: k[0])
-        if len(slugs) > 2000:
+        if len(slugs) > _FUZZY_TYPE_SIZE_CAP:
             continue
-        for i in range(len(slugs)):
-            if slugs[i] in merge_map:
-                continue
-            for j in range(i + 1, len(slugs)):
-                if slugs[j] in merge_map:
-                    continue
-                sim = _similarity(slugs[i][0], slugs[j][0])
-                if sim >= 0.85:
-                    a = merged[slugs[i]]
-                    b = merged[slugs[j]]
-                    if len(b.source_docs) > len(a.source_docs):
-                        merge_map[slugs[i]] = slugs[j]
-                    else:
-                        merge_map[slugs[j]] = slugs[i]
+        merge_map.update(_build_merge_map_for_type(slugs, merged))
 
-    # Apply merges
-    for victim, winner in merge_map.items():
-        while winner in merge_map:
-            winner = merge_map[winner]
-        v = merged.pop(victim)
-        w = merged[winner]
-        w.source_docs = _merge_lists(w.source_docs, v.source_docs)
-        w.domains = _merge_lists(w.domains, v.domains)
-        w.aliases = _merge_lists(w.aliases, [v.canonical_name], v.aliases)
-        w.confidence = max(w.confidence, v.confidence)
-        if len(v.description) > len(w.description):
-            w.description = v.description
+    # Snapshot via tuple — ``_apply_merge`` pops from ``merged`` (not
+    # ``merge_map``) so a tuple copy here is enough to keep the iteration
+    # stable. ``tuple()`` is the canonical idiom; ``list()`` was an
+    # unnecessary mutable copy (S7504).
+    for victim in tuple(merge_map):
+        winner = _resolve_winner(merge_map[victim], merge_map)
+        _apply_merge(merged, victim, winner)
 
     return merged
 

@@ -199,15 +199,18 @@ def _no_mcp_port_env():
 
 @pytest.mark.unit
 def test_resolve_port_auto_detect_when_default_available(monkeypatch, _no_mcp_port_env) -> None:
-    """No --port, no env var → _resolve_port calls is_port_available; if true, uses 8080."""
-    monkeypatch.setattr(sys, "argv", ["kairix", "mcp", "serve"])
-    # Patch the production port-probe utilities.
-    import kairix.platform.onboard.ports as ports
+    """No --port, no env var → ``_resolve_port`` uses ``deps.is_port_available_fn``;
+    when it returns True, port 8080 is selected.
 
-    monkeypatch.setattr(ports, "is_port_available", lambda p: True)
-    monkeypatch.setattr(ports, "find_available_port", lambda preferred: preferred)
+    Drives the public ``McpCliDeps.is_port_available_fn`` /
+    ``find_available_port_fn`` seams (F1-clean — no monkey-patching of
+    ``kairix.platform.onboard.ports``).
+    """
+    monkeypatch.setattr(sys, "argv", ["kairix", "mcp", "serve"])
 
     deps, build_calls, _runner = _build_deps()
+    deps.is_port_available_fn = lambda port: True
+    deps.find_available_port_fn = lambda *, preferred: preferred
     _stdout, _stderr, code = _drive(["serve", "--transport", "http"], deps)
     assert code == 0
     assert build_calls == [{"host": "127.0.0.1", "port": 8080}]
@@ -215,14 +218,17 @@ def test_resolve_port_auto_detect_when_default_available(monkeypatch, _no_mcp_po
 
 @pytest.mark.unit
 def test_resolve_port_auto_detect_falls_back_when_default_in_use(monkeypatch, _no_mcp_port_env) -> None:
-    """No --port, no env, default port unavailable → use find_available_port suggestion."""
-    monkeypatch.setattr(sys, "argv", ["kairix", "mcp", "serve"])
-    import kairix.platform.onboard.ports as ports
+    """No --port, no env, default port unavailable → ``find_available_port_fn`` is consulted.
 
-    monkeypatch.setattr(ports, "is_port_available", lambda p: False)
-    monkeypatch.setattr(ports, "find_available_port", lambda preferred: 19100)
+    Drives the public ``McpCliDeps`` port-probe seams to pin the
+    fallback-and-suggest path without touching the kairix internal
+    ``kairix.platform.onboard.ports`` module.
+    """
+    monkeypatch.setattr(sys, "argv", ["kairix", "mcp", "serve"])
 
     deps, build_calls, _runner = _build_deps()
+    deps.is_port_available_fn = lambda port: False
+    deps.find_available_port_fn = lambda *, preferred: 19100
     _stdout, stderr, code = _drive(["serve", "--transport", "http"], deps)
     assert code == 0
     assert build_calls == [{"host": "127.0.0.1", "port": 19100}]

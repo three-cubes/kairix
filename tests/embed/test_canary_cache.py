@@ -1,11 +1,10 @@
 """Unit tests for the persistent recall canary cache.
 
-The canary cache (``~/.cache/kairix/recall-canaries.json`` in production) is
-the fix for v2026.5.10's worker restart-loop. Before the cache, every
-recall check sampled five random documents from the corpus and compared
-their hit rate against the previous run's score — but the previous run
-sampled five DIFFERENT documents. The "delta -60%" alert was comparing
-unrelated query sets.
+The canary cache (``~/.cache/kairix/recall-canaries.json`` in production)
+pins the five sampled documents across recall-check runs so the alert's
+delta is comparing the SAME query set turn-on-turn. Without the cache,
+each check would re-sample five random documents and the hit-rate delta
+would be measuring sampling noise rather than recall regression.
 
 These tests pin the contract by exercising the **public** API
 (``RecallChecker.check`` + ``load_canary_cache`` / ``save_canary_cache``)

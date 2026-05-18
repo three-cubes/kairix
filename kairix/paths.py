@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 # resolves a cache location.
 _USER_CACHE_DIR = ".cache"
 
+# Canonical agent-knowledge directory under the document root.
+# Hosts agent memory subtrees and curator-managed config files (notably
+# ``_entity-overrides.md``). Extracted to satisfy F17 — three resolvers
+# below need to compose this segment and the literal string is otherwise
+# duplicated across them.
+_AGENT_KNOWLEDGE_DIR = "04-Agent-Knowledge"
+
 
 def is_docker_runtime_check() -> bool:
     """Detect if running inside a Docker container."""
@@ -207,9 +214,67 @@ def reference_library_root() -> Path:
     return Path(os.environ.get("KAIRIX_REFLIB_ROOT", "reference-library"))
 
 
+def resolve_first_existing_dir(
+    override: str | None,
+    candidates: list[Path],
+    fallback: Path,
+) -> Path:
+    """Return the first usable directory from the resolution chain.
+
+    Used by ``bundled_suites_root`` (and any future shipped-asset
+    resolver that needs the same env-override → candidate-list → CWD
+    fallback semantics).
+
+    Args:
+        override: When non-empty, returned as a ``Path`` immediately.
+                  A misconfigured operator override should surface as a
+                  downstream ``FileNotFoundError`` rather than silently
+                  fall through to a default.
+        candidates: Ordered list of paths; the first one whose
+                  ``is_dir()`` returns True wins.
+        fallback: Returned when ``override`` is empty and no candidate
+                  exists on disk. Typically the legacy CWD-relative
+                  path so behaviour from before the resolver existed is
+                  preserved.
+
+    The helper is pure (no env reads of its own) so tests can drive it
+    with crafted ``tmp_path`` candidate lists — no env-var monkeypatch
+    needed (F2-clean).
+    """
+    if override:
+        return Path(override)
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return fallback
+
+
 def bundled_suites_root() -> Path:
-    """Bundled benchmark suites — ships inside the container at /opt/kairix/suites."""
-    return Path(os.environ.get("KAIRIX_SUITES_ROOT", "suites"))
+    """Resolve the bundled benchmark suites root.
+
+    Resolution order (first existing path wins; the env-var override
+    wins even if its target is missing, so misconfigurations surface as
+    explicit ``FileNotFoundError`` downstream rather than silently
+    using a fallback):
+
+      1. ``$KAIRIX_SUITES_ROOT`` — operator override.
+      2. ``<repo-root>/suites/`` — when running from a kairix source
+         checkout; preserves the dev UX where ``cd`` to the repo finds
+         ``./suites/``. Derived from the kairix package location
+         (``Path(__file__).parent.parent`` = repo root).
+      3. ``/opt/kairix/suites/`` — canonical install path the Docker
+         image ships suites at. Closes #268: the host wrapper does
+         ``docker exec`` into the container, where the CWD is unrelated
+         to where suites live.
+      4. ``./suites/`` — final CWD fallback (legacy behaviour).
+    """
+    repo_root_suites = Path(__file__).resolve().parent.parent / "suites"
+    installed_suites = Path("/opt/kairix/suites")
+    return resolve_first_existing_dir(
+        override=os.environ.get("KAIRIX_SUITES_ROOT"),
+        candidates=[repo_root_suites, installed_suites],
+        fallback=Path("suites"),
+    )
 
 
 def worker_state_path() -> Path:
@@ -292,6 +357,40 @@ def set_agent_memory_root_override(root: str) -> None:
     os.environ["KAIRIX_AGENT_MEMORY_ROOT"] = root
 
 
+def read_int_env(name: str, *, default: int) -> int:
+    """Read an int from the named env var, falling back to ``default``.
+
+    Centralised here so callers needing tunable int knobs do not scatter
+    ``os.environ.get`` reads across production modules (F4). Malformed
+    values log a warning and fall back to ``default`` — the same
+    defensive policy used by the other typed env-var readers above.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not an int; using default %d", name, raw, default)
+        return default
+
+
+def read_float_env(name: str, *, default: float) -> float:
+    """Read a float from the named env var, falling back to ``default``.
+
+    Counterpart to :func:`read_int_env` for float-typed knobs (e.g.
+    cache TTLs in seconds). F4-clean — env reads stay in this module.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a float; using default %f", name, raw, default)
+        return default
+
+
 def embed_vector_dims(default: int = 1536) -> int:
     """Embedding vector dimensions — configurable via ``KAIRIX_EMBED_DIMS``.
 
@@ -361,9 +460,193 @@ def boards_dir_override() -> Path | None:
     return Path(raw) if raw else None
 
 
+def provider_name() -> str | None:
+    """Configured provider plugin name from ``kairix.config.yaml``, or ``None``.
+
+    Reads the top-level ``provider:`` field from the operator's
+    ``kairix.config.yaml``. Returns the stripped string when present
+    and non-empty; returns ``None`` otherwise so callers that depend
+    on a configured plugin can surface a typed
+    ``ProviderNotRegistered``-shaped error themselves.
+
+    The seam moved from ``KAIRIX_PROVIDER`` (env var) to the config
+    file in v2026.5.17 — operators pick a plugin in config; the plugin
+    owns its own credential-retrieval pattern (Azure → Key Vault;
+    AWS → Secrets Manager; etc.) so the secrets surface is shaped by
+    the plugin, not the env vocabulary. See
+    ``docs/architecture/provider-plugin-architecture.md``.
+
+    Lives in :mod:`kairix.paths` so the file-system read stays at the
+    F4 boundary even when the underlying source is a yaml file rather
+    than ``os.environ``. The import lives inside the function to keep
+    ``kairix.paths`` free of a module-level dependency on the
+    retrieval-config loader (which itself imports ``kairix.paths`` for
+    ``config_path_override``).
+    """
+    # Lazy import — avoid circular dependency with config_loader, which
+    # imports ``config_path_override`` from this module.
+    from kairix.core.search.config_loader import load_config
+
+    try:
+        cfg = load_config()
+    except Exception as exc:
+        # YAML parse errors / ConfigValidationError shouldn't crash
+        # operator-facing probes; surface ``None`` and let the caller
+        # render the actionable affordance.
+        logger.warning("provider_name: failed to load kairix.config.yaml — %s", exc)
+        return None
+    value = getattr(cfg, "provider", None)
+    return value if value else None
+
+
 def azure_api_version(default: str = "2024-12-01-preview") -> str:
     """Azure OpenAI API version — configurable via ``KAIRIX_AZURE_API_VERSION``."""
     return os.environ.get("KAIRIX_AZURE_API_VERSION", default)
+
+
+def bedrock_region_override() -> str | None:
+    """AWS region for the bedrock provider — configurable via ``KAIRIX_BEDROCK_REGION``.
+
+    Overrides whatever the boto3 default credential chain picked
+    (``AWS_DEFAULT_REGION`` / ``~/.aws/config``) so operators can pin
+    the Bedrock inference region distinct from their AWS control-plane
+    region. Returns ``None`` when unset; the bedrock plugin then falls
+    back to boto3's resolved region. Lives in :mod:`kairix.paths` per
+    F4 — no other module may read ``KAIRIX_*`` env vars.
+    """
+    value = os.environ.get("KAIRIX_BEDROCK_REGION")
+    return value if value else None
+
+
+def bedrock_embed_model(default: str = "amazon.titan-embed-text-v2:0") -> str:
+    """Bedrock embed model id — configurable via ``KAIRIX_BEDROCK_EMBED_MODEL``.
+
+    Defaults to Amazon Titan Text Embeddings V2. Cohere embed models on
+    Bedrock (``cohere.embed-*``) are also supported by the plugin's
+    body-shape dispatch. Lives in :mod:`kairix.paths` per F4.
+    """
+    return os.environ.get("KAIRIX_BEDROCK_EMBED_MODEL", default)
+
+
+def bedrock_chat_model(default: str = "anthropic.claude-3-5-sonnet-20241022-v2:0") -> str:
+    """Bedrock chat model id — configurable via ``KAIRIX_BEDROCK_CHAT_MODEL``.
+
+    Defaults to Anthropic Claude 3.5 Sonnet on Bedrock. Only
+    ``anthropic.*`` model ids are wired for chat at present; non-
+    Anthropic ids surface as a typed ``ClientError`` from
+    :meth:`kairix.providers.bedrock.BedrockProvider.chat`. Lives in
+    :mod:`kairix.paths` per F4.
+    """
+    return os.environ.get("KAIRIX_BEDROCK_CHAT_MODEL", default)
+
+
+def embed_pool_size(default: int = 20) -> int:
+    """Max concurrent HTTP connections to the embed provider.
+
+    Configurable via ``KAIRIX_EMBED_POOL_SIZE``. Sized for kairix's teaming
+    concurrency profile (20 agents, 5-15 sustained) with headroom. Invalid
+    values fall back to ``default`` with a logged warning so a bad operator
+    secret can't crash the embed dispatch stage. Read at call time so the
+    operator can rotate the value via Key Vault without restarting.
+    """
+    raw = os.environ.get("KAIRIX_EMBED_POOL_SIZE")
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_EMBED_POOL_SIZE=%r is not an int; using default %d",
+            raw,
+            default,
+        )
+        return default
+
+
+def embed_pool_keepalive(default: int = 10) -> int:
+    """Max idle HTTP connections kept warm against the embed provider.
+
+    Configurable via ``KAIRIX_EMBED_POOL_KEEPALIVE``. Balances connection
+    reuse against socket churn under burst load. Invalid values fall back
+    to ``default`` with a logged warning.
+    """
+    raw = os.environ.get("KAIRIX_EMBED_POOL_KEEPALIVE")
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_EMBED_POOL_KEEPALIVE=%r is not an int; using default %d",
+            raw,
+            default,
+        )
+        return default
+
+
+def embed_pool_expiry_s(default: float = 30.0) -> float:
+    """Idle-connection expiry (seconds) for the embed-provider pool.
+
+    Configurable via ``KAIRIX_EMBED_POOL_EXPIRY_S``. Invalid values fall
+    back to ``default`` with a logged warning.
+    """
+    raw = os.environ.get("KAIRIX_EMBED_POOL_EXPIRY_S")
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_EMBED_POOL_EXPIRY_S=%r is not a float; using default %s",
+            raw,
+            default,
+        )
+        return default
+
+
+def embed_coalesce_window_ms(default: int = 50) -> int:
+    """Coalesce window (ms) for the embed request coalescer (#288).
+
+    Configurable via ``KAIRIX_EMBED_COALESCE_WINDOW_MS``. Range 0-500;
+    out-of-range values clamp to the bound. ``0`` disables the
+    coalescer entirely — useful for low-concurrency deployments and
+    debugging. Invalid (non-int) values fall back to ``default`` with
+    a logged warning so a typo can't crash the embed dispatch stage.
+    """
+    raw = os.environ.get("KAIRIX_EMBED_COALESCE_WINDOW_MS")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_EMBED_COALESCE_WINDOW_MS=%r is not an int; using default %d",
+            raw,
+            default,
+        )
+        return default
+    return max(0, min(500, value))
+
+
+def embed_coalesce_max_batch(default: int = 16) -> int:
+    """Max batch size for the embed request coalescer (#288).
+
+    Configurable via ``KAIRIX_EMBED_COALESCE_MAX_BATCH``. Range 1-64.
+    Invalid values fall back to ``default`` with a logged warning.
+    """
+    raw = os.environ.get("KAIRIX_EMBED_COALESCE_MAX_BATCH")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "KAIRIX_EMBED_COALESCE_MAX_BATCH=%r is not an int; using default %d",
+            raw,
+            default,
+        )
+        return default
+    return max(1, min(64, value))
 
 
 def mcp_port(default: int = 8080) -> int:
@@ -419,9 +702,9 @@ def document_root_override() -> str | None:
 def data_dir() -> Path:
     """Public accessor for the platform-aware data dir.
 
-    Wraps the previously-private ``default_data_dir`` so other modules can
-    centralise their "log / cache under the kairix data dir" path resolution
-    without re-reading ``KAIRIX_DATA_DIR`` (or its legacy fallback) themselves.
+    Wraps ``default_data_dir`` so other modules can centralise their
+    "log / cache under the kairix data dir" path resolution without
+    re-reading ``KAIRIX_DATA_DIR`` (or its legacy fallback) themselves.
     Honours ``KAIRIX_DATA_DIR`` when set — operators occasionally pin the
     data dir directly rather than via Docker / service detection.
     """
@@ -476,7 +759,41 @@ def env_file_override() -> str | None:
     return value if value else None
 
 
-def entity_overrides_path() -> Path:
+def warm_flag_path() -> Path:
+    """Path to the cross-process warm-state flag — single env-read boundary
+    for ``KAIRIX_WARM_FLAG_PATH``.
+
+    The MCP server writes this flag when it finishes warming;
+    ``kairix onboard ready`` (running as the docker healthcheck) reads it
+    to decide whether ``docker compose up --wait`` can return.
+
+    S108 (insecure tmp dir) — kairix runs single-tenant in its own
+    container; ``/tmp`` is per-container, not a multi-user host tmpdir.
+    The flag carries no secret value (just existence-as-state).
+    ``KAIRIX_WARM_FLAG_PATH`` lets operators relocate it if their threat
+    model differs.
+    """
+    override = os.environ.get("KAIRIX_WARM_FLAG_PATH", "").strip()
+    return Path(override) if override else Path("/tmp/kairix-warm.flag")  # noqa: S108
+
+
+def noninteractive_mode() -> bool:
+    """Return True when ``KAIRIX_NONINTERACTIVE=1`` is set in the environment.
+
+    Centralised here so destructive CLI surfaces (``kairix store crawl
+    --reset``, future bulk-delete primitives) read one canonical boundary
+    instead of each scattering an ``os.environ.get`` (F4). Operators set
+    this in pipelines / containers where prompting is impossible and the
+    ``--confirm`` interlock would otherwise block automation.
+
+    Accepted truthy values: ``1``, ``true``, ``yes`` (case-insensitive).
+    Anything else — including unset — is False.
+    """
+    raw = os.environ.get("KAIRIX_NONINTERACTIVE", "").strip().lower()
+    return raw in {"1", "true", "yes"}
+
+
+def entity_overrides_path(*, document_root_arg: str | Path | None = None) -> Path:
     """Path to the operator-edited entity overrides file.
 
     Default: ``{document_root}/04-Agent-Knowledge/_entity-overrides.md``.
@@ -488,11 +805,17 @@ def entity_overrides_path() -> Path:
 
     Override via ``KAIRIX_ENTITY_OVERRIDES_PATH`` for tests and custom
     deployments. The env read stays in this module (F4).
+
+    ``document_root_arg`` lets callers (e.g. the store CLI) pin the path
+    against a per-invocation document root that does not necessarily
+    match the cached default. When supplied, the env-var override still
+    wins so operators retain the documented escape hatch.
     """
     raw = os.environ.get("KAIRIX_ENTITY_OVERRIDES_PATH")
     if raw:
         return Path(raw).expanduser()
-    return document_root() / "04-Agent-Knowledge" / "_entity-overrides.md"
+    base = Path(document_root_arg) if document_root_arg is not None else document_root()
+    return base / _AGENT_KNOWLEDGE_DIR / "_entity-overrides.md"
 
 
 def agent_memory_path(agent: str, *, root: Path | str | None = None) -> Path:
@@ -505,9 +828,8 @@ def agent_memory_path(agent: str, *, root: Path | str | None = None) -> Path:
     If the override path already ends with /{agent}/memory (a common
     misuse — passing the full agent-memory path rather than the parent
     of agent directories), the function detects this and returns the
-    path as-is rather than double-appending. This is the regression
-    guard for the path-doubling bug fixed in #67 / #93 — silently
-    handling the misuse with a warning is friendlier than failing.
+    path as-is rather than double-appending. Silently handling the
+    misuse with a warning is friendlier than failing.
 
     ``root`` is the test seam (F2-clean): tests pass an explicit root
     instead of monkeypatching ``KAIRIX_AGENT_MEMORY_ROOT``.
@@ -527,4 +849,4 @@ def agent_memory_path(agent: str, *, root: Path | str | None = None) -> Path:
             )
             return override_path
         return override_path / agent / "memory"
-    return document_root() / "04-Agent-Knowledge" / agent / "memory"
+    return document_root() / _AGENT_KNOWLEDGE_DIR / agent / "memory"

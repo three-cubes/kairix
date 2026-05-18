@@ -1,0 +1,152 @@
+name: "2b · Release smoke (wheel + container)"
+
+# Phase 3 of #272 — exercises wheel-install and container-entrypoint smoke gates
+# on every published release (alpha or stable).
+#
+# Trigger: GitHub Release `published` (fires for both prereleases and stable),
+# plus `workflow_dispatch` for re-running against an existing tag.
+#
+# The degraded-path test specifically catches the regression class behind
+# v2026.5.15.1 (a `tests.fakes` ImportError in the shipped wheel that crashed
+# `kairix onboard check` with a Python traceback instead of reporting it
+# cleanly as a degraded state).
+#
+# Security note: every reference to github.event.* / inputs.* is funneled
+# through an `env:` block and used in run: scripts as a shell variable (e.g.
+# "$TAG_NAME"). This is the recommended pattern from
+# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Tag to smoke (e.g. v2026.5.15.2 or v2026.5.15a1)'
+        required: true
+        type: string
+
+env:
+  IMAGE: ghcr.io/three-cubes/kairix
+
+jobs:
+  wheel-smoke:
+    name: Wheel install smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Derive PyPI version
+        id: ver
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name || inputs.version }}
+        run: |
+          # Strip the leading "v" — PyPI version strings are unprefixed.
+          # Works for stable (v2026.5.15 -> 2026.5.15) and PEP 440 alphas
+          # (v2026.5.15a1 -> 2026.5.15a1).
+          VERSION="${TAG_NAME#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Smoke-testing PyPI version: ${VERSION}"
+
+      - name: Wait for PyPI propagation
+        # Alpha env has 0-min propagation, so this 90s buffer is all we have
+        # before pip might 404 on a freshly-published file.
+        run: sleep 90
+
+      - name: Install from PyPI
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          # --pre because alphas are pre-releases and pip won't pick them up by default.
+          # The PyPI distribution name (kairix-agentic-knowledge-mgt) differs from
+          # the Python import name (kairix); pip resolves the long form.
+          pip install --pre "kairix-agentic-knowledge-mgt==${VERSION}"
+
+      - name: Smoke checks
+        run: |
+          python -c "import kairix; print(f'kairix {kairix.__version__} installed OK')"
+          kairix --version
+
+  container-smoke:
+    name: Container entrypoint smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive Docker tag
+        id: tag
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name || inputs.version }}
+        run: |
+          # Docker tags are the version without the leading "v"
+          # (matches docker-publish.yml: alphas 2026.5.15a1, stable 2026.5.15).
+          DOCKER_TAG="${TAG_NAME#v}"
+          echo "docker_tag=${DOCKER_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Smoke-testing container tag: ${DOCKER_TAG}"
+
+      - name: Pull image
+        env:
+          DOCKER_TAG: ${{ steps.tag.outputs.docker_tag }}
+        run: docker pull "${IMAGE}:${DOCKER_TAG}"
+
+      - name: Verify import inside container
+        env:
+          DOCKER_TAG: ${{ steps.tag.outputs.docker_tag }}
+        run: |
+          docker run --rm --entrypoint python "${IMAGE}:${DOCKER_TAG}" \
+            -c "import kairix; print(f'container import OK: {kairix.__version__}')"
+
+      - name: Verify CLI through entrypoint
+        env:
+          DOCKER_TAG: ${{ steps.tag.outputs.docker_tag }}
+        run: |
+          docker run --rm "${IMAGE}:${DOCKER_TAG}" kairix --version
+          docker run --rm "${IMAGE}:${DOCKER_TAG}" kairix --help | head -5
+
+      - name: Degraded-path - onboard check returns JSON not traceback
+        # The v2026.5.15.1 regression: `tests.fakes` ImportError crashed the
+        # degraded path. The job should fail if the JSON parse fails — that
+        # signals the entrypoint crashed instead of reporting cleanly.
+        env:
+          DOCKER_TAG: ${{ steps.tag.outputs.docker_tag }}
+        run: |
+          # Expect non-zero exit (no secrets loaded) but clean JSON output.
+          docker run --rm "${IMAGE}:${DOCKER_TAG}" kairix onboard check --json \
+            > /tmp/onboard.json 2>&1 || true
+          # If json.load fails, the degraded path crashed — fail the job.
+          python -c "import json; json.load(open('/tmp/onboard.json')); print('onboard --json shape valid')"
+
+  smoke-gate:
+    name: Release smoke gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [wheel-smoke, container-smoke]
+    steps:
+      - name: Fail if any smoke job failed
+        env:
+          WHEEL_RESULT: ${{ needs.wheel-smoke.result }}
+          CONTAINER_RESULT: ${{ needs.container-smoke.result }}
+        run: |
+          echo "wheel-smoke: ${WHEEL_RESULT}"
+          echo "container-smoke: ${CONTAINER_RESULT}"
+          if [ "${WHEEL_RESULT}" != "success" ] || [ "${CONTAINER_RESULT}" != "success" ]; then
+            echo "::error::Release smoke gate failed — see upstream jobs."
+            exit 1
+          fi
+          echo "All release smoke checks passed."

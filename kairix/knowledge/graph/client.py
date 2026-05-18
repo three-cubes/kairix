@@ -369,6 +369,36 @@ class Neo4jClient:
             logger.warning("cypher query failed: %s", e)
             return []
 
+    def reset_graph(self) -> tuple[int, int]:
+        """Drop every node and every relationship from the graph.
+
+        Closes #262. Replaces the manual ``cypher-shell ... "MATCH (n)
+        DETACH DELETE n"`` step the operator otherwise has to run before
+        ``kairix store crawl`` to rebuild from scratch. Returns
+        ``(nodes_deleted, relationships_deleted)`` from the Cypher
+        summary counters; ``(0, 0)`` when no driver is wired (offline
+        / dry-run) so callers can render an honest summary line.
+
+        Destructive — gate this behind ``--reset --confirm`` (or
+        ``KAIRIX_NONINTERACTIVE=1``) at the CLI layer. The Cypher path
+        itself is atomic at the Neo4j level: ``MATCH (n) DETACH DELETE
+        n`` is one statement, either all deletions land or none do.
+        """
+        if not self._driver:
+            logger.warning("reset_graph: no active connection — skipping")
+            return (0, 0)
+        try:
+            with self._driver.session() as session:
+                result = session.run("MATCH (n) DETACH DELETE n")
+                summary = result.consume()
+                return (
+                    int(summary.counters.nodes_deleted),
+                    int(summary.counters.relationships_deleted),
+                )
+        except Exception:
+            logger.exception("reset_graph failed")
+            return (0, 0)
+
     def rotate_password(self, new_password: str) -> bool:
         """Change the Neo4j password for the current user.
 

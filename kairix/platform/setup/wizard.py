@@ -23,16 +23,42 @@ logger = logging.getLogger(__name__)
 # kairix.platform.setup.prompts which supports interactive, non-interactive, and JSON modes.
 
 
-def _test_llm_connection(provider: str, endpoint: str, api_key: str, embed_model: str) -> bool:
-    """Test LLM connectivity with a single embed + chat call."""
-    from kairix.secrets import set_llm_api_key, set_llm_endpoint
+def _default_set_llm_endpoint(endpoint: str) -> None:
+    """Production seam — defers `kairix.secrets.set_llm_endpoint` to call time."""
+    from kairix.secrets import set_llm_endpoint
 
+    set_llm_endpoint(endpoint)
+
+
+def _default_set_llm_api_key(api_key: str) -> None:
+    """Production seam — defers `kairix.secrets.set_llm_api_key` to call time."""
+    from kairix.secrets import set_llm_api_key
+
+    set_llm_api_key(api_key)
+
+
+def _test_llm_connection(
+    provider: str,
+    endpoint: str,
+    api_key: str,
+    embed_model: str,
+    *,
+    set_llm_endpoint_fn: Callable[[str], None] = _default_set_llm_endpoint,
+    set_llm_api_key_fn: Callable[[str], None] = _default_set_llm_api_key,
+) -> bool:
+    """Test LLM connectivity with a single embed + chat call.
+
+    ``set_llm_endpoint_fn`` / ``set_llm_api_key_fn`` are public DI seams
+    — production callers leave the defaults and the function uses the
+    ``kairix.secrets`` versions; tests pass raising fakes to drive the
+    exception branch without monkey-patching ``kairix.secrets``.
+    """
     try:
         if provider == "azure":
-            set_llm_endpoint(endpoint)
-            set_llm_api_key(api_key)
+            set_llm_endpoint_fn(endpoint)
+            set_llm_api_key_fn(api_key)
         elif provider == "openai":
-            set_llm_api_key(api_key)
+            set_llm_api_key_fn(api_key)
 
         from kairix.platform.llm import get_default_backend
 
@@ -93,6 +119,11 @@ class WizardDeps:
     """
 
     connection_test: Callable[[str, str, str, str], bool] = field(default_factory=lambda: _test_llm_connection)
+    # Public DI seam for the initial-embed run — tests inject a fake to
+    # exercise the "indexing failed" branch in _maybe_run_initial_index
+    # without monkey-patching ``kairix.core.embed.cli.main``. The default
+    # factory lazy-imports the production ``embed_main`` at call time.
+    embed_main: Callable[[], Any] = field(default_factory=lambda: _default_embed_main)
 
 
 _USE_CASE_OPTIONS = [
@@ -355,8 +386,25 @@ def _write_config_yaml(output_path: str, template_name: str, full_config: dict[s
     return output
 
 
-def _maybe_run_initial_index(ctx: SetupContext, file_count: int) -> None:
-    """Offer to run the initial embed pass; never raises."""
+def _default_embed_main() -> Any:
+    """Production seam — defers `kairix.core.embed.cli.main` to call time."""
+    from kairix.core.embed.cli import main as embed_main
+
+    return embed_main()
+
+
+def _maybe_run_initial_index(
+    ctx: SetupContext,
+    file_count: int,
+    *,
+    embed_main_fn: Callable[[], Any] = _default_embed_main,
+) -> None:
+    """Offer to run the initial embed pass; never raises.
+
+    ``embed_main_fn`` is the public DI seam — production callers leave
+    the default which lazy-imports ``kairix.core.embed.cli.main``; tests
+    pass a fake to drive the failure-handling branch.
+    """
     print("Ready to index your documents.\n")
     if file_count <= 0:
         print("  No documents found to index. Add documents to your document store")
@@ -374,9 +422,7 @@ def _maybe_run_initial_index(ctx: SetupContext, file_count: int) -> None:
         return
     print("\n  Indexing...")
     try:
-        from kairix.core.embed.cli import main as embed_main
-
-        embed_main()
+        embed_main_fn()
         print("  ✓ Index built\n")
     except Exception as exc:
         logger.warning("wizard: indexing failed — %s", exc)
@@ -518,7 +564,7 @@ def run_setup(
         return True
 
     output = _write_config_yaml(output_path, template_name, full_config)
-    _maybe_run_initial_index(ctx, file_count)
+    _maybe_run_initial_index(ctx, file_count, embed_main_fn=deps.embed_main)
     _run_health_check_summary()
     _print_setup_summary(output)
     return True

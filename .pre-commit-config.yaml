@@ -32,6 +32,17 @@ repos:
       - id: detect-secrets
         args: [--baseline, .secrets.baseline]
 
+  # ── GitHub Actions workflow lint ────────────────────────────────────────────
+  # Catches the parse-error class that previously cost a four-commit CI cycle:
+  # literal ${{ }} inside shell comments, undefined needs.* refs, action SHAs
+  # that don't exist, matrix-with-empty-list etc. Runs only when workflow
+  # files are staged.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.7
+    hooks:
+      - id: actionlint
+        files: ^\.github/workflows/.*\.ya?ml$
+
   # ── Architecture fitness functions ─────────────────────────────────────────
   # Each check fails the commit on net-new violations. Pre-existing files
   # are grandfathered via .architecture/baseline/ and the baseline is
@@ -184,3 +195,38 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+      - id: arch-no-test-imports-in-prod
+        name: "arch F24: no imports of tests.* in kairix production code"
+        entry: python3 scripts/checks/check_no_test_imports_in_prod.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-provider-layer-imports
+        name: "arch F26: kairix/core/** may not import providers/ or transport/"
+        entry: python3 scripts/checks/check_provider_layer_imports.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$
+
+      - id: arch-no-cross-provider
+        name: "arch F27: providers/<a>/ may not import providers/<b>/"
+        entry: python3 scripts/checks/check_no_cross_provider.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/providers/.*\.py$
+
+      - id: arch-provider-bdd-completeness
+        name: "arch F28: every provider/<name>/ has matching BDD coverage"
+        entry: python3 scripts/checks/check_provider_bdd_completeness.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: arch-perf-singleton
+        name: "arch F29: perf-measurement code only under kairix/quality/probe/"
+        entry: python3 scripts/checks/check_perf_singleton.py
+        language: system
+        pass_filenames: false
+        files: ^kairix/.*\.py$

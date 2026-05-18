@@ -163,7 +163,7 @@ def migrate(db: sqlite3.Connection) -> None:
         )
     """)
 
-    # chunk_date migration (originally from embed/schema.py migrate_content_vectors)
+    # chunk_date migration
     existing = {row[1] for row in db.execute("PRAGMA table_info(content_vectors)")}
     if "chunk_date" not in existing:
         db.execute("ALTER TABLE content_vectors ADD COLUMN chunk_date TEXT")

@@ -52,26 +52,35 @@ pgrep -af "kairix store crawl" || echo "no crawler running"
 
 ## Step 2 — Drop all entities and relationships
 
+Preferred — single command via the crawler (closes #262). `--reset` runs
+`MATCH (n) DETACH DELETE n` against the live graph using the same Neo4j
+connection kairix reads from config, then walks the document store
+immediately. `--confirm` is the safety interlock; in pipelines set
+`KAIRIX_NONINTERACTIVE=1` instead.
+
 ```bash
-# Using cypher-shell (requires Neo4j password)
+# Drop + rebuild in one command
+kairix store crawl --reset --confirm --document-root "${KAIRIX_DOCUMENT_ROOT}"
+
+# Same command, scripted pipeline (no interactive prompt)
+KAIRIX_NONINTERACTIVE=1 kairix store crawl --reset --document-root "${KAIRIX_DOCUMENT_ROOT}"
+
+# Preview without writing — exits without touching the graph
+kairix store crawl --reset --confirm --dry-run --document-root "${KAIRIX_DOCUMENT_ROOT}"
+```
+
+The reset path prints a confirmation line before crawl output:
+`Reset: deleted N entities, M relationships before crawl`.
+
+Fallback when the kairix host doesn't have the database client wired (rare):
+
+```bash
 cypher-shell -a "${KAIRIX_NEO4J_URI}" -u "${KAIRIX_NEO4J_USER}" \
              -p "${KAIRIX_NEO4J_PASSWORD}" \
              "MATCH (n) DETACH DELETE n"
 
-# Verify: must return 0
-cypher-shell -a "${KAIRIX_NEO4J_URI}" -u "${KAIRIX_NEO4J_USER}" \
-             -p "${KAIRIX_NEO4J_PASSWORD}" \
-             "MATCH (n) RETURN count(n) AS remaining"
-# Expected: remaining = 0
+# Then run a plain crawl in Step 4 below
 ```
-
-If you don't have `cypher-shell` available, the kairix CLI can do this:
-
-```bash
-kairix store reset --confirm
-```
-
-(Subject to operator policy — `kairix store reset` is destructive and may be disabled in your deployment.)
 
 ## Step 3 — Verify wikilinks exist in the document store
 

@@ -51,9 +51,9 @@ JUDGE_DEPLOYMENT: str = "gpt-4o-mini"
 CALIBRATION_MAX_ERRORS: int = 3  # raise if more anchors are wrong
 
 # JUDGE_API_VERSION and JUDGE_TIMEOUT_S were declared here but never used —
-# the Azure adapter (kairix._azure.chat_completion) sets its own API version
-# and timeout. Removed in #143 Phase 0b to stop giving the false impression
-# that this module controls those values.
+# the provider plugin sets its own API version and timeout. Removed in
+# #143 Phase 0b to stop giving the false impression that this module
+# controls those values.
 
 # Letter labels for presenting candidates to the LLM
 _LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -262,9 +262,9 @@ def _parse_grade_response(content: str, labels: list[str]) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 # LLMJudge — ChatBackend-injected LLM judge implementing the LLMJudge protocol.
 #
-# Production: LLMJudge(chat_backend=AzureChatBackend()) at the CLI / pipeline
-# entry point. Tests: LLMJudge(chat_backend=FakeChatBackend(...)) from
-# tests/fakes.py. The class owns the implementation — the module-level
+# Production: LLMJudge(chat_backend=ProviderEvalChatBackend.from_config()) at
+# the CLI / pipeline entry point. Tests: LLMJudge(chat_backend=FakeChatBackend(...))
+# from tests/fakes.py. The class owns the implementation — the module-level
 # judge_batch / calibrate functions below are thin shims for legacy callers
 # in generate.py / gold_builder.py and disappear when those drop.
 # ---------------------------------------------------------------------------
@@ -399,11 +399,19 @@ class LLMJudge:
         indexed: list[tuple[int, tuple[str, str]]],
         labels: str,
     ) -> str:
-        safe_query = query.replace("\n", " ").replace("\r", " ")
+        from kairix.quality.eval.security import sanitise_document_content
+
+        # Sanitise + cap both the query and each document snippet. Role-marker
+        # tokens (<|im_start|>, <<SYS>>, [INST]) and embedded newlines are
+        # stripped so an adversarial document cannot break out of its
+        # <document>...</document> envelope. 150-char cap on the per-doc
+        # snippet matches the judge's existing rubric design (signal is in
+        # the first paragraph).
+        safe_query = sanitise_document_content(query, cap=500)
         doc_lines = []
         for label, (_, (stem, snippet)) in zip(labels, indexed, strict=False):
-            safe_stem = stem.replace("\n", " ").replace("\r", " ")
-            safe_snippet = snippet[:150].replace("\n", " ").replace("\r", " ")
+            safe_stem = sanitise_document_content(stem, cap=200)
+            safe_snippet = sanitise_document_content(snippet, cap=150)
             doc_lines.append(f"[{label}] {safe_stem}: <document>{safe_snippet}</document>")
         docs_block = "\n".join(doc_lines)
         return (
@@ -444,9 +452,9 @@ def judge_batch(
 ) -> JudgeResult:
     """DEPRECATED shim — use ``LLMJudge.grade``. Kept for legacy callers."""
     if chat_backend is None:
-        from kairix._azure import AzureChatBackend
+        from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
 
-        chat_backend = AzureChatBackend()
+        chat_backend = ProviderEvalChatBackend.from_config()
     return LLMJudge(chat_backend=chat_backend, deployment=deployment).grade(
         query,
         candidates,
@@ -464,9 +472,9 @@ def calibrate(
 ) -> bool:
     """DEPRECATED shim — use ``LLMJudge.calibrate``. Kept for legacy callers."""
     if chat_backend is None:
-        from kairix._azure import AzureChatBackend
+        from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
 
-        chat_backend = AzureChatBackend()
+        chat_backend = ProviderEvalChatBackend.from_config()
     return LLMJudge(chat_backend=chat_backend, deployment=deployment).calibrate(
         api_key=api_key,
         endpoint=endpoint,

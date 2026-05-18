@@ -1,14 +1,14 @@
 # docs/
 
 User-facing documentation. Internal sprint planning and PM artefacts
-live in the Three Cubes vault, not here (see memory:
-`feedback_doc_style_and_pm_separation`).
+live in the operator's private knowledge store, not here (this repo
+stays user-facing).
 
 - `getting-started/` — quick-start guide for new users
 - `architecture/` — ENGINEERING.md, fitness-functions.md, ADRs
 - `evaluation/` — EVALUATION.md (benchmark methodology, suite design)
 - `operations/` — OPERATIONS.md (deploy, monitor, secret rotation)
-- `runbooks/` — incident-response playbooks (one per scenario)
+- [`runbooks/`](runbooks/README.md) — incident-response playbooks (one per scenario); see `operations/runbooks/INDEX.md` for the docker-compose how-to set
 - `agents/` — AGENT-SETUP.md, ADMIN-CONVERSATION.md (agent-facing docs)
 - `upgrades/` — per-release upgrade notes referenced from CHANGELOG.md
 - `user-guide/` — end-user task guides

@@ -5,12 +5,10 @@ Asserts the data-class predicates (`default_collection_names`,
 the operator's intent uniformly across every default scope, while
 explicit `--collection X` lookups bypass the predicate entirely.
 
-These tests are the regression boundary for the policy lift performed in
-v2026.5.4 — the hardcoded `_RESERVED_COLLECTIONS = {"reference-library"}`
-constant was deleted and replaced with operator-yaml-driven membership.
-If a future change reintroduces a hardcoded reserve, these tests will not
-catch it directly — see tests/contracts/test_no_reflib_resolver_hardcode.py
-for the source-string regression guard.
+Membership in the default scope is driven by the operator-yaml
+``in_default`` flag, not by hardcoded collection names. The source-string
+guard in `tests/contracts/test_no_reflib_resolver_hardcode.py` is the
+companion check that catches a hardcoded reserve reintroducing itself.
 """
 
 from __future__ import annotations
@@ -65,8 +63,8 @@ class TestResolverHonoursInDefault:
     def test_default_in_default_value_is_true(self) -> None:
         """A CollectionDef constructed without specifying in_default is in default scope.
 
-        Backwards-compatibility guarantee: existing yamls that have not been
-        edited still produce identical behaviour to pre-v2026.5.4.
+        Backwards-compatibility guarantee: yamls that omit ``in_default``
+        get the same behaviour as if it were set to True.
         """
         cfg = CollectionsConfig(shared=(CollectionDef(name="legacy", path="legacy"),))
         resolver = DefaultCollectionResolver(collections_config=cfg)

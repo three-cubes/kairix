@@ -33,16 +33,15 @@ from kairix.agents.mcp.server import (
 
 
 @pytest.mark.unit
-def test_tool_entity_resolves_default_neo4j_factory_when_no_client_injected(monkeypatch) -> None:
-    """tool_entity with no neo4j_client must call get_client() via the helper.
+def test_tool_entity_resolves_default_neo4j_factory_when_no_client_injected() -> None:
+    """tool_entity with no neo4j_client must invoke ``client_factory``.
 
-    Drives the ``_fetch_entity_card`` lazy ``get_client()`` import branch
-    through the public ``tool_entity`` surface. The graph_client module
-    is the production boundary the helper looks up by name; we swap its
-    factory with a stub so the lazy import resolves to a fake without
-    touching the helper's source.
+    Drives the ``_fetch_entity_card`` "no client → factory()" fallback
+    through the public ``client_factory`` kwarg on ``tool_entity``. The
+    counting factory asserts the production code reached the seam (not
+    a side-effectless path). With available=False the helper short-circuits
+    and the entity lookup returns the EntityNotFound error envelope.
     """
-    import kairix.knowledge.graph.client as graph_client
 
     class _Stub:
         available = False
@@ -50,10 +49,16 @@ def test_tool_entity_resolves_default_neo4j_factory_when_no_client_injected(monk
         def cypher(self, *_a, **_k):
             return []
 
-    monkeypatch.setattr(graph_client, "get_client", lambda: _Stub())
-    # available=False → helper short-circuits and the entity lookup
-    # returns an error envelope (EntityNotFound).
-    out = tool_entity(name="Anything")
+    call_count = 0
+
+    def counting_factory() -> object:
+        nonlocal call_count
+        call_count += 1
+        return _Stub()
+
+    out = tool_entity(name="Anything", client_factory=counting_factory)
+
+    assert call_count == 1, f"client_factory must be invoked exactly once; got {call_count}"
     assert isinstance(out, dict)
     assert out.get("error", "") != ""
 
@@ -95,6 +100,7 @@ def test_build_server_constructs_fastmcp_with_all_tools_registered_under_unit() 
     tools = asyncio.run(server.list_tools())
     names = {t.name for t in tools}
     assert {
+        # Retrieval / synthesis
         "search",
         "entity",
         "prep",
@@ -106,6 +112,22 @@ def test_build_server_constructs_fastmcp_with_all_tools_registered_under_unit() 
         "entity_suggest",
         "entity_validate",
         "bootstrap",
+        # Diagnostic capabilities (read-only)
+        "onboard_check",
+        "worker_status",
+        "warm",
+        # Agent-safe capped surface (escalates above queries<=20 / concurrency<=3)
+        "probe_search",
+        # Programmatic introspection (affordance pattern 4)
+        "capabilities",
+        # Operator-only escalation stubs
+        "probe_burst",
+        "probe_config",
+        "soak_run",
+        "benchmark_run",
+        "embed",
+        "store_crawl",
+        "embed_rebuild_fts",
     } == names
 
 
@@ -144,6 +166,23 @@ def test_build_server_each_wrapper_dispatches_to_tool_function_under_unit() -> N
         ("entity_suggest", {"text": "x"}),
         ("entity_validate", {"name": "x"}),
         ("bootstrap", {"agent": "alpha", "max_memory_days": 0}),
+        # Diagnostic capabilities — read-only wrappers around their kairix CLI equivalents.
+        ("onboard_check", {}),
+        ("worker_status", {}),
+        ("warm", {}),
+        # Capped agent-safe probe — over-cap so the closure returns the escalation
+        # envelope without spinning up a real probe in unit context.
+        ("probe_search", {"queries": 1000, "concurrency": 10}),
+        # Programmatic introspection (affordance pattern 4).
+        ("capabilities", {}),
+        # Operator-only escalation stubs — fixed envelope responses.
+        ("probe_burst", {}),
+        ("probe_config", {}),
+        ("soak_run", {}),
+        ("benchmark_run", {}),
+        ("embed", {}),
+        ("store_crawl", {}),
+        ("embed_rebuild_fts", {}),
     ]:
         payload = _call_tool(server, tool_name, args)
         assert isinstance(payload, dict), f"tool {tool_name!r} returned non-dict: {payload!r}"

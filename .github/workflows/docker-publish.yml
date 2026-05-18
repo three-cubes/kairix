@@ -1,8 +1,16 @@
 name: "3 · Docker publish (release)"
 
 # Publishes Docker image to GitHub Container Registry (ghcr.io).
-# - Release: pushes :latest and :vX.Y.Z tags
+# - Stable release: pushes :latest and :vX.Y.Z tags
+# - Alpha pre-release (is_alpha=true OR GitHub prerelease): pushes :vX.Y.ZaN ONLY (no :latest)
 # - Develop push: pushes :develop tag (pre-release for VM testing)
+
+# Only one build at a time per ref. Cancel in-progress on develop
+# (saves minutes on rapid pushes), but never cancel a release build
+# mid-tag-push.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 on:
   release:
@@ -18,11 +26,17 @@ on:
   workflow_dispatch:
     # Manual entrypoint used by release.yml to re-fire publish after a
     # GITHUB_TOKEN-created release (which doesn't fan out — #230). Also
-    # useful for backfilling a missed release.
+    # used by release-alpha.yml for the alpha tag path (Phase 1 of #272).
+    # Also useful for backfilling a missed release.
     inputs:
       ref:
-        description: 'Git ref to build (tag for release builds, e.g. v2026.5.14)'
+        description: 'Git ref to build (tag for release builds, e.g. v2026.5.14 or v2026.5.14a1)'
         required: true
+        type: string
+      is_alpha:
+        description: 'Alpha pre-release: tag image as :vX.Y.ZaN only (skip :latest)'
+        required: false
+        default: 'false'
         type: string
 
 env:
@@ -39,38 +53,61 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           # workflow_dispatch checks out the input ref so we build the
           # tagged commit, not the default branch tip.
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+          # Full history required so setuptools-scm can compute the
+          # develop-push dev version (e.g. 2026.5.15.dev3+gabc1234). For
+          # release/workflow_dispatch we use the tag directly, but a
+          # shallow clone would still break the develop path (#267).
+          fetch-depth: 0
 
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine tags
+      - name: Determine tags and version
         id: tags
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_REF: ${{ inputs.ref }}
+          INPUT_IS_ALPHA: ${{ inputs.is_alpha }}
+          RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
-          if [ "$EVENT_NAME" = "release" ]; then
+          if [ "$EVENT_NAME" = "release" ] && [ "$RELEASE_IS_PRERELEASE" = "true" ]; then
+            # GitHub pre-release (alpha): version tag only, NO :latest.
+            VERSION="${REF_NAME#v}"
+            echo "tags=${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "release" ]; then
+            # Stable release: version tag + :latest.
             VERSION="${REF_NAME#v}"
             echo "tags=${IMAGE}:latest,${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_IS_ALPHA" = "true" ]; then
+            # Manual dispatch for alpha (from release-alpha.yml): version tag only, NO :latest.
+            VERSION="${INPUT_REF#v}"
+            echo "tags=${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            # Treat manual dispatch with a vX.Y.Z ref the same as a release.
+            # Manual dispatch for stable backfill: treat as a stable release.
             VERSION="${INPUT_REF#v}"
             echo "tags=${IMAGE}:latest,${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
           else
+            # Develop push — derive setuptools-scm's natural dev version
+            # from git history on the runner (the build context strips
+            # .git via .dockerignore, so setuptools-scm inside the image
+            # can't compute it itself — see #267).
+            pip install --quiet "setuptools-scm>=8"
+            VERSION="$(python -m setuptools_scm 2>/dev/null || echo "0.0.0")"
             echo "tags=${IMAGE}:develop" >> "$GITHUB_OUTPUT"
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
@@ -78,5 +115,10 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.tags.outputs.tags }}
+          # Pass the resolved version into the Dockerfile so
+          # SETUPTOOLS_SCM_PRETEND_VERSION fixes the kairix --version
+          # output baked into the image (#267).
+          build-args: |
+            KAIRIX_VERSION=${{ steps.tags.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

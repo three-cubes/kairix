@@ -8,9 +8,9 @@ Kairix's CLAUDE.md "Naming" section pins the high-level rules:
 
 This fitness function operationalises the *file path* counterpart of
 those rules: each tracked file must live under a known tree and its
-basename must satisfy that tree's naming regex. Convergence with
-tc-agent-zone's ``path_naming.py`` (issue #258); kairix uses kairix's
-own repo layout, not tc-agent-zone's.
+basename must satisfy that tree's naming regex. Convergence with a
+sibling repo's ``path_naming.py`` (issue #258); kairix uses kairix's
+own repo layout.
 
 Trees enforced (first match wins; the order matters):
 
@@ -66,7 +66,7 @@ _TEST_PY = re.compile(r"^(__init__|conftest|fakes|test_[a-z0-9_]+|_?[a-z][a-z0-9
 _SNAKE_FEATURE = re.compile(r"^[a-z][a-z0-9_]*\.feature$")
 _CHECK_SCRIPT_PY = re.compile(r"^(check_[a-z0-9_]+|_arch_lib|audit_baselines|merge_coverage_xml)\.py$")
 _CHECK_SCRIPT_SH = re.compile(r"^(check[-_][a-z0-9-]+|_lib|run-all)\.sh$")
-_RUNBOOK_MD = re.compile(r"^(INDEX|[a-z][a-z0-9-]*)\.md$")
+_RUNBOOK_MD = re.compile(r"^(INDEX|README|[a-z][a-z0-9-]*)\.md$")
 _BASELINE_TXT = re.compile(r"^[a-z][a-z0-9-]*-files\.txt$")
 
 _TREE_RULES: tuple[tuple[str, re.Pattern[str], tuple[re.Pattern[str], ...]], ...] = (

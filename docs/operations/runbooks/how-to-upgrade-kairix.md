@@ -4,6 +4,31 @@
 
 ---
 
+## Migration to v2026.5.17: pick your provider plugin
+
+v2026.5.17 retires the `KAIRIX_PROVIDER` env-var seam — the LLM/embed plugin is now selected by a top-level `provider:` field in `kairix.config.yaml`. The plugin is the only embed/chat path; each plugin owns its own credential-retrieval pattern (Azure → Key Vault; AWS → Secrets Manager; etc.), so secrets stay where the plugin's runbook puts them.
+
+**Before pulling the new image / running pip install**, edit your `kairix.config.yaml` and add the field at the top:
+
+```yaml
+# kairix.config.yaml
+provider: azure_foundry   # or: openai
+```
+
+If you previously set `KAIRIX_PROVIDER` in your shell / docker-compose env, remove it — it is no longer read. If you don't have a `kairix.config.yaml`, copy `kairix.example.config.yaml` from the source checkout, set `provider:`, and place it at the path `KAIRIX_CONFIG_PATH` points to (or `./kairix.config.yaml` in your run cwd).
+
+After upgrading, verify the plugin resolves:
+
+```bash
+kairix probe-config --output /tmp/probe.json
+cat /tmp/probe.json | jq .provider.name
+# expect: "azure_foundry"  (or your configured plugin)
+```
+
+If the probe reports `no provider configured`, your yaml file isn't being found by the runtime — re-check `KAIRIX_CONFIG_PATH` and the file's location. If it reports a typed `ProviderNotRegistered` error, the configured name doesn't match an installed plugin; the error's `available` field lists what's currently registered.
+
+---
+
 ## Docker Compose Upgrade (recommended)
 
 ```bash

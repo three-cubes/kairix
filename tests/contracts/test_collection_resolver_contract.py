@@ -42,9 +42,9 @@ def test_resolve_returns_list_or_none_per_protocol() -> None:
 
 # ---------------------------------------------------------------------------
 # Loud-failure contract for scope=ALL_AGENTS / EVERYTHING when no agents are
-# registered. Closes #164 — production yaml without an `agents:` section
-# previously fell through to "search everything", silently returning content
-# from the wrong collections.
+# registered. With no `agents:` section in the registry, scope expansion must
+# raise NotImplementedError rather than silently degrade to "search everything"
+# (which would surface content from the wrong collections — see #164).
 # ---------------------------------------------------------------------------
 
 

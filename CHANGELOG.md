@@ -7,6 +7,72 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
+## [2026.5.17] - 2026-05-18 — Faster searches under concurrent load + plug-in support for any LLM provider
+
+> **Upgrading?** **One required config change**: add `provider: <name>` to the top of your `kairix.config.yaml` before pulling this version. Kairix won't start without it and will list the installed plug-in names so you can pick. See [`docs/operations/runbooks/how-to-upgrade-kairix.md`](docs/operations/runbooks/how-to-upgrade-kairix.md) for the one-line edit. **Operators with a custom `kairix.config.yaml` mounted into the container** should move to the new overlay pattern before pulling — it stops future required-setting bumps from quietly breaking your deploy. See [`docs/operations/runbooks/config-overlay-upgrade.md`](docs/operations/runbooks/config-overlay-upgrade.md). **New for agents**: searches feel faster when several agents work at the same time, and a cold container no longer returns "fetch failed" — kairix tells you it's warming and how long it needs. **New for operators**: the new `kairix probe-config` command checks your endpoint after setup and recommends concrete tuning; seven first-party plug-ins ship today (Azure Foundry, Azure Legacy, OpenAI direct, Bedrock, Ollama, LiteLLM proxy, Anthropic).
+
+### New for agents
+
+- **Searches feel faster under concurrent load.** Probe data on the reference-library suite shows mean latency at concurrency 10 dropped from 1452 ms to 804 ms across the dev cycle. (closes #281, #282, #287, #288)
+- **Ten agents asking different questions at the same time pay one network round-trip.** Concurrent embed calls in a 50 ms window fold into one batched request. (closes #288)
+- **A second ask for the same text comes back from cache.** Same text → same vector, regardless of which agent or scope asked. (closes #281, #285)
+- **Vector lookups got 13× faster.** One batched database query instead of N+1 per result. (closes #287)
+- **The first call to a cold kairix no longer fails.** Previously the first agent call against a just-restarted container could return "fetch failed" because the search pipeline hadn't finished warming. Now every agent-facing tool — bootstrap, brief, search, entity, prep, timeline, research, contradict, entity_suggest, entity_validate — returns a clear "kairix is warming, retry in ~N seconds" response while warm-up runs in the background. The second call returns real results.
+- **Probe reports per-stage timings** for every query — so you can see where time goes. (closes #282)
+
+### New for operators
+
+- **`kairix probe-config`** — runs cold + warm + concurrent calls against your configured endpoint and emits a JSON report: status (healthy / degraded / unreachable), latencies, cache hit rate, and concrete tuning recommendations. Share the file with support if anything looks off. Privacy-safe: the report includes the endpoint hostname only — no full URLs, no credentials.
+- **`kairix entity count` / `audit` / `purge`** — fast entity-graph readout plus cleanup tools for stale entries. (closes #259, #260, #261)
+- **Embed connection pool is now tunable.** `KAIRIX_EMBED_POOL_SIZE` / `_KEEPALIVE_CONNECTIONS` / `_EXPIRY_S` match the pool to your team size and endpoint distance. (closes #280)
+- **Release pipeline gates stable releases on alpha.** Every `v2026.5.17` cannot publish without a successful `v2026.5.17-alpha` first. Alpha tags auto-deploy to your alpha host via a Go-built webhook. (closes #272)
+- **Search pipeline pre-warms at container start** so the first request doesn't pay the 192 MB factory-init tax. (closes #278, #279)
+- **Benchmark resolves bundled suites by name.** `kairix benchmark run reflib` works from any directory. (closes #268)
+- **`kairix --version` works inside Docker.** Build passes the version so reports show the real release. (closes #267)
+- **Upgrades that add new required settings won't quietly break your deploy.** Kairix now ships its own complete config inside the Docker image; your host-side YAML only carries the keys you want to override (paths, agents, retrieval tuning). When a future release adds a required setting, it's already in the image — you don't have to remember to copy it forward. Overlays can also pin a minimum kairix version with `_schema_version_required_min`; if the image doesn't meet it, kairix refuses to start and tells you which release to upgrade to. The previous single-file pattern (`KAIRIX_CONFIG_PATH`) keeps working for existing deployments. Migration guide: [`docs/operations/runbooks/config-overlay-upgrade.md`](docs/operations/runbooks/config-overlay-upgrade.md).
+- **`docker compose up --wait` actually waits for kairix to be ready.** The healthcheck now uses a new `kairix onboard ready` command that only succeeds once the first real agent call would too. Your deploy command returns when kairix is genuinely warm, not just when the port is bound.
+- **Auto-deploys now actually restart the container.** Previously a failed startup health check could leave the old container running while the deploy log said "deployed" — diagnosed during the alpha-9 recovery. The webhook now fully recycles the container on every deploy (~10s slower; eliminates the trap).
+
+### Internal (the foundation for multi-provider deployments)
+
+- **Three-layer architecture** in [`docs/architecture/provider-plugin-architecture.md`](docs/architecture/provider-plugin-architecture.md). Domain (`kairix/core/`) talks to universal endpoint concerns (`kairix/transport/`: pool / retry / coalesce / cache / timeout) and per-endpoint plugins (`kairix/providers/<name>/`) only via Protocols.
+- **Stops rebuilding the model connection on every batch.** Each concurrent embed batch was setting up a fresh TLS connection (~300-500 ms cold). The new `ClientPool` keeps one warm connection for the container's life.
+- **F26–F29 fitness functions** lock the split: domain can't import transport or providers, no cross-provider imports, every plugin needs BDD coverage, performance code stays in `kairix/quality/probe/`.
+- **Provider plugin discovery via Python entry points; config-yaml-driven selection.** Set `provider: <name>` at the top of `kairix.config.yaml` to select your plugin. Each plugin owns its own credential-retrieval pattern (Azure plugins use Key Vault; AWS plugins use Secrets Manager / IAM; etc.), so the operator doesn't wire secrets in the yaml. Existing deployments MUST add `provider:` to their `kairix.config.yaml` before upgrading (see [`docs/operations/runbooks/how-to-upgrade-kairix.md`](docs/operations/runbooks/how-to-upgrade-kairix.md)). Third parties ship `pip install kairix-provider-foo`. Seven first-party plugins available: Azure Foundry, Azure Legacy, OpenAI direct, Bedrock, Ollama, LiteLLM proxy, Anthropic. (closes #285)
+- **F21–F25 quality rules** (actionable-feedback markers, path naming, README resolvers, no `tests.*` imports in production, every CLI has an MCP affordance).
+- **Cognitive-complexity burndown** across chunker / reflib / sweep / entities / contradict / temporal — every flagged function now under 15. (closes #250)
+- **MCP retroactively exposes safe read-only operational capabilities** — onboard check, capability introspection. (closes #277)
+- **Performance + soak test suite** catches regressions like the embed-pipeline class in CI. (closes #276)
+- **More test files moved to clean dependency injection.** Seventeen test modules stopped reaching into kairix internals and now inject fakes through the public interface — keeps tests honest as the code evolves so they catch real regressions instead of silently going stale.
+- **New end-to-end coverage for classify and config-layering** — operator-language scenarios that exercise the same paths a real deploy goes through, including the exact alpha-9 failure mode.
+
+### Dependency updates
+
+- `docker/login-action` 3.7.0 → 4.1.0 (#290)
+- `actions/download-artifact` 4.3.0 → 8.0.1 (#291)
+- `actions/checkout` 4 → 6 (#292)
+- `ruff` 0.15.12 → 0.15.13 (dev) (#293)
+- `sentence-transformers` requirement widened `>=3.0,<4` → `>=3.0,<6` (#294)
+
+### Fixed
+
+- **Worker survives `SystemExit` from helpers.** Recall-gate alerts no longer crash the container. (closes #270)
+- **MCP entity lookup checks aliases.** Lookups find the entity even when the canonical name differs from the alias asked for. (closes #253)
+- **`prep` (L0 summary) returns grounded content.** No more generic responses when the knowledge store has the answer. (closes #254)
+- **Eval module security hardening** — path confinement, prompt-injection guards, finite-score validation. (closes #143)
+- **Per-collection retrieval overrides** apply to single-collection MCP and benchmark calls. (closes #274)
+- **Reflib benchmarks captured per release** for quality regression tracking. (closes #271)
+- **Retrieval health & recovery runbook** added for operators. (closes #252)
+- **Python 3.14 + numpy + pytest-cov** import-order error worked around. (closes #211)
+
+### Still open
+
+- PVT MCP HTTP test harness (#284)
+- SonarCloud check status mismatch (#269)
+- Webhook auto-deploy on release (#286)
+
+---
+
 ## [2026.5.15] - 2026-05-14 — Agent-first kairix + worker observability + F-rule legacy fully burned
 
 > **Upgrading?** Drop-in. No public API breaks. **New for agents**: `kairix bootstrap <agent>` returns a session-start orientation envelope; every MCP tool now includes a `health` field that tells agents what's offline and what to do next; `kairix onboard check --json` is the canonical "is kairix working" probe with per-check remediation strings. **New for operators**: worker pause/resume + observable phase state + skip-on-idle maintenance. **Internal**: 7 fitness-function baselines burned to zero (F1, F3, F4, F5, F6, F7, F9); per-file coverage floor ratcheted 85% → 90%; 10 shim modules deleted; 22 env-var helpers centralised in `paths.py`/`secrets.py`.
@@ -53,7 +119,7 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 ### Issues filed / closed
 
 - **Closed**: #246 (agent-first kairix — bootstrap + prescriptive MCP descriptions + health envelope + structured onboard check + plugin packaging + docs), #240 (flaky embed fake), #224 (worker resource discipline — phases 1, 2, 4, 5, 6 shipped; phase 3 deferred via #243), #222 (benchmark UX defaults), #203 (Wave 5 ratchet), #244 (F6 detector gap + refactor), #193 (quality-gate exceptions umbrella), #198 (F7 coverage backfill), #200 (F2 monkeypatch elimination), #201 (F1+F5 in-test internals).
-- **Filed**: #242 (SonarCloud project still keyed under `quanyeomans` org after the three-cubes rename — needs SonarCloud admin to update the GitHub binding), #243 (SRE/platform-health worker — design-first; recurring `kairix-fetch-secrets.service` disabled incident is now a concrete user story on that issue).
+- **Filed**: #242 (SonarCloud project still keyed under the previous org after the GitHub org rename — needs SonarCloud admin to update the GitHub binding), #243 (SRE/platform-health worker — design-first; recurring `kairix-fetch-secrets.service` disabled incident is now a concrete user story on that issue).
 
 ### Operational notes
 

@@ -1,0 +1,76 @@
+# golangci-lint configuration for kairix Go services.
+#
+# Pairs with docs/architecture/go-integration-plan.md. Linters here mirror
+# the Python F1-F24 rule philosophy: mechanical, blocking, no opt-outs
+# without inline rationale.
+#
+# This file is read by golangci-lint from the repo root regardless of which
+# services/<name>/ the lint targets. v2 schema (default since v2.0.0; v1
+# configs are silently rejected with "unsupported version of the configuration").
+
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # ``none`` then explicit enable-list — adding a linter is a deliberate
+  # decision, not a silent default flip.
+  default: none
+  enable:
+    - errcheck       # unchecked errors blocked
+    - govet          # vet correctness checks
+    - staticcheck    # broad correctness + style
+    - unused         # unused vars / consts / funcs / types
+    - ineffassign    # assignments whose value is never used
+    - errorlint      # %w wrapping; correct errors.Is/As
+    - bodyclose      # http.Response.Body must be closed
+    - gosec          # security; zero HIGH/MEDIUM per ENGINEERING.md §4
+    - revive         # stylistic (replaces deprecated golint)
+    - misspell       # typos in user-facing strings
+    - copyloopvar    # Go 1.22+ loop-variable capture footguns
+    - prealloc       # slice prealloc where length is known
+    - dupl           # duplicate code blocks (cousin of F17)
+    - goconst        # repeated literal strings → constants (F17 mirror)
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      # ``_ = f()`` to discard an error requires inline justification.
+      check-blank: true
+    revive:
+      rules:
+        - name: exported            # exported types/funcs need doc comments
+        - name: package-comments
+        - name: var-naming
+        - name: errorf              # use fmt.Errorf("%w", err)
+        - name: error-return
+        - name: error-naming
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: unexported-return
+        - name: unused-parameter
+          arguments:
+            - allowRegex: "^_"      # F19-equivalent: unused params must be _-prefixed
+    misspell:
+      locale: UK                    # kairix's en-AU/en-UK preference
+    dupl:
+      threshold: 100                # conservative — only substantial duplicates
+    goconst:
+      min-len: 10
+      min-occurrences: 3            # mirrors F17 (≥10 char × ≥3 occurrence)
+
+  exclusions:
+    # Test files get rope on dupl/goconst/errcheck — assertion boilerplate
+    # is legitimate duplication; errcheck on test cleanup is noise.
+    rules:
+      - path: _test\.go
+        linters:
+          - dupl
+          - goconst
+          - errcheck
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

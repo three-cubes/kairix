@@ -5,7 +5,7 @@ Subcommands:
   bootstrap   Agent orientation envelope: role, board, recent memory, goals, health
   embed       Embed documents into the kairix vector index
   search      Hybrid search: BM25 + vector via RRF
-  entity      Entity management: suggest (NER), validate (Wikidata)
+  entity      Entity management: suggest (NER), validate (Wikidata), audit, purge
   curator     Curator agent: entity health monitoring and enrichment (CA-1)
   contradict  Contradiction detection: check new content against existing knowledge
   store       Document store operations: crawl entities into Neo4j, health check
@@ -19,6 +19,10 @@ Subcommands:
   research    Iterative research over the knowledge store with LLM synthesis
   usage-guide Read the kairix agent usage guide (full text or topic-filtered)
   benchmark   Run retrieval quality benchmark
+  probe       Concurrent-load latency probe (decide which Tier 1 tuning lever to pull)
+  probe-config  Probe the configured provider for health + tuning recommendations
+  soak        Repeat a workload and assert it holds together (memory, log volume, fd, determinism)
+  warm        Pre-load caches + pay factory-init costs (run at container start, before /healthz/ready=200)
   wikilinks   Inject [[wikilinks]] on first mention in agent-written document store files
   reference-library  Reference library: install entities, check status, run extraction
   eval        Evaluation harness: gold suite build, judge, sweep, monitor, gate
@@ -40,6 +44,10 @@ COMMANDS: dict[str, tuple[str, str, bool]] = {
     "curator": ("kairix.agents.curator.cli", "main", True),
     "search": ("kairix.core.search.cli", "main", True),
     "benchmark": ("kairix.quality.benchmark.cli", "main", True),
+    "probe": ("kairix.quality.probe.cli", "main", True),
+    "probe-config": ("kairix.quality.probe.config_cli", "main", True),
+    "soak": ("kairix.quality.soak.cli", "main", True),
+    "warm": ("kairix.platform.warm.cli", "main", True),
     "summarise": ("kairix.knowledge.summaries.cli", "main", True),
     "timeline": ("kairix.core.temporal.cli", "main", True),
     "wikilinks": ("kairix.knowledge.wikilinks.cli", "main", True),
@@ -61,7 +69,16 @@ COMMANDS: dict[str, tuple[str, str, bool]] = {
 }
 
 
-def main() -> None:
+def main(*, commands: dict[str, tuple[str, str, bool]] | None = None) -> None:
+    """Top-level ``kairix`` CLI dispatcher.
+
+    The ``commands`` kwarg is the public DI seam: production callers leave
+    it ``None`` and the dispatcher reads :data:`COMMANDS` from this module;
+    tests pass a synthetic dispatch table to drive the routing logic
+    without monkey-patching the module attribute.
+    """
+    table = commands if commands is not None else COMMANDS
+
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
         print(__doc__)
         sys.exit(0 if len(sys.argv) >= 2 else 1)
@@ -74,7 +91,7 @@ def main() -> None:
         print(f"kairix {__version__}")
         sys.exit(0)
 
-    entry = COMMANDS.get(cmd)
+    entry = table.get(cmd)
     if entry is None:
         print(f"Unknown command: {cmd}\n{__doc__}", file=sys.stderr)
         sys.exit(1)

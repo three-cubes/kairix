@@ -59,7 +59,7 @@ _VALID_LABELS: frozenset[str] = frozenset({"ORG", "PERSON", "GPE", "PRODUCT", "W
 # containing colons/commas don't trip the parser. The optional
 # ``, key: value`` flag tail is matched separately by ``_FLAG_PATTERN``
 # below — splitting the two patterns keeps each regex below SonarCloud's
-# complexity ceiling (previously a single combined pattern scored 24).
+# cognitive-complexity ceiling.
 _ENTRY_HEAD_PATTERN = re.compile(
     r"""^\s*-\s+              # leading list marker
         "(?P<term>[^"]+)"     # quoted term

@@ -6,7 +6,7 @@ or agent who follows a path mention (``docs/...``, ``tests/...``,
 what belongs here, what doesn't, where the canonical docs live.
 
 This fitness function enforces that resolver-README invariant. It
-mirrors tc-agent-zone's ``repo_ia.py`` IA1 check (issue #258).
+mirrors a sibling repo's ``repo_ia.py`` IA1 check (issue #258).
 
 Detection: ``REPO_ROOT.iterdir()`` for directories; subtract the
 allow-list; require ``<dir>/README.md`` to exist on each remaining

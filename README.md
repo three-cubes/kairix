@@ -36,11 +36,11 @@ Kairix gives your agents a shared knowledge layer they can search, write to, and
 
 ## What agents say
 
-> *"Before kairix, I had to ask Dan for context on every client. Now I search before every task and I already know who the client is, what we've decided, and what's still open. I run contradiction checks before writing decisions — kairix catches conflicts before they become problems."*
-> — **Shape**, chief of staff agent at Three Cubes
+> *"Before kairix, I had to ask the operator for context on every client. Now I search before every task and I already know who the client is, what we've decided, and what's still open. I run contradiction checks before writing decisions — kairix catches conflicts before they become problems."*
+> — **Shape**, chief of staff agent
 
 > *"I used to get a wall of instructions about where to find things and where to put things. Now my prompt just says 'search kairix.' When I write something new, the classifier handles where it goes. I spend my context window on the actual work."*
-> — **Builder**, engineering agent at Three Cubes
+> — **Builder**, engineering agent
 
 ---
 
@@ -61,7 +61,7 @@ That's **4–30x fewer tokens** per query. Your agents read less noise and give 
 Agent asks: "brief me on the kairix project before my meeting"
   → 24 ranked results, 1,222 tokens, top result: KAIRIX-POSITIONING.md
 
-Agent asks: "who works at Three Cubes and what are they responsible for?"
+Agent asks: "who works at the company and what are they responsible for?"
   → 23 ranked results, 1,171 tokens, top result: entities/concept/builder.md
 
 Agent asks: "what is the process for deploying a new version?"
@@ -295,7 +295,7 @@ pytest tests/                      # bare test run
 ruff check kairix/ tests/          # lint only
 ```
 
-`scripts/safe-commit.sh` is the single entry point — it runs every gate the CI runs in the same order before letting the commit through; failing gates print the exact fix command. See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture and PR process, and [docs/architecture/fitness-functions.md](docs/architecture/fitness-functions.md) for the F1–F23 architecture fitness functions that enforce structural invariants.
+`scripts/safe-commit.sh` is the single entry point — it runs every gate the CI runs in the same order before letting the commit through; failing gates print the exact fix command. See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture and PR process, and [docs/architecture/fitness-functions.md](docs/architecture/fitness-functions.md) for the F1–F24 architecture fitness functions that enforce structural invariants.
 
 ---
 

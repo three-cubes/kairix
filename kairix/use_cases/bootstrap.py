@@ -203,6 +203,32 @@ def _load_board(agent_dir: Path) -> str:
     return _read_text(agent_dir / "Board.md")
 
 
+def _classify_goal_line(line: str) -> str | None:
+    """Return the goal text for a bullet-style line, or ``None``.
+
+    Recognises ``- foo`` / ``* foo`` / ``1. foo`` (any leading digit).
+    Blank lines and headings (``#``-prefixed) return ``None``; the
+    caller decides whether to fall back to plain-line mode.
+    """
+    if not line or line.startswith("#"):
+        return None
+    if line.startswith(("- ", "* ")):
+        return line[2:].strip()
+    # Numbered list item: "1. ..."
+    if len(line) >= 3 and line[0].isdigit() and line[1:].startswith(". "):
+        return line.split(". ", 1)[1].strip()
+    return None
+
+
+def _plain_goal_lines(text: str) -> list[str]:
+    """Fallback: non-empty, non-heading lines stripped of surrounding whitespace.
+
+    Used when ``Goals.md`` is written as prose rather than bullets so
+    the agent still gets something useful.
+    """
+    return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+
+
 def _load_goals(agent_dir: Path) -> list[str]:
     """Extract bullet-style active goals from ``Goals.md``.
 
@@ -215,27 +241,11 @@ def _load_goals(agent_dir: Path) -> list[str]:
     if not text:
         return []
 
-    goals: list[str] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            continue
-        if line.startswith(("- ", "* ")):
-            goals.append(line[2:].strip())
-            continue
-        # Numbered list item: "1. ..."
-        if len(line) >= 3 and line[0].isdigit() and line[1:].startswith(". "):
-            goals.append(line.split(". ", 1)[1].strip())
-
+    goals = [g for g in (_classify_goal_line(ln.strip()) for ln in text.splitlines()) if g is not None]
     if goals:
         return goals
-
-    # No bullets found — fall through to non-empty plain lines so the
-    # agent still gets *something* useful when goals are written as
-    # prose. Strip leading markdown emphasis on the first chars only.
-    return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    # No bullets found — fall through to non-empty plain lines.
+    return _plain_goal_lines(text)
 
 
 def _load_recent_memory(agent_dir: Path, *, max_days: int) -> list[MemoryEntry]:
@@ -417,6 +427,49 @@ def bootstrap_output_to_envelope(out: BootstrapOutput) -> dict[str, Any]:
     }
 
 
+def _markdown_header_lines(out: BootstrapOutput) -> list[str]:
+    """Title + optional role/error preamble for the markdown render."""
+    lines: list[str] = [f"# Bootstrap envelope: {out.agent}"]
+    if out.role:
+        lines.append(f"\n**Role:** {out.role}")
+    if out.error:
+        lines.append(f"\n**Error:** {out.error}")
+    return lines
+
+
+def _markdown_health_lines(health: BootstrapHealth) -> list[str]:
+    """``## Health`` section as a list of markdown lines."""
+    lines = [
+        "## Health",
+        f"- vector_search: {health.vector_search}",
+        f"- bm25: {health.bm25}",
+        f"- chat: {health.chat}",
+        f"- secrets_loaded: {health.secrets_loaded}",
+    ]
+    if health.degraded_reason:
+        lines.append(f"- degraded_reason: {health.degraded_reason}")
+    return lines
+
+
+def _markdown_goals_lines(active_goals: list[str]) -> list[str]:
+    """``## Active goals`` section — bullet list or placeholder."""
+    if not active_goals:
+        return ["## Active goals", "_(no Goals.md found)_"]
+    return ["## Active goals", *(f"- {g}" for g in active_goals)]
+
+
+def _markdown_memory_lines(recent_memory: list[MemoryEntry]) -> list[str]:
+    """``## Recent memory`` section — per-entry block or placeholder."""
+    if not recent_memory:
+        return ["## Recent memory", "_(no recent memory entries)_"]
+    lines = ["## Recent memory"]
+    for entry in recent_memory:
+        lines.append(f"### {entry.date}")
+        lines.append(entry.content)
+        lines.append("")
+    return lines
+
+
 def bootstrap_output_to_markdown(out: BootstrapOutput) -> str:
     """Render a ``BootstrapOutput`` as the CLI-facing markdown document.
 
@@ -424,39 +477,19 @@ def bootstrap_output_to_markdown(out: BootstrapOutput) -> str:
     agents see the same fields in the same order; the only difference
     is presentation.
     """
-    lines: list[str] = [f"# Bootstrap envelope: {out.agent}"]
-    if out.role:
-        lines.append(f"\n**Role:** {out.role}")
-    if out.error:
-        lines.append(f"\n**Error:** {out.error}")
-    lines.append("")
-    lines.append("## Health")
-    lines.append(f"- vector_search: {out.health.vector_search}")
-    lines.append(f"- bm25: {out.health.bm25}")
-    lines.append(f"- chat: {out.health.chat}")
-    lines.append(f"- secrets_loaded: {out.health.secrets_loaded}")
-    if out.health.degraded_reason:
-        lines.append(f"- degraded_reason: {out.health.degraded_reason}")
-    lines.append("")
-    lines.append("## Next action")
-    lines.append(out.next_action or "(none)")
-    lines.append("")
-    lines.append("## Board")
-    lines.append(out.board if out.board else "_(no Board.md found)_")
-    lines.append("")
-    lines.append("## Active goals")
-    if out.active_goals:
-        for g in out.active_goals:
-            lines.append(f"- {g}")
-    else:
-        lines.append("_(no Goals.md found)_")
-    lines.append("")
-    lines.append("## Recent memory")
-    if out.recent_memory:
-        for entry in out.recent_memory:
-            lines.append(f"### {entry.date}")
-            lines.append(entry.content)
-            lines.append("")
-    else:
-        lines.append("_(no recent memory entries)_")
+    lines: list[str] = [
+        *_markdown_header_lines(out),
+        "",
+        *_markdown_health_lines(out.health),
+        "",
+        "## Next action",
+        out.next_action or "(none)",
+        "",
+        "## Board",
+        out.board if out.board else "_(no Board.md found)_",
+        "",
+        *_markdown_goals_lines(list(out.active_goals)),
+        "",
+        *_markdown_memory_lines(list(out.recent_memory)),
+    ]
     return "\n".join(lines).rstrip() + "\n"

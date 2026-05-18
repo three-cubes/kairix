@@ -33,6 +33,9 @@ Not all environment variables are secrets. Configuration values belong in `servi
 | `kairix-embed-api-key` | `KAIRIX_EMBED_API_KEY` | Embed API key (falls back to LLM) |
 | `kairix-embed-endpoint` | `KAIRIX_EMBED_ENDPOINT` | Embed API endpoint (falls back to LLM) |
 | `kairix-embed-model` | `KAIRIX_EMBED_MODEL` | Embed model name |
+| `kairix-embed-pool-size` | `KAIRIX_EMBED_POOL_SIZE` | int, default 20 — max concurrent HTTP connections to the embed provider |
+| `kairix-embed-pool-keepalive` | `KAIRIX_EMBED_POOL_KEEPALIVE` | int, default 10 — max idle connections kept warm |
+| `kairix-embed-pool-expiry-s` | `KAIRIX_EMBED_POOL_EXPIRY_S` | float, default 30.0 — idle-connection expiry (seconds) |
 | `kairix-neo4j-password` | `KAIRIX_NEO4J_PASSWORD` | Neo4j password |
 
 Resolution order: env var > per-file secret (`/run/secrets/<name>`) > bundle file (`/run/secrets/kairix.env`) > Azure Key Vault CLI (`KAIRIX_KV_NAME`).
@@ -441,6 +444,11 @@ kairix curator health   # should report entity counts
 
 Expected: entity count ≥ 50 for a typical vault.
 
+**Entity-graph management (#262, #263).** Routine maintenance commands:
+
+- **Drop-and-rebuild from the document store** — `kairix store crawl --reset --confirm` runs `MATCH (n) DETACH DELETE n` against the live graph and immediately re-crawls. Pair `--reset` with `--confirm` interactively, or set `KAIRIX_NONINTERACTIVE=1` in scripted pipelines (cron, CI). `--dry-run` previews without writing. The summary prints `Reset: deleted N entities, M relationships before crawl` before the usual crawl counts. Full sequence in [how-to-rebuild-entity-graph](runbooks/how-to-rebuild-entity-graph.md).
+- **Override-coverage report** — every `kairix store crawl` (with or without `--reset`) reads `${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md`, records which allowlist entries fired against the crawled text, and writes a sidecar to `${KAIRIX_DATA_DIR}/entity-override-coverage.json`. Curators inspect this to find dead allowlist entries (`never_matched`) without an O(N) shell loop over `kairix entity get`. Audit details in [kairix-entity-audit Step 4](runbooks/kairix-entity-audit.md#step-4--override-coverage-allowlisted-but-never-matched).
+
 ### Step 8: Test briefing
 
 ```bash
@@ -688,6 +696,8 @@ export KAIRIX_LOG_QUERIES=1
 ---
 
 ## Troubleshooting
+
+> For cross-cutting retrieval degradation (search wrong/empty, recall canary regressed, multiple `kairix onboard check` failures), use [`../runbooks/kairix-retrieval-health.md`](../runbooks/kairix-retrieval-health.md) — it has the full diagnosis tree and recovery paths. The per-symptom recipes below cover the narrow cases.
 
 ### `kairix: command not found`
 

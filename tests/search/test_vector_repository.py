@@ -19,7 +19,7 @@ interface and is intentionally local to this module.
 
 Edge-case focus (per #197 DoD): empty-result search, malformed/dimension-
 varied query vectors, and missing-collection filtering — these are the
-branches that historically mask wrong-results-on-edge-case bugs.
+branches where wrong-results-on-edge-case bugs hide.
 """
 
 from __future__ import annotations

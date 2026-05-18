@@ -25,6 +25,7 @@ pytestmark = pytest.mark.integration
 
 
 _EXPECTED_TOOLS = {
+    # Retrieval / synthesis
     "search",
     "entity",
     "prep",
@@ -36,6 +37,23 @@ _EXPECTED_TOOLS = {
     "entity_suggest",
     "entity_validate",
     "bootstrap",
+    # Diagnostic capabilities
+    "onboard_check",
+    "worker_status",
+    "warm",
+    # Agent-safe capped surface (escalates above queries<=20 / concurrency<=3)
+    "probe_search",
+    # Tuning advisor — bundles capabilities + recent probe runs into recommendations.
+    "probe_config",
+    # Programmatic introspection (affordance pattern 4)
+    "capabilities",
+    # Operator-only escalation stubs
+    "probe_burst",
+    "soak_run",
+    "benchmark_run",
+    "embed",
+    "store_crawl",
+    "embed_rebuild_fts",
 }
 
 

@@ -61,7 +61,7 @@ def _make_healthz_route(
     """
     started_at = _ensure_started_at()
 
-    async def healthz(_request: Request) -> JSONResponse:
+    async def healthz(_request: Request) -> JSONResponse:  # NOSONAR S7503 — Starlette ASGI contract
         ready = bool(readiness_check()) if readiness_check is not None else True
         uptime_s = int(time.monotonic() - started_at)
         return JSONResponse({"ready": ready, "uptime_s": uptime_s})
@@ -111,7 +111,7 @@ def _make_ready_route(
     """
     started_at = _ensure_started_at()
 
-    async def healthz_ready(_request: Request) -> JSONResponse:
+    async def healthz_ready(_request: Request) -> JSONResponse:  # NOSONAR S7503 — Starlette ASGI contract
         uptime_s = int(time.monotonic() - started_at)
         if capability_probe is None:
             return JSONResponse({"live": True, "ready": True, "uptime_s": uptime_s, "checks": {}})

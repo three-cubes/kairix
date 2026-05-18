@@ -156,8 +156,9 @@ class TestLLMJudgeScorer:
         """LLMJudgeScorer with a FakeChatBackend returns the parsed score.
 
         Sabotage proof: regressing to ignore the injected backend (e.g. by
-        always calling AzureChatBackend()) would either crash on missing
-        credentials or return 0.0 — never the canned 0.8.
+        always calling ``ProviderEvalChatBackend.from_config()``) would either
+        crash on the missing provider config or return 0.0 — never the
+        canned 0.8.
         """
         fake = FakeChatBackend(responses=["0.8"])
         scorer = LLMJudgeScorer(chat_backend=fake)

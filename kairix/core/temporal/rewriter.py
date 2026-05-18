@@ -14,6 +14,7 @@ Never raises — returns (None, None) / unchanged query on any failure.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from datetime import date, timedelta
 
 # ---------------------------------------------------------------------------
@@ -151,105 +152,121 @@ def is_relative_temporal(query: str) -> bool:
         return False
 
 
+_LAST_PERIOD_DAYS_MAP = {"week": 7, "month": 30, "year": 365, "quarter": 90}
+
+
+def _try_explicit_date(q: str, _today: date) -> tuple[date, date] | None:
+    """``on YYYY-MM-DD`` or bare ``YYYY-MM-DD`` → exact single-day window."""
+    m = _ON_DATE_RE.search(q) or _ISO_DATE_RE.search(q)
+    if not m:
+        return None
+    d = date(int(m.group("year")), int(m.group("month")), int(m.group("day")))
+    return d, d
+
+
+def _try_month_year(q: str, today: date) -> tuple[date, date] | None:
+    """``in March 2026`` / ``in March`` → first-to-last-day-of-month window."""
+    m = _IN_MONTH_YEAR_RE.search(q)
+    if not m:
+        return None
+    month_num = _MONTH_NAMES[m.group("month").lower()]
+    year = int(m.group("year")) if m.group("year") else today.year
+    if month_num == 12:
+        last_day = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        last_day = date(year, month_num + 1, 1) - timedelta(days=1)
+    return date(year, month_num, 1), last_day
+
+
+def _try_last_n_days(q: str, today: date) -> tuple[date, date] | None:
+    """``last N days`` → ``today-N`` through ``today``."""
+    m = _LAST_N_DAYS_RE.search(q)
+    if not m:
+        return None
+    return today - timedelta(days=int(m.group("n"))), today
+
+
+def _try_last_period(q: str, today: date) -> tuple[date, date] | None:
+    """``last week|month|year|quarter`` → rolling window backward from ``today``."""
+    m = _LAST_PERIOD_RE.search(q)
+    if not m:
+        return None
+    days = _LAST_PERIOD_DAYS_MAP[m.group("unit").lower()]
+    return today - timedelta(days=days), today
+
+
+def _try_this_period(q: str, today: date) -> tuple[date, date] | None:
+    """``this week|month`` → start-of-period through ``today``."""
+    m = _THIS_PERIOD_RE.search(q)
+    if not m:
+        return None
+    unit = m.group("unit").lower()
+    if unit == "week":
+        return today - timedelta(days=today.weekday()), today
+    if unit == "month":
+        return date(today.year, today.month, 1), today
+    return None
+
+
+def _try_yesterday(q: str, today: date) -> tuple[date, date] | None:
+    if not _YESTERDAY_RE.search(q):
+        return None
+    yesterday = today - timedelta(days=1)
+    return yesterday, yesterday
+
+
+def _try_today(q: str, today: date) -> tuple[date, date] | None:
+    return (today, today) if _TODAY_RE.search(q) else None
+
+
+def _try_recently(q: str, today: date) -> tuple[date, date] | None:
+    return (today - timedelta(days=14), today) if _RECENTLY_RE.search(q) else None
+
+
+# Pattern handlers tried in order; first match wins (matches the historic
+# pattern priority documented in extract_time_window's docstring).
+_WINDOW_PATTERNS: list[Callable[[str, date], tuple[date, date] | None]] = [
+    _try_explicit_date,
+    _try_month_year,
+    _try_last_n_days,
+    _try_last_period,
+    _try_this_period,
+    _try_yesterday,
+    _try_today,
+    _try_recently,
+]
+
+
 def extract_time_window(
     query: str,
     reference_date: date | None = None,
 ) -> tuple[date | None, date | None]:
-    """
-    Extract a (start, end) date window from a temporal query string.
+    """Extract a ``(start, end)`` date window from a temporal query string.
 
     Patterns recognised (first match wins):
-      "on YYYY-MM-DD"        → (YYYY-MM-DD, YYYY-MM-DD)
-      "YYYY-MM-DD"           → (YYYY-MM-DD, YYYY-MM-DD)
-      "in March 2026"        → (2026-03-01, 2026-03-31)
-      "in March"             → (ref_year-03-01, ref_year-03-31)
-      "last N days"          → (today-N, today)
-      "last week"            → (today-7d, today)
-      "last month"           → (today-30d, today)
-      "last year"            → (today-365d, today)
-      "last quarter"         → (today-90d, today)
-      "this week"            → (Monday, today)
-      "this month"           → (1st of current month, today)
-      "yesterday"            → (today-1d, today-1d)
-      "today"                → (today, today)
-      "recently" / "lately"  → (today-14d, today)
+      ``on YYYY-MM-DD`` / ``YYYY-MM-DD``  → single-day window
+      ``in March 2026`` / ``in March``    → full-month window
+      ``last N days`` / ``last week|month|year|quarter`` → rolling-back window
+      ``this week|month``                 → start-of-period to today
+      ``yesterday`` / ``today``           → single-day window
+      ``recently`` / ``lately``           → last 14 days
 
     Args:
         query:          Natural-language query string.
         reference_date: Date to use as "today". Defaults to date.today().
 
     Returns:
-        (start, end) tuple, or (None, None) if no temporal expression found.
+        ``(start, end)`` tuple, or ``(None, None)`` if no temporal expression found.
         Never raises.
     """
     try:
         today = reference_date or date.today()
         q = query.strip()
-
-        # 1. "on YYYY-MM-DD" — explicit single day with "on" prefix
-        m = _ON_DATE_RE.search(q)
-        if m:
-            d = date(int(m.group("year")), int(m.group("month")), int(m.group("day")))
-            return d, d
-
-        # 2. "in Month YYYY" or "in Month"
-        m = _IN_MONTH_YEAR_RE.search(q)
-        if m:
-            month_num = _MONTH_NAMES[m.group("month").lower()]
-            year = int(m.group("year")) if m.group("year") else today.year
-            # Compute last day of month
-            if month_num == 12:
-                last_day = date(year + 1, 1, 1) - timedelta(days=1)
-            else:
-                last_day = date(year, month_num + 1, 1) - timedelta(days=1)
-            start = date(year, month_num, 1)
-            return start, last_day
-
-        # 3. "last N days"
-        m = _LAST_N_DAYS_RE.search(q)
-        if m:
-            n = int(m.group("n"))
-            return today - timedelta(days=n), today
-
-        # 4. "last week/month/year/quarter"
-        m = _LAST_PERIOD_RE.search(q)
-        if m:
-            unit = m.group("unit").lower()
-            days_map = {"week": 7, "month": 30, "year": 365, "quarter": 90}
-            n = days_map[unit]
-            return today - timedelta(days=n), today
-
-        # 5. "this week"
-        m = _THIS_PERIOD_RE.search(q)
-        if m:
-            unit = m.group("unit").lower()
-            if unit == "week":
-                monday = today - timedelta(days=today.weekday())
-                return monday, today
-            elif unit == "month":
-                return date(today.year, today.month, 1), today
-
-        # 6. "yesterday"
-        if _YESTERDAY_RE.search(q):
-            yesterday = today - timedelta(days=1)
-            return yesterday, yesterday
-
-        # 7. "today"
-        if _TODAY_RE.search(q):
-            return today, today
-
-        # 8. "recently" / "lately"
-        if _RECENTLY_RE.search(q):
-            return today - timedelta(days=14), today
-
-        # 9. Bare ISO date anywhere in query
-        m = _ISO_DATE_RE.search(q)
-        if m:
-            d = date(int(m.group("year")), int(m.group("month")), int(m.group("day")))
-            return d, d
-
+        for handler in _WINDOW_PATTERNS:
+            result = handler(q, today)
+            if result is not None:
+                return result
         return None, None
-
     except Exception:
         return None, None
 

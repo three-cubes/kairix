@@ -26,17 +26,48 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
+# 0. Empty-stage guard. safe-commit.sh does not auto-stage; running it
+# without `git add` produced silent no-op "commits" that masked real
+# failures (#208 side-finding). Fail loud here instead.
+if git diff --cached --quiet; then
+    echo -e "${RED}FAIL${NC}: nothing staged for commit"
+    echo "fix: stage files with 'git add <paths>' before running safe-commit.sh"
+    echo "next: 'git status' to see what's modified but not yet staged"
+    exit 1
+fi
+
 echo "=== Quality gates ==="
 
 # 1. Lint (includes isort via ruff I rules)
+# Scope kairix/ + tests/ + scripts/ to match what pre-commit's ruff hook
+# scans in CI — local-vs-CI divergence here has cost round-trips already.
 echo -n "  ruff lint... "
-ruff check kairix/ tests/ --quiet 2>&1 || { echo -e "${RED}FAIL${NC}"; echo "Run: ruff check kairix/ tests/ --fix"; exit 1; }
+ruff check kairix/ tests/ scripts/ --quiet 2>&1 || { echo -e "${RED}FAIL${NC}"; echo "Run: ruff check kairix/ tests/ scripts/ --fix"; exit 1; }
 echo -e "${GREEN}OK${NC}"
 
 # 2. Format (black-compatible via ruff format)
 echo -n "  ruff format... "
-ruff format --check kairix/ tests/ >/dev/null 2>&1 || { echo -e "${RED}FAIL${NC}"; echo "Run: ruff format kairix/ tests/"; exit 1; }
+ruff format --check kairix/ tests/ scripts/ >/dev/null 2>&1 || { echo -e "${RED}FAIL${NC}"; echo "Run: ruff format kairix/ tests/ scripts/"; exit 1; }
 echo -e "${GREEN}OK${NC}"
+
+# 2b. gofmt on every Go service (when present). Auto-discovered: any
+# services/<name>/go.mod triggers a gofmt check on that module. Mirrors
+# what the remote 'Go quality' workflow does — keeping this local saves
+# a CI round-trip when a Go change is in the staged diff.
+if command -v gofmt >/dev/null 2>&1; then
+    while IFS= read -r gomod; do
+        svc_dir="$(dirname "$gomod")"
+        echo -n "  gofmt -s ($svc_dir)... "
+        unformatted=$(gofmt -s -l "$svc_dir" 2>&1)
+        if [[ -n "$unformatted" ]]; then
+            echo -e "${RED}FAIL${NC}"
+            echo "$unformatted" | sed 's/^/  /'
+            echo "Run: gofmt -s -w $svc_dir"
+            exit 1
+        fi
+        echo -e "${GREEN}OK${NC}"
+    done < <(find services -mindepth 2 -maxdepth 2 -name go.mod 2>/dev/null)
+fi
 
 # 3. Type checking (strict — matches CI)
 echo -n "  mypy strict... "

@@ -276,6 +276,14 @@ def _parse_paths_list(name: str, paths_raw: object) -> list[str]:
     return [str(p) for p in paths_raw if p]
 
 
+# Per-process dedup for the legacy `collection:` deprecation warning. Each
+# (agent_name, candidate) emits once across the lifetime of the process —
+# benchmark and eval paths re-parse the agent registry per case, so without
+# dedup a single run would emit N_agents x N_cases warnings and drown out
+# real signal in container stderr / journal output (#275).
+_LEGACY_COLLECTION_WARNED: set[tuple[str, str]] = set()
+
+
 def _resolve_legacy_collection_name(
     name: str,
     item: dict,
@@ -289,7 +297,10 @@ def _resolve_legacy_collection_name(
       - If ``collection:`` is supplied and clashes with a reserved name,
         log a warning and drop the override.
       - Otherwise the legacy collection name flows through with a
-        deprecation warning pointing at the multi-path schema.
+        deprecation warning pointing at the multi-path schema. The
+        deprecation warning is deduplicated per (agent, candidate) so
+        repeated re-parsing (e.g. per benchmark case) doesn't drown out
+        other signal.
       - Fully-default agents (no ``paths``, no ``collection``) keep the
         ``default_pattern``-derived label so existing benchmarks pinned to
         ``{agent}-memory`` continue to resolve.
@@ -305,14 +316,17 @@ def _resolve_legacy_collection_name(
                 candidate,
             )
             return ""
-        logger.warning(
-            "agent %r: 'collection: %s' is deprecated — prefer the multi-path "
-            "schema 'paths: [%s]'. The legacy field still parses but will be "
-            "removed in a future release. (#115)",
-            name,
-            candidate,
-            write_path or "/data/workspaces/" + str(name),
-        )
+        warn_key = (name, candidate)
+        if warn_key not in _LEGACY_COLLECTION_WARNED:
+            _LEGACY_COLLECTION_WARNED.add(warn_key)
+            logger.warning(
+                "agent %r: 'collection: %s' is deprecated — prefer the multi-path "
+                "schema 'paths: [%s]'. The legacy field still parses but will be "
+                "removed in a future release. (#115)",
+                name,
+                candidate,
+                write_path or "/data/workspaces/" + str(name),
+            )
         return candidate
     if not paths:
         return default_pattern.format(agent=str(name))

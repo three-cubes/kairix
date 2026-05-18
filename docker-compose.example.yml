@@ -48,30 +48,47 @@ services:
     volumes:
       - ./documents:/data/documents
       - kairix-data:/data/kairix
-      # - ./kairix.config.yaml:/opt/kairix/kairix.config.yaml:ro
+      # Layered config: the image ships a complete canonical config at
+      # /opt/kairix/kairix.config.yaml (containing _schema_version, provider:,
+      # collections, retrieval defaults). Operators overlay sparse host-side
+      # overrides via the OVERLAY env-var below — the overlay only needs to
+      # declare the keys you're changing; required keys come from the image.
+      # NEVER bind-mount over /opt/kairix/kairix.config.yaml — that shadow-
+      # mount drops required keys silently (the v2026.5.17a9 incident).
+      - ./kairix.config.local.yaml:/opt/kairix/kairix.config.local.yaml:ro
     env_file:
       - .env
     environment:
       - KAIRIX_NEO4J_URI=bolt://neo4j:7687
       - KAIRIX_NEO4J_USER=neo4j
       - KAIRIX_NEO4J_PASSWORD=${KAIRIX_NEO4J_PASSWORD}
+      # Point kairix at the host-side overlay file. The image-bundled base
+      # at /opt/kairix/kairix.config.yaml is the source of required keys;
+      # the overlay supplies operator-specific values (vault paths, agent
+      # registry, retrieval tuning). See docs/operations/runbooks/config-upgrade.md.
+      - KAIRIX_CONFIG_OVERLAY_PATH=/opt/kairix/kairix.config.local.yaml
     depends_on:
       neo4j:
         condition: service_healthy
     restart: unless-stopped
-    # Healthcheck uses `kairix onboard check` — the canonical "is kairix
-    # working right now" probe. Exit code is 0 on full pass, 1 on any
-    # failure (see #246 W4). Each failed check carries a structured
-    # ``remediation`` string, available via ``kairix onboard check --json``
-    # for machine consumers. This probe replaces the prior HTTP-only
-    # healthcheck so it surfaces secrets / embed-pipeline failures, not
-    # just process-level liveness.
+    # Healthcheck uses `kairix onboard ready` — the narrow readiness probe
+    # that exits 0 only once kairix has finished warming. Distinct from
+    # `kairix onboard check` (configuration diagnostic — secrets, paths,
+    # neo4j, embed pipeline). `ready` answers the deploy-wait question:
+    # "will the next agent call succeed without a cold-start envelope?".
+    # Using it as the healthcheck means `docker compose up --wait` blocks
+    # until the first real request can actually return search results,
+    # not just until the process binds its port.
+    #
+    # ``start_period`` is generous so the initial warm (~7-10s on a hot
+    # node, ~30s on a fresh container) is treated as "starting", not
+    # "unhealthy".
     healthcheck:
-      test: ["CMD", "kairix", "onboard", "check"]
-      interval: 60s
-      timeout: 30s
+      test: ["CMD", "kairix", "onboard", "ready"]
+      interval: 30s
+      timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 60s
     # API / MCP service. Steady-state RSS is ~1.2 GiB after rerank-model
     # load; cold-start spikes briefly higher. Reservation guarantees the
     # scheduler hands kairix enough memory to come up cleanly. Limit caps
@@ -96,13 +113,21 @@ services:
     volumes:
       - ./documents:/data/documents
       - kairix-data:/data/kairix
-      # - ./kairix.config.yaml:/opt/kairix/kairix.config.yaml:ro
+      # Layered config: the image ships a complete canonical config at
+      # /opt/kairix/kairix.config.yaml (containing _schema_version, provider:,
+      # collections, retrieval defaults). Operators overlay sparse host-side
+      # overrides via the OVERLAY env-var below — the overlay only needs to
+      # declare the keys you're changing; required keys come from the image.
+      # NEVER bind-mount over /opt/kairix/kairix.config.yaml — that shadow-
+      # mount drops required keys silently (the v2026.5.17a9 incident).
+      - ./kairix.config.local.yaml:/opt/kairix/kairix.config.local.yaml:ro
     env_file:
       - .env
     environment:
       - KAIRIX_NEO4J_URI=bolt://neo4j:7687
       - KAIRIX_NEO4J_USER=neo4j
       - KAIRIX_NEO4J_PASSWORD=${KAIRIX_NEO4J_PASSWORD}
+      - KAIRIX_CONFIG_OVERLAY_PATH=/opt/kairix/kairix.config.local.yaml
     depends_on:
       neo4j:
         condition: service_healthy

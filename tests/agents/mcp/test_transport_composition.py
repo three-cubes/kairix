@@ -185,10 +185,10 @@ def test_streamable_route_reaches_underlying_handler() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Layered readiness probe (/healthz/ready) — v2026.5.10 #167 fix
+# Layered readiness probe (/healthz/ready)
 #
 # /healthz/ready surfaces granular capability checks so a deployment with
-# missing secrets / broken vector search can no longer report ready=true.
+# missing secrets / broken vector search must not report ready=true.
 # ---------------------------------------------------------------------------
 
 

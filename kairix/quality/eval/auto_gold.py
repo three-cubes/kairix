@@ -34,9 +34,8 @@ class CorpusProfile:
     # Titles whose underlying *path* matches the procedural-content shape
     # (how-to / runbook / playbook / sop). Pre-computed at analyse time
     # because path information is dropped before `generate_template_queries`
-    # runs — applying _PROCEDURAL_PATTERNS to titles directly was the bug
-    # fixed in #143 (procedural filter was permanently empty since titles
-    # never contain path separators).
+    # runs, and titles alone don't carry path separators so _PROCEDURAL_PATTERNS
+    # cannot be applied downstream.
     procedural_titles: list[str] = field(default_factory=list)
 
 
@@ -123,10 +122,9 @@ def generate_template_queries(profile: CorpusProfile, n: int = 50) -> list[dict[
         )
 
     # Procedural queries — use titles pre-classified by path in analyse_corpus.
-    # Applying _PROCEDURAL_PATTERNS directly to titles here used to silently
-    # produce an empty list (titles never contain '/') so the fallback at
-    # `proc_titles = titles[:n_procedural]` always ran, mislabelling recall
-    # queries as procedural.
+    # _PROCEDURAL_PATTERNS cannot be applied to bare titles here because titles
+    # never contain '/'; the fallback below is a last resort when no procedural
+    # titles were classified at all.
     proc_titles = profile.procedural_titles[:n_procedural]
     if not proc_titles:
         proc_titles = titles[:n_procedural]

@@ -6,8 +6,20 @@ name: "1 · Quality gate"
 on:
   push:
     branches: [main, develop]
+    # Skip the workflow entirely on docs-only commits — saves ~15s of
+    # 'changes' job runner allocation that would otherwise just confirm
+    # nothing else needs to run. The internal dorny/paths-filter still
+    # operates for partial cases where some-but-not-all paths changed.
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "!CLAUDE.md"
   pull_request:
     branches: [main, develop]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "!CLAUDE.md"
   workflow_dispatch:
 
 # Deny all permissions by default. Each job declares its own minimum.
@@ -31,7 +43,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       reflib: ${{ steps.filter.outputs.reflib }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
@@ -62,7 +74,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -85,13 +97,13 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
-      - name: Run F1-F6 + F8 + F10-F13 (no test runtime needed)
+      - name: Run F1-F6 + F8 + F10-F23 + F26-F29 (no test runtime needed)
         run: bash scripts/checks/run-all.sh --skip-coverage
 
   contracts:
@@ -102,7 +114,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -130,7 +142,7 @@ jobs:
           echo "::notice::paths-DI: ${COUNT} test files still call monkeypatch.setenv(KAIRIX_*) -- see docs/architecture/paths-di-refactor.md"
           if [ "$COUNT" -gt 0 ]; then
             echo "Files using monkeypatch.setenv(KAIRIX_*):"
-            printf '  %s\n' $MATCHES
+            printf '  %s\n' "$MATCHES"
           fi
           # WARN-ONLY in Phase 0 -- exit 0 regardless. Phase 4 will switch to:
           #   if [ "$COUNT" -gt 0 ]; then exit 1; fi
@@ -159,7 +171,7 @@ jobs:
   unit-and-type:
     name: "Stage 2 -- Unit + Type (${{ matrix.python-version }})"
     runs-on: ubuntu-latest
-    needs: contracts
+    needs: [changes, contracts]
     if: needs.changes.outputs.python == 'true'
     permissions:
       contents: read
@@ -170,7 +182,7 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -290,9 +302,9 @@ jobs:
       pull-requests: write
       issues: write
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: coverage-data
 
@@ -308,13 +320,13 @@ jobs:
   integration:
     name: "Stage 3 -- Integration"
     runs-on: ubuntu-latest
-    needs: unit-and-type
+    needs: [changes, unit-and-type]
     if: needs.changes.outputs.python == 'true'
     permissions:
       contents: read
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -403,13 +415,13 @@ jobs:
   union-coverage:
     name: "Stage 5 -- Union coverage floor (F9)"
     runs-on: ubuntu-latest
-    needs: [unit-and-type, integration]
+    needs: [changes, unit-and-type, integration]
     if: needs.changes.outputs.python == 'true'
     permissions:
       contents: read
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -417,12 +429,12 @@ jobs:
           cache: pip
 
       - name: Download unit coverage XML
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: coverage-data
 
       - name: Download integration coverage XML
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: coverage-data-integration
 
@@ -451,7 +463,7 @@ jobs:
   security:
     name: "Stage 4 -- Security"
     runs-on: ubuntu-latest
-    needs: unit-and-type
+    needs: [changes, unit-and-type]
     if: needs.changes.outputs.python == 'true'
     # Run in parallel with integration -- both depend on unit passing
     permissions:
@@ -459,7 +471,7 @@ jobs:
       security-events: write   # required to upload SARIF / security findings
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0  # Full history for secret scanning
 
@@ -526,25 +538,32 @@ jobs:
   # Method → "CI-based analysis") or this job conflicts with it and
   # SonarCloud fails the analysis with "You are running CI analysis while
   # Automatic Analysis is enabled."
+  #
+  # `sonar.qualitygate.wait=true` in sonar-project.properties makes this job
+  # block on the Quality Gate verdict and exit with it, so the GHA job
+  # conclusion IS the gate verdict (deterministic, in-pipeline). The external
+  # "SonarCloud Code Analysis" check posted by the SonarCloud GitHub App over
+  # webhook can race / temporarily disagree (#269); branch protection should
+  # gate on this `SonarCloud analysis` job, not the webhook-posted check.
   sonarcloud:
     name: "SonarCloud analysis"
     runs-on: ubuntu-latest
-    needs: unit-and-type
+    needs: [changes, unit-and-type]
     if: needs.changes.outputs.python == 'true'
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: test-results-unit-3.12
         continue-on-error: true  # artifact missing on path-filtered runs; Sonar still scans without it
 
       - name: Download coverage
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: coverage-data
         continue-on-error: true  # artifact missing on path-filtered runs; Sonar still scans without it
@@ -563,7 +582,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 

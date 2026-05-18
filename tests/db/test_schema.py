@@ -303,16 +303,11 @@ def test_migrate_idempotent_on_agent_owner() -> None:
 def test_create_schema_on_legacy_db_runs_migration() -> None:
     """create_schema() must work on a pre-#114 documents table without agent_owner.
 
-    Regression for VM hotfix 2026-05-06: deploying the WS3-5-114 schema to a
-    running VM with an existing index.sqlite raised
-    `sqlite3.OperationalError: no such column: agent_owner` because the
-    CREATE INDEX for idx_documents_agent_owner ran inside the same
-    executescript as the CREATE TABLE IF NOT EXISTS — the IF NOT EXISTS
-    skipped the table create on legacy DBs (table already there without the
-    column), but the CREATE INDEX still fired.
-
-    Fix: split the executescript so migrate() runs *between* table creation
-    and index creation. This test asserts the upgrade path works.
+    When the table already exists without ``agent_owner`` (legacy on-disk
+    schema), ``CREATE TABLE IF NOT EXISTS`` is a no-op but ``CREATE INDEX
+    idx_documents_agent_owner`` would still try to reference the missing
+    column. migrate() MUST run between table creation and index creation so
+    the column is added before the index references it.
     """
     db = sqlite3.connect(":memory:")
     # Build a pre-#114 documents schema (no agent_owner column) and seed a row
@@ -340,7 +335,7 @@ def test_create_schema_on_legacy_db_runs_migration() -> None:
         """
     )
 
-    # Must not raise — this is the bug the hotfix repairs
+    # Must not raise — create_schema must be idempotent against partial schemas.
     create_schema(db)
 
     # Both columns are now present

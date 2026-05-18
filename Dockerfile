@@ -1,6 +1,15 @@
 # ── Build stage: install all dependencies ────────────────────────────────────
 FROM python:3.12-slim AS builder
 
+# Version passed in by the publishing workflow (docker-publish.yml). The
+# .dockerignore excludes .git from the build context, so setuptools-scm
+# can't auto-derive the version and would fall back to "0.0.0" (see
+# fallback_version in pyproject.toml). Passing it as a build-arg and
+# exporting SETUPTOOLS_SCM_PRETEND_VERSION lets pip install . compute the
+# real version without needing the git history in-context (#267).
+ARG KAIRIX_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${KAIRIX_VERSION}
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*

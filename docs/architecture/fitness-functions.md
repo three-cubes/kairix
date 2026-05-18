@@ -174,6 +174,39 @@ fully enforced; new violations anywhere in the codebase block.
 | F21 | Check-script failure output must carry an action marker (`fix:`, `next:`, `run:`) | structural | Python AST + shell regex | pre-commit, safe-commit, CI Stage 0 | `actionable-feedback-files.txt` |
 | F22 | Repo paths follow per-tree naming conventions | structural | Python (regex per tree) | pre-commit, safe-commit, CI Stage 0 | `path-naming-files.txt` (empty — clean) |
 | F23 | Every top-level directory has a `README.md` | structural | Python (filesystem walk) | pre-commit, safe-commit, CI Stage 0 | `readme-coverage-files.txt` |
+| F24 | No `from tests.*` / `import tests` imports in `kairix/**/*.py` | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-test-imports-in-prod-files.txt` (empty — clean) |
+| F25 | Every CLI subcommand has an MCP affordance — real `tool_<command>` binding OR `OperatorOnlyCapability` escalation stub | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `capability-affordance-files.txt` (empty — clean) |
+
+### Go-side rules (G1–G10)
+
+Active when `services/<name>/go.mod` exists. Full text and rationale in
+[`go-integration-plan.md`](go-integration-plan.md) §"Architecture
+fitness — extending F1-F24 to Go". The Go gate (`Go quality` workflow)
+enforces these in parallel with the Python pipeline.
+
+| ID | Rule | Detection | Tool | SDLC layer | Baseline file |
+|----|------|-----------|------|------------|---------------|
+| G1 | Every `cmd/<name>/main.go` exposes `--version` | structural | golangci-lint custom rule (planned) | Go-quality workflow | `go-version-flag-files.txt` (empty — clean) |
+| G2 | Errors wrap with `%w` (`fmt.Errorf("...: %w", err)`) | structural | `errorlint` (golangci-lint) | Go-quality workflow | (none — clean baseline) |
+| G3 | No `interface{}` / `any` in exported signatures | structural | revive `exported` + custom | Go-quality workflow | `go-any-in-exported-files.txt` (planned) |
+| G4 | `context.Context` as first arg on exported I/O functions | structural | revive `context-as-argument` | Go-quality workflow | `go-context-propagation-files.txt` (planned) |
+| G5 | Every Go package has a doc comment | structural | revive `package-comments` | Go-quality workflow | (none — clean baseline) |
+| G6 | No `panic` in non-`main` packages | structural | gocritic + custom | Go-quality workflow | (none — clean baseline) |
+| G7 | Tests follow Go conventions (`*_test.go`, `TestXxx(t *testing.T)`) | structural | `go test` discovery + custom | Go-quality workflow | (none — clean baseline) |
+| G8 | Logging via `log/slog` only (no `fmt.Println` / `log.Printf` in prod) | structural | custom Python check | Go-quality workflow | `go-logging-discipline-files.txt` (planned) |
+| G9 | Every `services/<name>/` has a `README.md` | structural | Python filesystem walk (`check_go_readme_coverage.py`) | safe-commit + Go-quality workflow | `go-readme-coverage-files.txt` (empty — clean) |
+| G10 | Third-party deps require a rationale entry in `services/<name>/DEPENDENCIES.md` | structural | custom Python check | Go-quality workflow | `go-dependency-rationale-files.txt` (planned) |
+
+G1 / G3 / G4 / G8 / G10 are **planned** — their detector scripts land
+when the first real Go service does (alpha-deploy webhook for
+[#272](https://github.com/three-cubes/kairix/issues/272) Phase 4). G2 /
+G5 / G6 / G7 land "for free" via golangci-lint's existing rule set; the
+plan-of-record reserves the rule ID so it survives reviewers asking
+"shouldn't we enforce this?" — yes, we do.
+
+G9 is **active now** because it depends only on filesystem-walk, not on
+any Go source. Empty baseline; will trip if any future
+`services/<name>/` lands without a README.
 
 ---
 
@@ -183,33 +216,59 @@ Each rule below is described with: **statement**, **why**,
 **detection mechanism**, **examples** (rejected and allowed), and
 **fix pattern**.
 
-### F1 — No `@patch` on kairix internal code
+### F1 — No internal-substitution patching of kairix code
 
 #### Statement
 
-Test files MUST NOT call `@patch("kairix.…")` or
-`with patch("kairix.…")`.
+Test files MUST NOT reach into a production kairix module's namespace
+to swap an implementation. F1 flags six structurally-identical shapes:
+
+1. `@patch("kairix.X.Y", ...)` — decorator
+2. `with patch("kairix.X.Y", ...):` — context manager
+3. `kairix.X.Y = <expr>` — full-path attribute assignment
+4. `<alias>.Y = <expr>` where alias resolves via imports to a kairix module
+5. `monkeypatch.setattr("kairix.X.Y", ...)` — string-target form
+6. `monkeypatch.setattr(<kairix module ref>, "attr", fake)` — ref-target form
+
+Stdlib (`os`, `time`, `pathlib`, `sys`, `importlib`, ...) and external
+SDKs (`httpx`, `openai`, `boto3`, `anthropic`, `requests`, `numpy`,
+`neo4j`, ...) remain allowed — patching at those boundaries fixtures
+genuinely external state at the kairix edge.
 
 #### Why
 
 Patches couple tests to module structure (`patch("kairix.foo._helper")`
 breaks silently when `_helper` is renamed or moved). They also make
-production code grow defensive shims to remain mockable, which is
-exactly the test-shaped-API smell.
+production code grow defensive shims to remain mockable, which is the
+test-shaped-API smell.
 
 The replacement is **constructor injection** or a **`Protocol` seam**
-from `kairix.core.protocols`. `tests/fakes.py` exists for exactly this:
-canonical Fake* implementations of every domain Protocol.
+from `kairix.core.protocols`. `tests/fakes.py` holds canonical Fake*
+implementations of every domain Protocol. When the only way to test
+a function is to reach into its module's namespace, the function is
+the problem: it has a hidden dependency (function-local imports or
+at-call-time resolution) that should be moved to construction time via
+a `*Deps` dataclass with `default_factory`. See `EmbedDependencies`,
+`LLMBackendDeps`, `BenchmarkDeps` for the canonical shape, then inject
+the Fake* at construction.
 
 #### Detection
 
-`scripts/checks/check-no-internal-patches.sh`. Grep is the right tool
-here — the pattern `@patch("kairix.` is unambiguous at the line level.
-The script:
+`scripts/checks/check-no-internal-patches.sh` delegates to
+`scripts/checks/check_no_internal_patches.py`. The detector is
+AST-based, walks each test file's imports to resolve aliases, and
+flags any of the six shapes against the alias-resolved root.
+Multi-line constructs, aliased imports
+(`import kairix.paths as paths_mod`), from-imports
+(`from kairix import providers as providers_mod`), and full-path
+forms (`kairix.paths.provider_name = ...`) are all caught.
 
-```bash
-grep -rEl '(@patch|with patch)\("kairix\.' tests/ --include='*.py'
-```
+The detector's own tests live at
+`tests/architecture/test_check_no_internal_patches.py` — each of the
+six shapes has a positive (kairix target → violation) and negative
+(stdlib/external target → allowed) test. To verify the gate stays
+honest: comment out the detector branch for a shape, run the matching
+positive test, confirm red, restore, confirm green.
 
 #### Examples
 
@@ -1477,7 +1536,7 @@ harness/orchestrator (no per-rule remediation of their own).
 
 #### Why
 
-Convergence with tc-agent-zone (issue #258). A check that fails with
+Convergence with sibling-repo fitness functions (issue #258). A check that fails with
 "AssertionError" or a REMEDIATION that only describes the offence
 wastes one full agent loop while the cure is re-derived. The markers
 turn the failure into an actionable instruction. The verbose
@@ -1564,7 +1623,7 @@ wins):
 
 Files outside every registered tree (top-level config, `.github/`,
 `docker/`, `reference-library/`, etc.) are not constrained by F22.
-Convergence with tc-agent-zone's `path_naming.py` (issue #258);
+Convergence with a sibling repo's `path_naming.py` check (issue #258);
 kairix uses its own repo layout.
 
 #### Why
@@ -1600,7 +1659,7 @@ Allowed:
 
 ```
 kairix/core/search/pipeline.py
-kairix/_azure.py                          # leading-underscore private
+kairix/providers/_base.py                 # leading-underscore private
 tests/search/test_pipeline.py
 tests/bdd/features/search_returns_hits.feature
 scripts/checks/check_path_naming.py
@@ -1628,7 +1687,7 @@ allow-list (intentionally narrow) covers `.git`, `.github`,
 `coverage`, `dist`, `build`, and any directory whose name starts
 with `.` (dotfile config trees in general).
 
-Convergence with tc-agent-zone's `repo_ia.py` IA1 check (issue #258).
+Convergence with a sibling repo's `repo_ia.py` IA1 check (issue #258).
 
 #### Why
 
@@ -1682,6 +1741,388 @@ Write a one-screen `<dir>/README.md` with three sections:
 Then delete the corresponding line from
 `.architecture/baseline/readme-coverage-files.txt`. The baseline is
 expected to shrink monotonically.
+
+### F24 — No imports of `tests.*` in `kairix/` production code
+
+#### Statement
+
+Production code under `kairix/**/*.py` MUST NOT contain any
+`from tests.<...> import <...>` or `import tests[...]` statement.
+The `tests/` package is excluded from the published wheel by
+`setuptools` packaging configuration — any production reference to
+`tests.*` works on a dev checkout (where pytest puts the repo root
+on `sys.path`) but raises `ModuleNotFoundError: No module named
+'tests'` the moment an end user `pip install`s kairix.
+
+This rule was created in response to the v2026.5.15.1 → v2026.5.15.2
+incident: a production module had `from tests.fakes import
+FakeVectorRepository` as a default-parameter import. CI was green
+(tests run from the repo, `tests/` is importable). The first end
+user who ran the installed wheel hit a boot-time crash. F24 codifies
+that mistake into a mechanical gate. Issue #266.
+
+#### Why
+
+The wheel doesn't ship `tests/`. Anything in `tests/fakes.py` or
+`tests/conftest.py` is invisible to a `pip install` user. Imports of
+`tests.*` in production therefore break the installed posture, even
+though they "work" locally. The only way to catch this *before*
+release is to forbid the import shape outright — by the time it
+shows up in a release-candidate smoke test, the dogfood loop has
+already swallowed the noise.
+
+#### Detection
+
+`scripts/checks/check_no_test_imports_in_prod.py`. AST-walks every
+`kairix/**/*.py` file:
+
+  - `ast.ImportFrom` where `node.module` is `"tests"` or starts with
+    `"tests."` → flagged.
+  - `ast.Import` where any `alias.name` is `"tests"` or starts with
+    `"tests."` → flagged.
+
+The baseline at
+`.architecture/baseline/no-test-imports-in-prod-files.txt` ships
+empty — the v2026.5.15.2 release cleaned out the only known
+violation. Net-new violations block at pre-commit, in
+`safe-commit.sh`, and in CI Stage 0.
+
+#### Examples
+
+Rejected:
+
+```python
+# kairix/core/search/pipeline.py
+from tests.fakes import FakeVectorRepository      # tests/ not in wheel
+import tests                                      # ditto
+from tests import fakes                           # ditto
+from tests.fixtures.docs import SAMPLE_PAYLOAD    # ditto, deeper path
+```
+
+Allowed:
+
+```python
+# kairix/core/search/pipeline.py
+from kairix.core.vector.null import NullVectorRepository
+from kairix.core.protocols import VectorRepository
+import json
+```
+
+#### Fix pattern
+
+Move the symbol you needed out of `tests/` and into `kairix/`. The
+common case is a production-quality default implementation that was
+living in `tests/fakes.py` — re-home it under `kairix/` (for example
+as a `NullX` / `InMemoryX` in the relevant domain package) so it
+ships with the wheel. If the import was for a test seam, the
+production code shouldn't carry that seam at all — inject the
+dependency via a constructor argument and let the test pass the
+fake explicitly (the canonical kairix pattern).
+
+After fixing, verify from the installed-wheel posture, not just the
+repo:
+
+```
+pip install -e .
+python -c "import kairix.<your-module>"
+```
+
+That mirrors what the dogfood and release smoke tests do, and proves
+the import works without `tests/` on `sys.path`.
+
+---
+
+### F26 — `kairix/core/**` may not import providers/ or transport/
+
+#### Statement
+
+No Python file under `kairix/core/` may import from `kairix/providers/`
+or `kairix/transport/`. Domain code crosses those boundaries through
+Protocols only.
+
+Allowed from core: sibling `kairix.core.*` modules, `kairix.core.protocols`
+(the seam), and any non-kairix import. Rejected: any `Import` or
+`ImportFrom` whose module path equals or starts with
+`kairix.providers.` or `kairix.transport.`.
+
+Pre-existing violations are grandfathered in
+`.architecture/baseline/f26-files.txt`. The check is a no-op when
+`kairix/core/` does not yet exist (fresh checkout before the
+three-layer scaffold lands).
+
+#### Why
+
+The three-layer provider-plugin split
+(`docs/architecture/provider-plugin-architecture.md`) puts a hard
+boundary between domain logic, universal endpoint concerns, and
+per-provider plugins. Without the F26 gate, every new perf concern
+accretes another homegrown class inside `kairix/core/`, every new
+provider mutates `_azure.py` further, and the probe code grows
+per-provider conditionals — exactly the AI-gateway-in-process shape
+the ADR exists to undo.
+
+#### Detection
+
+`scripts/checks/check_provider_layer_imports.py`. AST-walks every
+`.py` under `kairix/core/`, scans `Import` and `ImportFrom` nodes,
+flags any forbidden prefix match. Anchored on the dotted boundary so
+hypothetical siblings (`kairix.providers_helpers`) don't false-positive.
+
+#### Examples
+
+Rejected:
+
+```python
+# kairix/core/search/pipeline.py
+from kairix.providers.azure_foundry import AzureFoundryProvider  # F26
+from kairix.transport.pool import make_openai_client            # F26
+import kairix.transport.coalesce                                # F26
+```
+
+Allowed:
+
+```python
+# kairix/core/search/pipeline.py
+from kairix.core.protocols import EmbeddingService, VectorSearchBackend
+from kairix.core.factory import build_search_pipeline
+import logging  # non-kairix is fine
+```
+
+#### Fix pattern
+
+Define or reuse a Protocol in `kairix/core/protocols.py` for the
+capability the import was reaching for, then accept it as a
+constructor / factory parameter. Production wire-up in
+`kairix/core/factory.py` (or the provider registry) supplies the
+concrete provider; tests inject a `Fake*` from `tests/fakes.py`.
+
+---
+
+### F27 — `kairix/providers/<a>/**` may not import another provider
+
+#### Statement
+
+No Python file under `kairix/providers/<plugin>/` may import from
+`kairix/providers/<other>/`. Plugins must remain independently
+shippable as separate pip distributions.
+
+Allowed: sibling imports within the same plugin
+(`kairix.providers.<plugin>.*`), shared scaffolding
+(`kairix.providers._base` and any `_`-prefixed module under
+providers/), `kairix.core.*`, `kairix.transport.*`, and non-kairix
+imports. Rejected: any import whose first path segment under
+`kairix.providers.` names a different plugin.
+
+Pre-existing violations are grandfathered in
+`.architecture/baseline/f27-files.txt`. The check is a no-op when
+`kairix/providers/` doesn't exist or holds no plugin subdirectories.
+
+#### Why
+
+The plugin model in the ADR
+(`docs/architecture/provider-plugin-architecture.md` — "Plugin
+discovery") is that a third party can `pip install kairix-provider-foo`
+and register a new endpoint family with zero kairix changes. A plugin
+that imports another can't be split out without dragging its sibling
+along, and the dependency graph becomes a tangle that defeats the
+plugin model. Shared concerns belong in `kairix/transport/`.
+
+#### Detection
+
+`scripts/checks/check_no_cross_provider.py`. For each `.py` under
+`kairix/providers/`, derives the owning plugin from the path; AST-walks
+imports; flags any `kairix.providers.<other>` reference. The shared
+`kairix.providers._base` module is explicitly NOT cross-plugin.
+
+#### Examples
+
+Rejected:
+
+```python
+# kairix/providers/openai/embed.py
+from kairix.providers.azure_foundry import auth_header  # F27
+import kairix.providers.bedrock.sigv4                   # F27
+```
+
+Allowed:
+
+```python
+# kairix/providers/openai/embed.py
+from kairix.providers._base import Provider                  # shared base
+from kairix.providers.openai.client import build_client      # same plugin
+from kairix.transport.pool import get_openai_client          # transport
+from kairix.core.protocols import LLMBackend                 # Protocol
+```
+
+#### Fix pattern
+
+Extract the shared concern to `kairix/transport/`. If it's genuinely
+provider-specific shape, duplicate it inline rather than importing a
+sibling plugin.
+
+---
+
+### F28 — Every provider plugin has matching BDD coverage
+
+#### Statement
+
+For every plugin directory under `kairix/providers/<name>/`, both
+must hold:
+
+1. `tests/bdd/features/provider_<name>.feature` exists and has at
+   least one Scenario (the per-plugin file).
+2. Every `tests/bdd/features/e2e_provider_*.feature` either has an
+   Examples-table row whose first non-empty cell equals `<name>`,
+   OR carries the opt-out tag `@<name>_no_<journey>` (where
+   `<journey>` is the part after `e2e_provider_` in the filename).
+
+Plugin discovery: every immediate non-`_`-prefixed subdirectory of
+`kairix/providers/` is a plugin. Bare files at the providers root
+(`__init__.py`, `_base.py`) are scaffolding, not plugins.
+
+Pre-existing violations are grandfathered in
+`.architecture/baseline/f28-files.txt` (one entry per plugin missing
+coverage; format `kairix/providers/<name>`). When `kairix/providers/`
+holds no plugins, the check is a no-op. When plugins exist but no
+`e2e_provider_*.feature` files exist yet (Wave 1 scaffold), only the
+per-plugin requirement fires.
+
+#### Why
+
+The E2E features are Scenario Outlines parameterised over the provider
+column — adding a provider is one new fixture + one new Examples row,
+not a copy-pasted feature. F28 is the mechanical guard that keeps
+that property: a plugin without coverage shouldn't ship. The
+per-plugin feature covers auth shape, URL shape, error mapping, and
+model-id semantics (provider-specific); the E2E journey covers the
+generic "user configures provider X → embed/chat works" path.
+
+#### Detection
+
+`scripts/checks/check_provider_bdd_completeness.py`. Discovers plugins
+by listing `kairix/providers/<name>/`; for each, checks per-plugin
+feature presence and Examples-row inclusion across every
+`e2e_provider_*.feature`. The Examples-row matcher tolerates leading
+whitespace, ignores the header row, and matches on the first
+non-empty cell.
+
+#### Examples
+
+Rejected:
+
+```
+kairix/providers/bedrock/        exists, but
+tests/bdd/features/provider_bedrock.feature  does not exist  → F28
+```
+
+```
+tests/bdd/features/e2e_provider_embed.feature  exists with rows
+                                               | openai | ... |
+                                               | azure_foundry | ... |
+kairix/providers/bedrock/  exists  → F28 (no bedrock row, no @bedrock_no_embed tag)
+```
+
+Allowed:
+
+```gherkin
+# tests/bdd/features/provider_openai.feature
+Feature: openai provider plugin
+  Scenario: embed_batch reaches the configured base_url
+    Given an openai plugin configured with base_url=https://api.openai.com
+    When the caller invokes embed_batch with two texts
+    Then the recorded request URL is https://api.openai.com/v1/embeddings
+```
+
+```gherkin
+# tests/bdd/features/e2e_provider_embed.feature
+Feature: E2E provider embed journey
+  Scenario Outline: embed with provider <provider>
+    ...
+    Examples:
+      | provider      | model              |
+      | openai        | text-embedding-3   |
+      | azure_foundry | text-embedding-ada |
+      | bedrock       | titan-embed-v1     |
+```
+
+Allowed (opt-out for an embed-only plugin):
+
+```gherkin
+# tests/bdd/features/e2e_provider_chat.feature
+@embedonly_no_chat
+Feature: E2E provider chat journey
+  Scenario Outline: chat with provider <provider>
+    ...
+```
+
+#### Fix pattern
+
+Create `tests/bdd/features/provider_<name>.feature` with a happy-path
+Scenario per the per-plugin contract (auth, URL, error mapping). Add
+`| <name> | <model> | ... |` rows to every
+`tests/bdd/features/e2e_provider_*.feature`. Use the
+`@<name>_no_<journey>` tag only when the plugin genuinely doesn't
+implement that journey (e.g. embed-only plugin with no chat).
+
+---
+
+### F29 — Performance-measurement code lives only under `kairix/quality/probe/`
+
+#### Statement
+
+Any `.py` file under `kairix/` whose basename matches a
+perf-measurement pattern (`bench*.py`, `microbench*.py`, `*_bench.py`,
+`*_microbench.py`, `*_latency*.py`, `*_perf*.py`) must live under
+`kairix/quality/probe/`. Tests (`tests/**`) and operational probe
+drivers (`scripts/probe*.{py,sh}`) are exempt because they consume
+the probe, they don't reimplement it.
+
+Pre-existing violations are grandfathered in
+`.architecture/baseline/f29-files.txt`. The check is a no-op when
+`kairix/` is absent.
+
+#### Why
+
+The ADR (`docs/architecture/provider-plugin-architecture.md` —
+"Performance") centralises every layer's instrumentation in
+`kairix/quality/probe/` so the PVT release gate and the end-user
+`kairix probe-config` health check share one implementation. Letting
+`transport/` or `providers/` grow ad-hoc benchmarks recreates the
+per-provider conditional jungle the split exists to remove.
+
+#### Detection
+
+`scripts/checks/check_perf_singleton.py`. Walks `kairix/`; for each
+`.py` whose basename matches the perf regex, checks the file's path
+against the allow-list (`kairix/quality/probe/**`, `tests/**`,
+`scripts/probe*`). Flags any perf-named file outside the allow-list.
+
+#### Examples
+
+Rejected:
+
+```
+kairix/transport/pool/bench_pool.py         # F29
+kairix/providers/openai/openai_perf.py      # F29
+kairix/core/search/bm25_latency.py          # F29
+```
+
+Allowed:
+
+```
+kairix/quality/probe/embed_latency.py       # canonical home
+tests/integration/test_embed_perf_floor.py  # latency assertion in a test
+scripts/probe-config-runner.py              # operational driver
+kairix/transport/pool/client.py             # not perf-named — fine
+```
+
+#### Fix pattern
+
+Relocate the measurement script under `kairix/quality/probe/`, expose
+it via the probe CLI, and consume `kairix/transport/telemetry/`'s
+timings hook rather than reinventing measurement plumbing. If the
+"measurement" is a test assertion, move it under `tests/` (the
+allow-list covers that).
 
 ---
 
@@ -2235,5 +2676,12 @@ fitness_functions:
     script: scripts/checks/check_bdd_no_implementation_leaks.py
     baseline: .architecture/baseline/bdd-no-implementation-leaks-files.txt
     precommit_hook: arch-bdd-no-implementation-leaks
+    layer: [pre-commit, safe-commit, ci-stage0]
+
+  - id: F24
+    name: no-test-imports-in-prod
+    script: scripts/checks/check_no_test_imports_in_prod.py
+    baseline: .architecture/baseline/no-test-imports-in-prod-files.txt
+    precommit_hook: arch-no-test-imports-in-prod
     layer: [pre-commit, safe-commit, ci-stage0]
 ```

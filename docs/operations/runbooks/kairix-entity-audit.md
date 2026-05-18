@@ -161,25 +161,42 @@ kairix store crawl --document-root "${KAIRIX_DOCUMENT_ROOT}"
 
 The vault-driven override loader at `${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md` (see [entity-overrides user guide](../../user-guide/entity-overrides.md)) lets curators force-add or force-block entity terms. An override that's allowlisted but never matches in a crawl is dead weight — the term is wrong, the spelling drifted, or the source content was removed.
 
-Kairix does not today track "override matched N times" — see "Gaps" below. The practical audit:
+Closes #263. Every `kairix store crawl` now scans each markdown file's text against the allowlist and records per-override match counts. At end of crawl the summary prints:
 
-```bash
-# 1. List every allowlisted name in the overrides file
-grep -E "^- " "${KAIRIX_DOCUMENT_ROOT}/04-Agent-Knowledge/_entity-overrides.md" \
-  | sed 's/^- //' \
-  | sort -u > /tmp/kairix-overrides-names.txt
-
-# 2. For each name, check whether it exists as a Neo4j entity
-while read -r name; do
-  result=$(kairix entity get "$name" --format json 2>/dev/null | jq -r '.id // "missing"')
-  printf "%-40s %s\n" "$name" "$result"
-done < /tmp/kairix-overrides-names.txt
+```
+Override coverage: N/M overrides matched (K never used)
+Never-matched: ['foo', 'bar', ...]  (first 10 shown)
+Coverage report written: ${KAIRIX_DATA_DIR}/entity-override-coverage.json
 ```
 
-Entries with `missing` are either:
-- A new override the next crawl will pick up (run `kairix store crawl` and re-check).
+The sidecar JSON lets you inspect drift over multiple crawls without re-running the crawler:
+
+```bash
+# Inspect the latest coverage report
+jq . "${KAIRIX_DATA_DIR}/entity-override-coverage.json"
+
+# Surface only the never-matched names
+jq -r '.never_matched[]' "${KAIRIX_DATA_DIR}/entity-override-coverage.json"
+
+# Surface match counts (which overrides fired the most)
+jq -r '.match_counts | to_entries | sort_by(-.value) | .[] | "\(.value)\t\(.key)"' \
+   "${KAIRIX_DATA_DIR}/entity-override-coverage.json"
+```
+
+Entries in `never_matched` are either:
+- A new override the next crawl will pick up (run `kairix store crawl` and re-check the sidecar).
 - A drift-prone name (the canonical form in the document store changed). Edit the override.
 - Genuinely unused. Remove the line from `_entity-overrides.md`.
+
+If you also need to know whether a never-matched override has a stale Neo4j node, fall back to the per-name graph check:
+
+```bash
+jq -r '.never_matched[]' "${KAIRIX_DATA_DIR}/entity-override-coverage.json" \
+  | while read -r name; do
+      result=$(kairix entity get "$name" --format json 2>/dev/null | jq -r '.id // "missing"')
+      printf "%-40s %s\n" "$name" "$result"
+    done
+```
 
 ## Step 5 — Safe purge (destructive, dry-run gated)
 
@@ -246,14 +263,17 @@ Compare the post-audit reflib NDCG@10 against your last green run. If recall reg
 
 When the audit report shows > 50% of entities flagged as junk, or repeated path-repair runs surface different sets of orphans, the underlying problem is graph state, not audit. Stop running prune cycles and rebuild from scratch.
 
-```bash
-# Drop every entity and relationship — destructive
-cypher-shell -a "${KAIRIX_NEO4J_URI}" -u "${KAIRIX_NEO4J_USER}" \
-             -p "${KAIRIX_NEO4J_PASSWORD}" \
-             "MATCH (n) DETACH DELETE n"
+Single command (closes #262): `kairix store crawl --reset` drops the graph and rebuilds in one step. Pair with `--confirm` interactively or `KAIRIX_NONINTERACTIVE=1` in pipelines.
 
-# Full crawl from the document store
-kairix store crawl --document-root "${KAIRIX_DOCUMENT_ROOT}"
+```bash
+# Drop + rebuild — destructive, requires --confirm
+kairix store crawl --reset --confirm --document-root "${KAIRIX_DOCUMENT_ROOT}"
+
+# Scripted equivalent (e.g. cron / CI)
+KAIRIX_NONINTERACTIVE=1 kairix store crawl --reset --document-root "${KAIRIX_DOCUMENT_ROOT}"
+
+# Preview the destruction without writing
+kairix store crawl --reset --confirm --dry-run --document-root "${KAIRIX_DOCUMENT_ROOT}"
 
 # Verify
 kairix store health
@@ -271,8 +291,8 @@ Some surfaces this runbook would benefit from do not exist today. Where the runb
 | `kairix entity count` (just the number, no extra) | `kairix store health --json \| jq '.total_entities'` | filed |
 | `kairix entity audit` (one-shot audit covering Steps 1-4) | curator health + prune-entities.py + entity get loop | filed |
 | `kairix entity purge --dry-run / --execute` (proper CLI, not a script) | `scripts/prune-entities.py` | filed |
-| `kairix store crawl --reset` (drop-and-rebuild in one command) | manual `MATCH (n) DETACH DELETE n` + `kairix store crawl` | filed |
-| Override-coverage stats (matched N times in last crawl) | shell loop over `_entity-overrides.md` + `kairix entity get` | filed |
+| `kairix store crawl --reset` (drop-and-rebuild in one command) | landed (#262) — see Escalation section | done |
+| Override-coverage stats (matched N times in last crawl) | landed (#263) — see Step 4 | done |
 
 Until those land, the steps above are the operational practice.
 

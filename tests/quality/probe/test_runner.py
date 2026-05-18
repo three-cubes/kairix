@@ -1,0 +1,527 @@
+"""Unit tests for `kairix.quality.probe.runner.run_probe_search`.
+
+Pins composition behaviour: sampler picks cases by weight, executor times
+them, stats roll up overall + per-category, bottleneck heuristic fires
+appropriately. Real kairix is never imported — ``suite_loader`` and
+``searcher`` are injected so each test stays hermetic.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+
+import pytest
+
+from kairix.quality.probe.runner import (
+    DEFAULT_P95_THRESHOLD_MS,
+    ProbeResult,
+    SampledQuery,
+    run_probe_search,
+)
+
+pytestmark = pytest.mark.unit
+
+
+@dataclass(frozen=True)
+class _Case:
+    """Minimal stand-in for BenchmarkCase — sampler reads .category, .query, .id."""
+
+    id: str
+    category: str
+    query: str
+    agent: str | None = None
+
+
+def _build_cases() -> list[_Case]:
+    """Cases across every positive-weight category so default-weights work."""
+    out: list[_Case] = []
+    for cat in ("recall", "temporal", "entity", "conceptual", "multi_hop", "procedural"):
+        for i in range(20):
+            out.append(_Case(id=f"{cat}-{i}", category=cat, query=f"q for {cat} {i}"))
+    return out
+
+
+def _suite_loader(_suite: str) -> list[_Case]:
+    return _build_cases()
+
+
+class FakeFastSearchClient:
+    """Implements the :class:`SearchClient` Protocol; returns immediately.
+
+    Used as the ``searcher=`` injection for tests that need the probe to
+    return quickly so the assertion target is the latency-stats / passed-
+    flag logic, not the simulated search time.
+    """
+
+    def search(self, _q: SampledQuery) -> dict[str, str]:
+        return {"results": "fake"}
+
+
+class FakeSlowSearchClient:
+    """Implements the :class:`SearchClient` Protocol; always exceeds p95 threshold.
+
+    Used to verify the failure path of the gate. The 0.55s sleep is just
+    above the 0.5s default threshold so the assertion fires deterministically.
+    """
+
+    def search(self, _q: SampledQuery) -> dict[str, str]:
+        time.sleep(0.55)  # > 500ms threshold
+        return {"results": "slow"}
+
+
+_fast_client = FakeFastSearchClient()
+_slow_client = FakeSlowSearchClient()
+
+
+def test_queries_less_than_one_rejected() -> None:
+    """queries=0 makes no sense; raise rather than silently return empty stats.
+
+    Sabotage-proof: remove the guard and the empty-input branch in
+    latency_stats silently passes 0-stats through.
+    """
+    with pytest.raises(ValueError, match="queries must be >= 1"):
+        run_probe_search(suite="x", queries=0, suite_loader=_suite_loader, searcher=_fast_client.search)
+
+
+def test_concurrency_less_than_one_rejected() -> None:
+    """concurrency=0 forwards to the executor's guard; the runner rejects early too.
+
+    Sabotage-proof: remove the runner-side guard and the error surfaces
+    deeper in the stack as an executor ValueError instead.
+    """
+    with pytest.raises(ValueError, match="concurrency must be >= 1"):
+        run_probe_search(suite="x", queries=5, concurrency=0, suite_loader=_suite_loader, searcher=_fast_client.search)
+
+
+def test_passes_when_fast_search_under_threshold() -> None:
+    """Fast fake search → p95 well under 500ms → passed=True, no bottleneck.
+
+    Sabotage-proof: flip the ``passed=`` calculation to ``>= threshold`` and
+    healthy runs report failure.
+    """
+    result = run_probe_search(
+        suite="x",
+        queries=20,
+        concurrency=2,
+        suite_loader=_suite_loader,
+        searcher=_fast_client.search,
+    )
+    assert isinstance(result, ProbeResult)
+    assert result.queries == 20
+    assert result.passed is True
+    assert result.errors == 0
+    assert result.overall.p95_ms < DEFAULT_P95_THRESHOLD_MS
+    assert result.bottleneck is None
+
+
+def test_fails_when_p95_exceeds_threshold() -> None:
+    """Slow search → p95 > 500ms → passed=False AND bottleneck recommendation set.
+
+    Sabotage-proof: drop the bottleneck call and result.bottleneck stays None.
+    """
+    result = run_probe_search(
+        suite="x",
+        queries=4,
+        concurrency=4,
+        suite_loader=_suite_loader,
+        searcher=_slow_client.search,
+    )
+    assert result.passed is False
+    assert result.overall.p95_ms >= DEFAULT_P95_THRESHOLD_MS
+    assert result.bottleneck is not None
+
+
+def test_per_category_stats_populated() -> None:
+    """Sampling across categories produces per_category[cat] for each present cat.
+
+    Sabotage-proof: skip ``_per_category_stats`` and the dict stays empty.
+    """
+    result = run_probe_search(
+        suite="x",
+        queries=60,  # large enough that every default-weight category lands at least one
+        concurrency=4,
+        suite_loader=_suite_loader,
+        searcher=_fast_client.search,
+    )
+    expected_cats = {"recall", "temporal", "entity", "conceptual", "multi_hop", "procedural"}
+    assert set(result.per_category.keys()) == expected_cats
+    for cat, stats in result.per_category.items():
+        assert stats.n >= 1, f"category {cat} had no samples"
+        assert stats.p50_ms >= 0
+
+
+def test_seed_determinism_pins_query_order() -> None:
+    """Same seed → same sampled-case sequence → same query set executed.
+
+    Sabotage-proof: drop the seed forwarding into ``sample_weighted`` and two
+    runs return different per_category distributions.
+    """
+    seen_ids_a: list[str] = []
+    seen_ids_b: list[str] = []
+
+    def collect_a(q: SampledQuery) -> int:
+        seen_ids_a.append(q.case_id)
+        return 0
+
+    def collect_b(q: SampledQuery) -> int:
+        seen_ids_b.append(q.case_id)
+        return 0
+
+    run_probe_search(suite="x", queries=20, concurrency=1, seed=99, suite_loader=_suite_loader, searcher=collect_a)
+    run_probe_search(suite="x", queries=20, concurrency=1, seed=99, suite_loader=_suite_loader, searcher=collect_b)
+    assert sorted(seen_ids_a) == sorted(seen_ids_b)
+
+
+def test_envelope_round_trip_contains_required_keys() -> None:
+    """to_envelope produces a dict CLI / MCP can serialise.
+
+    Sabotage-proof: drop ``mean_concurrency`` from the envelope and an
+    operator parsing the JSON loses the signal the bottleneck heuristic
+    relied on.
+    """
+    result = run_probe_search(
+        suite="x",
+        queries=5,
+        concurrency=2,
+        suite_loader=_suite_loader,
+        searcher=_fast_client.search,
+    )
+    env = result.to_envelope()
+    required = {
+        "suite",
+        "queries",
+        "concurrency",
+        "seed",
+        "overall",
+        "per_category",
+        "mean_concurrency",
+        "wallclock_s",
+        "azure_429_count",
+        "errors",
+        "p95_threshold_ms",
+        "passed",
+        "bottleneck",
+        "stage_means_ms",
+    }
+    assert required.issubset(env.keys())
+    assert env["bottleneck"] is None  # fast path → healthy → no recommendation
+
+
+def test_envelope_serialises_bottleneck_as_dict_when_present() -> None:
+    """When bottleneck fires, envelope contains a dict with kind + recommended_action.
+
+    Sabotage-proof: leave bottleneck as the bare tuple and JSON serialisation
+    in the CLI fails (tuples become arrays and the agent loses the field names).
+    """
+    result = run_probe_search(
+        suite="x",
+        queries=4,
+        concurrency=4,
+        suite_loader=_suite_loader,
+        searcher=_slow_client.search,
+    )
+    env = result.to_envelope()
+    assert env["bottleneck"] is not None
+    assert "kind" in env["bottleneck"]
+    assert "recommended_action" in env["bottleneck"]
+
+
+def test_errors_in_search_fn_are_counted_not_raised() -> None:
+    """A raising search_fn becomes an error count, not a crash.
+
+    Sabotage-proof: remove the executor's exception capture and one raising
+    case sinks the whole run.
+    """
+
+    def raiser(_q: SampledQuery) -> int:
+        raise RuntimeError("simulated backend failure")
+
+    result = run_probe_search(
+        suite="x",
+        queries=5,
+        concurrency=2,
+        suite_loader=_suite_loader,
+        searcher=raiser,
+    )
+    assert result.errors == 5
+    assert result.passed is False  # any error blocks passing
+
+
+def test_stage_means_aggregated_from_search_result_stage_latencies() -> None:
+    """Closes #282: per-stage wall-clock means surface in the probe envelope.
+
+    When the searcher returns objects carrying ``stage_latency_ms`` (as the
+    real kairix SearchPipeline does post-#282), the probe aggregates a
+    per-stage mean across successful queries. With known per-call stage
+    values (10, 20, 30 ms across 3 calls), the mean is deterministically 20.
+
+    Sabotage-proof: drop the ``_stage_means`` call in run_probe_search and
+    result.stage_means_ms stays empty, breaking the assertion.
+    """
+
+    class _FakeStagedResult:
+        def __init__(self, classify_ms: float, dispatch_ms: float) -> None:
+            self.stage_latency_ms = {"classify": classify_ms, "dispatch": dispatch_ms}
+
+    call = {"i": 0}
+    samples = [(10.0, 100.0), (20.0, 200.0), (30.0, 300.0)]
+
+    def staged_searcher(_q: SampledQuery) -> _FakeStagedResult:
+        idx = call["i"] % len(samples)
+        call["i"] += 1
+        return _FakeStagedResult(*samples[idx])
+
+    result = run_probe_search(
+        suite="x",
+        queries=3,
+        concurrency=1,
+        suite_loader=_suite_loader,
+        searcher=staged_searcher,
+    )
+    assert result.stage_means_ms.get("classify") == 20.0
+    assert result.stage_means_ms.get("dispatch") == 200.0
+    # to_envelope round-trips the stage means as a top-level key.
+    assert result.to_envelope()["stage_means_ms"] == {"classify": 20.0, "dispatch": 200.0}
+
+
+def test_query_cache_dedupes_repeat_queries_through_pipeline() -> None:
+    """SearchPipeline with a query_cache hits the underlying searcher once for two
+    identical queries — proving the cache integrates into the search path (#281).
+
+    Sabotage-proof: drop the ``cached = self.query_cache.get(cache_key)`` /
+    ``if cached is not None: return cached`` block in
+    :meth:`SearchPipeline.search` and the second query falls through to
+    the BM25 backend, so ``doc_repo.calls`` grows to 2 instead of 1.
+    """
+    from kairix.core.search.backends import BM25SearchBackend, VectorSearchBackend
+    from kairix.core.search.config import RetrievalConfig
+    from kairix.core.search.pipeline import SearchPipeline
+    from kairix.core.search.query_cache import QueryResultCache
+    from tests.fakes import (
+        FakeClassifier,
+        FakeDocumentRepository,
+        FakeEmbeddingService,
+        FakeFusion,
+        FakeGraphRepository,
+        FakeSearchLogger,
+        FakeVectorRepository,
+    )
+
+    doc_repo = FakeDocumentRepository(
+        documents=[{"path": "p.md", "title": "T", "content": "alpha bravo", "collection": "c"}]
+    )
+    pipeline = SearchPipeline(
+        classifier=FakeClassifier(),
+        bm25=BM25SearchBackend(doc_repo),
+        vector=VectorSearchBackend(FakeEmbeddingService(), FakeVectorRepository()),
+        graph=FakeGraphRepository(available=True),
+        fusion=FakeFusion(),
+        boosts=[],
+        logger=FakeSearchLogger(),
+        config=RetrievalConfig.defaults(),
+        query_cache=QueryResultCache(max_entries=10, max_age_s=60.0),
+    )
+
+    pipeline.search("alpha bravo")
+    pipeline.search("alpha bravo")
+
+    # Two identical queries → cache hits second time → BM25 backend
+    # invoked exactly once. The fake doc repo tracks every search_fts
+    # call in .calls, so this is the canonical assertion.
+    assert len(doc_repo.calls) == 1
+
+
+def test_stage_means_empty_when_searcher_omits_stage_latency() -> None:
+    """Searchers that don't return SearchResult-shaped objects yield empty means.
+
+    The probe must still produce a valid envelope when stage_latency_ms is
+    absent (e.g. tests using a bare dict-returning fake, or a hypothetical
+    transport client that doesn't surface stage data).
+
+    Sabotage-proof: change the ``isinstance(stage_map, dict)`` guard to
+    ``stage_map is None`` and a dict-returning fake (which has no
+    ``stage_latency_ms`` attribute at all) starts blowing up.
+    """
+    result = run_probe_search(
+        suite="x",
+        queries=5,
+        concurrency=2,
+        suite_loader=_suite_loader,
+        searcher=_fast_client.search,
+    )
+    assert result.stage_means_ms == {}
+
+
+def test_per_query_stages_one_record_per_query_with_full_metadata() -> None:
+    """Each executed query produces one per_query_stages record with all keys.
+
+    The record carries case_id (mapped via task_index, not zip-order),
+    category from the SampledQuery, the per-query latency_ms, and the
+    full stage_latency_ms dict from the underlying SearchResult.
+
+    Sabotage-proof: drop the ``_per_query_stages`` call in run_probe_search
+    and ``result.per_query_stages`` stays empty so this assertion fires.
+    """
+
+    class _Staged:
+        def __init__(self, classify_ms: float, vector_ms: float) -> None:
+            self.stage_latency_ms = {"classify": classify_ms, "vector": vector_ms}
+
+    counter = {"i": 0}
+
+    def staged_searcher(_q: SampledQuery) -> _Staged:
+        counter["i"] += 1
+        return _Staged(classify_ms=float(counter["i"]), vector_ms=10.0 * counter["i"])
+
+    result = run_probe_search(
+        suite="x",
+        queries=4,
+        concurrency=2,
+        suite_loader=_suite_loader,
+        searcher=staged_searcher,
+    )
+    assert len(result.per_query_stages) == 4
+    for record in result.per_query_stages:
+        assert set(record.keys()) == {"case_id", "category", "latency_ms", "stage_latency_ms"}
+        assert isinstance(record["case_id"], str) and record["case_id"]
+        assert isinstance(record["category"], str) and record["category"]
+        assert isinstance(record["latency_ms"], float)
+        assert "classify" in record["stage_latency_ms"]
+        assert "vector" in record["stage_latency_ms"]
+
+
+def test_per_query_stages_preserves_task_to_sampled_mapping_under_concurrency() -> None:
+    """Under concurrency, per_query_stages still maps each result to its sampled query.
+
+    The executor returns results in completion order. The runner uses
+    ``TimedResult.task_index`` to recover the original submission-order
+    SampledQuery — so the case_id/category on each record actually belongs
+    to the query that produced that latency.
+
+    Sabotage-proof: change ``_per_query_stages`` to ``zip(sampled, results)``
+    (the per_category-stats bug pattern) and under concurrency > 1 the
+    case_id <-> stage_map mapping shuffles non-deterministically — the
+    invariant below (the union of case_ids equals the sampled case_ids
+    AND each record's category matches its case_id prefix) breaks.
+    """
+
+    class _StagedReturningSelf:
+        def __init__(self, case_id: str) -> None:
+            self.stage_latency_ms = {"marker": float(hash(case_id) & 0xFFFF)}
+            self.case_id = case_id
+
+    def staged_searcher(q: SampledQuery) -> _StagedReturningSelf:
+        # Tiny variable sleep so completion order differs from submission order
+        # under concurrency. Without this, the bug we're guarding against
+        # wouldn't manifest in test runs that happen to complete in submission
+        # order.
+        time.sleep(0.005 if hash(q.case_id) % 2 == 0 else 0.001)
+        return _StagedReturningSelf(case_id=q.case_id)
+
+    result = run_probe_search(
+        suite="x",
+        queries=12,
+        concurrency=4,
+        suite_loader=_suite_loader,
+        searcher=staged_searcher,
+    )
+    # Each record's category prefix appears in its case_id (per _build_cases).
+    for record in result.per_query_stages:
+        case_id = record["case_id"]
+        category = record["category"]
+        assert case_id.startswith(f"{category}-"), (
+            f"category {category!r} does not match case_id {case_id!r} — task_index mapping shuffled under concurrency"
+        )
+
+
+def test_per_query_stages_handles_results_without_stage_latency() -> None:
+    """Searchers without stage data produce records with empty stage_latency_ms.
+
+    A dict-returning fake has no ``stage_latency_ms`` attribute. The
+    record still surfaces with case_id, category, latency_ms — so an
+    operator can see the per-query latency distribution even when stage
+    decomposition is unavailable.
+
+    Sabotage-proof: change the ``_result_stage_map`` fallback to
+    ``raise`` instead of returning None, and probes using dict-returning
+    fakes start crashing in the runner.
+    """
+    result = run_probe_search(
+        suite="x",
+        queries=3,
+        concurrency=1,
+        suite_loader=_suite_loader,
+        searcher=_fast_client.search,
+    )
+    assert len(result.per_query_stages) == 3
+    for record in result.per_query_stages:
+        assert record["stage_latency_ms"] == {}
+        assert record["case_id"]
+        assert record["category"]
+        assert record["latency_ms"] >= 0.0
+
+
+def test_per_query_stages_envelope_serialises_as_list_of_dicts() -> None:
+    """to_envelope round-trips per_query_stages as a top-level JSON-shaped list.
+
+    CLI ``--json`` and MCP envelope need ``per_query_stages`` to be a
+    JSON-serialisable list of plain dicts. Without it, ``jq``
+    post-processing (the operator's primary tool for ranking slow
+    queries) can't run.
+
+    Sabotage-proof: drop ``per_query_stages`` from the envelope dict
+    and operators lose the slow-query surfacing entirely.
+    """
+    result = run_probe_search(
+        suite="x",
+        queries=5,
+        concurrency=2,
+        suite_loader=_suite_loader,
+        searcher=_fast_client.search,
+    )
+    env = result.to_envelope()
+    assert "per_query_stages" in env
+    assert isinstance(env["per_query_stages"], list)
+    assert len(env["per_query_stages"]) == 5
+    for record in env["per_query_stages"]:
+        assert isinstance(record, dict)
+        assert "case_id" in record
+        assert "latency_ms" in record
+
+
+def test_per_query_stages_aggregation_pins_known_stage_maps() -> None:
+    """Pin _per_query_stages projection from synthetic results with known stage maps.
+
+    Drives the runner directly via the public ``run_probe_search`` API
+    (no internal-function tests, per project policy). Synthetic searcher
+    returns objects with explicit per-call stage maps, and the asserted
+    invariant is: each record's stage_latency_ms equals what the searcher
+    returned for that case_id.
+
+    Sabotage-proof: change ``dict(stage_map)`` in _per_query_stages to a
+    shallow alias and a later mutation of the runner's internal sums dict
+    would leak; this assertion catches that the per-record dicts are
+    independent copies.
+    """
+
+    class _Staged:
+        def __init__(self, case_id: str) -> None:
+            # Encode case_id into the stage value so we can verify the
+            # mapping survived task_index round-tripping.
+            self.stage_latency_ms = {"classify": 7.0, "case_marker": float(len(case_id))}
+            self.case_id = case_id
+
+    def staged_searcher(q: SampledQuery) -> _Staged:
+        return _Staged(case_id=q.case_id)
+
+    result = run_probe_search(
+        suite="x",
+        queries=6,
+        concurrency=1,  # deterministic order for the exact-equality check
+        suite_loader=_suite_loader,
+        searcher=staged_searcher,
+    )
+    for record in result.per_query_stages:
+        assert record["stage_latency_ms"]["classify"] == 7.0
+        assert record["stage_latency_ms"]["case_marker"] == float(len(record["case_id"]))

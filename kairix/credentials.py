@@ -17,13 +17,114 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from kairix.paths import azure_api_version as _azure_api_version
+from kairix.paths import (
+    azure_api_version as _azure_api_version,
+)
+from kairix.paths import (
+    embed_pool_expiry_s as _embed_pool_expiry_s,
+)
+from kairix.paths import (
+    embed_pool_keepalive as _embed_pool_keepalive,
+)
+from kairix.paths import (
+    embed_pool_size as _embed_pool_size,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # Env read lives in kairix.paths.azure_api_version (F4 — env reads stay in paths/secrets).
 AZURE_API_VERSION = _azure_api_version()
+
+
+# Pool config - kairix-side knobs that operators can tune via Azure Key
+# Vault secrets. Defaults sized for peak teaming concurrency (20 agents,
+# 5-15 sustained) with headroom. The keep-alive count balances connection
+# reuse against socket churn under burst load. Stage-timing data (probe
+# sweeps in tier-1 lever 1) showed vector latency grows 240 -> 534 ms going
+# from conc=1 -> conc=10 with the openai SDK default httpx Limits - classic
+# pool contention. These knobs let operators tune for their concurrency
+# profile without code changes.
+EMBED_POOL_MAX_CONNECTIONS = 20
+EMBED_POOL_MAX_KEEPALIVE = 10
+EMBED_POOL_KEEPALIVE_EXPIRY_S = 30.0
+
+
+def _build_http_client(
+    max_connections: int,
+    max_keepalive: int,
+    expiry_s: float,
+    timeout: float,
+) -> Any:
+    """Return an ``httpx.Client`` with explicit ``Limits``, sized for kairix's teaming load.
+
+    Local import keeps httpx out of the kairix critical-path imports for
+    code that uses credentials/auth but doesn't issue HTTP calls.
+    """
+    import httpx
+
+    limits = httpx.Limits(
+        max_connections=max_connections,
+        max_keepalive_connections=max_keepalive,
+        keepalive_expiry=expiry_s,
+    )
+    return httpx.Client(limits=limits, timeout=timeout)
+
+
+def _resolve_pool_config(
+    pool_max_connections: int | None = None,
+    pool_max_keepalive: int | None = None,
+    pool_expiry_s: float | None = None,
+) -> tuple[int, int, float]:
+    """Resolve the pool-size triple, preferring explicit kwargs over env reads.
+
+    Production callers leave all three None and the function reads from
+    kairix.paths (F4 boundary — env reads stay there). Tests pass explicit
+    values to drive ``make_openai_client`` without going through
+    ``monkeypatch.setenv`` (F2 — env state shouldn't leak between tests).
+
+    Invalid env values fall back to the module-level defaults with a
+    logged warning rather than crashing the embed dispatch stage; that
+    fallback behaviour is unit-tested in tests/test_paths.py.
+    """
+    return (
+        _embed_pool_size(EMBED_POOL_MAX_CONNECTIONS) if pool_max_connections is None else pool_max_connections,
+        _embed_pool_keepalive(EMBED_POOL_MAX_KEEPALIVE) if pool_max_keepalive is None else pool_max_keepalive,
+        _embed_pool_expiry_s(EMBED_POOL_KEEPALIVE_EXPIRY_S) if pool_expiry_s is None else pool_expiry_s,
+    )
+
+
+# Three endpoint shapes kairix routes through ``make_openai_client``:
+#
+# 1. **Azure AI Foundry** — ``<resource>.services.ai.azure.com`` — Microsoft's
+#    unified inference surface, the forward-recommended path. We use the
+#    OpenAI-compatible alias at ``/openai/v1`` so the existing openai SDK
+#    keeps working. Native AI Inference SDK migration tracked separately for
+#    multi-provider (Bedrock / Cohere / Mistral) needs.
+# 2. **Legacy Azure OpenAI** — ``<resource>.openai.azure.com`` — the older
+#    Azure-OpenAI-specific endpoint. Still supported by Microsoft today;
+#    being steered off toward Foundry. Uses ``AzureOpenAI(azure_endpoint=...)``.
+# 3. **OpenAI-direct / OpenRouter / other OpenAI-compat** — any other
+#    endpoint. Uses ``OpenAI(base_url=...)``.
+#
+# Ordered detection matters: Foundry endpoints contain "azure" too, so the
+# Foundry check fires FIRST. Without that ordering, Foundry endpoints would
+# be misrouted into ``AzureOpenAI(azure_endpoint=...)``, which expects the
+# legacy URL pattern and would 404 on the embed call.
+_FOUNDRY_HOST_FRAGMENT = "services.ai.azure.com"
+_FOUNDRY_OPENAI_COMPAT_SUFFIX = "/openai/v1"
+_LEGACY_AZURE_FRAGMENTS = ("openai.azure.com", "cognitiveservices.azure.com")
+
+
+def _is_foundry_endpoint(endpoint: str) -> bool:
+    """True for Azure AI Foundry endpoints (``services.ai.azure.com``)."""
+    return _FOUNDRY_HOST_FRAGMENT in endpoint.lower()
+
+
+def _is_legacy_azure_endpoint(endpoint: str) -> bool:
+    """True for legacy Azure OpenAI endpoints (``<r>.openai.azure.com`` etc)."""
+    ep = endpoint.lower()
+    return any(frag in ep for frag in _LEGACY_AZURE_FRAGMENTS) and not _is_foundry_endpoint(endpoint)
 
 
 @dataclass(frozen=True)
@@ -37,9 +138,13 @@ class Credentials:
 
     @property
     def is_azure(self) -> bool:
-        """True if the endpoint is an Azure deployment."""
-        ep = self.endpoint.lower()
-        return "azure" in ep or "cognitiveservices" in ep
+        """True for any Azure-hosted endpoint (Foundry or legacy)."""
+        return _is_foundry_endpoint(self.endpoint) or _is_legacy_azure_endpoint(self.endpoint)
+
+    @property
+    def is_foundry(self) -> bool:
+        """True specifically for the Azure AI Foundry unified-inference surface."""
+        return _is_foundry_endpoint(self.endpoint)
 
 
 @dataclass(frozen=True)
@@ -57,13 +162,42 @@ def make_openai_client(
     *,
     max_retries: int = 5,
     timeout: float = 30.0,
+    pool_max_connections: int | None = None,
+    pool_max_keepalive: int | None = None,
+    pool_expiry_s: float | None = None,
 ) -> Any:
-    """Create an OpenAI-compatible client. Auto-detects Azure from the endpoint URL.
+    """Create an OpenAI-compatible client for any of the three endpoint shapes.
 
-    Single factory — all client creation in kairix goes through this function.
+    See the module-level comment block above this function for the three
+    branches (Foundry / legacy Azure / OpenAI-direct). The Foundry branch
+    uses the ``/openai/v1`` alias so the openai SDK can call AI Foundry
+    without a Microsoft-specific SDK dependency.
+
+    Pool config (``pool_max_connections`` / ``pool_max_keepalive`` /
+    ``pool_expiry_s``) — when None (production default), reads from
+    ``kairix.paths`` env helpers. Tests pass explicit values directly to
+    avoid ``monkeypatch.setenv`` (F2).
     """
-    is_azure = "azure" in endpoint.lower() or "cognitiveservices" in endpoint.lower()
-    if is_azure:
+    max_conns, max_keepalive, expiry_s = _resolve_pool_config(pool_max_connections, pool_max_keepalive, pool_expiry_s)
+    http_client = _build_http_client(max_conns, max_keepalive, expiry_s, timeout)
+
+    if _is_foundry_endpoint(endpoint):
+        from openai import OpenAI
+
+        base_url = endpoint.rstrip("/")
+        # Add the openai-compat alias suffix if the operator didn't already
+        # include it — tolerates both forms in the configured secret.
+        if not base_url.endswith(_FOUNDRY_OPENAI_COMPAT_SUFFIX):
+            base_url = base_url + _FOUNDRY_OPENAI_COMPAT_SUFFIX
+        return OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=max_retries,
+            timeout=timeout,
+            http_client=http_client,
+        )
+
+    if _is_legacy_azure_endpoint(endpoint):
         from openai import AzureOpenAI
 
         return AzureOpenAI(
@@ -72,16 +206,18 @@ def make_openai_client(
             api_version=AZURE_API_VERSION,
             max_retries=max_retries,
             timeout=timeout,
+            http_client=http_client,
         )
-    else:
-        from openai import OpenAI
 
-        return OpenAI(
-            api_key=api_key,
-            base_url=endpoint,
-            max_retries=max_retries,
-            timeout=timeout,
-        )
+    from openai import OpenAI
+
+    return OpenAI(
+        api_key=api_key,
+        base_url=endpoint,
+        max_retries=max_retries,
+        timeout=timeout,
+        http_client=http_client,
+    )
 
 
 def get_credentials(purpose: str) -> Credentials | GraphCredentials | None:

@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 _F = TypeVar("_F", bound=Callable[..., dict[str, Any]])
 
 
-def wrap_tool_errors(handler: _F) -> _F:
+def wrap_tool_errors(handler: _F) -> _F:  # NOSONAR S6796 — PEP 695 needs 3.12+, kairix on 3.10+
     """Wrap an MCP tool handler so escaped exceptions become error dicts.
 
     The wrapped handler:

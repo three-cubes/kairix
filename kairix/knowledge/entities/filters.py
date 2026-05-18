@@ -13,8 +13,40 @@ no module-level globals, all configuration injected at construction.
 from __future__ import annotations
 
 import re
+from collections import Counter
+from dataclasses import dataclass, field
 
 from kairix.knowledge.entities.protocols import Suggestion, SuggestionFilter
+
+
+@dataclass
+class OverrideMatchCounter:
+    """Per-override match counter shared between filter and crawl orchestrator.
+
+    Closes #263. The :class:`KnownEntityAllowlist` records one increment
+    per override-text that matches an input context; the crawl orchestrator
+    reads the counts at end-of-crawl to write the coverage report. This
+    object is the DI seam — passed into the filter at construction so
+    the filter has nowhere else to write to (no module-level globals,
+    no thread-locals — F1/F2 clean).
+
+    ``counts`` maps override text to its match count. ``record(text)``
+    increments by one; absent keys default to zero. The crawl writer
+    intersects ``counts`` keys with the known allowlist to derive the
+    never-matched set.
+    """
+
+    counts: Counter[str] = field(default_factory=Counter)
+
+    def record(self, text: str) -> None:
+        """Increment the match count for ``text`` by one."""
+        if text:
+            self.counts[text] += 1
+
+    def get(self, text: str) -> int:
+        """Return the recorded match count for ``text`` (0 if absent)."""
+        return int(self.counts.get(text, 0))
+
 
 # ---------------------------------------------------------------------------
 # Role-phrase filter — drops job titles / role descriptors
@@ -41,7 +73,7 @@ class RolePhraseFilter:
     # Words after the article must be alphabetic; allows uppercase acronyms.
     # IGNORECASE is set, so character classes use `[a-z]` only — adding `A-Z`
     # would duplicate every range under IGNORECASE (Sonar python:S5869).
-    _ARTICLE_PATTERN = re.compile(r"^the\s+[a-z][a-z]*(?:\s+[a-z][a-z]*)+$", re.IGNORECASE)
+    _ARTICLE_PATTERN = re.compile(r"^the\s+[a-z]+(?:\s+[a-z]+)+$", re.IGNORECASE)
 
     # Plain-role: capitalised word + role noun (no further words — that would
     # imply a person's full title, e.g. "John Smith Director" is unusual; we
@@ -102,8 +134,20 @@ class KnownEntityAllowlist:
     which the word-boundary regex matches case-insensitively here.
     """
 
-    def __init__(self, entities: list[Suggestion]) -> None:
+    def __init__(
+        self,
+        entities: list[Suggestion],
+        *,
+        match_counter: OverrideMatchCounter | None = None,
+    ) -> None:
         self._entities: list[Suggestion] = list(entities)
+        # DI seam for #263: when a counter is injected, every word-boundary
+        # match against ``context`` records an increment for the override
+        # text. Production crawl-time wiring passes a shared counter the
+        # orchestrator later reads to write the coverage report. Tests
+        # pass their own counter to assert on increments. Default None
+        # keeps existing suggest-pipeline callers unchanged.
+        self._match_counter: OverrideMatchCounter | None = match_counter
 
     def apply(self, suggestions: list[Suggestion], context: str) -> list[Suggestion]:
         result: list[Suggestion] = list(suggestions)
@@ -112,9 +156,15 @@ class KnownEntityAllowlist:
             text = entry.get("text", "")
             if not text:
                 continue
-            if text.lower() in existing_texts:
-                continue
             if not _matches_word_boundary(text, context):
+                continue
+            # Record the match before dedup — overrides that match get
+            # counted even when an earlier NER hit already covered the
+            # same surface form. The coverage report is "did this override
+            # ever fire," not "did it produce a unique promotion."
+            if self._match_counter is not None:
+                self._match_counter.record(text)
+            if text.lower() in existing_texts:
                 continue
             promoted: Suggestion = {
                 "text": text,

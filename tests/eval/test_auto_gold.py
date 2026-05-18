@@ -159,9 +159,9 @@ class TestBuildSuite:
             assert "score_method" in case
 
     def test_writes_utf8_for_non_ascii_titles(self, tmp_path: Path) -> None:
-        """Regression for #143 Phase 0: build_suite previously opened the
-        output file without encoding= so non-ASCII titles were mangled or
-        raised UnicodeEncodeError on non-UTF-8 hosts."""
+        """build_suite must open the output with encoding=utf-8 so non-ASCII
+        titles round-trip cleanly on non-UTF-8 hosts (otherwise titles are
+        mangled or build_suite raises UnicodeEncodeError)."""
         import yaml
 
         from kairix.quality.eval.auto_gold import build_suite

@@ -51,6 +51,9 @@ _SECRET_ENV_MAP = {
     "kairix-embed-api-key": "KAIRIX_EMBED_API_KEY",
     "kairix-embed-endpoint": "KAIRIX_EMBED_ENDPOINT",
     "kairix-embed-model": "KAIRIX_EMBED_MODEL",
+    "kairix-embed-pool-size": "KAIRIX_EMBED_POOL_SIZE",
+    "kairix-embed-pool-keepalive": "KAIRIX_EMBED_POOL_KEEPALIVE",
+    "kairix-embed-pool-expiry-s": "KAIRIX_EMBED_POOL_EXPIRY_S",
     "kairix-neo4j-password": "KAIRIX_NEO4J_PASSWORD",
 }
 
@@ -203,7 +206,7 @@ def _read_secret_from_keyvault(name: str) -> str | None:
         logger.warning("get_secret: KV fetch error for requested key")
         return None
     if result.returncode == 0 and result.stdout.strip():
-        return result.stdout.strip()  # nosec: returns secret value to caller (intended)
+        return result.stdout.strip()
     logger.warning("get_secret: KV fetch failed for requested key")
     return None
 
@@ -255,6 +258,18 @@ def neo4j_uri(default: str = "bolt://localhost:7687") -> str:
     and password reads from a single boundary.
     """
     return os.environ.get("KAIRIX_NEO4J_URI", default)
+
+
+def neo4j_uri_configured() -> bool:
+    """True when an operator has explicitly set ``KAIRIX_NEO4J_URI``.
+
+    Distinct from ``neo4j_uri()`` which falls back to a localhost default —
+    that default is indistinguishable from "operator wants localhost".
+    Callers who need to know whether the operator wants Neo4j at all
+    (e.g. to skip a 22 MB driver import on deployments without it) use
+    this helper instead.
+    """
+    return bool(os.environ.get("KAIRIX_NEO4J_URI"))
 
 
 def neo4j_user(default: str = "neo4j") -> str:

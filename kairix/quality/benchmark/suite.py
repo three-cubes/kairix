@@ -146,8 +146,13 @@ def load_yaml_file(path: Path) -> dict:
     return raw
 
 
-def validate_meta_and_cases_structure(raw: dict, path: str) -> tuple[dict, list[dict], list[str]]:
-    """Validate root dict has valid meta and cases. Returns (meta, raw_cases, errors)."""
+def validate_meta_and_cases_structure(raw: dict, _path: str) -> tuple[dict, list[dict], list[str]]:
+    """Validate root dict has valid meta and cases. Returns (meta, raw_cases, errors).
+
+    ``_path`` is accepted for caller-side symmetry with ``load_suite``/CLI
+    error messages, which thread the source path through; this validator
+    only inspects the parsed ``raw`` mapping.
+    """
     meta = raw.get("meta", {})
     if not isinstance(meta, dict):
         raise ValueError("'meta' must be a mapping")
@@ -424,7 +429,6 @@ def _check_duplicate_gold_titles(suite: BenchmarkSuite) -> list[str]:
 def validate_suite(
     suite: BenchmarkSuite,
     db: sqlite3.Connection,
-    strict: bool = True,
 ) -> list[str]:
     """
     Validate a benchmark suite against the kairix index.
@@ -434,12 +438,14 @@ def validate_suite(
     - No duplicate gold paths across the suite
 
     Args:
-        suite:  The BenchmarkSuite to validate.
-        db:     Open sqlite3.Connection to the kairix index.
-        strict: If True, missing gold paths are errors. If False, they are warnings.
+        suite: The BenchmarkSuite to validate.
+        db:    Open sqlite3.Connection to the kairix index.
 
     Returns:
-        List of error strings. Empty list means all checks passed.
+        List of error strings. Empty list means all checks passed. Callers
+        decide whether to treat any non-empty result as a hard failure or a
+        warning (see ``kairix.quality.benchmark.cli.cmd_run`` for the
+        warning path and ``cmd_validate`` for the strict-error path).
     """
     path_based_recall: list[tuple[str, str]] = [
         (case.id, case.gold_path)

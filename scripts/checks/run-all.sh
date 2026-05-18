@@ -88,6 +88,39 @@ python3 "${SCRIPT_DIR}/check_path_naming.py" || overall=1
 # F23 — every top-level directory has a README.md
 python3 "${SCRIPT_DIR}/check_readme_coverage.py" || overall=1
 
+# F24 — no imports of tests.* in kairix production code
+python3 "${SCRIPT_DIR}/check_no_test_imports_in_prod.py" || overall=1
+
+# F25 — every CLI subcommand has an MCP affordance (real binding or escalation stub)
+python3 "${SCRIPT_DIR}/check_capability_affordance.py" || overall=1
+
+# F26 — kairix/core/** may not import providers/ or transport/
+python3 "${SCRIPT_DIR}/check_provider_layer_imports.py" || overall=1
+
+# F27 — providers/<a>/ may not import providers/<b>/
+python3 "${SCRIPT_DIR}/check_no_cross_provider.py" || overall=1
+
+# F28 — every provider/<name>/ has matching BDD coverage
+python3 "${SCRIPT_DIR}/check_provider_bdd_completeness.py" || overall=1
+
+# F29 — perf-measurement code only under kairix/quality/probe/
+python3 "${SCRIPT_DIR}/check_perf_singleton.py" || overall=1
+
+# G9 — every services/<name>/ has a README.md (Go side; mirrors F23)
+python3 "${SCRIPT_DIR}/check_go_readme_coverage.py" || overall=1
+
+# G1 — every Go binary exposes --version
+python3 "${SCRIPT_DIR}/check_go_version_flag.py" || overall=1
+
+# G10 — every direct Go dependency carries a rationale in DEPENDENCIES.md
+python3 "${SCRIPT_DIR}/check_go_dependency_rationale.py" || overall=1
+
+# G6 — no panic() in non-main packages
+python3 "${SCRIPT_DIR}/check_go_no_panic_outside_main.py" || overall=1
+
+# G8 — logging via log/slog only (no fmt.Print* / log.Print* in prod)
+python3 "${SCRIPT_DIR}/check_go_logging_discipline.py" || overall=1
+
 # F7 — needs coverage.xml. Skip if not present or skip flag set.
 if [[ "$skip_coverage" -eq 0 ]]; then
     if [[ -f "${REPO_ROOT}/coverage.xml" ]]; then

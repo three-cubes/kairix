@@ -121,18 +121,24 @@ def _vector_search(  # pragma: no cover — prod-only path; tests inject FakeRet
 
     Module-level helper retained for the deprecated ``pool_candidates``
     wrapper — Phase 4 removes this once all callers route through
-    ``GoldBuilder._retriever``. Production-only path: depends on a real
-    Azure embedding endpoint plus a populated usearch index. Tests use
-    ``FakeRetriever`` injected into ``GoldBuilder`` and never reach this
-    function.
+    ``GoldBuilder._retriever``. Production-only path: depends on the
+    configured provider plugin's embedding endpoint plus a populated
+    usearch index. Tests use ``FakeRetriever`` injected into
+    ``GoldBuilder`` and never reach this function.
     """
     try:
         import numpy as np
 
-        from kairix._azure import embed_text
         from kairix.core.search.vec_index import get_vector_index
+        from kairix.paths import provider_name
+        from kairix.providers import get_provider
+        from kairix.transport.embed_service import ProviderEmbeddingService
 
-        vec = embed_text(query)
+        name = provider_name()
+        if name is None:
+            return []
+        embedding_service = ProviderEmbeddingService(get_provider(name))
+        vec = embedding_service.embed(query)
         if not vec:
             return []
 
@@ -175,7 +181,8 @@ class GoldBuilder:
 
     Constructor takes:
       - ``llm_judge``: ``LLMJudge`` protocol implementation (production:
-        ``kairix.quality.eval.judge.LLMJudge`` wrapping ``AzureChatBackend``;
+        ``kairix.quality.eval.judge.LLMJudge`` wrapping
+        :class:`~kairix.quality.eval.chat_backend.ProviderEvalChatBackend`;
         tests: ``FakeLLMJudge``).
       - ``retriever``: ``Retriever`` protocol implementation. Used for the
         ``vector`` system path; BM25 weighted variants stay on the private
@@ -183,8 +190,8 @@ class GoldBuilder:
         lifts this onto ``DocumentRepository``).
 
     Both are optional; when omitted, production defaults are constructed
-    lazily on first use (``LLMJudge(chat_backend=AzureChatBackend())`` and
-    a ``_DefaultGoldRetriever`` shim).
+    lazily on first use (``LLMJudge(chat_backend=ProviderEvalChatBackend.from_config())``
+    and a ``_DefaultGoldRetriever`` shim).
     """
 
     def __init__(
@@ -208,13 +215,13 @@ class GoldBuilder:
     def _get_llm_judge(self) -> LLMJudgeProtocol:
         """Return the configured LLMJudge or construct a production default."""
         # The lazy-construction branch is production-only — tests always inject
-        # FakeLLMJudge via the constructor, so the AzureChatBackend wiring runs
+        # FakeLLMJudge via the constructor, so the provider-backed wiring runs
         # only from CLI entry points (kairix.quality.eval.cli).
         if self._llm_judge is None:  # pragma: no cover — prod-only lazy default; tests inject FakeLLMJudge
-            from kairix._azure import AzureChatBackend
+            from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
             from kairix.quality.eval.judge import LLMJudge as ProductionLLMJudge
 
-            self._llm_judge = ProductionLLMJudge(chat_backend=AzureChatBackend())
+            self._llm_judge = ProductionLLMJudge(chat_backend=ProviderEvalChatBackend.from_config())
         return self._llm_judge
 
     def _get_retriever(self) -> RetrieverProtocol:
@@ -440,7 +447,7 @@ class GoldBuilder:
         Runs the judge ``runs`` times and uses majority vote for the final
         grade. ``api_key`` / ``endpoint`` are forwarded to judge
         implementations that resolve credentials per-call (e.g. the
-        production ``LLMJudge`` wrapping ``AzureChatBackend``).
+        production ``LLMJudge`` wrapping ``ProviderEvalChatBackend``).
         """
         if not candidates:
             return []

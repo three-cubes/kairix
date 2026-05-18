@@ -131,8 +131,8 @@ def _default_retrieve(
     """Production retrieve callable — delegates to ``runner.retrieve``.
 
     Wrapper exists so ``BenchmarkDeps.retrieve`` has a stable, typed
-    default that doesn't import ``runner.retrieve`` at module-import time
-    (avoids the circular-import risk callers historically tripped on).
+    default that doesn't import ``runner.retrieve`` at module-import
+    time (avoiding a circular-import risk on the retrieve callers).
     """
     return retrieve(
         query=query,
@@ -144,11 +144,66 @@ def _default_retrieve(
     )
 
 
-def _default_chat_backend() -> ChatBackend:
-    """Construct the production chat backend — Azure-hosted gpt-4o-mini."""
-    from kairix._azure import AzureChatBackend
+class _LazyDefaultChatBackend:
+    """Production chat backend that defers provider resolution to call-time.
 
-    return AzureChatBackend()
+    Constructed eagerly (``BenchmarkDeps.chat_backend`` is a dataclass
+    ``default_factory`` — the field is built every time ``BenchmarkDeps()``
+    runs, even in tests that override the field via constructor kwarg),
+    but the underlying ``kairix.config.yaml`` lookup + provider plugin
+    resolution happens on first ``complete()`` call. This preserves the
+    historical contract (``BenchmarkDeps()`` constructs cheaply; the chat
+    backend only fails when actually used and credentials / config are
+    missing) while routing the production path through the provider plugin.
+
+    The wider ``llm_judge`` try/except swallows the ValueError on
+    ``complete()`` and returns 0.0, matching the historical credential-
+    failure behaviour.
+    """
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        api_key: str,
+        endpoint: str,
+        deployment: str,
+        system: str | None = None,
+        temperature: float = 0.0,
+        timeout_s: float = 30.0,
+    ) -> str:
+        from kairix.paths import provider_name
+        from kairix.providers import get_provider
+        from kairix.quality.eval.chat_backend import ProviderEvalChatBackend
+
+        name = provider_name()
+        if name is None:
+            raise ValueError(
+                "kairix.config.yaml is missing the required 'provider:' field. "
+                "fix: set 'provider: <plugin-name>' in kairix.config.yaml. "
+                "next: see docs/architecture/provider-plugin-architecture.md."
+            )
+        backend = ProviderEvalChatBackend(get_provider(name))
+        return backend.complete(
+            prompt,
+            api_key=api_key,
+            endpoint=endpoint,
+            deployment=deployment,
+            system=system,
+            temperature=temperature,
+            timeout_s=timeout_s,
+        )
+
+
+def _default_chat_backend() -> ChatBackend:
+    """Construct the production chat backend — backed by the configured provider plugin.
+
+    Returns a :class:`_LazyDefaultChatBackend` that resolves the plugin from
+    ``kairix.config.yaml``'s ``provider:`` field on the first ``complete()``
+    call (deferred so ``BenchmarkDeps()`` stays cheap to construct even
+    when the config is incomplete).
+    """
+    return _LazyDefaultChatBackend()
 
 
 @dataclass
@@ -156,12 +211,10 @@ class BenchmarkDeps:
     """Injectable dependencies for ``run_benchmark`` and its helpers.
 
     Each field defaults to a production implementation; tests construct
-    ``BenchmarkDeps`` with fakes from ``tests/fakes.py``.
-
-    The dataclass replaces the per-helper ``*_fn=None`` substitution kwargs
-    that previously threaded through ``run_benchmark`` / ``retrieve_case`` /
-    ``score_case`` (the F6 violation that the issue resolves). All three
-    boundary collaborators are now reified as one typed bag.
+    ``BenchmarkDeps`` with fakes from ``tests/fakes.py``. All boundary
+    collaborators that ``run_benchmark`` / ``retrieve_case`` / ``score_case``
+    delegate to are reified as one typed bag (F6 — no ``*_fn=None`` test
+    seams threaded through production signatures).
     """
 
     classifier: ContentClassifier = field(default_factory=DefaultContentClassifier)
@@ -255,7 +308,8 @@ def llm_judge(
                       ``run-benchmark-hybrid.py`` scorer for cross-run
                       comparability.
         chat_backend: ``ChatBackend`` protocol implementation. Defaults to
-                      ``AzureChatBackend`` constructed lazily.
+                      ``_default_chat_backend()`` constructed lazily (resolves
+                      the configured provider plugin from ``kairix.config.yaml``).
 
     Returns 0.0 on any failure (API error, parse error, timeout).
     """
@@ -266,11 +320,9 @@ def llm_judge(
         if chat_backend is None:
             # Lazy production default — covered by a unit test that drops
             # the kwarg and asserts the wider try/except returns 0.0 on
-            # the inevitable credential-resolution failure. Tests that
-            # exercise the success path inject FakeChatBackend.
-            from kairix._azure import AzureChatBackend
-
-            chat_backend = AzureChatBackend()
+            # the inevitable plugin / credential resolution failure. Tests
+            # that exercise the success path inject FakeChatBackend.
+            chat_backend = _default_chat_backend()
 
         # Match the original run-benchmark-hybrid.py scorer — paths only, 6-point scale.
         # This ensures scores are comparable across runs.
@@ -423,6 +475,46 @@ def format_interpretation(result: BenchmarkResult) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _score_classification(case: Any, _paths: list[str], deps: BenchmarkDeps) -> tuple[float, dict[str, Any]]:
+    return classification_score(case.query, case.expected_type or "", classifier=deps.classifier), {}
+
+
+def _score_exact(case: Any, paths: list[str], _deps: BenchmarkDeps) -> tuple[float, dict[str, Any]]:
+    if case.gold_title:
+        score = 1.0 if title_in_retrieved(case.gold_title, paths, EXACT_MATCH_TOPK) else 0.0
+    else:
+        score = exact_match(paths, case.gold_path or "")
+    return score, {}
+
+
+def _score_fuzzy(case: Any, paths: list[str], _deps: BenchmarkDeps) -> tuple[float, dict[str, Any]]:
+    if case.gold_title:
+        score = 1.0 if title_in_retrieved(case.gold_title, paths, FUZZY_MATCH_TOPK) else 0.0
+    else:
+        score = fuzzy_match(paths, case.gold_path or "")
+    return score, {}
+
+
+def _score_ndcg(case: Any, paths: list[str], _deps: BenchmarkDeps) -> tuple[float, dict[str, Any]]:
+    effective_gold = (
+        case.gold_titles or case.gold_paths or ([{"path": case.gold_path, "relevance": 2}] if case.gold_path else [])
+    )
+    score = ndcg_graded(paths, effective_gold, k=10)
+    ndcg_detail = {
+        "hit_at_5": hit_at_k_graded(paths, effective_gold, k=5),
+        "rr": reciprocal_rank_graded(paths, effective_gold, k=10),
+    }
+    return score, ndcg_detail
+
+
+_SCORE_DISPATCH: dict[str, Callable[[Any, list[str], BenchmarkDeps], tuple[float, dict[str, Any]]]] = {
+    "classification": _score_classification,
+    "exact": _score_exact,
+    "fuzzy": _score_fuzzy,
+    "ndcg": _score_ndcg,
+}
+
+
 def score_case(
     case: Any,
     paths: list[str],
@@ -444,37 +536,9 @@ def score_case(
     """
     _ = retrieval_meta  # explicit drop documents intent
     deps = deps if deps is not None else BenchmarkDeps()
-
-    if case.score_method == "classification":
-        return classification_score(case.query, case.expected_type or "", classifier=deps.classifier), {}
-
-    if case.score_method == "exact":
-        if case.gold_title:
-            score = 1.0 if title_in_retrieved(case.gold_title, paths, EXACT_MATCH_TOPK) else 0.0
-        else:
-            score = exact_match(paths, case.gold_path or "")
-        return score, {}
-
-    if case.score_method == "fuzzy":
-        if case.gold_title:
-            score = 1.0 if title_in_retrieved(case.gold_title, paths, FUZZY_MATCH_TOPK) else 0.0
-        else:
-            score = fuzzy_match(paths, case.gold_path or "")
-        return score, {}
-
-    if case.score_method == "ndcg":
-        effective_gold = (
-            case.gold_titles
-            or case.gold_paths
-            or ([{"path": case.gold_path, "relevance": 2}] if case.gold_path else [])
-        )
-        score = ndcg_graded(paths, effective_gold, k=10)
-        ndcg_detail = {
-            "hit_at_5": hit_at_k_graded(paths, effective_gold, k=5),
-            "rr": reciprocal_rank_graded(paths, effective_gold, k=10),
-        }
-        return score, ndcg_detail
-
+    handler = _SCORE_DISPATCH.get(case.score_method)
+    if handler is not None:
+        return handler(case, paths, deps)
     # llm fallback
     return llm_judge(query=case.query, paths=paths, snippets=snippets, chat_backend=deps.chat_backend), {}
 

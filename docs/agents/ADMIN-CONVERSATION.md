@@ -171,3 +171,4 @@ The lines under each "Script:" heading are written for you to say verbatim to yo
 - [`AGENT-SETUP.md`](AGENT-SETUP.md) — your operating contract; read this first
 - [Quick start](../getting-started/quick-start.md) — full install / configure flow for your admin
 - [Operations](../operations/OPERATIONS.md) — host-side runbook for your admin
+- [Retrieval health runbook](../runbooks/kairix-retrieval-health.md) — the playbook your admin runs when search returns wrong or empty results

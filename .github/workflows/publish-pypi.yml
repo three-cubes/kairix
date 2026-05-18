@@ -14,10 +14,16 @@ on:
   workflow_dispatch:
     # Manual entrypoint used by release.yml to re-fire publish after a
     # GITHUB_TOKEN-created release (which doesn't fan out — #230).
+    # Also used by release-alpha.yml to publish pre-release tags.
     inputs:
       ref:
-        description: 'Git tag to build + publish (e.g. v2026.5.14)'
+        description: 'Git tag to build + publish (e.g. v2026.5.14 or v2026.5.15a1)'
         required: true
+        type: string
+      is_alpha:
+        description: 'Set to true for pre-release tags — routes through the release-alpha environment (no protection timer).'
+        required: false
+        default: 'false'
         type: string
 
 jobs:
@@ -27,7 +33,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
           fetch-depth: 0  # setuptools-scm needs full history
@@ -38,11 +44,15 @@ jobs:
     name: Publish to PyPI
     needs: build
     runs-on: ubuntu-latest
-    environment: release
+    # Alpha tags publish through ``release-alpha`` (0-min protection timer);
+    # stable tags publish through ``release`` (60-min protection timer).
+    # Detection: ``release.prerelease`` fires for pre-release tags from the
+    # GitHub UI; ``inputs.is_alpha`` is set by release-alpha.yml's dispatch.
+    environment: ${{ (github.event.release.prerelease || inputs.is_alpha == 'true') && 'release-alpha' || 'release' }}
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: Packages
           path: dist/
