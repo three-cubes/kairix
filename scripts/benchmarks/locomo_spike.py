@@ -224,10 +224,34 @@ def _format_session_as_markdown(session: list[dict[str, Any]], conv_id: str, ses
 # ----------------------------------------------------------------------------
 
 
+def _spike_env(vault_path: Path) -> dict[str, str]:
+    """Build the per-spike subprocess env with the FULL path set overridden.
+
+    Overriding only ``KAIRIX_DOCUMENT_ROOT`` is unsafe in environments where
+    ``KAIRIX_DB_PATH`` / ``KAIRIX_DATA_DIR`` / ``KAIRIX_WORKSPACE_ROOT`` are
+    set in the inherited env (e.g. the deployed container has these baked
+    into the Dockerfile). Embed would walk the spike vault but write its
+    SQLite + vectors into the production index, and prep would read the
+    production index back — so answers come from the wrong corpus even
+    though the doc root looks isolated. This helper pins the whole path
+    set under ``vault_path``'s sibling directories so the spike run is
+    fully isolated from any inherited deployment config.
+    """
+    spike_data = vault_path.parent / f"{vault_path.name}-data"
+    spike_data.mkdir(parents=True, exist_ok=True)
+    overrides: dict[str, str] = {
+        "KAIRIX_DOCUMENT_ROOT": str(vault_path),
+        "KAIRIX_DATA_DIR": str(spike_data),
+        "KAIRIX_DB_PATH": str(spike_data / "index.sqlite"),
+        "KAIRIX_WORKSPACE_ROOT": str(spike_data / "workspaces"),
+    }
+    return {**os.environ, **overrides}
+
+
 def run_kairix_embed(vault_path: Path) -> None:
-    """Embed the vault by running ``kairix embed`` with KAIRIX_DOCUMENT_ROOT set."""
+    """Embed the vault by running ``kairix embed`` with the full path set isolated."""
     LOGGER.info("Running kairix embed against %s ...", vault_path)
-    env = {**os.environ, "KAIRIX_DOCUMENT_ROOT": str(vault_path)}
+    env = _spike_env(vault_path)
     result = subprocess.run(
         ["kairix", "embed"],
         env=env,
@@ -248,7 +272,7 @@ def run_kairix_prep(question: str, vault_path: Path) -> str:
     string so the judge can score them as failures rather than crashing the
     whole run.
     """
-    env = {**os.environ, "KAIRIX_DOCUMENT_ROOT": str(vault_path)}
+    env = _spike_env(vault_path)
     try:
         result = subprocess.run(
             ["kairix", "prep", question, "--tier", _PREP_TIER],
