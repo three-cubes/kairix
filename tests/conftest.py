@@ -103,6 +103,8 @@ pytest_plugins = [
     "tests.bdd.steps.provider_ollama_steps",
     "tests.bdd.steps.provider_openai_steps",
     "tests.bdd.steps.provider_wire_common_steps",
+    # Provider chat parameter-routing (gpt-5/o1/o3 max_completion_tokens translation).
+    "tests.bdd.steps.provider_chat_max_completion_tokens_steps",
     # E2E provider journey step modules.
     "tests.bdd.steps.e2e_provider_chat_steps",
     "tests.bdd.steps.e2e_provider_embed_steps",

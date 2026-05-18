@@ -68,6 +68,29 @@ DEFAULT_EMBED_DIMENSION = 1536
 #: Default chat ``max_tokens`` honoured by the Protocol surface.
 DEFAULT_CHAT_MAX_TOKENS = 800
 
+#: Deployment-name prefixes for reasoning-class models that require
+#: ``max_completion_tokens`` on the wire instead of ``max_tokens``.
+#:
+#: OpenAI introduced this constraint with the o1 series and continued
+#: it for the gpt-5 family; Azure inherits it for the same deployments.
+#: kairix's public chat surface keeps ``max_tokens=`` as the kwarg name
+#: callers pass; this list decides whether to translate to the alternate
+#: parameter at the wire layer. Add new prefixes when reasoning-class
+#: models join the Foundry catalogue (gpt-6.x, o-anything, etc.).
+_REASONING_MODEL_PREFIXES: tuple[str, ...] = ("gpt-5", "o1", "o3")
+
+
+def _uses_max_completion_tokens(model_name: str) -> bool:
+    """Return True when ``model_name`` belongs to the reasoning-class
+    family that requires ``max_completion_tokens`` on the wire.
+
+    Case-insensitive prefix match — operators sometimes use
+    inconsistent casing in deployment names ("GPT-5.4-mini") and the
+    detection must work regardless.
+    """
+    return any(model_name.lower().startswith(p) for p in _REASONING_MODEL_PREFIXES)
+
+
 #: The Foundry-specific openai-compat alias. Apppended to the configured
 #: endpoint when the operator didn't already include it. Kept here too
 #: (in addition to ``kairix.credentials._FOUNDRY_OPENAI_COMPAT_SUFFIX``)
@@ -293,19 +316,31 @@ class AzureFoundryProvider:
         """Run a single chat completion against Foundry.
 
         Translates the Protocol's ``messages=[...]`` shape into the
-        SDK's ``chat.completions.create(model=, messages=, max_tokens=)``
-        call. ``model=`` carries the configured deployment, ``temperature``
-        defaults to ``0.3`` for deterministic-ish synthesis. Maps
-        transport failures via :func:`_map_transport_error`.
+        SDK's ``chat.completions.create(model=, messages=, …)`` call.
+        ``model=`` carries the configured deployment, ``temperature``
+        defaults to ``0.3`` for deterministic-ish synthesis.
+
+        The public kwarg name is always ``max_tokens``; for reasoning-
+        class deployments (gpt-5.x / o1-x / o3-x) the parameter is sent
+        on the wire as ``max_completion_tokens`` instead — these models
+        reject the legacy name with ``400 Unsupported parameter``. The
+        translation is internal so callers never have to know which
+        underlying model is wired.
+
+        Maps transport failures via :func:`_map_transport_error`.
         """
         client = self._client()
+        kwargs: dict[str, Any] = {
+            "model": self._credentials.model,
+            "messages": list(messages),
+            "temperature": 0.3,
+        }
+        if _uses_max_completion_tokens(self._credentials.model):
+            kwargs["max_completion_tokens"] = max_tokens
+        else:
+            kwargs["max_tokens"] = max_tokens
         try:
-            response = client.chat.completions.create(
-                model=self._credentials.model,
-                messages=list(messages),
-                max_tokens=max_tokens,
-                temperature=0.3,
-            )
+            response = client.chat.completions.create(**kwargs)
         except Exception as err:
             raise _map_transport_error(err, provider_name=self.name) from err
         content = response.choices[0].message.content

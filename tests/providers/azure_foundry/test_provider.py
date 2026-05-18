@@ -557,3 +557,100 @@ class TestDimensionAndHealth:
         # Canonical class name is surfaced — stable across plugins so
         # the JSON probe-config report has a typed failure category.
         assert health.error == "AuthError"
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-class model → max_completion_tokens translation
+#
+# All branches of the internal ``_uses_max_completion_tokens`` helper are
+# exercised through the public ``provider.chat(...)`` surface in
+# TestChatKwargRouting below and in the parametrised matrix in
+# ``tests/integration/test_azure_foundry_reasoning_model_chat.py``. The
+# helper has no direct test cases (F5 — no internal-name imports in tests).
+# If a branch isn't reachable through the public chat method, it is dead
+# code and gets deleted, not pinned.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestChatKwargRouting:
+    """``chat`` routes the public ``max_tokens=`` kwarg to the correct wire
+    parameter based on the configured deployment model.
+    """
+
+    def test_gpt5_deployment_sends_max_completion_tokens_on_wire(self) -> None:
+        """A gpt-5.x deployment receives ``max_completion_tokens`` (not
+        ``max_tokens``) on the wire.
+
+        Sabotage-proof: revert ``chat()`` to always send ``max_tokens``
+        and this fails because ``max_completion_tokens`` is missing.
+        """
+        client = _RecordingTransportClient(chat_content="ok")
+        provider = AzureFoundryProvider(
+            credentials=_foundry_credentials(model="gpt-5.4-mini"),
+            transport_client=client,
+        )
+
+        provider.chat([{"role": "user", "content": "hi"}], max_tokens=500)
+
+        call = client.chat.completions.calls[0]
+        assert call["max_completion_tokens"] == 500
+        assert "max_tokens" not in call
+
+    def test_o1_deployment_sends_max_completion_tokens_on_wire(self) -> None:
+        """An o1 deployment receives ``max_completion_tokens``.
+
+        Sabotage-proof: drop "o1" from ``_REASONING_MODEL_PREFIXES``
+        and the wire receives ``max_tokens``, this fails.
+        """
+        client = _RecordingTransportClient(chat_content="ok")
+        provider = AzureFoundryProvider(
+            credentials=_foundry_credentials(model="o1-mini"),
+            transport_client=client,
+        )
+
+        provider.chat([{"role": "user", "content": "hi"}], max_tokens=100)
+
+        call = client.chat.completions.calls[0]
+        assert call["max_completion_tokens"] == 100
+        assert "max_tokens" not in call
+
+    def test_gpt4o_deployment_continues_to_send_max_tokens_on_wire(self) -> None:
+        """A gpt-4o-mini deployment retains the legacy ``max_tokens`` kwarg.
+
+        Sabotage-proof: change ``chat()`` to always send
+        ``max_completion_tokens`` and this fails — gpt-4o-mini rejects
+        the unknown kwarg silently or with a 400.
+        """
+        client = _RecordingTransportClient(chat_content="ok")
+        provider = AzureFoundryProvider(
+            credentials=_foundry_credentials(model="gpt-4o-mini"),
+            transport_client=client,
+        )
+
+        provider.chat([{"role": "user", "content": "hi"}], max_tokens=42)
+
+        call = client.chat.completions.calls[0]
+        assert call["max_tokens"] == 42
+        assert "max_completion_tokens" not in call
+
+    def test_temperature_still_present_on_reasoning_model_call(self) -> None:
+        """The model-name routing must not accidentally drop the
+        ``temperature`` kwarg the provider passes for synthesis
+        determinism.
+
+        Sabotage-proof: a refactor that builds the kwargs dict per branch
+        and forgets ``temperature`` in the reasoning branch fails this.
+        """
+        client = _RecordingTransportClient(chat_content="ok")
+        provider = AzureFoundryProvider(
+            credentials=_foundry_credentials(model="gpt-5.4-mini"),
+            transport_client=client,
+        )
+
+        provider.chat([{"role": "user", "content": "hi"}], max_tokens=100)
+
+        call = client.chat.completions.calls[0]
+        assert "temperature" in call, (
+            f"reasoning-model branch must still pass temperature; got kwargs: {sorted(call.keys())}"
+        )
