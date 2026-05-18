@@ -24,6 +24,7 @@ Design principles:
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -39,6 +40,70 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_SCOPE: Scope = Scope.SHARED_AGENT
+
+
+# ---------------------------------------------------------------------------
+# Cold-start gate decorator
+# ---------------------------------------------------------------------------
+
+
+def _is_warm_or_cold_envelope(tool_name: str) -> dict[str, Any] | None:
+    """Single source of truth for the cold-start check.
+
+    Returns ``None`` when kairix is warm — caller proceeds to the real
+    tool body. Returns the ColdStart affordance envelope when kairix is
+    cold, AND kicks off a background warm-up so subsequent calls land on
+    a warm pipeline.
+
+    The lazy imports keep ``kairix.platform.warm`` out of the MCP server
+    module's import graph at parse time (matters for ``kairix --help``
+    cold-path imports).
+    """
+    from kairix.platform.warm.state import (
+        cold_start_envelope,
+        is_warm,
+        trigger_background_warm,
+    )
+
+    if is_warm():
+        return None
+    trigger_background_warm()
+    return cold_start_envelope(tool_name)
+
+
+def warm_gate(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    """Decorator: short-circuit MCP tool calls with the ColdStart envelope
+    while kairix is warming.
+
+    Apply ABOVE the function (closest to the body), BELOW
+    ``@async_tool_handler``. Decorator order in the registration stack:
+
+        @server.tool(description="...")    # outermost — registers the wrapped fn
+        @async_tool_handler                # sync → async wrapping
+        @warm_gate                          # innermost — gate before the body
+        def my_tool(...) -> dict[str, Any]:
+            return tool_my_tool(...)
+
+    The tool name passed to the cold-start envelope is taken from
+    ``fn.__name__`` — by convention each ``@server.tool``-registered
+    function in ``build_server`` is named identically to its MCP tool
+    name, so no explicit parameter is needed.
+
+    Sabotage-proof: remove ``@warm_gate`` from any gated tool and the
+    parametrized cold-start test for that tool fails because the tool
+    body runs against the not-yet-warm pipeline instead of returning the
+    envelope.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        cold = _is_warm_or_cold_envelope(fn.__name__)
+        if cold is not None:
+            return cold
+        return fn(*args, **kwargs)
+
+    return wrapper
+
 
 # ---------------------------------------------------------------------------
 # Shared service helpers — MCP tools call these, not each other
@@ -756,13 +821,6 @@ def tool_embed_rebuild_fts() -> dict[str, Any]:
 # `mcp_tool` fields stay in sync without literal duplication.
 CAPABILITIES_TOOL_NAME = "capabilities"
 
-# Tool-name constants — each tool name appears in the capabilities catalogue
-# (``name`` + ``mcp_tool``) AND in the cold-start gate. Pinning the literal
-# once keeps the catalogue, gate, and any contract test in lock-step (F17).
-_TOOL_CONTRADICT = "contradict"
-_TOOL_ENTITY_SUGGEST = "entity_suggest"
-_TOOL_ENTITY_VALIDATE = "entity_validate"
-
 # Capability category labels — used by tool_capabilities and the usage-guide
 # capabilities table. F25 cross-checks these for sync.
 CAP_CATEGORY_RETRIEVAL = "retrieval"
@@ -823,8 +881,8 @@ def tool_capabilities() -> dict[str, Any]:
             _cap(name="prep", mcp_tool="prep", cli="kairix prep", category=CAP_CATEGORY_SYNTHESIS),
             _cap(name="research", mcp_tool="research", cli="kairix research", category=CAP_CATEGORY_SYNTHESIS),
             _cap(
-                name=_TOOL_CONTRADICT,
-                mcp_tool=_TOOL_CONTRADICT,
+                name="contradict",
+                mcp_tool="contradict",
                 cli="kairix contradict",
                 category=CAP_CATEGORY_SYNTHESIS,
             ),
@@ -844,14 +902,14 @@ def tool_capabilities() -> dict[str, Any]:
             ),
             _cap(name="bootstrap", mcp_tool="bootstrap", cli="kairix bootstrap", category=CAP_CATEGORY_AGENT),
             _cap(
-                name=_TOOL_ENTITY_SUGGEST,
-                mcp_tool=_TOOL_ENTITY_SUGGEST,
+                name="entity_suggest",
+                mcp_tool="entity_suggest",
                 cli="kairix entity suggest",
                 category=CAP_CATEGORY_AGENT,
             ),
             _cap(
-                name=_TOOL_ENTITY_VALIDATE,
-                mcp_tool=_TOOL_ENTITY_VALIDATE,
+                name="entity_validate",
+                mcp_tool="entity_validate",
                 cli="kairix entity validate",
                 category=CAP_CATEGORY_AGENT,
             ),
@@ -964,24 +1022,13 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
 
     server = FastMCP("kairix", host=host, port=port)
 
-    def _check_warm_or_return_envelope(tool_name: str) -> dict[str, Any] | None:
-        """If kairix isn't warm, kick off a background warm-up and return
-        the ColdStart affordance envelope. Returns None when warm — the
-        caller proceeds to the real tool body.
-
-        Agents calling against a cold container receive a structured
-        next-step ('retry in N seconds') instead of an opaque 8s wait.
-        """
-        from kairix.platform.warm.state import (
-            cold_start_envelope,
-            is_warm,
-            trigger_background_warm,
-        )
-
-        if is_warm():
-            return None
-        trigger_background_warm()
-        return cold_start_envelope(tool_name)
+    # --- Agent-facing retrieval/synthesis tools (gated on warm) ---
+    #
+    # Every tool below uses ``@warm_gate`` so a cold container returns the
+    # ColdStart envelope instead of letting the upstream fetch fail. Diagnostic
+    # tools further down (usage_guide, onboard_check, worker_status, warm,
+    # probes, operator escalations, capabilities) are intentionally NOT gated
+    # — they exist to diagnose the cold state itself.
 
     @server.tool(
         description=(
@@ -991,6 +1038,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         )
     )
     @async_tool_handler
+    @warm_gate
     def search(
         query: str,
         agent: str | None = None,
@@ -999,9 +1047,6 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         limit: int = 10,
     ) -> dict[str, Any]:
         """Search your knowledge store — finds the best answers to any question."""
-        cold = _check_warm_or_return_envelope("search")
-        if cold is not None:
-            return cold
         return tool_search(query=query, agent=agent, scope=scope, budget=budget, limit=limit)
 
     @server.tool(
@@ -1011,15 +1056,14 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         )
     )
     @async_tool_handler
+    @warm_gate
     def entity(name: str) -> dict[str, Any]:
         """Entity lookup from Neo4j."""
-        cold = _check_warm_or_return_envelope("entity")
-        if cold is not None:
-            return cold
         return tool_entity(name=name)
 
     @server.tool()
     @async_tool_handler
+    @warm_gate
     def prep(
         query: str,
         agent: str | None = None,
@@ -1027,13 +1071,11 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Context preparation: tiered L0/L1 summary generation."""
-        cold = _check_warm_or_return_envelope("prep")
-        if cold is not None:
-            return cold
         return tool_prep(query=query, agent=agent, tier=tier, scope=scope)
 
     @server.tool()
     @async_tool_handler
+    @warm_gate
     def timeline(
         query: str,
         anchor_date: str | None = None,
@@ -1041,9 +1083,6 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Temporal query rewriting + date-aware retrieval."""
-        cold = _check_warm_or_return_envelope("timeline")
-        if cold is not None:
-            return cold
         return tool_timeline(
             query=query,
             anchor_date=anchor_date,
@@ -1053,15 +1092,14 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
 
     @server.tool()
     @async_tool_handler
+    @warm_gate
     def research(query: str, agent: str | None = None, max_turns: int = 4) -> dict[str, Any]:
         """Research a complex question. Searches iteratively until it finds a good answer."""
-        cold = _check_warm_or_return_envelope("research")
-        if cold is not None:
-            return cold
         return tool_research(query=query, agent=agent, max_turns=max_turns)
 
     @server.tool()
     @async_tool_handler
+    @warm_gate
     def contradict(
         content: str,
         agent: str | None = None,
@@ -1071,9 +1109,6 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Check new content against existing knowledge for contradictions."""
-        cold = _check_warm_or_return_envelope(_TOOL_CONTRADICT)
-        if cold is not None:
-            return cold
         return tool_contradict(
             content=content,
             agent=agent,
@@ -1097,11 +1132,9 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         )
     )
     @async_tool_handler
+    @warm_gate
     def brief(agent: str) -> dict[str, Any]:
         """Generate a session briefing for an agent. Returns content + on-disk path."""
-        cold = _check_warm_or_return_envelope("brief")
-        if cold is not None:
-            return cold
         return tool_brief(agent=agent)
 
     @server.tool(
@@ -1113,29 +1146,23 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         )
     )
     @async_tool_handler
+    @warm_gate
     def bootstrap(agent: str, max_memory_days: int = 3) -> dict[str, Any]:
         """Return the agent orientation envelope: role, board, recent memory, goals, health."""
-        cold = _check_warm_or_return_envelope("bootstrap")
-        if cold is not None:
-            return cold
         return tool_bootstrap(agent=agent, max_memory_days=max_memory_days)
 
     @server.tool()
     @async_tool_handler
+    @warm_gate
     def entity_suggest(text: str) -> dict[str, Any]:
         """Suggest entities (people, organisations, places) found in text via NER + Neo4j cross-ref."""
-        cold = _check_warm_or_return_envelope(_TOOL_ENTITY_SUGGEST)
-        if cold is not None:
-            return cold
         return tool_entity_suggest(text=text)
 
     @server.tool()
     @async_tool_handler
+    @warm_gate
     def entity_validate(name: str, update: bool = False) -> dict[str, Any]:
         """Validate a named entity against Wikidata and optionally write the qid to Neo4j."""
-        cold = _check_warm_or_return_envelope(_TOOL_ENTITY_VALIDATE)
-        if cold is not None:
-            return cold
         return tool_entity_validate(name=name, update=update)
 
     @server.tool(

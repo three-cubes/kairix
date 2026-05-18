@@ -1,14 +1,25 @@
 """Integration test for the MCP cold-start affordance (#278).
 
-When an agent calls an MCP tool on a not-yet-warmed kairix, the tool
-returns the structured ColdStart envelope immediately — never a silent
-multi-second block, never an opaque error. The envelope carries the
-retry ETA and guidance so the agent commits 'kairix is warming up, retry
-in N seconds' to memory rather than 'kairix is flaky'.
+When an agent calls an MCP tool on a not-yet-warmed kairix, the gated
+tools return the structured ColdStart envelope immediately — never a
+silent multi-second block, never an opaque "fetch failed". The envelope
+carries the retry ETA and guidance so the agent commits 'kairix is
+warming up, retry in N seconds' to memory rather than 'kairix is flaky'.
+
+Diagnostic tools (usage_guide, onboard_check, worker_status, warm,
+capabilities, probes, operator escalations) are deliberately NOT gated
+— they exist to diagnose the cold state itself or to perform the
+warm-up.
+
+Gating shape: ``@warm_gate`` decorator in ``kairix/agents/mcp/server.py``.
+The decorator is the single source of truth — these tests pin its
+behaviour across every gated tool via parametrisation, so adding /
+removing a gated tool only requires updating the table below, not
+writing another test function.
 
 The per-directory conftest pre-marks state warm via an autouse fixture,
 so EVERY OTHER integration test runs the production tool path. This
-test deliberately resets state cold so the affordance path fires.
+module overrides that fixture to reset cold so the affordance path fires.
 """
 
 from __future__ import annotations
@@ -23,6 +34,41 @@ from kairix.agents.mcp.server import build_server
 from kairix.platform.warm.state import reset_warm_state
 
 pytestmark = pytest.mark.integration
+
+
+# ---------------------------------------------------------------------------
+# Tool inventories — single source of truth for which tools gate and which
+# don't. Adding a new tool means updating ONE entry; the parametrised tests
+# below cover it automatically.
+# ---------------------------------------------------------------------------
+
+# (tool_name, minimal_sample_args) for every ``@warm_gate``-decorated tool
+# in ``build_server``. Order matches the ``build_server`` registration order
+# so the file reads top-to-bottom alongside ``server.py``.
+GATED_TOOLS: list[tuple[str, dict[str, Any]]] = [
+    ("search", {"query": "anything", "budget": 1000}),
+    ("entity", {"name": "anything"}),
+    ("prep", {"query": "anything"}),
+    ("timeline", {"query": "anything"}),
+    ("research", {"query": "anything"}),
+    ("contradict", {"content": "anything"}),
+    ("brief", {"agent": "anyone"}),
+    ("bootstrap", {"agent": "anyone"}),
+    ("entity_suggest", {"text": "anything"}),
+    ("entity_validate", {"name": "anything"}),
+]
+
+# Tools that must STILL serve real responses while cold — they exist to
+# diagnose the cold state itself, or return static content.
+UNGATED_TOOLS: list[tuple[str, dict[str, Any]]] = [
+    ("usage_guide", {}),
+    ("onboard_check", {}),
+]
+
+
+# ---------------------------------------------------------------------------
+# Test harness
+# ---------------------------------------------------------------------------
 
 
 def _payload_from_call(raw: Any) -> dict[str, Any]:
@@ -46,146 +92,63 @@ def _force_cold_state() -> None:
     reset_warm_state()
 
 
-@pytest.mark.integration
-def test_cold_search_returns_immediate_affordance_envelope() -> None:
-    """An agent calling `search` on a cold kairix gets ColdStart, not a slow result.
+# ---------------------------------------------------------------------------
+# Cold-start envelope on every gated tool
+# ---------------------------------------------------------------------------
 
-    Sabotage-proof: comment out the _check_warm_or_return_envelope call in the
-    search registration and this test breaks because the real search runs.
+
+@pytest.mark.parametrize(("tool_name", "sample_args"), GATED_TOOLS)
+def test_gated_tool_returns_cold_start_envelope_when_cold(
+    tool_name: str,
+    sample_args: dict[str, Any],
+) -> None:
+    """Every ``@warm_gate``-decorated MCP tool returns the ColdStart envelope
+    on a not-yet-warm container — instead of "fetch failed", instead of an
+    8-second block, instead of an opaque error.
+
+    Sabotage-proof: remove ``@warm_gate`` from any tool in ``build_server``
+    and this parametrised case fires for that tool — the body runs against
+    the not-yet-warm pipeline and the envelope assertion fails.
+
+    Envelope shape is pinned: ``error == "ColdStart"``, ``tool`` matches
+    the calling tool name, ``guidance`` carries a retry ETA, and the
+    ``estimated_seconds_remaining`` field gives the agent a number to wait.
     """
     server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "search", {"query": "anything", "budget": 1000})
+
+    payload = _call_tool(server, tool_name, sample_args)
 
     assert payload.get("error") == "ColdStart", (
-        f"cold search must return ColdStart envelope; got error={payload.get('error')!r}, keys={sorted(payload.keys())}"
+        f"cold {tool_name} must return ColdStart envelope; "
+        f"got error={payload.get('error')!r}, keys={sorted(payload.keys())}"
     )
-    assert payload["tool"] == "search"
+    assert payload["tool"] == tool_name
     assert "Retry" in payload["guidance"]
     assert "estimated_seconds_remaining" in payload
 
 
-@pytest.mark.integration
-def test_cold_entity_returns_affordance_envelope() -> None:
-    """Same affordance for entity lookups."""
-    server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "entity", {"name": "anything"})
-    assert payload.get("error") == "ColdStart"
-    assert payload["tool"] == "entity"
-
-
-@pytest.mark.integration
-def test_cold_prep_returns_affordance_envelope() -> None:
-    """Same affordance for prep."""
-    server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "prep", {"query": "anything"})
-    assert payload.get("error") == "ColdStart"
-    assert payload["tool"] == "prep"
-
-
 # ---------------------------------------------------------------------------
-# v2026.5.17: the cold-start gate now covers every retrieval/synthesis tool,
-# not just search/entity/prep. An agent's first call against a cold container
-# (typically ``bootstrap`` or ``brief`` at session start) returns the
-# ColdStart envelope instead of a transport-level "fetch failed".
-#
-# Sabotage proof for each: remove the ``cold = _check_warm_or_return_envelope(...)``
-# line from the tool's registration in ``build_server`` and the corresponding
-# test breaks because the real tool body runs against the not-yet-warm pipeline.
+# Diagnostic / static tools must NOT gate
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
-def test_cold_bootstrap_returns_affordance_envelope() -> None:
-    """An agent's session-start bootstrap call on a cold kairix gets the
-    ColdStart envelope, not a transport failure.
+@pytest.mark.parametrize(("tool_name", "sample_args"), UNGATED_TOOLS)
+def test_ungated_tool_serves_while_cold(
+    tool_name: str,
+    sample_args: dict[str, Any],
+) -> None:
+    """Diagnostic and static tools must serve real responses while kairix
+    is cold — operators need them to diagnose what's wrong, and ``usage_guide``
+    returns a static document agents can read while waiting for warm-up.
 
-    This is the path the user reported: agents calling ``bootstrap`` first
-    used to see "fetch failed" because bootstrap didn't gate on warm state.
+    Sabotage-proof: add ``@warm_gate`` to one of these tools in
+    ``build_server`` and this parametrised case fires — the tool starts
+    returning ColdStart instead of its real response.
     """
     server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "bootstrap", {"agent": "anyone"})
-    assert payload.get("error") == "ColdStart"
-    assert payload["tool"] == "bootstrap"
-    assert "Retry" in payload["guidance"]
 
+    payload = _call_tool(server, tool_name, sample_args)
 
-@pytest.mark.integration
-def test_cold_brief_returns_affordance_envelope() -> None:
-    """Brief — agent-facing synthesis tool — gates on warm."""
-    server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "brief", {"agent": "anyone"})
-    assert payload.get("error") == "ColdStart"
-    assert payload["tool"] == "brief"
-
-
-@pytest.mark.integration
-def test_cold_timeline_returns_affordance_envelope() -> None:
-    """Timeline — temporal retrieval — gates on warm."""
-    server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "timeline", {"query": "anything"})
-    assert payload.get("error") == "ColdStart"
-    assert payload["tool"] == "timeline"
-
-
-@pytest.mark.integration
-def test_cold_research_returns_affordance_envelope() -> None:
-    """Research — iterative search loop — gates on warm."""
-    server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "research", {"query": "anything"})
-    assert payload.get("error") == "ColdStart"
-    assert payload["tool"] == "research"
-
-
-@pytest.mark.integration
-def test_cold_contradict_returns_affordance_envelope() -> None:
-    """Contradict — uses retrieval to find conflicting claims — gates on warm."""
-    server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "contradict", {"content": "anything"})
-    assert payload.get("error") == "ColdStart"
-    assert payload["tool"] == "contradict"
-
-
-@pytest.mark.integration
-def test_cold_entity_suggest_returns_affordance_envelope() -> None:
-    """Entity suggest — uses NER + Neo4j — gates on warm."""
-    server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "entity_suggest", {"text": "anything"})
-    assert payload.get("error") == "ColdStart"
-    assert payload["tool"] == "entity_suggest"
-
-
-@pytest.mark.integration
-def test_cold_entity_validate_returns_affordance_envelope() -> None:
-    """Entity validate — uses Neo4j + Wikidata lookup — gates on warm."""
-    server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "entity_validate", {"name": "anything"})
-    assert payload.get("error") == "ColdStart"
-    assert payload["tool"] == "entity_validate"
-
-
-# Diagnostic tools (onboard_check, worker_status, warm, capabilities, probes,
-# operator escalations) deliberately do NOT gate on warm — they exist to
-# diagnose the cold state itself or to perform the warm-up. usage_guide
-# returns a static document, also no gate.
-@pytest.mark.integration
-def test_cold_usage_guide_does_not_gate_on_warm() -> None:
-    """``usage_guide`` returns a static document; it must work on a cold
-    container so an agent can read the guide while waiting for warm.
-
-    Sabotage-proof: add ``_check_warm_or_return_envelope("usage_guide")``
-    to the registration and this test breaks because usage_guide starts
-    returning ColdStart instead of the guide.
-    """
-    server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "usage_guide", {})
-    assert payload.get("error") != "ColdStart", "usage_guide must serve while cold"
-
-
-@pytest.mark.integration
-def test_cold_onboard_check_does_not_gate_on_warm() -> None:
-    """``onboard_check`` is the deployment health probe — it must run on a
-    cold container so operators can diagnose what's wrong.
-    """
-    server = build_server(host="127.0.0.1", port=18099)
-    payload = _call_tool(server, "onboard_check", {})
-    assert payload.get("error") != "ColdStart", "onboard_check must run while cold"
+    assert payload.get("error") != "ColdStart", (
+        f"{tool_name} must serve while cold; got ColdStart envelope: {payload!r}"
+    )
