@@ -24,7 +24,22 @@ import threading
 import time
 from typing import Any
 
+from kairix.paths import warm_flag_path
+
 logger = logging.getLogger(__name__)
+
+# Cross-process readiness flag.
+#
+# The in-process ``_state`` dict below is only visible inside the MCP server
+# process. The Docker healthcheck runs as a separate ``docker exec`` shell
+# and can't read it directly. ``mark_warm`` writes the flag at
+# ``warm_flag_path()`` once the search/embed pipeline is ready;
+# ``kairix onboard ready`` reads the same path as the docker compose
+# healthcheck signal so ``docker compose up --wait`` blocks until the
+# first agent call will actually return real results.
+#
+# The env-read boundary lives in ``kairix/paths.py::warm_flag_path``
+# (F4 — KAIRIX_* env reads stay centralised).
 
 
 # Estimated wall time for a full warm-up: build_search_pipeline ~2.5s +
@@ -75,11 +90,23 @@ def mark_warming() -> None:
 
 
 def mark_warm() -> None:
-    """Record successful warm-up completion. Called by run_warm on ok=True."""
+    """Record successful warm-up completion. Called by run_warm on ok=True.
+
+    Also writes the cross-process flag so ``kairix onboard ready``
+    (running as the docker healthcheck) returns 0.
+    """
     with _lock:
         _state[_K_WARM] = True
         _state[_K_WARMING] = False
         _state[_K_COMPLETED_AT] = time.time()
+    try:
+        flag = warm_flag_path()
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.touch(exist_ok=True)
+    except OSError as exc:
+        # Filesystem failure shouldn't prevent the in-process state from
+        # being set. Operators see the degraded healthcheck as the signal.
+        logger.warning("could not write warm flag at %s: %s", flag, exc)
 
 
 def reset_warm_state() -> None:
@@ -89,6 +116,21 @@ def reset_warm_state() -> None:
         _state[_K_WARMING] = False
         _state[_K_STARTED_AT] = 0.0
         _state[_K_COMPLETED_AT] = 0.0
+    try:
+        warm_flag_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def is_warm_persisted() -> bool:
+    """Cross-process warm check — does the flag file exist?
+
+    Used by ``kairix onboard ready`` (docker healthcheck) so the deploy
+    wait gate can see the MCP server's warm state from outside its
+    process. Independent of the in-process ``is_warm()`` so tests can
+    drive each on its own.
+    """
+    return warm_flag_path().exists()
 
 
 def warm_status() -> dict[str, Any]:

@@ -124,6 +124,47 @@ def _self_load_env(
 
 
 # ---------------------------------------------------------------------------
+# ready subcommand — deploy-time readiness probe
+# ---------------------------------------------------------------------------
+
+
+def _default_warm_state_is_warm() -> bool:
+    """Production seam — checks the cross-process warm flag.
+
+    The healthcheck runs in a separate ``docker exec`` shell, so the
+    in-process ``is_warm()`` flag from the MCP server isn't visible.
+    Reads ``is_warm_persisted()`` which checks for the flag file the
+    MCP process writes once warm.
+    """
+    from kairix.platform.warm.state import is_warm_persisted
+
+    return is_warm_persisted()
+
+
+def cmd_ready(args: argparse.Namespace) -> int:
+    """Readiness probe for deploy tooling — exits 0 only when kairix is warm.
+
+    Distinct from ``cmd_check`` (which probes infrastructure config — secrets,
+    paths, neo4j, embed pipeline). ``ready`` answers the narrower question
+    "will the next agent call succeed without hitting a cold-start envelope?".
+
+    Used as the Docker compose healthcheck so ``docker compose up --wait``
+    blocks until kairix has actually finished warming, not just until the
+    process binds its port.
+
+    Tests pass ``_is_warm_fn`` via the public ``is_warm_fn`` kwarg on
+    ``main()`` to drive both branches without monkey-patching
+    ``kairix.platform.warm.state``.
+    """
+    is_warm_fn = getattr(args, "_is_warm_fn", _default_warm_state_is_warm)
+    if is_warm_fn():
+        print("ready")
+        return 0
+    print("not-ready: kairix is still warming up", file=sys.stderr)
+    return 1
+
+
+# ---------------------------------------------------------------------------
 # check subcommand
 # ---------------------------------------------------------------------------
 
@@ -411,6 +452,7 @@ def main(
     script_root: Path | None = None,
     run_all_checks_fn: Callable[..., Any] = _default_run_all_checks,
     pkg_root: Path | None = None,
+    is_warm_fn: Callable[[], bool] = _default_warm_state_is_warm,
 ) -> int:
     """`kairix onboard` entry point.
 
@@ -456,6 +498,12 @@ def main(
     p_verify.add_argument("--agent", default="builder", help="Agent name for scoped tests")
     p_verify.add_argument("--json", action="store_true", help="Output as JSON")
 
+    # ready — narrow readiness probe used as the Docker compose healthcheck
+    sub.add_parser(
+        "ready",
+        help="Exit 0 when kairix is warm; exit 1 while still warming (Docker healthcheck target).",
+    )
+
     args = parser.parse_args(argv)
     # Thread the DI seams onto the args namespace so the sub-command
     # helpers pick them up through getattr in their existing signatures.
@@ -465,6 +513,7 @@ def main(
     args._script_root = script_root
     args._run_all_checks_fn = run_all_checks_fn
     args._pkg_root = pkg_root
+    args._is_warm_fn = is_warm_fn
 
     if args.subcommand == "check":
         return cmd_check(args)
@@ -472,6 +521,8 @@ def main(
         return cmd_guide(args)
     if args.subcommand == "verify":
         return cmd_verify(args)
+    if args.subcommand == "ready":
+        return cmd_ready(args)
     # argparse with required=True makes this unreachable in practice;
     # surface as a non-zero exit if argparse semantics ever change.
     return 2

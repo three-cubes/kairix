@@ -608,6 +608,43 @@ def test_guide_writes_to_default_path_when_agent_knowledge_dir_exists(
 
 
 # ---------------------------------------------------------------------------
+# cmd_ready — narrow readiness probe used as Docker compose healthcheck
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_ready_exit_zero_when_warm(capsys) -> None:
+    """``ready`` exits 0 and prints "ready" once kairix is warm.
+
+    Sabotage-proof: invert the ``if is_warm_fn():`` check in ``cmd_ready``
+    and this test fails because the rc flips to 1.
+    """
+    rc = main(["ready"], is_warm_fn=lambda: True)
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ready" in captured.out
+
+
+@pytest.mark.unit
+def test_ready_exit_one_while_warming(capsys) -> None:
+    """``ready`` exits 1 with an operator-readable hint while kairix is warming.
+
+    Docker compose ``up --wait`` reads exit code 1 as "not yet healthy" and
+    keeps polling — so the deploy command genuinely blocks until kairix can
+    serve real agent calls, not just until the port is bound.
+
+    Sabotage-proof: change ``return 1`` to ``return 0`` and the deploy-wait
+    semantics break (compose flags as healthy too early).
+    """
+    rc = main(["ready"], is_warm_fn=lambda: False)
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "warming" in captured.err.lower()
+
+
+# ---------------------------------------------------------------------------
 # cmd_verify — runs scripts/verify-search.py
 # ---------------------------------------------------------------------------
 

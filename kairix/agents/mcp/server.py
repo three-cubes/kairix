@@ -756,6 +756,13 @@ def tool_embed_rebuild_fts() -> dict[str, Any]:
 # `mcp_tool` fields stay in sync without literal duplication.
 CAPABILITIES_TOOL_NAME = "capabilities"
 
+# Tool-name constants — each tool name appears in the capabilities catalogue
+# (``name`` + ``mcp_tool``) AND in the cold-start gate. Pinning the literal
+# once keeps the catalogue, gate, and any contract test in lock-step (F17).
+_TOOL_CONTRADICT = "contradict"
+_TOOL_ENTITY_SUGGEST = "entity_suggest"
+_TOOL_ENTITY_VALIDATE = "entity_validate"
+
 # Capability category labels — used by tool_capabilities and the usage-guide
 # capabilities table. F25 cross-checks these for sync.
 CAP_CATEGORY_RETRIEVAL = "retrieval"
@@ -816,8 +823,8 @@ def tool_capabilities() -> dict[str, Any]:
             _cap(name="prep", mcp_tool="prep", cli="kairix prep", category=CAP_CATEGORY_SYNTHESIS),
             _cap(name="research", mcp_tool="research", cli="kairix research", category=CAP_CATEGORY_SYNTHESIS),
             _cap(
-                name="contradict",
-                mcp_tool="contradict",
+                name=_TOOL_CONTRADICT,
+                mcp_tool=_TOOL_CONTRADICT,
                 cli="kairix contradict",
                 category=CAP_CATEGORY_SYNTHESIS,
             ),
@@ -837,14 +844,14 @@ def tool_capabilities() -> dict[str, Any]:
             ),
             _cap(name="bootstrap", mcp_tool="bootstrap", cli="kairix bootstrap", category=CAP_CATEGORY_AGENT),
             _cap(
-                name="entity_suggest",
-                mcp_tool="entity_suggest",
+                name=_TOOL_ENTITY_SUGGEST,
+                mcp_tool=_TOOL_ENTITY_SUGGEST,
                 cli="kairix entity suggest",
                 category=CAP_CATEGORY_AGENT,
             ),
             _cap(
-                name="entity_validate",
-                mcp_tool="entity_validate",
+                name=_TOOL_ENTITY_VALIDATE,
+                mcp_tool=_TOOL_ENTITY_VALIDATE,
                 cli="kairix entity validate",
                 category=CAP_CATEGORY_AGENT,
             ),
@@ -1034,6 +1041,9 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Temporal query rewriting + date-aware retrieval."""
+        cold = _check_warm_or_return_envelope("timeline")
+        if cold is not None:
+            return cold
         return tool_timeline(
             query=query,
             anchor_date=anchor_date,
@@ -1045,6 +1055,9 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     @async_tool_handler
     def research(query: str, agent: str | None = None, max_turns: int = 4) -> dict[str, Any]:
         """Research a complex question. Searches iteratively until it finds a good answer."""
+        cold = _check_warm_or_return_envelope("research")
+        if cold is not None:
+            return cold
         return tool_research(query=query, agent=agent, max_turns=max_turns)
 
     @server.tool()
@@ -1058,6 +1071,9 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
         scope: Scope = DEFAULT_SCOPE,
     ) -> dict[str, Any]:
         """Check new content against existing knowledge for contradictions."""
+        cold = _check_warm_or_return_envelope(_TOOL_CONTRADICT)
+        if cold is not None:
+            return cold
         return tool_contradict(
             content=content,
             agent=agent,
@@ -1083,6 +1099,9 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     @async_tool_handler
     def brief(agent: str) -> dict[str, Any]:
         """Generate a session briefing for an agent. Returns content + on-disk path."""
+        cold = _check_warm_or_return_envelope("brief")
+        if cold is not None:
+            return cold
         return tool_brief(agent=agent)
 
     @server.tool(
@@ -1096,18 +1115,27 @@ def build_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     @async_tool_handler
     def bootstrap(agent: str, max_memory_days: int = 3) -> dict[str, Any]:
         """Return the agent orientation envelope: role, board, recent memory, goals, health."""
+        cold = _check_warm_or_return_envelope("bootstrap")
+        if cold is not None:
+            return cold
         return tool_bootstrap(agent=agent, max_memory_days=max_memory_days)
 
     @server.tool()
     @async_tool_handler
     def entity_suggest(text: str) -> dict[str, Any]:
         """Suggest entities (people, organisations, places) found in text via NER + Neo4j cross-ref."""
+        cold = _check_warm_or_return_envelope(_TOOL_ENTITY_SUGGEST)
+        if cold is not None:
+            return cold
         return tool_entity_suggest(text=text)
 
     @server.tool()
     @async_tool_handler
     def entity_validate(name: str, update: bool = False) -> dict[str, Any]:
         """Validate a named entity against Wikidata and optionally write the qid to Neo4j."""
+        cold = _check_warm_or_return_envelope(_TOOL_ENTITY_VALIDATE)
+        if cold is not None:
+            return cold
         return tool_entity_validate(name=name, update=update)
 
     @server.tool(

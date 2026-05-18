@@ -759,6 +759,24 @@ def env_file_override() -> str | None:
     return value if value else None
 
 
+def warm_flag_path() -> Path:
+    """Path to the cross-process warm-state flag — single env-read boundary
+    for ``KAIRIX_WARM_FLAG_PATH``.
+
+    The MCP server writes this flag when it finishes warming;
+    ``kairix onboard ready`` (running as the docker healthcheck) reads it
+    to decide whether ``docker compose up --wait`` can return.
+
+    S108 (insecure tmp dir) — kairix runs single-tenant in its own
+    container; ``/tmp`` is per-container, not a multi-user host tmpdir.
+    The flag carries no secret value (just existence-as-state).
+    ``KAIRIX_WARM_FLAG_PATH`` lets operators relocate it if their threat
+    model differs.
+    """
+    override = os.environ.get("KAIRIX_WARM_FLAG_PATH", "").strip()
+    return Path(override) if override else Path("/tmp/kairix-warm.flag")  # noqa: S108
+
+
 def noninteractive_mode() -> bool:
     """Return True when ``KAIRIX_NONINTERACTIVE=1`` is set in the environment.
 

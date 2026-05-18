@@ -7,10 +7,12 @@ import pytest
 from kairix.platform.warm.state import (
     cold_start_envelope,
     is_warm,
+    is_warm_persisted,
     is_warming,
     mark_warm,
     mark_warming,
     reset_warm_state,
+    warm_flag_path,
     warm_status,
 )
 
@@ -87,6 +89,50 @@ def test_status_when_warm_clears_warming_flag() -> None:
     status = warm_status()
     assert status["warm"] is True
     assert status["warming"] is False
+
+
+# ---------------------------------------------------------------------------
+# Cross-process flag — `kairix onboard ready` reads this via is_warm_persisted
+# (running as docker healthcheck in a separate process from the MCP server).
+# ---------------------------------------------------------------------------
+
+
+def test_warm_flag_absent_when_process_is_cold() -> None:
+    """A fresh process has no flag on disk — ``kairix onboard ready`` reports
+    not-ready, ``docker compose up --wait`` keeps polling.
+    """
+    assert not is_warm_persisted()
+
+
+def test_mark_warm_writes_flag_visible_to_other_processes() -> None:
+    """``mark_warm`` writes the cross-process flag so the docker healthcheck
+    (running as a separate ``docker exec`` shell) can see the MCP server's
+    warm state.
+
+    Sabotage-proof: remove the ``flag.touch(...)`` call in ``mark_warm``
+    and ``is_warm_persisted`` keeps returning False even after warm completes;
+    the healthcheck never flips to ready and ``compose up --wait`` hangs.
+    """
+    mark_warm()
+
+    assert is_warm_persisted()
+    assert warm_flag_path().exists()
+
+
+def test_reset_warm_state_removes_the_flag() -> None:
+    """Resetting warm state also removes the flag so the next process
+    starts fresh (mirrors a container restart wiping ``/tmp``).
+
+    Sabotage-proof: remove the ``warm_flag_path().unlink(...)`` call in
+    ``reset_warm_state`` and tests / containers carry warm flags across
+    restarts that should have been cold-starting from scratch.
+    """
+    mark_warm()
+    assert is_warm_persisted()
+
+    reset_warm_state()
+
+    assert not is_warm_persisted()
 
 
 # ---------------------------------------------------------------------------
