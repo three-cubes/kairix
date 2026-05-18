@@ -137,6 +137,15 @@ def _resolve_port(args: argparse.Namespace, *, deps: McpCliDeps) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace, *, deps: McpCliDeps) -> None:
+    # Clear any stale warm flag from a previous MCP process. The flag lives
+    # on the persistent kairix data volume so it survives container restarts
+    # by default; the in-process warm state, however, is reset on each
+    # start. Clearing here keeps the docker healthcheck honest: a freshly
+    # started container reports not-ready until it actually re-warms.
+    from kairix.platform.warm.state import reset_warm_state
+
+    reset_warm_state()
+
     try:
         build_server = deps.build_server_factory()
     except ImportError:

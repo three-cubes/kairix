@@ -767,14 +767,26 @@ def warm_flag_path() -> Path:
     ``kairix onboard ready`` (running as the docker healthcheck) reads it
     to decide whether ``docker compose up --wait`` can return.
 
-    S108 (insecure tmp dir) — kairix runs single-tenant in its own
-    container; ``/tmp`` is per-container, not a multi-user host tmpdir.
-    The flag carries no secret value (just existence-as-state).
-    ``KAIRIX_WARM_FLAG_PATH`` lets operators relocate it if their threat
-    model differs.
+    The flag lives under :func:`data_dir` — owned by the kairix process
+    user, not world-writable — so other users on the host can't poison
+    the readiness signal (spoof "ready" by ``touch``\\ ing the path) or
+    set up a symlink attack on a predictable ``/tmp`` filename. This is
+    the right home in production (mounted as the kairix data volume) and
+    in dev (under the per-user XDG / Application Support tree).
+
+    Because the flag now lives on the same persistent volume as the
+    SQLite index, a restarted container will see the previous process's
+    flag if it shut down without clearing it. The MCP entry point calls
+    :func:`kairix.platform.warm.state.reset_warm_state` at startup so a
+    cold container correctly reports not-ready until it has actually
+    re-warmed.
+
+    Operators with a layout where ``data_dir`` is read-only can set
+    ``KAIRIX_WARM_FLAG_PATH`` to relocate the flag — but it must point
+    at a writable, non-world-writable location.
     """
     override = os.environ.get("KAIRIX_WARM_FLAG_PATH", "").strip()
-    return Path(override) if override else Path("/tmp/kairix-warm.flag")  # noqa: S108
+    return Path(override) if override else data_dir() / "warm.flag"
 
 
 def noninteractive_mode() -> bool:

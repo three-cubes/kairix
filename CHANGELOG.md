@@ -7,6 +7,10 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
+### Security
+
+- **Warm-state flag moved out of `/tmp` into the kairix data directory.** The cross-process readiness flag added in v2026.5.17 lived at `/tmp/kairix-warm.flag` — a world-writable, predictable path. Two failure modes that fixes: a local user could spoof the docker healthcheck to "ready" by creating that file (causing `docker compose up --wait` to return while kairix was still cold), and a pre-placed symlink at that path would be followed by the flag-write (touching a sensitive file's mtime if kairix ran as root). The flag now lives at `<KAIRIX_DATA_DIR>/warm.flag` — owned by the kairix process user and not world-writable. The MCP server clears any stale flag at startup so a restarted container still correctly reports not-ready until it has actually re-warmed.
+
 ## [2026.5.17] - 2026-05-18 — Faster searches under concurrent load + plug-in support for any LLM provider
 
 > **Upgrading?** **One required config change**: add `provider: <name>` to the top of your `kairix.config.yaml` before pulling this version. Kairix won't start without it and will list the installed plug-in names so you can pick. See [`docs/operations/runbooks/how-to-upgrade-kairix.md`](docs/operations/runbooks/how-to-upgrade-kairix.md) for the one-line edit. **Operators with a custom `kairix.config.yaml` mounted into the container** should move to the new overlay pattern before pulling — it stops future required-setting bumps from quietly breaking your deploy. See [`docs/operations/runbooks/config-overlay-upgrade.md`](docs/operations/runbooks/config-overlay-upgrade.md). **New for agents**: searches feel faster when several agents work at the same time, and a cold container no longer returns "fetch failed" — kairix tells you it's warming and how long it needs. **New for operators**: the new `kairix probe-config` command checks your endpoint after setup and recommends concrete tuning; seven first-party plug-ins ship today (Azure Foundry, Azure Legacy, OpenAI direct, Bedrock, Ollama, LiteLLM proxy, Anthropic).
