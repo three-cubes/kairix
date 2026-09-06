@@ -36,6 +36,11 @@ Sub-rules
       "${SCRIPT_DIR}/check-*.sh"``) carries ``|| overall=1`` so one
       failing check never aborts the ledger, and the aggregate
       pass/FAIL verdict lines exist.
+(e) **No quiet-grep output probes in pipelines under ``pipefail``.**
+    ``producer | grep -q`` can report failure after a successful match:
+    ``grep -q`` exits early, the producer receives SIGPIPE, and
+    ``pipefail`` returns the producer's non-zero status. Probe captured
+    output with a here-string instead: ``grep -q PATTERN <<< "$OUTPUT"``.
 
 Intentionally NOT caught (precision over recall):
 
@@ -82,6 +87,7 @@ EXEMPT_CAPTURE_RE = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\+?=[\"']?\$\(\s*(?:c
 OR_TRUE_RE = re.compile(r"\|\|\s*true\b")
 STAGE_ANNOUNCE_RE = re.compile(r'echo -n "  [^"]+?\.\.\. "')
 RUN_ALL_CHECK_RE = re.compile(r"^\s*(?:python3|bash)\s+\"\$\{SCRIPT_DIR\}/check[_-][^\"]+\"")
+QUIET_GREP_PIPE_RE = re.compile(r"\|\s*grep\s+(?:-[A-Za-z]*q[A-Za-z]*\b|[^#\n]*\s-q[A-Za-z]*\b)")
 
 SAFE_COMMIT_REL = "scripts/safe-commit.sh"
 RUN_ALL_REL = "scripts/checks/run-all.sh"
@@ -210,6 +216,24 @@ def _bare_or_true(source: str) -> list[str]:
     return details
 
 
+def _pipefail_unsafe_quiet_probes(source: str) -> list[str]:
+    """Sub-rule (e): reject ``producer | grep -q`` under pipefail.
+
+    A quiet grep exits as soon as it finds a match. With a sufficiently large
+    producer payload, that closes the pipe while the producer is still writing;
+    the resulting SIGPIPE makes the whole pipeline non-zero under ``pipefail``.
+    Gate scripts must probe already-captured output through stdin redirection,
+    which has only grep's truthful status: ``grep -q ... <<< "$OUTPUT"``.
+    """
+    if "pipefail" not in source:
+        return []
+    return [
+        f"line {lineno}: quiet grep output probe can fail on upstream SIGPIPE under pipefail"
+        for lineno, raw in enumerate(source.splitlines(), start=1)
+        if not raw.lstrip().startswith("#") and QUIET_GREP_PIPE_RE.search(raw)
+    ]
+
+
 def _stage_ledger_contract(rel: str, source: str) -> list[str]:
     """Sub-rule (d): targeted stage-verdict assertions for the two runners."""
     details: list[str] = []
@@ -280,6 +304,7 @@ def collect_violations(repo_root: Path = REPO_ROOT) -> set[Path]:
         details = (
             _unguarded_captures(source)
             + _bare_or_true(source)
+            + _pipefail_unsafe_quiet_probes(source)
             + _stage_ledger_contract(str(rel), source)
             + sc_errors.get(rel, [])
         )

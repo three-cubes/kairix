@@ -632,6 +632,133 @@ def _list_folders_only_payload() -> dict[str, Any]:
     }
 
 
+def _recovery_message(folder_id: str) -> dict[str, Any]:
+    """One complete header envelope for a recovered folder."""
+    return {
+        "id": f"{folder_id}-message",
+        "from": {"emailAddress": {"address": "agent-alpha@example.com"}},
+        "toRecipients": [],
+        "ccRecipients": [],
+        "subject": f"Recovered {folder_id}",
+        "sentDateTime": "2026-05-22T10:00:00Z",
+        "receivedDateTime": "2026-05-22T10:00:01Z",
+    }
+
+
+def _email_recovery_handler(
+    requested: list[str],
+    *,
+    fail_reseed_for: str | None = None,
+    folders_payload: dict[str, Any] | None = None,
+) -> httpx.MockTransport:
+    """Serve two folders with an expired f1 cursor and a healthy f2 cursor."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/oauth2/v2.0/token" in url:
+            return httpx.Response(
+                200,
+                request=request,
+                json={"access_token": "x", "expires_in": 3600, "token_type": "Bearer"},
+            )
+        if "/mailFolders" in url and "/messages/delta" not in url:
+            return httpx.Response(
+                200,
+                request=request,
+                json=folders_payload or {"value": _list_folders_only_payload()["value"][:2]},
+            )
+        requested.append(url)
+        if "stale-f1" in url:
+            return httpx.Response(410, request=request, json={"error": {"code": "syncStateNotFound"}})
+        if "/mailFolders/f1/messages/delta" in url and fail_reseed_for == "f1":
+            return httpx.Response(410, request=request, json={"error": {"code": "syncStateNotFound"}})
+        folder_id = "f1" if "/mailFolders/f1/" in url else "f2"
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "value": [_recovery_message(folder_id)],
+                "@odata.deltaLink": f"https://graph.microsoft.com/v1.0/fresh-{folder_id}",
+            },
+        )
+
+    return httpx.MockTransport(_handler)
+
+
+def test_expired_folder_cursor_resets_only_that_folder_and_siblings_progress() -> None:
+    """A 410 resets f1 once while f2 continues from its own cursor."""
+    requested: list[str] = []
+    connector = _build_real_connector(
+        handler=_email_recovery_handler(requested),
+        folders_payload=_list_folders_only_payload(),
+    )
+    prior = json.dumps(
+        {
+            "f1": "https://graph.microsoft.com/v1.0/stale-f1",
+            "f2": "https://graph.microsoft.com/v1.0/mailFolders/f2/messages/delta?$deltatoken=healthy-f2",
+        }
+    )
+
+    events = list(connector.list_changes(cursor=prior))
+
+    assert {event.item_id for event in events} == {"f1-message", "f2-message"}
+    assert sum("stale-f1" in url for url in requested) == 1
+    assert sum("/mailFolders/f1/messages/delta" in url for url in requested) == 1
+    assert sum("healthy-f2" in url for url in requested) == 1
+    assert json.loads(connector.next_cursor() or "{}") == {
+        "f1": "https://graph.microsoft.com/v1.0/fresh-f1",
+        "f2": "https://graph.microsoft.com/v1.0/fresh-f2",
+    }
+
+
+def test_folder_reseed_410_preserves_prior_cursor_and_sibling_progress(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed one-shot f1 reseed preserves f1 while f2 still advances."""
+    requested: list[str] = []
+    connector = _build_real_connector(
+        handler=_email_recovery_handler(requested, fail_reseed_for="f1"),
+        folders_payload=_list_folders_only_payload(),
+    )
+    stale_f1 = "https://graph.microsoft.com/v1.0/stale-f1"
+    prior = json.dumps(
+        {
+            "f1": stale_f1,
+            "f2": "https://graph.microsoft.com/v1.0/mailFolders/f2/messages/delta?$deltatoken=healthy-f2",
+        }
+    )
+
+    with caplog.at_level("WARNING", logger="kairix.connectors.m365_email_headers.connector"):
+        events = list(connector.list_changes(cursor=prior))
+
+    assert [event.item_id for event in events] == ["f2-message"]
+    assert sum("stale-f1" in url for url in requested) == 1
+    assert sum("/mailFolders/f1/messages/delta" in url for url in requested) == 1
+    assert json.loads(connector.next_cursor() or "{}") == {
+        "f1": stale_f1,
+        "f2": "https://graph.microsoft.com/v1.0/fresh-f2",
+    }
+    assert any("folder 'Inbox' drain failed" in record.getMessage() for record in caplog.records)
+
+
+def test_failed_folder_without_display_name_is_identified_by_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Recovery diagnostics retain an identity when Graph omits displayName."""
+    requested: list[str] = []
+    folders = _list_folders_only_payload()
+    folders["value"][0]["displayName"] = ""
+    connector = _build_real_connector(
+        handler=_email_recovery_handler(requested, fail_reseed_for="f1", folders_payload=folders),
+    )
+    prior = json.dumps({"f1": "https://graph.microsoft.com/v1.0/stale-f1"})
+
+    with caplog.at_level("WARNING", logger="kairix.connectors.m365_email_headers.connector"):
+        list(connector.list_changes(cursor=prior))
+
+    assert any("folder 'f1' drain failed" in record.getMessage() for record in caplog.records)
+
+
 def test_legacy_string_cursor_collapses_to_cold_start() -> None:
     """A pre-#380 single-string deltaLink cursor decodes to cold-start.
 

@@ -27,6 +27,7 @@ from kairix.worker import (
     HEALTH_CHECK_INTERVAL,
     WIKILINKS_INTERVAL,
     ConnectorSyncResult,
+    ConnectorSyncRuntime,
     WorkerDeps,
     main,
     run_connector_sync,
@@ -38,6 +39,41 @@ from kairix.worker import (
 from kairix.worker_state import WorkerPhase, WorkerState, write_state
 
 pytestmark = pytest.mark.unit
+
+
+def test_connector_sync_runtime_reuses_replaces_and_rejects_after_close() -> None:
+    """The public runtime owns connectors by identity and exact config."""
+    constructed: list[tuple[dict[str, str], object]] = []
+
+    def _resolver(kind: str):
+        assert kind == "obsidian"
+
+        def _construct(config: dict[str, str]) -> object:
+            instance = object()
+            constructed.append((config, instance))
+            return instance
+
+        return _construct
+
+    runtime = ConnectorSyncRuntime(connector_factory_resolver=_resolver)
+    first_entry = {"kind": "obsidian", "name": "vault", "config": {"vault_root": "/vault-a"}}
+    changed_entry = {"kind": "obsidian", "name": "vault", "config": {"vault_root": "/vault-b"}}
+
+    first = runtime.connector_for(first_entry)
+    same = runtime.connector_for(first_entry)
+    changed = runtime.connector_for(changed_entry)
+
+    assert same is first
+    assert changed is not first
+    assert [config for config, _instance in constructed] == [
+        {"vault_root": "/vault-a"},
+        {"vault_root": "/vault-b"},
+    ]
+
+    runtime.close()
+    runtime.close()
+    with pytest.raises(RuntimeError, match="connector runtime is closed"):
+        runtime.connector_for(changed_entry)
 
 
 # ---------------------------------------------------------------------------

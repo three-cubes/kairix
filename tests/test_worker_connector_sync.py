@@ -45,9 +45,11 @@ from kairix.core.protocols import BronzeRef, DocMetadata, ExtractedDocument, Pag
 from kairix.worker import (
     ConnectorSyncDeps,
     ConnectorSyncResult,
+    ConnectorSyncRuntime,
     build_worker_silver_processor,
     run_connector_sync_pipeline,
 )
+from tests.fakes import FakeSourceConnector
 
 # NOTE: no module-level ``pytestmark`` — a module-level ``pytest.mark.unit``
 # STACKS with the per-function ``@pytest.mark.integration`` markers below,
@@ -121,6 +123,62 @@ def _no_db_factory() -> sqlite3.Connection:
     raise AssertionError("db_factory must not be invoked on the short-circuit path")
 
 
+class _CloseTrackingConnector(FakeSourceConnector):
+    """No-change connector that records worker-owned lifecycle closure."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def _exercise_long_lived_obsidian_runtime(
+    vault: Path,
+    db_path: Path,
+    bronze_root: Path,
+    result_sink: Any,
+) -> None:
+    """Run the real watcher lifecycle in an isolated worker process.
+
+    macOS's FSEvents and lxml native extensions are unsafe when loaded into
+    the same pytest process.  Production also runs the watcher in a dedicated
+    worker process, so the integration test mirrors that boundary and reports
+    only the observable per-tick sync counts to its parent.
+    """
+    from watchdog.observers.polling import PollingObserver
+
+    from kairix.connectors.obsidian import ObsidianConnector
+    from kairix.connectors.obsidian.watcher import WatchdogSource
+
+    def _resolve_obsidian(_kind: str) -> Any:
+        def _build(config: dict[str, Any]) -> ObsidianConnector:
+            def _polling_watcher(root: Path) -> WatchdogSource:
+                return WatchdogSource(root, observer_factory=PollingObserver)
+
+            return ObsidianConnector(
+                vault_root=Path(config["vault_root"]),
+                watcher_factory=_polling_watcher,
+            )
+
+        return _build
+
+    runtime = ConnectorSyncRuntime(
+        deps=ConnectorSyncDeps(
+            disabled_fn=lambda: False,
+            config_mapping_fn=lambda: _obsidian_topology(vault),
+            db_factory=lambda: sqlite3.connect(str(db_path)),
+            bronze_root_resolver=lambda: bronze_root,
+        ),
+        connector_factory_resolver=_resolve_obsidian,
+    )
+    try:
+        result_sink.put([runtime().synced for _ in range(10)])
+    finally:
+        runtime.close()
+
+
 def _obsidian_topology(vault: Path, *, cc_pair_name: str = "obsidian-personal") -> dict[str, Any]:
     """Build a minimal merged mapping with one obsidian connector + cc_pair.
 
@@ -150,6 +208,84 @@ def _obsidian_topology(vault: Path, *, cc_pair_name: str = "obsidian-personal") 
             ],
         }
     }
+
+
+@pytest.mark.integration
+def test_connector_runtime_reuses_one_instance_for_more_than_inotify_limit_and_closes_it(tmp_path: Path) -> None:
+    """A worker lifetime owns one connector across ticks and closes it once.
+
+    The 129 ticks cross Linux's common ``max_user_instances=128`` boundary.
+    Reconstructing one watcher-backed connector per tick leaks the first 128
+    observers and fails production on tick 129.  The runtime must resolve the
+    connector once, reuse it, and close it deterministically at shutdown.
+    """
+    connector = _CloseTrackingConnector()
+    factory_calls = 0
+
+    def _resolve(_kind: str) -> Any:
+        def _factory(_config: dict[str, Any]) -> _CloseTrackingConnector:
+            nonlocal factory_calls
+            factory_calls += 1
+            return connector
+
+        return _factory
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    runtime = ConnectorSyncRuntime(
+        deps=ConnectorSyncDeps(
+            disabled_fn=lambda: False,
+            config_mapping_fn=lambda: _obsidian_topology(vault),
+            db_factory=lambda: sqlite3.connect(str(tmp_path / "index.sqlite")),
+            bronze_root_resolver=lambda: tmp_path / "bronze",
+        ),
+        connector_factory_resolver=_resolve,
+    )
+
+    for _ in range(129):
+        runtime()
+
+    assert factory_calls == 1
+    assert connector.close_calls == 0
+
+    runtime.close()
+    runtime.close()
+
+    assert connector.close_calls == 1
+
+
+@pytest.mark.integration
+def test_long_lived_runtime_reaches_obsidian_periodic_reconciliation(tmp_path: Path) -> None:
+    """The real Obsidian connector retains its ten-tick reconciliation cadence.
+
+    A newly constructed connector cold-scans on every call.  One worker-owned
+    connector instead cold-scans once, remains quiet for ticks two through
+    nine, and runs its configured periodic reconciliation on tick ten.  This
+    exercises the real filesystem watcher, reconciler, pipeline, and SQLite
+    cursor rather than a lifecycle stand-in.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "alpha.md").write_text("# Alpha\n\nLong-lived runtime reconciliation.\n", encoding="utf-8")
+    db_path = tmp_path / "index.sqlite"
+    from multiprocessing import get_context
+
+    context = get_context("spawn")
+    result_sink = context.Queue()
+    process = context.Process(
+        target=_exercise_long_lived_obsidian_runtime,
+        args=(vault, db_path, tmp_path / "bronze", result_sink),
+    )
+    process.start()
+    process.join(timeout=30)
+
+    assert process.exitcode == 0
+    synced = result_sink.get(timeout=1)
+    result_sink.close()
+    process.close()
+    assert synced[0] == 1
+    assert synced[1:9] == [0] * 8
+    assert synced[9] == 1
 
 
 @pytest.mark.integration

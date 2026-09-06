@@ -146,7 +146,7 @@ if [[ "$PRE_PR_MODE" == "1" ]]; then
     run_gate env UV_PROJECT_ENVIRONMENT="$PRE_PR_VENV" \
         uv run pytest tests/ -m integration --maxfail=3
     PRE_PR_OUT="$GATE_OUT"
-    if echo "$PRE_PR_OUT" | grep -qE "[0-9]+ failed|^FAILED |^ERROR "; then
+    if grep -qE "[0-9]+ failed|^FAILED |^ERROR " <<< "$PRE_PR_OUT"; then
         echo -e "${RED}FAIL${NC}"
         echo "$PRE_PR_OUT" | grep -E "FAILED|ERROR|passed|failed|error" | tail -15
         echo "fix: the failing integration tests are listed above — this is the CI Stage 3 tier the inner loop skips."
@@ -156,7 +156,7 @@ if [[ "$PRE_PR_MODE" == "1" ]]; then
     if [[ "$GATE_RC" -ne 0 ]]; then
         gate_died "integration (Stage 3)" "$GATE_RC" "env UV_PROJECT_ENVIRONMENT=$PRE_PR_VENV uv run pytest tests/ -m integration --maxfail=3"
     fi
-    PRE_PR_PASSED=$(echo "$PRE_PR_OUT" | grep -oE '[0-9]+ passed' | head -1 || echo "0 passed")
+    PRE_PR_PASSED=$(grep -m1 -oE '[0-9]+ passed' <<< "$PRE_PR_OUT" || echo "0 passed")
     [[ -z "$PRE_PR_PASSED" ]] && PRE_PR_PASSED="0 passed"
     echo -e "${GREEN}OK${NC} ($PRE_PR_PASSED)"
 
@@ -252,7 +252,7 @@ if [[ "$CHECK_MODE" == "1" ]]; then
     fi
     run_gate uv run dmypy run -- kairix/ --strict
     DMYPY_OUT="$GATE_OUT"
-    if echo "$DMYPY_OUT" | grep -qE "error:|Daemon crashed"; then
+    if grep -qE "error:|Daemon crashed" <<< "$DMYPY_OUT"; then
         echo -e "${RED}FAIL${NC}"
         echo "$DMYPY_OUT" | grep -E "error:|Daemon crashed" | head -10
         echo "fix: the type errors are listed above."
@@ -312,7 +312,7 @@ if [[ "$CHECK_MODE" == "1" ]]; then
             # `FAILED <nodeid>` line but not always a `N failed` summary, so
             # match either — otherwise a single-failure run would fall through
             # to the generic gate_died path with a less actionable message.
-            if echo "$CHECK_TEST_OUT" | grep -qE "[0-9]+ failed|^FAILED "; then
+            if grep -qE "[0-9]+ failed|^FAILED " <<< "$CHECK_TEST_OUT"; then
                 echo -e "${RED}FAIL${NC}"
                 echo "$CHECK_TEST_OUT" | grep -E "FAILED|passed|failed|error" | tail -10
                 echo "fix: the failing tests are listed above."
@@ -322,7 +322,7 @@ if [[ "$CHECK_MODE" == "1" ]]; then
             if [[ "$GATE_RC" -ne 0 ]]; then
                 gate_died "impacted tests" "$GATE_RC" "uv run python -m pytest ${CHECK_TEST_ARGS[*]} -m 'unit or bdd or contract'"
             fi
-            CHECK_PASSED=$(echo "$CHECK_TEST_OUT" | grep -oE '[0-9]+ passed' | head -1 || echo "0 passed")
+            CHECK_PASSED=$(grep -m1 -oE '[0-9]+ passed' <<< "$CHECK_TEST_OUT" || echo "0 passed")
             [[ -z "$CHECK_PASSED" ]] && CHECK_PASSED="0 passed"
             echo -e "${GREEN}OK${NC} ($CHECK_PASSED, impacted-only, no coverage)"
         fi
@@ -381,7 +381,7 @@ echo -n "  mypy strict... "
 # fires false-positive `[misc]` / `[no-any-return]` errors. CI uses uv run mypy.
 run_gate uv run mypy kairix/ --strict
 MYPY_OUT="$GATE_OUT"
-if echo "$MYPY_OUT" | grep -q "error"; then
+if grep -q "error" <<< "$MYPY_OUT"; then
     echo -e "${RED}FAIL${NC}"
     echo "$MYPY_OUT" | grep "error" | head -10
     echo "Run: uv run mypy kairix/ --strict"
@@ -460,7 +460,7 @@ else
     TEST_RC="$GATE_RC"
     COVERAGE_SKIPPED=0
 fi
-if echo "$TEST_OUT" | grep -qE "[0-9]+ failed"; then
+if grep -qE "[0-9]+ failed" <<< "$TEST_OUT"; then
     echo -e "${RED}FAIL${NC}"
     echo "$TEST_OUT" | grep -E "FAILED|passed|failed" | tail -10
     echo "fix: the failing tests are listed above."
@@ -476,18 +476,18 @@ if [[ "${TEST_RC:-0}" -ne 0 ]]; then
 fi
 # --fast may legitimately collect 0 tests (no kairix/*.py touched, or no
 # tests import the staged modules); skip the no-tests-collected check then.
-if [[ "$FAST_MODE" != "1" ]] && ! echo "$TEST_OUT" | grep -qE "[0-9]+ passed"; then
+if [[ "$FAST_MODE" != "1" ]] && ! grep -qE "[0-9]+ passed" <<< "$TEST_OUT"; then
     echo -e "${RED}FAIL${NC} (no tests collected)"
     exit 1
 fi
-PASSED=$(echo "$TEST_OUT" | grep -oE '[0-9]+ passed' | head -1 || echo "0 passed")
+PASSED=$(grep -m1 -oE '[0-9]+ passed' <<< "$TEST_OUT" || echo "0 passed")
 [[ -z "$PASSED" ]] && PASSED="0 passed"
 if [[ "$FAST_MODE" == "1" ]]; then
     echo -e "${GREEN}OK${NC} ($PASSED, --fast: impacted-only, no coverage)"
 elif [[ "$COVERAGE_SKIPPED" == "1" ]]; then
     echo -e "${GREEN}OK${NC} ($PASSED, coverage skipped via KAIRIX_SKIP_COVERAGE=1)"
 else
-    TOTAL_COV=$(echo "$TEST_OUT" | grep -oE 'Total coverage: [0-9.]+%' | head -1)
+    TOTAL_COV=$(grep -m1 -oE 'Total coverage: [0-9.]+%' <<< "$TEST_OUT")
     echo -e "${GREEN}OK${NC} ($PASSED, $TOTAL_COV)"
 fi
 
@@ -520,7 +520,7 @@ if [[ "${KAIRIX_SKIP_MUTATION:-0}" == "1" ]]; then
 else
     run_gate uv run python scripts/checks/mutation_parity.py
     MUT_OUT="$GATE_OUT"
-    if echo "$MUT_OUT" | grep -q "FAIL mutation_parity"; then
+    if grep -q "FAIL mutation_parity" <<< "$MUT_OUT"; then
         echo -e "${RED}FAIL${NC}"
         echo "$MUT_OUT" | tail -30
         echo "fix: a mutant survived — the impacted tests pass with the logic changed. Strengthen the assertion that should pin it (see the per-survivor fix: lines above)."
@@ -530,7 +530,7 @@ else
     if [[ "$GATE_RC" -ne 0 ]]; then
         gate_died "mutation parity" "$GATE_RC" "uv run python scripts/checks/mutation_parity.py"
     fi
-    echo -e "${GREEN}OK${NC} ($(echo "$MUT_OUT" | grep -oE '[0-9]+ survivor\(s\) of [0-9]+ mutant\(s\) run' | head -1 || echo 'no mutable diff'))"
+    echo -e "${GREEN}OK${NC} ($(grep -m1 -oE '[0-9]+ survivor\(s\) of [0-9]+ mutant\(s\) run' <<< "$MUT_OUT" || echo 'no mutable diff'))"
 fi
 
 # 5. Architecture fitness functions (F1-F30)
@@ -561,7 +561,7 @@ echo -e "${GREEN}OK${NC}"
 # directly here (it overwrites the baseline and only scans the path you pass it).
 echo -n "  secrets... "
 SECRETS_OUT=$(pre-commit run detect-secrets --all-files 2>&1) || true
-if echo "$SECRETS_OUT" | grep -q "Failed"; then
+if grep -q "Failed" <<< "$SECRETS_OUT"; then
     echo -e "${RED}FAIL${NC}"
     echo "$SECRETS_OUT" | tail -20
     echo "If a test fixture is a false positive, mark with: # pragma: allowlist secret"

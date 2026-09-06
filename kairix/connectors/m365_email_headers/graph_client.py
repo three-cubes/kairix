@@ -58,6 +58,7 @@ from tenacity import (
 )
 
 from kairix.transport.auth.oauth2_client_creds import OAuth2ClientCredsAuth
+from kairix.transport.errors import raise_for_graph_status
 
 logger = logging.getLogger(__name__)
 
@@ -346,9 +347,9 @@ class M365GraphClient:
             # so callers see the same :class:`httpx.HTTPStatusError`
             # shape they did before retry was added.
             final: httpx.Response = exc.last_attempt.result()
-            final.raise_for_status()
+            raise_for_graph_status(final)
             return final  # pragma: no cover — raise_for_status above always raises here
-        response.raise_for_status()
+        raise_for_graph_status(response)
         return response
 
     def _authorised_get_once(self, url: str) -> httpx.Response:

@@ -90,6 +90,7 @@ from kairix.secrets.loader import SecretsLoader, SecretsResolver
 from kairix.transport.auth.oauth2_client_creds import (
     OAuth2ClientCredsAuth,
 )
+from kairix.transport.errors import GraphDeltaExpiredError
 
 logger = logging.getLogger(__name__)
 
@@ -405,36 +406,84 @@ class M365EmailHeadersConnector:
         """
         start_url = previous_cursors.get(folder.folder_id)
         try:
-            for message in graph.iter_messages(folder.folder_id, start_url=start_url):
-                self._cache[message.message_id] = message
-                metadata: dict[str, str] = {
-                    _SENSITIVITY_METADATA_KEY: LOCKED_SENSITIVITY,
-                    _FOLDER_METADATA_KEY: folder.display_name or folder.folder_id,
-                }
-                metadata.update(extra_metadata)
-                events.append(
-                    ChangeEvent(
-                        op="created",
-                        item_id=message.message_id,
-                        modified_at=_event_modified_at(message),
-                        metadata=metadata,
-                    )
-                )
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "m365 graph: folder %r drain failed; keeping previous cursor and skipping for this tick: %s",
-                folder.display_name or folder.folder_id,
-                exc,
+            folder_events = self._collect_folder_events(
+                graph=graph,
+                folder=folder,
+                start_url=start_url,
+                extra_metadata=extra_metadata,
             )
-            prior = previous_cursors.get(folder.folder_id)
-            if prior is not None:
-                next_cursors[folder.folder_id] = prior
+        except GraphDeltaExpiredError:
+            if start_url is None:
+                self._preserve_folder_cursor(folder, previous_cursors, next_cursors, "initial seed returned 410")
+                return
+            logger.warning(
+                "m365 graph: folder %r delta cursor expired; restarting that folder from its initial seed",
+                folder.display_name or folder.folder_id,
+            )
+            try:
+                folder_events = self._collect_folder_events(
+                    graph=graph,
+                    folder=folder,
+                    start_url=None,
+                    extra_metadata=extra_metadata,
+                )
+            except httpx.HTTPError as exc:
+                self._preserve_folder_cursor(folder, previous_cursors, next_cursors, str(exc))
+                return
+        except httpx.HTTPError as exc:
+            self._preserve_folder_cursor(folder, previous_cursors, next_cursors, str(exc))
             return
+        events.extend(folder_events)
         terminal = graph.last_delta_link()
         if isinstance(terminal, str) and terminal:
             next_cursors[folder.folder_id] = terminal
         elif start_url is not None:
             next_cursors[folder.folder_id] = start_url
+
+    def _collect_folder_events(
+        self,
+        *,
+        graph: M365GraphClient,
+        folder: MailFolderRef,
+        start_url: str | None,
+        extra_metadata: dict[str, str],
+    ) -> list[ChangeEvent]:
+        """Stage a complete folder drain so a failed page emits no partial batch."""
+        messages = list(graph.iter_messages(folder.folder_id, start_url=start_url))
+        folder_events: list[ChangeEvent] = []
+        for message in messages:
+            self._cache[message.message_id] = message
+            metadata: dict[str, str] = {
+                _SENSITIVITY_METADATA_KEY: LOCKED_SENSITIVITY,
+                _FOLDER_METADATA_KEY: folder.display_name or folder.folder_id,
+            }
+            metadata.update(extra_metadata)
+            folder_events.append(
+                ChangeEvent(
+                    op="created",
+                    item_id=message.message_id,
+                    modified_at=_event_modified_at(message),
+                    metadata=metadata,
+                )
+            )
+        return folder_events
+
+    @staticmethod
+    def _preserve_folder_cursor(
+        folder: MailFolderRef,
+        previous_cursors: dict[str, str],
+        next_cursors: dict[str, str],
+        detail: str,
+    ) -> None:
+        """Keep one failed folder's prior horizon without stopping siblings."""
+        logger.warning(
+            "m365 graph: folder %r drain failed; keeping previous cursor and skipping for this tick: %s",
+            folder.display_name or folder.folder_id,
+            detail,
+        )
+        prior = previous_cursors.get(folder.folder_id)
+        if prior is not None:
+            next_cursors[folder.folder_id] = prior
 
     def fetch(self, item_id: str) -> RawArtefact:
         """Return the cached header envelope for ``item_id`` as JSON.

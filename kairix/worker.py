@@ -569,6 +569,7 @@ def _run_one_connector_batch(
     db: sqlite3.Connection,
     entry: dict[str, Any],
     bronze_root: Path,
+    connector: Any,
 ) -> _ConnectorBatchOutcome:
     """Wire one connector entry through the :class:`ConnectorPipeline`.
 
@@ -596,19 +597,14 @@ def _run_one_connector_batch(
         ConnectorPipeline,
         CursorStore,
         DeadLetterStore,
-        resolve_connector,
     )
     from kairix.core.connectors.collection_router import _legacy_chunk_writer
     from kairix.core.connectors.registry import build_bronze_from_entry, build_extractor_from_entry
 
     name = entry["name"]
-    kind = entry["kind"]
     # bronze_root is signature-only; streaming bronze writes no files.
     if bronze_root is not None:
         logger.debug("_run_one_connector_batch: bronze_root parameter is unused.")
-    # Plugin resolution keys on KIND; routing keys on the cc_pair NAME.
-    connector_factory = resolve_connector(kind)
-    connector = connector_factory(entry.get("config", {}))
     extractor = build_extractor_from_entry(entry)
     bronze_store = build_bronze_from_entry(entry, db=db)
     # N3: resolve the cc_pair id ONCE here and thread it through both the
@@ -789,6 +785,13 @@ def _bronze_root_default() -> Path:
     return data_dir() / "bronze"
 
 
+def _new_connector_from_entry(entry: dict[str, Any]) -> Any:
+    """Construct one connector from a canonical topology entry."""
+    from kairix.core.connectors import resolve_connector
+
+    return resolve_connector(entry["kind"])(entry.get("config", {}))
+
+
 @dataclass
 class ConnectorSyncDeps:
     """Injectable dependencies for :func:`run_connector_sync_pipeline`.
@@ -816,6 +819,9 @@ class ConnectorSyncDeps:
         :func:`kairix.core.db.open_db`.
       * ``bronze_root_resolver`` — returns the Bronze blob root; default
         ``data_dir() / "bronze"``.
+      * ``connector_provider`` — returns the connector instance for an
+        entry. Direct one-shot callers get a fresh connector; the worker's
+        :class:`ConnectorSyncRuntime` supplies its lifetime-owned cache.
     """
 
     disabled_fn: Callable[[], bool] = field(default_factory=lambda: connector_sync_disabled)
@@ -823,6 +829,82 @@ class ConnectorSyncDeps:
     flag_reader: Callable[[str], bool] = field(default_factory=lambda: _default_flag_value)
     db_factory: Callable[[], sqlite3.Connection] = field(default_factory=lambda: _open_db_default)
     bronze_root_resolver: Callable[[], Path] = field(default_factory=lambda: _bronze_root_default)
+    connector_provider: Callable[[dict[str, Any]], Any] = field(default_factory=lambda: _new_connector_from_entry)
+
+
+@dataclass
+class _OwnedConnector:
+    """One cached connector and the config that constructed it."""
+
+    config: dict[str, Any]
+    instance: Any
+
+
+class _ConnectorOwner:
+    """Own connector instances for one worker lifetime."""
+
+    def __init__(self, connector_factory_resolver: Callable[[str], Callable[[dict[str, Any]], Any]]) -> None:
+        self._connector_factory_resolver = connector_factory_resolver
+        self._connectors: dict[tuple[str, str], _OwnedConnector] = {}
+        self._closed = False
+
+    @staticmethod
+    def _close_instance(instance: Any) -> None:
+        close = getattr(instance, "close", None)
+        if callable(close):
+            close()
+
+    def connector_for(self, entry: dict[str, Any]) -> Any:
+        """Return the stable instance for an entry, replacing it on config change."""
+        if self._closed:
+            raise RuntimeError("connector runtime is closed")
+        key = (entry["kind"], entry["name"])
+        config = dict(entry.get("config", {}))
+        owned = self._connectors.get(key)
+        if owned is not None and owned.config == config:
+            return owned.instance
+        if owned is not None:
+            self._close_instance(owned.instance)
+        factory = self._connector_factory_resolver(entry["kind"])
+        instance = factory(config)
+        self._connectors[key] = _OwnedConnector(config=config, instance=instance)
+        return instance
+
+    def close(self) -> None:
+        """Close every owned connector exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        for owned in self._connectors.values():
+            self._close_instance(owned.instance)
+        self._connectors.clear()
+
+
+class ConnectorSyncRuntime:
+    """Callable connector-sync slot with worker-lifetime connector ownership."""
+
+    def __init__(
+        self,
+        *,
+        deps: ConnectorSyncDeps | None = None,
+        connector_factory_resolver: Callable[[str], Callable[[dict[str, Any]], Any]] | None = None,
+    ) -> None:
+        from dataclasses import replace
+
+        from kairix.core.connectors import resolve_connector
+
+        self._owner = _ConnectorOwner(connector_factory_resolver or resolve_connector)
+        self._deps = replace(deps or ConnectorSyncDeps(), connector_provider=self.connector_for)
+
+    def connector_for(self, entry: dict[str, Any]) -> Any:
+        """Resolve an entry through this runtime's lifetime-owned connector pool."""
+        return self._owner.connector_for(entry)
+
+    def __call__(self) -> ConnectorSyncResult:
+        return run_connector_sync_pipeline(self._deps)
+
+    def close(self) -> None:
+        self._owner.close()
 
 
 @dataclass
@@ -892,6 +974,7 @@ def _process_sync_entry(
     entry: dict[str, Any],
     bronze_root: Path,
     acc: _SyncAccumulator,
+    connector_provider: Callable[[dict[str, Any]], Any],
 ) -> None:
     """Run one connector batch, fold its outcome into ``acc``, stamp counters.
 
@@ -901,7 +984,8 @@ def _process_sync_entry(
     had before SYNC-OBS extracted it.
     """
     try:
-        outcome = _run_one_connector_batch(db, entry, bronze_root)
+        connector = connector_provider(entry)
+        outcome = _run_one_connector_batch(db, entry, bronze_root, connector)
     except Exception as exc:
         logger.warning("worker: connector %s failed — %s", entry.get("name"), exc)
         return
@@ -971,7 +1055,7 @@ def run_connector_sync_pipeline(deps: ConnectorSyncDeps | None = None) -> Connec
             if not connector_enabled(entry["kind"], deps.flag_reader):
                 logger.info("worker: connector %s gated off (flag connector_%s OFF)", entry["kind"], entry["kind"])
                 continue
-            _process_sync_entry(db, entry, bronze_root, acc)
+            _process_sync_entry(db, entry, bronze_root, acc, deps.connector_provider)
         return acc.to_result()
     finally:
         db.close()
@@ -1938,7 +2022,7 @@ class WorkerDeps:
     # above. Tests pass a Fake; production omits and gets the
     # NotImplementedError-raising default until Wave 2 swaps it for the
     # real ``kairix.core.connectors`` dispatcher.
-    connector_sync_fn: Callable[[], ConnectorSyncResult] = field(default_factory=lambda: _default_connector_sync)
+    connector_sync_fn: Callable[[], ConnectorSyncResult] = field(default_factory=ConnectorSyncRuntime)
     # GH #334 — Neo4j entity-graph drain dispatch slot. Same F6-clean
     # default_factory shape as ``connector_sync_fn``. Tests pass a
     # Fake; production omits and gets ``_default_neo4j_drain`` which
@@ -3019,6 +3103,13 @@ def _maybe_run_maintenance_cycle(
     )
 
 
+def _close_connector_runtime(connector_sync_fn: Callable[[], ConnectorSyncResult]) -> None:
+    """Close a lifetime-owning connector sync callable when it exposes shutdown."""
+    close = getattr(connector_sync_fn, "close", None)
+    if callable(close):
+        close()
+
+
 def main(
     *,
     deps: WorkerDeps | None = None,
@@ -3277,6 +3368,7 @@ def main(
                 break
             deps.sleep(1)
 
+    _close_connector_runtime(deps.connector_sync_fn)
     logger.info("kairix worker stopped")
 
 

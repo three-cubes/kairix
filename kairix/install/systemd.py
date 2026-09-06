@@ -123,7 +123,7 @@ def install_unit(
     try:
         _run(deps.subprocess_runner, [*systemctl_argv, "daemon-reload"])
         _run(deps.subprocess_runner, [*systemctl_argv, "enable", _UNIT_FILENAME])
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+    except (subprocess.CalledProcessError, FileNotFoundError, PermissionError) as exc:
         systemctl_ok = False
         _logger.warning(
             "systemctl enable kairix.service failed (%s). Unit file is written "
@@ -143,7 +143,9 @@ def install_unit(
     }
 
 
-def _systemctl_failure_detail(exc: subprocess.CalledProcessError | FileNotFoundError) -> str:
+def _systemctl_failure_detail(
+    exc: subprocess.CalledProcessError | FileNotFoundError | PermissionError,
+) -> str:
     """One-line cause string for the best-effort systemctl warning.
 
     ``subprocess.run`` raises ``FileNotFoundError`` when the systemctl
@@ -152,8 +154,8 @@ def _systemctl_failure_detail(exc: subprocess.CalledProcessError | FileNotFoundE
     (no logind session, unreachable user bus). The warning carries
     whichever detail applies so the operator sees the real cause.
     """
-    if isinstance(exc, FileNotFoundError):
-        return "systemctl binary not found; this host has no systemd (e.g. container runtime)"
+    if isinstance(exc, OSError):
+        return f"systemctl unavailable: {exc}"
     stderr = (exc.stderr or b"").decode("utf-8", errors="replace")[:200]
     return f"rc={exc.returncode}, stderr: {stderr}"
 

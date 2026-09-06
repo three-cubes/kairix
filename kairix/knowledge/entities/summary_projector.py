@@ -164,6 +164,10 @@ def now_iso() -> str:
 _now_iso = now_iso  # Backwards-compatible alias for any internal callers.
 
 
+def noop_projector_action() -> None:
+    """Default lifecycle action for directly composed projectors."""
+
+
 # ---------------------------------------------------------------------------
 # Projector implementation
 # ---------------------------------------------------------------------------
@@ -196,10 +200,15 @@ class EntitySummaryProjectorImpl:
         neo4j: Any,
         chunk_writer: Any,
         clock: Callable[[], str] = now_iso,
+        commit: Callable[[], None] = noop_projector_action,
+        close_actions: tuple[Callable[[], None], ...] = (),
     ) -> None:
         self._neo4j = neo4j
         self._chunk_writer = chunk_writer
         self._clock = clock
+        self._commit = commit
+        self._close_actions = close_actions
+        self._closed = False
 
     def tick(self, *, per_tick_max_items: int = 200) -> EntitySummaryProjectionResult:
         rows = self._fetch_pending(per_tick_max_items)
@@ -226,12 +235,22 @@ class EntitySummaryProjectorImpl:
                 updated += 1
             elif outcome == "skipped":
                 skipped += 1
-        return EntitySummaryProjectionResult(
+        result = EntitySummaryProjectionResult(
             projected=projected,
             updated=updated,
             skipped=skipped,
             failed=failed,
         )
+        self._commit()
+        return result
+
+    def close(self) -> None:
+        """Release resources owned by the production builder exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        for action in self._close_actions:
+            action()
 
     def _fetch_pending(self, per_tick_max_items: int) -> list[Mapping[str, Any]]:
         try:
@@ -355,50 +374,59 @@ class EntitySummaryProjectorDeps:
     per_tick_max_items: int = 200
 
 
-class UnavailableNeo4jClient:
-    """Placeholder Neo4j client whose ``cypher`` always raises.
+def default_projector_db_factory() -> Any:
+    """Open the canonical production SQLite database."""
+    from kairix.core.db import open_db
 
-    Slice B's :func:`default_projector_builder` wires this so the
-    flag-gated tick dispatcher's poll path absorbs the failure into
-    an idle result. Slice C+ overrides the default factory with a
-    real Neo4j client + a real ChunkWriter so the projector runs
-    against the live worker DB.
-    """
-
-    def cypher(self, _query: str, _params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        raise RuntimeError("EntitySummaryProjector: no Neo4j wired — Slice C+ deploys the live factory")
+    return open_db()
 
 
-class NoopChunkWriter:
-    """Placeholder ChunkWriter satisfying the Protocol with all-zero returns.
+def default_projector_neo4j_factory() -> Any:
+    """Open the canonical production Neo4j client."""
+    from kairix.knowledge.graph.client import Neo4jClient
 
-    Pairs with :class:`UnavailableNeo4jClient` in
-    :func:`default_projector_builder`. Never invoked in normal Slice B
-    flow (Neo4j poll raises first), but kept Protocol-compatible so a
-    future caller wiring a real Neo4j against this default writer
-    stays safe.
-    """
-
-    def upsert(self, _chunks: Any) -> int:
-        return 0
-
-    def delete_by_source_uri(self, _source_uri: str) -> int:
-        return 0
+    return Neo4jClient()
 
 
-def default_projector_builder() -> EntitySummaryProjectorImpl:
-    """Production default factory placeholder (Slice B).
+@dataclass(frozen=True)
+class DefaultProjectorBuilderDeps:
+    """Process-boundary factories used by the production projector builder."""
 
-    Returns a projector with no Neo4j connection — the tick path
-    returns an idle result via the projector's poll-failure path.
-    The continuous worker-loop wiring (Slice C+) overrides this
-    default with a builder that wires the live Neo4j client +
-    ``legacy_chunk_writer`` against the worker DB.
+    db_factory: Callable[[], Any] = field(default_factory=lambda: default_projector_db_factory)
+    neo4j_factory: Callable[[], Any] = field(default_factory=lambda: default_projector_neo4j_factory)
 
-    Public so :class:`EntitySummaryProjectorDeps` can reference it
-    via ``field(default_factory=...)``; F1/F2/F6 clean.
-    """
-    return EntitySummaryProjectorImpl(neo4j=UnavailableNeo4jClient(), chunk_writer=NoopChunkWriter())
+
+def default_projector_builder(
+    deps: DefaultProjectorBuilderDeps | None = None,
+) -> EntitySummaryProjectorImpl:
+    """Compose the live Neo4j reader and SQLite entity-summary writer."""
+    from kairix.core.connectors.collection_router import legacy_chunk_writer
+    from kairix.core.db.schema import create_schema
+
+    deps = deps if deps is not None else DefaultProjectorBuilderDeps()
+    db = deps.db_factory()
+    neo4j: Any | None = None
+    try:
+        create_schema(db)
+        neo4j = deps.neo4j_factory()
+        writer = legacy_chunk_writer(db, collection="entity-summaries")
+        close_actions: list[Callable[[], None]] = []
+        neo4j_close = getattr(neo4j, "close", None)
+        if callable(neo4j_close):
+            close_actions.append(neo4j_close)
+        close_actions.append(db.close)
+        return EntitySummaryProjectorImpl(
+            neo4j=neo4j,
+            chunk_writer=writer,
+            commit=db.commit,
+            close_actions=tuple(close_actions),
+        )
+    except Exception:
+        neo4j_close = getattr(neo4j, "close", None)
+        if callable(neo4j_close):
+            neo4j_close()
+        db.close()
+        raise
 
 
 def run_entity_summary_projector_tick(
@@ -420,4 +448,9 @@ def run_entity_summary_projector_tick(
     if not deps.flag_reader():
         return None
     projector = deps.projector_factory()
-    return projector.tick(per_tick_max_items=deps.per_tick_max_items)
+    try:
+        return projector.tick(per_tick_max_items=deps.per_tick_max_items)
+    finally:
+        close = getattr(projector, "close", None)
+        if callable(close):
+            close()

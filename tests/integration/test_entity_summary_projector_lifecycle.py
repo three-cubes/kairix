@@ -24,7 +24,9 @@ import pytest
 from kairix.core.connectors.collection_router import legacy_chunk_writer
 from kairix.core.db.schema import create_schema
 from kairix.knowledge.entities.summary_projector import (
+    DefaultProjectorBuilderDeps,
     EntitySummaryProjectorImpl,
+    default_projector_builder,
     hash_summary,
 )
 from tests.fakes import FakeGraphRepository
@@ -56,6 +58,43 @@ def _row(
         "prior_hash": prior_hash,
         "summary_source": "wikidata",
     }
+
+
+def test_production_default_builder_wires_live_graph_and_sqlite_writer(tmp_path: Path) -> None:
+    """The worker's non-injected builder projects through real SQLite wiring.
+
+    Only process boundaries are supplied: the production builder still owns
+    schema creation, ``entity-summaries`` writer composition, transaction
+    commit, and connection closure.  This catches the former placeholder
+    graph/no-op writer default that made every live tick silently idle.
+    """
+    db_path = tmp_path / "kairix.db"
+    neo4j = FakeGraphRepository(
+        cypher_rows=[_row(name="Ada", qid="Q42", summary="Systems research leader")],
+    )
+
+    projector = default_projector_builder(
+        DefaultProjectorBuilderDeps(
+            db_factory=lambda: sqlite3.connect(str(db_path)),
+            neo4j_factory=lambda: neo4j,
+        )
+    )
+    try:
+        result = projector.tick(per_tick_max_items=10)
+    finally:
+        projector.close()
+
+    assert result.projected == 1
+    db = sqlite3.connect(str(db_path))
+    try:
+        row = db.execute(
+            "SELECT collection, source_uri FROM documents WHERE source_uri = ?",
+            ("entity://Q42",),
+        ).fetchone()
+    finally:
+        db.close()
+    assert row == ("entity-summaries", "entity://Q42")
+    assert any("SET n.summary_indexed_at" in query for query, _params in neo4j.cypher_calls)
 
 
 def test_lifecycle_seed_tick_assert_chunk_and_fts(tmp_path: Path) -> None:

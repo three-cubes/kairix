@@ -27,6 +27,7 @@ the extractor layer.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -53,6 +54,9 @@ from kairix.core.protocols import (
     SourceMetadata,
 )
 from kairix.secrets.loader import SecretsLoader, SecretsResolver
+from kairix.transport.errors import GraphDeltaExpiredError
+
+logger = logging.getLogger(__name__)
 
 CONNECTOR_NAME = "m365_calendar"
 
@@ -318,7 +322,13 @@ class M365CalendarConnector:
         boundary surface.
         """
         client = self._ensure_client()
-        batch = self._drain(client, cursor)
+        try:
+            batch = self._drain(client, cursor)
+        except GraphDeltaExpiredError:
+            if cursor is None:
+                raise
+            logger.warning("m365 calendar: stored delta cursor expired; restarting from the configured initial window")
+            batch = self._drain(client, None)
         self._last_delta_link = batch.delta_link
         return iter(batch.events)
 
@@ -721,7 +731,18 @@ class M365CalendarConnector:
         """
         upn = container.container_id
         client = self._ensure_client_for_upn(upn)
-        batch = self._drain_for_container(client, container.cursor_token)
+        try:
+            batch = self._drain_for_container(client, container.cursor_token)
+        except GraphDeltaExpiredError:
+            if container.cursor_token is None:
+                raise
+            logger.warning(
+                "m365 calendar: stored delta cursor expired for %s; "
+                "restarting that calendar from the configured initial window",
+                upn,
+            )
+            batch = self._drain_for_container(client, None)
+        self._last_delta_link = batch.delta_link
         return iter(batch.events)
 
     def _drain_for_container(self, client: M365GraphCalendarClient, cursor: Cursor | None) -> _SyncBatch:
