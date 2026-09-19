@@ -73,6 +73,8 @@ jobs:
               - 'scripts/safe-commit.sh'
               - '.architecture/baseline/**'
               - '**/_rule_catalogue.py'
+              # A caller change must execute the reusable workflow it changes.
+              - '.github/workflows/ci.yml'
             docker:
               - 'Dockerfile'
               - 'docker-compose*.yml'
@@ -151,7 +153,7 @@ jobs:
     #  * PRIVATE_INFRA_PATTERNS (F73) is forwarded through the reusable's
     #    private-infra-patterns secret so the detector stays ENFORCED, not a
     #    silent no-op. Stage 1..5 (contracts / integration / e2e) are untouched.
-    uses: three-cubes/tc-pipelines/.github/workflows/python-quality-gate.yml@b9d6408868eec5be56dbe57581aa086a95095d46 # v1.16.1
+    uses: three-cubes/tc-pipelines/.github/workflows/python-quality-gate.yml@0541f75d6a3491ff83e643bc752d9722f17d865e # v1.19.1
     with:
       python-version: "3.12"
       uv-version: "0.11.16"
