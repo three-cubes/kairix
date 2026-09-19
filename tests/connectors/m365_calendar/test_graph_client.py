@@ -22,6 +22,7 @@ from kairix.connectors.m365_calendar.graph_client import (
     M365GraphCalendarClient,
     iter_pages,
 )
+from kairix.transport.errors import GraphDeltaExpiredError
 
 
 def _stub_auth() -> OAuth2ClientCredsAuth:
@@ -309,3 +310,21 @@ def test_non_2xx_response_raises_httpx_error() -> None:
     client = _client_with_handler(_handler)
     with pytest.raises(httpx.HTTPStatusError):
         client.fetch_initial_delta("2026-05-01T00:00:00Z", "2026-06-01T00:00:00Z")
+
+
+@pytest.mark.unit
+def test_410_response_raises_typed_delta_expired_error() -> None:
+    """A Graph 410 is distinguishable from every other HTTP failure."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            410,
+            request=request,
+            json={"error": {"code": "syncStateNotFound"}},
+        )
+
+    client = _client_with_handler(_handler)
+    with pytest.raises(GraphDeltaExpiredError) as raised:
+        client.fetch_delta_page("https://graph.microsoft.com/v1.0/expired-calendar-delta")
+
+    assert raised.value.response.status_code == 410

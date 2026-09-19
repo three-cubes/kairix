@@ -24,11 +24,12 @@ the tick continues. A Neo4j poll failure produces an idle result
 (``projected=0``, ``failed=0``) — the worker boundary decides whether
 to surface based on telemetry, not by absorbing the wrong failure.
 
-ADR-036 §Q6 idempotency contract: a re-tick with no Neo4j changes
-projects zero new chunks because the hash filter short-circuits each
-row. A re-projection (summary text changed) deletes the prior chunk
-via :meth:`ChunkWriter.delete_by_source_uri` before upserting, so the
-new ``content_hash`` doesn't leave a stale row behind.
+ADR-036 §Q6 idempotency contract: the Neo4j poll filters unchanged
+summaries before applying the per-tick limit, so a re-tick projects zero
+new chunks and a large backlog keeps moving. A re-projection (summary text
+changed) deletes the prior chunk via :meth:`ChunkWriter.delete_by_source_uri`
+before upserting, so the new ``content_hash`` doesn't leave a stale row
+behind.
 """
 
 from __future__ import annotations
@@ -58,18 +59,25 @@ logger = logging.getLogger(__name__)
 _POLL_CYPHER = """
 MATCH (n)
 WHERE n.summary IS NOT NULL AND n.summary <> ''
+  AND (
+    n.summary_indexed_summary IS NULL
+    OR n.summary_indexed_summary <> n.summary
+  )
 RETURN n.name AS name,
        n.wikidata_qid AS qid,
        n.summary AS summary,
        n.summary_indexed_content_hash AS prior_hash,
+       n.summary_indexed_summary AS prior_summary,
        n.summary_source AS summary_source
+ORDER BY n.name
 LIMIT $per_tick_max_items
 """
 
 _MARK_INDEXED_CYPHER = """
 MATCH (n {name: $name})
 SET n.summary_indexed_at = $now,
-    n.summary_indexed_content_hash = $hash
+    n.summary_indexed_content_hash = $hash,
+    n.summary_indexed_summary = $summary
 RETURN n.name AS name
 """
 
@@ -83,8 +91,8 @@ def hash_summary(summary: str) -> str:
     """SHA-256 hex digest of ``summary`` — used as both the chunk's
     ``content_hash`` and Neo4j's ``n.summary_indexed_content_hash``.
 
-    Same string → same digest, so re-running a tick with no changes
-    short-circuits via the prior-hash equality check below.
+    Same string → same digest, so existing chunk identity remains stable
+    across safe retries and legacy marker backfills.
     """
     return hashlib.sha256(summary.encode("utf-8")).hexdigest()
 
@@ -164,6 +172,10 @@ def now_iso() -> str:
 _now_iso = now_iso  # Backwards-compatible alias for any internal callers.
 
 
+def noop_projector_action() -> None:
+    """Default lifecycle action for directly composed projectors."""
+
+
 # ---------------------------------------------------------------------------
 # Projector implementation
 # ---------------------------------------------------------------------------
@@ -196,10 +208,15 @@ class EntitySummaryProjectorImpl:
         neo4j: Any,
         chunk_writer: Any,
         clock: Callable[[], str] = now_iso,
+        commit: Callable[[], None] = noop_projector_action,
+        close_actions: tuple[Callable[[], None], ...] = (),
     ) -> None:
         self._neo4j = neo4j
         self._chunk_writer = chunk_writer
         self._clock = clock
+        self._commit = commit
+        self._close_actions = close_actions
+        self._closed = False
 
     def tick(self, *, per_tick_max_items: int = 200) -> EntitySummaryProjectionResult:
         rows = self._fetch_pending(per_tick_max_items)
@@ -233,6 +250,14 @@ class EntitySummaryProjectorImpl:
             failed=failed,
         )
 
+    def close(self) -> None:
+        """Release resources owned by the production builder exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        for action in self._close_actions:
+            action()
+
     def _fetch_pending(self, per_tick_max_items: int) -> list[Mapping[str, Any]]:
         try:
             return list(
@@ -260,6 +285,7 @@ class EntitySummaryProjectorImpl:
         qid = str(row.get("qid") or "")
         name = str(row.get("name") or "")
         prior_hash = str(row.get("prior_hash") or "")
+        prior_summary = str(row.get("prior_summary") or "")
 
         # #429: ``qid`` is optional — a first-party canonical entity (#467)
         # has a summary but no ``wikidata_qid`` and must still index, keyed
@@ -269,6 +295,13 @@ class EntitySummaryProjectorImpl:
 
         current_hash = hash_summary(summary)
         if prior_hash == current_hash:
+            if prior_summary != summary:
+                self._mark_indexed(
+                    name=name,
+                    summary=summary,
+                    content_hash=current_hash,
+                    tick_iso=tick_iso,
+                )
             return "skipped"
 
         source_uri = entity_summary_source_uri(qid=qid, name=name)
@@ -286,11 +319,20 @@ class EntitySummaryProjectorImpl:
             # never-projected branch via the prior_hash truthiness check.
             self._chunk_writer.delete_by_source_uri(source_uri)
         self._chunk_writer.upsert([chunk])
-
-        self._mark_indexed(name=name, content_hash=current_hash, tick_iso=tick_iso)
+        # SQLite is the retrievable source of truth. Commit it before the
+        # cross-store Neo4j marker so the graph can never claim a chunk that
+        # a process exit or commit failure rolls back. If the marker fails,
+        # the graph row stays pending and a later tick safely re-upserts.
+        self._commit()
+        self._mark_indexed(
+            name=name,
+            summary=summary,
+            content_hash=current_hash,
+            tick_iso=tick_iso,
+        )
         return "updated" if prior_hash else "projected"
 
-    def _mark_indexed(self, *, name: str, content_hash: str, tick_iso: str) -> None:
+    def _mark_indexed(self, *, name: str, summary: str, content_hash: str, tick_iso: str) -> None:
         """Stamp ``n.summary_indexed_at`` + ``n.summary_indexed_content_hash``.
 
         Same try-block discipline as the rest of ``_process_one`` —
@@ -299,10 +341,12 @@ class EntitySummaryProjectorImpl:
         (idempotent next tick via content_hash) but the entity will
         re-project until Neo4j recovers.
         """
-        self._neo4j.cypher(
+        rows = self._neo4j.cypher(
             _MARK_INDEXED_CYPHER,
-            {"name": name, "now": tick_iso, "hash": content_hash},
+            {"name": name, "now": tick_iso, "hash": content_hash, "summary": summary},
         )
+        if not rows:
+            raise RuntimeError(f"Neo4j did not mark entity summary indexed: {name}")
 
 
 # ---------------------------------------------------------------------------
@@ -355,50 +399,59 @@ class EntitySummaryProjectorDeps:
     per_tick_max_items: int = 200
 
 
-class UnavailableNeo4jClient:
-    """Placeholder Neo4j client whose ``cypher`` always raises.
+def default_projector_db_factory() -> Any:
+    """Open the canonical production SQLite database."""
+    from kairix.core.db import open_db
 
-    Slice B's :func:`default_projector_builder` wires this so the
-    flag-gated tick dispatcher's poll path absorbs the failure into
-    an idle result. Slice C+ overrides the default factory with a
-    real Neo4j client + a real ChunkWriter so the projector runs
-    against the live worker DB.
-    """
-
-    def cypher(self, _query: str, _params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        raise RuntimeError("EntitySummaryProjector: no Neo4j wired — Slice C+ deploys the live factory")
+    return open_db()
 
 
-class NoopChunkWriter:
-    """Placeholder ChunkWriter satisfying the Protocol with all-zero returns.
+def default_projector_neo4j_factory() -> Any:
+    """Open the canonical production Neo4j client."""
+    from kairix.knowledge.graph.client import Neo4jClient
 
-    Pairs with :class:`UnavailableNeo4jClient` in
-    :func:`default_projector_builder`. Never invoked in normal Slice B
-    flow (Neo4j poll raises first), but kept Protocol-compatible so a
-    future caller wiring a real Neo4j against this default writer
-    stays safe.
-    """
-
-    def upsert(self, _chunks: Any) -> int:
-        return 0
-
-    def delete_by_source_uri(self, _source_uri: str) -> int:
-        return 0
+    return Neo4jClient()
 
 
-def default_projector_builder() -> EntitySummaryProjectorImpl:
-    """Production default factory placeholder (Slice B).
+@dataclass(frozen=True)
+class DefaultProjectorBuilderDeps:
+    """Process-boundary factories used by the production projector builder."""
 
-    Returns a projector with no Neo4j connection — the tick path
-    returns an idle result via the projector's poll-failure path.
-    The continuous worker-loop wiring (Slice C+) overrides this
-    default with a builder that wires the live Neo4j client +
-    ``legacy_chunk_writer`` against the worker DB.
+    db_factory: Callable[[], Any] = field(default_factory=lambda: default_projector_db_factory)
+    neo4j_factory: Callable[[], Any] = field(default_factory=lambda: default_projector_neo4j_factory)
 
-    Public so :class:`EntitySummaryProjectorDeps` can reference it
-    via ``field(default_factory=...)``; F1/F2/F6 clean.
-    """
-    return EntitySummaryProjectorImpl(neo4j=UnavailableNeo4jClient(), chunk_writer=NoopChunkWriter())
+
+def default_projector_builder(
+    deps: DefaultProjectorBuilderDeps | None = None,
+) -> EntitySummaryProjectorImpl:
+    """Compose the live Neo4j reader and SQLite entity-summary writer."""
+    from kairix.core.connectors.collection_router import legacy_chunk_writer
+    from kairix.core.db.schema import create_schema
+
+    deps = deps if deps is not None else DefaultProjectorBuilderDeps()
+    db = deps.db_factory()
+    neo4j: Any | None = None
+    try:
+        create_schema(db)
+        neo4j = deps.neo4j_factory()
+        writer = legacy_chunk_writer(db, collection="entity-summaries")
+        close_actions: list[Callable[[], None]] = []
+        neo4j_close = getattr(neo4j, "close", None)
+        if callable(neo4j_close):
+            close_actions.append(neo4j_close)
+        close_actions.append(db.close)
+        return EntitySummaryProjectorImpl(
+            neo4j=neo4j,
+            chunk_writer=writer,
+            commit=db.commit,
+            close_actions=tuple(close_actions),
+        )
+    except Exception:
+        neo4j_close = getattr(neo4j, "close", None)
+        if callable(neo4j_close):
+            neo4j_close()
+        db.close()
+        raise
 
 
 def run_entity_summary_projector_tick(
@@ -420,4 +473,9 @@ def run_entity_summary_projector_tick(
     if not deps.flag_reader():
         return None
     projector = deps.projector_factory()
-    return projector.tick(per_tick_max_items=deps.per_tick_max_items)
+    try:
+        return projector.tick(per_tick_max_items=deps.per_tick_max_items)
+    finally:
+        close = getattr(projector, "close", None)
+        if callable(close):
+            close()

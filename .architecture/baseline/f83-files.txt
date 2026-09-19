@@ -7,6 +7,5 @@ scripts/checks/check-fresh-install-smoke.sh
 scripts/download-additional-sources.sh
 scripts/download-reference-library.sh
 scripts/pre-commit-confidential-check.sh
-scripts/preflight.sh
 scripts/safe-commit.sh
 scripts/uat-smoke.sh

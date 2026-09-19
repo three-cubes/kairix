@@ -173,8 +173,9 @@ def test_projector_skips_when_prior_hash_matches() -> None:
     assert result.updated == 0
     assert writer.writes == []
     assert writer.deletes == []
-    # Only the poll happened — no mark-indexed write.
-    assert len(neo4j.cypher_calls) == 1
+    # A legacy row missing the server-side comparison value is backfilled
+    # once, without rewriting the already-current SQLite chunk.
+    assert len(neo4j.cypher_calls) == 2
 
 
 def test_projector_updates_when_summary_hash_changed() -> None:
@@ -313,8 +314,10 @@ def test_projector_respects_per_tick_max_items_param() -> None:
 
     projector.tick(per_tick_max_items=42)
     assert neo4j.cypher_calls, "projector should call cypher even on empty result"
-    _query, params = neo4j.cypher_calls[0]
+    query, params = neo4j.cypher_calls[0]
     assert params == {"per_tick_max_items": 42}
+    assert "summary_indexed_summary" in query
+    assert query.index("summary_indexed_summary") < query.index("LIMIT $per_tick_max_items")
 
 
 def test_default_clock_returns_utc_zulu_iso_string() -> None:
@@ -366,44 +369,3 @@ def test_default_flag_reader_returns_registry_default_false() -> None:
     from kairix.knowledge.entities.summary_projector import default_flag_reader
 
     assert default_flag_reader() is False
-
-
-def test_default_projector_builder_returns_safe_noop_projector() -> None:
-    """The Slice B placeholder builder constructs a projector whose
-    tick produces an all-zero result (Neo4j raises → poll absorbs).
-
-    Locks the safe-misconfig contract: an operator who flips the flag
-    before Slice C ships the live factory sees an idle tick result,
-    NOT a crashed worker loop.
-    """
-    from kairix.knowledge.entities.summary_projector import default_projector_builder
-
-    projector = default_projector_builder()
-    result = projector.tick(per_tick_max_items=10)
-    assert (result.projected, result.updated, result.skipped, result.failed) == (0, 0, 0, 0)
-
-
-def test_noop_chunk_writer_returns_zero_on_upsert_and_delete() -> None:
-    """The Slice B placeholder :class:`NoopChunkWriter` returns 0 from
-    both Protocol methods. Locks the Protocol-compatibility contract:
-    a future caller that wires a real Neo4j against this placeholder
-    writer (e.g. mid-cutover) stays safe — no exception, just zero
-    counts."""
-    from kairix.knowledge.entities.summary_projector import NoopChunkWriter
-
-    writer = NoopChunkWriter()
-    assert writer.upsert([]) == 0
-    assert writer.delete_by_source_uri("entity://Q-anything") == 0
-
-
-def test_unavailable_neo4j_client_raises_on_cypher() -> None:
-    """The Slice B placeholder :class:`UnavailableNeo4jClient.cypher`
-    raises so the projector poll path absorbs into an idle result.
-    Locks the placeholder's safe-misconfig semantics — Slice C+
-    overrides the default factory with a real Neo4j client."""
-    import pytest as _pytest
-
-    from kairix.knowledge.entities.summary_projector import UnavailableNeo4jClient
-
-    with _pytest.raises(RuntimeError, match="no Neo4j wired"):
-        UnavailableNeo4jClient().cypher("MATCH (n) RETURN n")
