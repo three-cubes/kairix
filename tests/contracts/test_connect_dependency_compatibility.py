@@ -12,11 +12,7 @@ from __future__ import annotations
 
 from importlib.metadata import version
 
-import jwt
 import pytest
-from caldav import Event
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from kairix.connect.oauth2.github_app import JWT_ALGORITHM
 from kairix.connectors.apple_caldav.client import AppleCalDavClient
@@ -32,6 +28,10 @@ def _release_version(distribution: str) -> tuple[int, ...]:
 
 def test_github_app_rs256_signing_uses_supported_cryptography_backend() -> None:
     """The installed PyJWT/cryptography pair signs and verifies an App JWT."""
+    import jwt
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
     assert _release_version("cryptography") >= (50, 0, 1)
 
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -55,6 +55,8 @@ def test_github_app_rs256_signing_uses_supported_cryptography_backend() -> None:
 
 def test_apple_caldav_parses_real_icalendar_event_into_typed_record() -> None:
     """The installed caldav/icalendar pair preserves Kairix event fields."""
+    from caldav import Event
+
     assert _release_version("icalendar") >= (7, 3, 0)
 
     raw_ics = """BEGIN:VCALENDAR\r
