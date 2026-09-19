@@ -10,6 +10,7 @@ stays hermetic.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pytest
@@ -383,13 +384,13 @@ def test_include_warmup_disables_auto_skip() -> None:
     and the operator opt-in becomes a no-op — skipped_buckets stays non-empty
     and the headline numbers change vs raw mode, breaking the contract.
     """
-    call_counter = {"i": 0}
 
-    def slow_first_then_fast(_q: SampledQuery) -> int:
-        call_counter["i"] += 1
-        if call_counter["i"] == 1:
-            time.sleep(0.08)
-        return 0
+    def scripted_clock() -> Callable[[], float]:
+        # run start, 20 completion timestamps in bucket 4, run end. This
+        # produces the cold-start geometry deterministically, independently of
+        # host scheduling or concurrent test load.
+        timeline = iter([0.0, *(0.080 + index * 0.0005 for index in range(20)), 0.1])
+        return lambda: next(timeline)
 
     auto = run_probe_burst(
         suite="x",
@@ -397,10 +398,9 @@ def test_include_warmup_disables_auto_skip() -> None:
         peak_concurrency=1,
         bucket_ms=20,
         suite_loader=_suite_loader,
-        searcher=slow_first_then_fast,
+        searcher=_fast_client.search,
+        clock=scripted_clock(),
     )
-    # Reset counter for the second run so it sees the same shape.
-    call_counter["i"] = 0
     raw = run_probe_burst(
         suite="x",
         total_queries=20,
@@ -408,7 +408,8 @@ def test_include_warmup_disables_auto_skip() -> None:
         bucket_ms=20,
         include_warmup=True,
         suite_loader=_suite_loader,
-        searcher=slow_first_then_fast,
+        searcher=_fast_client.search,
+        clock=scripted_clock(),
     )
     assert raw.include_warmup is True
     assert auto.include_warmup is False
@@ -419,11 +420,11 @@ def test_include_warmup_disables_auto_skip() -> None:
     # When sustained drops to near-zero from cold-start contamination, the
     # raw sustained must be lower than the auto-skipped sustained (auto-skip
     # excludes the zero-QPS leading buckets).
-    if auto.skipped_buckets:
-        assert raw.sustained_qps <= auto.sustained_qps, (
-            f"raw sustained={raw.sustained_qps} should be <= auto={auto.sustained_qps} "
-            "(raw includes pre-completion zero buckets)"
-        )
+    assert auto.skipped_buckets
+    assert raw.sustained_qps < auto.sustained_qps, (
+        f"raw sustained={raw.sustained_qps} should be < auto={auto.sustained_qps} "
+        "(raw includes pre-completion zero buckets)"
+    )
 
 
 def test_skipped_buckets_serialise_in_envelope() -> None:

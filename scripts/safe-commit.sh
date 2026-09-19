@@ -39,17 +39,20 @@ set -euo pipefail
 # (default safe-commit.sh) REMAINS the merge bar — --check does NOT replace
 # CI; it is purely the local inner loop. See CLAUDE.md "How to commit".
 #
-# --pre-pr mode (opt-in): the PRE-PUSH integration leg (CI Stage 3 parity).
+# --pre-pr mode (opt-in): the PRE-PUSH integration and composed E2E legs
+# (CI Stage 3 + Stage 4.5 parity).
 # The default/--fast/--check gates run only `unit or bdd or contract` (CI
 # Stage 2). CI Stage 3 runs `pytest tests/ -m integration` as a SEPARATE tier
 # the inner loop never replicated — so a change could be green locally and red
 # in CI (PLA-281: a DI-seam change broke an integration-only fake, run_search's
 # broad except swallowed the TypeError into empty results, safe-commit was
-# green, and CI Stage 3 went red an hour later). --pre-pr replicates CI Stage 3
-# EXACTLY: same `-m integration --maxfail=3` marker, same extras set (mirrors
-# ci.yml Stage 3's `.[dev,agents,markitdown,pdf_fallback,ocr,pptx,docx,xlsx]`,
-# synced into a dedicated env so the warm --all-extras inner-loop venv is left
-# intact). It is VERIFY-ONLY: it does not commit and needs nothing staged.
+# green, and CI Stage 3 went red an hour later). A later Neo4j write-contract
+# change passed every local gate but failed Stage 4.5 because --pre-pr did not
+# select the composed E2E suite. --pre-pr now replicates both commands exactly:
+# `pytest tests/ -m integration --maxfail=3` and
+# `pytest -m e2e tests/e2e/ -v --tb=short`. Both use the same CI-parity extras
+# in one dedicated environment, leaving the warm --all-extras inner-loop venv
+# intact. It is VERIFY-ONLY: it does not commit and needs nothing staged.
 # safe-commit green is NECESSARY BUT NOT SUFFICIENT — run `--pre-pr` after the
 # normal gate has committed, before you push / open a PR / report done. It is
 # deliberately OUT of the default/--fast/--check inner loops so the <60s
@@ -109,16 +112,15 @@ gate_died() {
     exit "$rc"
 }
 
-# ── --pre-pr: the pre-push integration leg (CI Stage 3 parity) ───────────────
-# Verify-only. Replicates CI Stage 3 exactly — same `-m integration
-# --maxfail=3` marker, same extras — so "green locally" == "green in CI" for
-# the integration tier the inner loop skips (PLA-281). Runs BEFORE the coverage
-# trap + staged guard so it needs nothing staged and never commits. Placed
-# early on purpose: the normal gate has already committed; this is the final
-# integration confirmation before push. Every stage emits a named OK/FAIL
+# ── --pre-pr: CI Stage 3 + Stage 4.5 parity ──────────────────────────────────
+# Verify-only. Replicates the integration and composed E2E commands exactly so
+# "green locally" covers both long-running Python tiers CI selects for runtime
+# changes. The two suites share one synced CI-parity environment and each runs
+# exactly once. This block runs before the coverage trap + staged guard, so it
+# needs nothing staged and never commits. Every stage emits a named OK/FAIL
 # verdict (F83 stage-ledger contract).
 if [[ "$PRE_PR_MODE" == "1" ]]; then
-    echo "=== Pre-PR gate (--pre-pr — CI Stage 3 integration tier parity) ==="
+    echo "=== Pre-PR gate (--pre-pr — CI Stage 3 + Stage 4.5 parity) ==="
 
     # A dedicated env keeps the warm --all-extras inner-loop .venv intact and
     # is synced to EXACTLY CI Stage 3's extras (mirror ci.yml Stage 3
@@ -160,8 +162,26 @@ if [[ "$PRE_PR_MODE" == "1" ]]; then
     [[ -z "$PRE_PR_PASSED" ]] && PRE_PR_PASSED="0 passed"
     echo -e "${GREEN}OK${NC} ($PRE_PR_PASSED)"
 
+    echo -n "  composed E2E tests (Stage 4.5)... "
+    run_gate env UV_PROJECT_ENVIRONMENT="$PRE_PR_VENV" \
+        uv run pytest -m e2e tests/e2e/ -v --tb=short
+    PRE_PR_E2E_OUT="$GATE_OUT"
+    if grep -qE "[0-9]+ failed|^FAILED |^ERROR " <<< "$PRE_PR_E2E_OUT"; then
+        echo -e "${RED}FAIL${NC}"
+        echo "$PRE_PR_E2E_OUT" | grep -E "FAILED|ERROR|passed|failed|error" | tail -15
+        echo "fix: the failing composed E2E tests are listed above — this is the CI Stage 4.5 tier."
+        echo "next: re-run standalone: env UV_PROJECT_ENVIRONMENT=$PRE_PR_VENV uv run pytest -m e2e tests/e2e/ -v --tb=short"
+        exit 1
+    fi
+    if [[ "$GATE_RC" -ne 0 ]]; then
+        gate_died "composed E2E (Stage 4.5)" "$GATE_RC" "env UV_PROJECT_ENVIRONMENT=$PRE_PR_VENV uv run pytest -m e2e tests/e2e/ -v --tb=short"
+    fi
+    PRE_PR_E2E_PASSED=$(grep -m1 -oE '[0-9]+ passed' <<< "$PRE_PR_E2E_OUT" || echo "0 passed")
+    [[ -z "$PRE_PR_E2E_PASSED" ]] && PRE_PR_E2E_PASSED="0 passed"
+    echo -e "${GREEN}OK${NC} ($PRE_PR_E2E_PASSED)"
+
     echo ""
-    echo -e "${GREEN}--pre-pr complete: the CI Stage 3 integration tier is green. Safe to push / open a PR.${NC}"
+    echo -e "${GREEN}--pre-pr complete: CI Stage 3 integration and Stage 4.5 composed E2E are green. Safe to push / open a PR.${NC}"
     exit 0
 fi
 
