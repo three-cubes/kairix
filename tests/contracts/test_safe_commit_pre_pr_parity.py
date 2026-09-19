@@ -11,8 +11,8 @@ import pytest
 pytestmark = pytest.mark.contract
 
 
-def test_pre_pr_runs_integration_and_composed_e2e_once(tmp_path: Path) -> None:
-    """The public ``--pre-pr`` command selects both long-running CI tiers."""
+def test_pre_pr_prepares_inputs_then_runs_each_ci_tier_once(tmp_path: Path) -> None:
+    """The public ``--pre-pr`` command prepares before both CI tiers."""
     repo_root = Path(__file__).resolve().parents[2]
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -43,8 +43,12 @@ def test_pre_pr_runs_integration_and_composed_e2e_once(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    pytest_calls = [line for line in call_log.read_text().splitlines() if line.startswith("run pytest ")]
-    assert pytest_calls == [
+    calls = call_log.read_text().splitlines()
+    assert calls[0].startswith("sync --locked ")
+    selected_calls = [line for line in calls if line.startswith("run python ") or line.startswith("run pytest ")]
+    assert selected_calls == [
+        "run python scripts/checks/generate_catalogue_docs.py",
+        "run python -m kairix.agents.usage_guide.generate",
         "run pytest tests/ -m integration --maxfail=3",
         "run pytest -m e2e tests/e2e/ -v --tb=short",
     ]

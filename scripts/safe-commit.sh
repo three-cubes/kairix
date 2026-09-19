@@ -134,12 +134,40 @@ if [[ "$PRE_PR_MODE" == "1" ]]; then
     PRE_PR_EXTRAS=(--extra dev --extra agents --extra markitdown --extra pdf_fallback --extra ocr --extra pptx --extra docx --extra xlsx --group fitness)
 
     echo -n "  sync CI-parity env... "
-    run_gate env UV_PROJECT_ENVIRONMENT="$PRE_PR_VENV" uv sync "${PRE_PR_EXTRAS[@]}"
+    run_gate env UV_PROJECT_ENVIRONMENT="$PRE_PR_VENV" uv sync --locked "${PRE_PR_EXTRAS[@]}"
     if [[ "$GATE_RC" -ne 0 ]]; then
         echo -e "${RED}FAIL${NC}"
         echo "$GATE_OUT" | tail -20
         echo "fix: the dedicated CI-parity venv could not be synced — see the tail above."
-        echo "next: env UV_PROJECT_ENVIRONMENT=$PRE_PR_VENV uv sync ${PRE_PR_EXTRAS[*]}"
+        echo "next: env UV_PROJECT_ENVIRONMENT=$PRE_PR_VENV uv sync --locked ${PRE_PR_EXTRAS[*]}"
+        exit 1
+    fi
+    echo -e "${GREEN}OK${NC}"
+
+    # Rebuild each committed generated input before evaluation. These
+    # generators are deterministic and idempotent; a resulting diff means the
+    # source and committed projection disagree and must be committed together.
+    echo -n "  prepare generated inputs... "
+    run_gate env UV_PROJECT_ENVIRONMENT="$PRE_PR_VENV" \
+        uv run python scripts/checks/generate_catalogue_docs.py
+    if [[ "$GATE_RC" -ne 0 ]]; then
+        gate_died "generated catalogue inputs" "$GATE_RC" "env UV_PROJECT_ENVIRONMENT=$PRE_PR_VENV uv run python scripts/checks/generate_catalogue_docs.py"
+    fi
+    run_gate env UV_PROJECT_ENVIRONMENT="$PRE_PR_VENV" \
+        uv run python -m kairix.agents.usage_guide.generate
+    if [[ "$GATE_RC" -ne 0 ]]; then
+        gate_died "generated usage-guide input" "$GATE_RC" "env UV_PROJECT_ENVIRONMENT=$PRE_PR_VENV uv run python -m kairix.agents.usage_guide.generate"
+    fi
+    GENERATED_INPUTS=(
+        CLAUDE.md
+        docs/architecture/fitness-functions.md
+        kairix/agents/usage_guide/data/agent-usage-guide.md
+    )
+    if ! git diff --quiet -- "${GENERATED_INPUTS[@]}"; then
+        echo -e "${RED}FAIL${NC}"
+        git diff --stat -- "${GENERATED_INPUTS[@]}"
+        echo "fix: the deterministic generators refreshed stale committed outputs; review and stage the files above."
+        echo "next: commit the generated outputs, then re-run bash scripts/safe-commit.sh --pre-pr"
         exit 1
     fi
     echo -e "${GREEN}OK${NC}"
