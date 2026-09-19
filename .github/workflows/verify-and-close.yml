@@ -2,7 +2,7 @@ name: verify-and-close
 
 # On-merge-to-main adoption of the org-shared, DETERMINISTIC close side of the
 # Autonomous Delivery loop — kairix is the FIRST consumer of the reusable
-# `three-cubes/tc-pipelines/.github/workflows/verify-and-close.yml@v1`
+# `three-cubes/tc-pipelines/.github/workflows/verify-and-close.yml@v2.2.0`
 # (Autonomous Delivery Platform initiative · SP-C-3, decision D5). It replaces a
 # human/agent manually verifying a merge and hand-marking the linked Linear
 # issue Done.
@@ -60,7 +60,7 @@ permissions:
 jobs:
   verify-and-close:
     name: verify-and-close
-    uses: three-cubes/tc-pipelines/.github/workflows/verify-and-close.yml@0541f75d6a3491ff83e643bc752d9722f17d865e # v1.19.1
+    uses: three-cubes/tc-pipelines/.github/workflows/verify-and-close.yml@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
     with:
       # fetch-depth: 0 so setuptools-scm can derive a real version from tags on
       # the source install below (the reusable defaults to a shallow depth-1
