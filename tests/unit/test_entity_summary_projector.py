@@ -173,8 +173,9 @@ def test_projector_skips_when_prior_hash_matches() -> None:
     assert result.updated == 0
     assert writer.writes == []
     assert writer.deletes == []
-    # Only the poll happened — no mark-indexed write.
-    assert len(neo4j.cypher_calls) == 1
+    # A legacy row missing the server-side comparison value is backfilled
+    # once, without rewriting the already-current SQLite chunk.
+    assert len(neo4j.cypher_calls) == 2
 
 
 def test_projector_updates_when_summary_hash_changed() -> None:
@@ -313,8 +314,10 @@ def test_projector_respects_per_tick_max_items_param() -> None:
 
     projector.tick(per_tick_max_items=42)
     assert neo4j.cypher_calls, "projector should call cypher even on empty result"
-    _query, params = neo4j.cypher_calls[0]
+    query, params = neo4j.cypher_calls[0]
     assert params == {"per_tick_max_items": 42}
+    assert "summary_indexed_summary" in query
+    assert query.index("summary_indexed_summary") < query.index("LIMIT $per_tick_max_items")
 
 
 def test_default_clock_returns_utc_zulu_iso_string() -> None:

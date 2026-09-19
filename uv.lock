@@ -1321,7 +1321,7 @@ requires-dist = [
     { name = "bandit", extras = ["toml"], marker = "extra == 'dev'", specifier = ">=1.7" },
     { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.34,<2" },
     { name = "caldav", marker = "extra == 'caldav'", specifier = ">=1.3,<4" },
-    { name = "cryptography", marker = "extra == 'connect'", specifier = ">=43,<50" },
+    { name = "cryptography", marker = "extra == 'connect'", specifier = ">=43,<51" },
     { name = "detect-secrets", marker = "extra == 'dev'", specifier = ">=1.4" },
     { name = "google-auth", marker = "extra == 'connect'", specifier = ">=2.40,<3" },
     { name = "google-auth-oauthlib", marker = "extra == 'connect'", specifier = ">=1.2,<2" },

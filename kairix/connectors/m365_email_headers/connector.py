@@ -339,6 +339,7 @@ class M365EmailHeadersConnector:
         regardless: their next-cursor is still recorded and their events
         are still yielded.
         """
+        self._cache.clear()
         previous_cursors = _decode_per_folder_cursor(cursor)
         events, next_cursors = self._drain_all_folders(
             graph=self._graph,
@@ -762,6 +763,7 @@ class M365EmailHeadersConnector:
         retry-next-tick policy from :meth:`list_changes` applies here
         (both methods share :meth:`_drain_all_folders`).
         """
+        self._cache.clear()
         mailbox = container.container_id
         graph = self._per_mailbox_client(mailbox)
         previous_cursors = _decode_per_folder_cursor(container.cursor_token)

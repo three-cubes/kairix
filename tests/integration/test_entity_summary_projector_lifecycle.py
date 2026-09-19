@@ -177,8 +177,147 @@ def test_lifecycle_second_tick_is_idempotent_when_neo4j_reports_indexed_hash(
         ("entity://Q42",),
     ).fetchone()
     assert rows[0] == 0
-    # Only the poll happened; no mark-indexed.
-    assert len(neo4j.cypher_calls) == 1
+    # Legacy rows without the indexed-summary comparison value are backfilled
+    # once, without rewriting SQLite, so future polls filter them server-side.
+    assert len(neo4j.cypher_calls) == 2
+
+
+def test_poll_filters_indexed_rows_before_limit_so_backlog_progresses(tmp_path: Path) -> None:
+    """A full indexed prefix cannot starve a pending entity behind the cap."""
+
+    class _BacklogGraph:
+        def __init__(self) -> None:
+            self.rows = [
+                {
+                    **_row(name="Already A", qid="Q1", summary="stable a", prior_hash=hash_summary("stable a")),
+                    "prior_summary": "stable a",
+                },
+                {
+                    **_row(name="Already B", qid="Q2", summary="stable b", prior_hash=hash_summary("stable b")),
+                    "prior_summary": "stable b",
+                },
+                {**_row(name="Pending C", qid="Q3", summary="new c"), "prior_summary": ""},
+            ]
+
+        def cypher(self, query: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+            if "SET n.summary_indexed_at" in query:
+                for row in self.rows:
+                    if row["name"] == params["name"]:
+                        row["prior_hash"] = params["hash"]
+                        row["prior_summary"] = params["summary"]
+                        return [{"name": row["name"]}]
+                return []
+            # This small semantic fake mirrors the graph predicate: pending
+            # selection occurs before the bound is applied.
+            pending = [row for row in self.rows if not row["prior_summary"] or row["prior_summary"] != row["summary"]]
+            return pending[: int(params["per_tick_max_items"])]
+
+    db = _seed_db(tmp_path / "backlog.sqlite")
+    graph = _BacklogGraph()
+    projector = EntitySummaryProjectorImpl(
+        neo4j=graph,
+        chunk_writer=legacy_chunk_writer(db, collection="entity-summaries"),
+        clock=lambda: _FIXED_TICK,
+        commit=db.commit,
+    )
+
+    result = projector.tick(per_tick_max_items=2)
+
+    assert result.projected == 1
+    assert result.skipped == 0
+    assert db.execute(
+        "SELECT source_uri FROM documents WHERE source_uri = ?",
+        ("entity://Q3",),
+    ).fetchone() == ("entity://Q3",)
+
+
+def test_sqlite_commit_precedes_graph_mark_and_failed_mark_retries_safely(tmp_path: Path) -> None:
+    """Neo4j never claims a chunk that SQLite has not committed.
+
+    A swallowed Neo4j write failure returns no rows. The first tick reports a
+    failed projection but leaves the idempotent SQLite chunk committed. A
+    later tick retries the pending graph row and marks it without duplicating
+    the chunk.
+    """
+
+    class _RecoveringGraph:
+        def __init__(self) -> None:
+            self.mark_attempts = 0
+            self.marked = False
+
+        def cypher(self, query: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+            if "SET n.summary_indexed_at" not in query:
+                if self.marked:
+                    return []
+                return [{**_row(name="Ada", qid="Q42", summary="durable summary"), "prior_summary": ""}]
+            self.mark_attempts += 1
+            if self.mark_attempts == 1:
+                return []
+            self.marked = True
+            return [{"name": params["name"]}]
+
+    db_path = tmp_path / "ordering.sqlite"
+    db = _seed_db(db_path)
+    graph = _RecoveringGraph()
+    projector = EntitySummaryProjectorImpl(
+        neo4j=graph,
+        chunk_writer=legacy_chunk_writer(db, collection="entity-summaries"),
+        clock=lambda: _FIXED_TICK,
+        commit=db.commit,
+    )
+
+    first = projector.tick(per_tick_max_items=1)
+    visible_from_other_connection = sqlite3.connect(str(db_path))
+    try:
+        persisted_after_failed_mark = visible_from_other_connection.execute(
+            "SELECT COUNT(*) FROM documents WHERE source_uri = ?",
+            ("entity://Q42",),
+        ).fetchone()[0]
+    finally:
+        visible_from_other_connection.close()
+    second = projector.tick(per_tick_max_items=1)
+
+    assert first.failed == 1
+    assert first.projected == 0
+    assert persisted_after_failed_mark == 1
+    assert second.projected == 1
+    assert graph.marked is True
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM documents WHERE source_uri = ?",
+            ("entity://Q42",),
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_failed_sqlite_commit_never_marks_graph_indexed(tmp_path: Path) -> None:
+    """A storage commit failure stops before the Neo4j marker write."""
+
+    class _Graph:
+        def __init__(self) -> None:
+            self.mark_calls = 0
+
+        def cypher(self, query: str, _params: dict[str, Any]) -> list[dict[str, Any]]:
+            if "SET n.summary_indexed_at" in query:
+                self.mark_calls += 1
+                return [{"name": "Ada"}]
+            return [{**_row(name="Ada", qid="Q42", summary="must commit first"), "prior_summary": ""}]
+
+    db = _seed_db(tmp_path / "commit-failure.sqlite")
+    graph = _Graph()
+    projector = EntitySummaryProjectorImpl(
+        neo4j=graph,
+        chunk_writer=legacy_chunk_writer(db, collection="entity-summaries"),
+        clock=lambda: _FIXED_TICK,
+        commit=lambda: (_ for _ in ()).throw(sqlite3.OperationalError("disk full")),
+    )
+
+    result = projector.tick(per_tick_max_items=1)
+
+    assert result.failed == 1
+    assert result.projected == 0
+    assert graph.mark_calls == 0
 
 
 def test_lifecycle_re_projection_swaps_old_chunk_for_new(tmp_path: Path) -> None:

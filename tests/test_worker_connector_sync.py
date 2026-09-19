@@ -41,7 +41,7 @@ import pytest
 
 from kairix.core.connectors.cc_pair import create_cc_pair
 from kairix.core.db.schema import create_schema
-from kairix.core.protocols import BronzeRef, DocMetadata, ExtractedDocument, Page
+from kairix.core.protocols import BronzeRef, ChangeEvent, DocMetadata, ExtractedDocument, Page
 from kairix.worker import (
     ConnectorSyncDeps,
     ConnectorSyncResult,
@@ -126,8 +126,8 @@ def _no_db_factory() -> sqlite3.Connection:
 class _CloseTrackingConnector(FakeSourceConnector):
     """No-change connector that records worker-owned lifecycle closure."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
         self.close_calls = 0
 
     def close(self) -> None:
@@ -252,6 +252,77 @@ def test_connector_runtime_reuses_one_instance_for_more_than_inotify_limit_and_c
     runtime.close()
 
     assert connector.close_calls == 1
+
+
+@pytest.mark.integration
+def test_connector_runtime_recreates_failed_connector_and_replays_uncommitted_batch(tmp_path: Path) -> None:
+    """A failed tick discards connector-local cursor state before retry.
+
+    The first connector advances its in-memory source horizon and then raises
+    from ``list_changes``. SQLite therefore has no committed cursor. The next
+    tick must construct a fresh connector and replay the item from the
+    committed horizon instead of reusing the advanced failed instance.
+
+    Sabotage proof: remove the failed-instance discard in
+    ``ConnectorSyncRuntime`` and the second tick reuses the first connector;
+    ``synced`` remains zero and the document never reaches SQLite.
+    """
+    created: list[_CloseTrackingConnector] = []
+    event = ChangeEvent(
+        op="created",
+        item_id="replayed.md",
+        modified_at="2026-09-19T00:00:00Z",
+    )
+
+    def _resolve(_kind: str) -> Any:
+        def _factory(_config: dict[str, Any]) -> _CloseTrackingConnector:
+            if not created:
+                connector = _CloseTrackingConnector(
+                    raise_on_list_changes=RuntimeError("batch failed after source horizon advanced"),
+                    cursor_token="advanced-but-uncommitted",
+                )
+            else:
+                connector = _CloseTrackingConnector(
+                    events=[event],
+                    content={"replayed.md": b"# Replayed\n\nRecovered after rollback.\n"},
+                    cursor_token="committed-after-replay",
+                )
+            created.append(connector)
+            return connector
+
+        return _factory
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    db_path = tmp_path / "index.sqlite"
+    runtime = ConnectorSyncRuntime(
+        deps=ConnectorSyncDeps(
+            disabled_fn=lambda: False,
+            config_mapping_fn=lambda: _obsidian_topology(vault),
+            db_factory=lambda: sqlite3.connect(str(db_path)),
+            bronze_root_resolver=lambda: tmp_path / "bronze",
+        ),
+        connector_factory_resolver=_resolve,
+    )
+    try:
+        failed_tick = runtime()
+        replay_tick = runtime()
+    finally:
+        runtime.close()
+
+    assert failed_tick.synced == 0
+    assert replay_tick.synced == 1
+    assert len(created) == 2
+    assert created[0].close_calls == 1
+    db = sqlite3.connect(str(db_path))
+    try:
+        persisted = db.execute(
+            "SELECT source_uri FROM documents WHERE source_uri LIKE ?",
+            ("%replayed.md",),
+        ).fetchone()
+    finally:
+        db.close()
+    assert persisted is not None
 
 
 @pytest.mark.integration

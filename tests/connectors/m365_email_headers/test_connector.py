@@ -203,6 +203,31 @@ def test_list_changes_emits_one_event_per_envelope() -> None:
         assert ev.metadata.get("sensitivity") == "personal"
 
 
+def test_successive_email_batches_release_prior_header_envelopes() -> None:
+    """Header envelopes remain fetchable for one eager batch only.
+
+    A worker-owned connector may live indefinitely, but payload caches must
+    not grow with every message ever observed. Starting the next batch drops
+    the prior envelopes while retaining the newly emitted batch for fetch.
+    """
+    first = _single_page_payload()
+    first["value"] = [_envelopes()[0]]
+    first["@odata.deltaLink"] = "https://graph.microsoft.com/v1.0/delta/first"
+    second = _single_page_payload()
+    second["value"] = [_envelopes()[1]]
+    second["@odata.deltaLink"] = "https://graph.microsoft.com/v1.0/delta/second"
+    connector = _build_real_connector(pages=[first, second])
+
+    list(connector.list_changes(cursor=None))
+    assert connector.fetch("msg-1").raw
+
+    list(connector.list_changes(cursor=connector.next_cursor()))
+
+    with pytest.raises(KeyError, match="not in the per-tick cache"):
+        connector.fetch("msg-1")
+    assert connector.fetch("msg-2").raw
+
+
 def test_list_changes_advances_cursor_to_delta_link() -> None:
     """After a successful drain, ``next_cursor`` returns a JSON-encoded
     ``{folder_id: deltaLink}`` mapping carrying the folder's deltaLink.

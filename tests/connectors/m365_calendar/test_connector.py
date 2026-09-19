@@ -33,11 +33,8 @@ from typing import Any
 import httpx
 import pytest
 
-from kairix.connectors.m365_calendar import (
-    M365CalendarConfig,
-    M365CalendarConnector,
-    make_connector,
-)
+from kairix.connectors.m365_calendar import make_connector
+from kairix.connectors.m365_calendar.connector import M365CalendarConfig, M365CalendarConnector
 from kairix.connectors.m365_calendar.graph_client import (
     CalendarDeltaPage,
     CalendarEventRecord,
@@ -322,6 +319,49 @@ def test_expired_stored_calendar_cursor_restarts_once_from_initial_window() -> N
 
 
 @pytest.mark.contract
+def test_expired_cursor_reseed_bypasses_connector_cached_delta_link() -> None:
+    """A later 410 recovery uses the initial window, never a cached delta URL.
+
+    The first tick primes ``last_delta_link``. The next tick's persisted cursor
+    expires. Recovery must bypass both the expired persisted cursor and the
+    connector's cached prior link, otherwise long-lived workers repeat the 410.
+    """
+
+    class _ExpiryClient(_RecordingClient):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.initial_count = 0
+
+        def fetch_initial_delta(self, start_iso: str, end_iso: str) -> CalendarDeltaPage:
+            self.initial_calls.append((start_iso, end_iso))
+            self.initial_count += 1
+            if self.initial_count == 1:
+                return _page(_event("before-expiry"), delta_link="cached-expired-link")
+            return _page(_event("after-reseed"), delta_link="fresh-link")
+
+        def fetch_delta_page(self, link: str) -> CalendarDeltaPage:
+            self.delta_calls.append(link)
+            request = httpx.Request("GET", link)
+            response = httpx.Response(410, request=request)
+            raise GraphDeltaExpiredError("delta expired", request=request, response=response)
+
+    client = _ExpiryClient()
+    connector = M365CalendarConnector(
+        _config(),
+        client_factory=lambda _config: client,
+        clock=_fixed_clock,
+    )
+
+    assert [event.item_id for event in connector.list_changes(cursor=None)] == ["before-expiry"]
+    recovered = list(connector.list_changes(cursor="persisted-expired-link"))
+
+    assert [event.item_id for event in recovered] == ["after-reseed"]
+    assert client.delta_calls == ["persisted-expired-link"]
+    assert len(client.initial_calls) == 2
+    assert connector.last_delta_link == "fresh-link"
+
+
+@pytest.mark.contract
 def test_calendar_seed_410_is_not_retried_forever() -> None:
     """A 410 from the initial window is terminal after one request."""
     requested: list[str] = []
@@ -507,6 +547,46 @@ def test_fetch_returns_cached_payload_after_list_changes() -> None:
     assert isinstance(artefact, RawArtefact)
     assert artefact.mime == "application/json"
     assert b"ev-alpha" in artefact.raw
+
+
+@pytest.mark.unit
+def test_successive_calendar_batches_release_prior_payload_and_metadata() -> None:
+    """Per-item envelopes live for one eager batch, not the worker lifetime."""
+    factory = _factory_for(
+        [
+            _page(_event("ev-old"), delta_link="cursor-1"),
+            _page(_event("ev-new"), delta_link="cursor-2"),
+        ]
+    )
+    connector = M365CalendarConnector(_config(), client_factory=factory, clock=_fixed_clock)
+
+    list(connector.list_changes(cursor=None))
+    assert connector.fetch("ev-old").raw
+    assert connector.metadata_for("ev-old").author == "organiser@example.com"
+
+    list(connector.list_changes(cursor="cursor-1"))
+
+    with pytest.raises(ValueError, match="no cached payload"):
+        connector.fetch("ev-old")
+    assert connector.metadata_for("ev-old").author is None
+    assert connector.fetch("ev-new").raw
+
+
+@pytest.mark.unit
+def test_calendar_known_id_history_is_bounded_without_losing_recent_classification() -> None:
+    """Long-lived classification state retains only the bounded recent set."""
+    factory = _factory_for([_page(_event("oldest"), _event("newest"))])
+    connector = M365CalendarConnector(_config(), client_factory=factory, clock=_fixed_clock)
+    history_size = connector.known_id_cache_max_items
+    connector.seed_known_ids(["oldest", *(f"seed-{index}" for index in range(history_size)), "newest"])
+
+    events = list(connector.list_changes(cursor="resume"))
+
+    assert [(event.item_id, event.op) for event in events] == [
+        ("oldest", "created"),
+        ("newest", "modified"),
+    ]
+    assert len(connector._known_ids) == history_size
 
 
 @pytest.mark.unit

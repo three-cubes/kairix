@@ -10,7 +10,9 @@ from kairix.knowledge.entities.summary_projector import (
     DefaultProjectorBuilderDeps,
     EntitySummaryProjectorImpl,
     default_projector_builder,
+    hash_summary,
 )
+from tests.fakes import FakeChunkWriter, FakeGraphRepository
 
 pytestmark = pytest.mark.unit
 
@@ -46,3 +48,33 @@ def test_default_builder_composes_schema_writer_and_owned_database() -> None:
     projector.close()
     with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
         db.execute("SELECT 1")
+
+
+def test_projector_current_summary_marker_is_a_no_write_skip() -> None:
+    """A matching graph summary value needs neither chunk nor marker write."""
+    summary = "an unchanged description"
+    neo4j = FakeGraphRepository(
+        cypher_rows=[
+            {
+                "name": "Ada",
+                "qid": "Q42",
+                "summary": summary,
+                "prior_hash": hash_summary(summary),
+                "prior_summary": summary,
+                "summary_source": "wikidata",
+            }
+        ],
+    )
+    writer = FakeChunkWriter()
+    projector = EntitySummaryProjectorImpl(
+        neo4j=neo4j,
+        chunk_writer=writer,
+        clock=lambda: "2026-06-09T00:00:00Z",
+    )
+
+    result = projector.tick(per_tick_max_items=10)
+
+    assert result.skipped == 1
+    assert result.failed == 0
+    assert writer.writes == []
+    assert len(neo4j.cypher_calls) == 1

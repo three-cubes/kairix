@@ -93,11 +93,8 @@ def test_first_sync_emits_created_for_every_file(vault: Path) -> None:
     reconciler when ``cursor is None``; this test fails because no
     events fire on the first sync.
     """
-    connector = _connector_with_known(vault, {})
-    try:
+    with _connector_with_known(vault, {}) as connector:
         events = list(connector.list_changes(cursor=None))
-    finally:
-        connector.close()
     assert {e.op for e in events} == {"created"}
     assert sorted(e.item_id for e in events) == ["alpha.md", "bravo.md", "charlie.md"]
 
@@ -118,11 +115,8 @@ def test_touch_file_surfaces_as_modified_event(vault: Path) -> None:
     known_before = _hash_snapshot(vault)
     (vault / "alpha.md").write_text("# Alpha\n\nEdited body.", encoding="utf-8")
 
-    connector = _connector_with_known(vault, known_before)
-    try:
+    with _connector_with_known(vault, known_before) as connector:
         events = list(connector.list_changes(cursor=None))
-    finally:
-        connector.close()
 
     modified = [e for e in events if e.op == "modified"]
     assert [e.item_id for e in modified] == ["alpha.md"]
@@ -147,11 +141,8 @@ def test_delete_file_surfaces_as_deleted_event(vault: Path) -> None:
     known_before = _hash_snapshot(vault)
     (vault / "bravo.md").unlink()
 
-    connector = _connector_with_known(vault, known_before)
-    try:
+    with _connector_with_known(vault, known_before) as connector:
         events = list(connector.list_changes(cursor=None))
-    finally:
-        connector.close()
 
     deleted = [e for e in events if e.op == "deleted"]
     assert [e.item_id for e in deleted] == ["bravo.md"]
@@ -367,11 +358,8 @@ def test_cursor_filters_out_old_events(vault: Path) -> None:
     # Pass a cursor in the future — every reconciliation event has
     # ``modified_at == now``, which is strictly less than the cursor.
     future_cursor = "2099-01-01T00:00:00Z"
-    connector = _connector_with_known(vault, known_before)
-    try:
+    with _connector_with_known(vault, known_before) as connector:
         events = list(connector.list_changes(cursor=future_cursor))
-    finally:
-        connector.close()
     assert events == [], f"future cursor must filter all events, got {events!r}"
 
 
@@ -419,11 +407,8 @@ def test_reconciliation_emits_creates_then_modifies_then_deletes(vault: Path) ->
     (vault / "delta.md").write_text("# Delta\n\nNew note.", encoding="utf-8")
     (vault / "bravo.md").unlink()
 
-    connector = _connector_with_known(vault, known)
-    try:
+    with _connector_with_known(vault, known) as connector:
         events = list(connector.list_changes(cursor=None))
-    finally:
-        connector.close()
     ops = [e.op for e in events]
     # Created events must precede modified, which must precede deleted.
     created_idx = max(i for i, o in enumerate(ops) if o == "created")

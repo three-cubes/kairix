@@ -55,7 +55,9 @@ class _ScriptedNeo4j:
     def cypher(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         self.cypher_calls.append((query, params))
         if "SET n.summary_indexed_at" in query:
-            return []
+            assert params is not None
+            removed = self._pool.pop(str(params["name"]), None)
+            return [{"name": params["name"]}] if removed is not None else []
         per_tick = int((params or {}).get("per_tick_max_items", 200))
         return list(self._pool.values())[:per_tick]
 
@@ -158,6 +160,7 @@ def _run_tick(entity_summary_ctx: _Ctx) -> None:
             neo4j=neo4j,
             chunk_writer=writer,
             clock=lambda: _FIXED_TICK,
+            commit=db.commit,
         )
 
     deps = EntitySummaryProjectorDeps(

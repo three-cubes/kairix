@@ -266,6 +266,7 @@ class M365CalendarConnector:
 
     name: str = CONNECTOR_NAME
     per_tick_max_items: int = 500
+    known_id_cache_max_items: int = 1000
     disk_watermark_min_free_bytes: int | None = 5 * 1024**3  # 5 GiB — m365 attachments can be large
 
     def __init__(
@@ -287,7 +288,7 @@ class M365CalendarConnector:
         # subsequent delta page tagged with the same id is reported as
         # ``modified`` (Graph's delta surface doesn't distinguish the
         # two — it just yields the current state).
-        self._known_ids: set[str] = set()
+        self._known_ids: dict[str, None] = {}
         # Cache of the most recent delta cursor — kept on the
         # connector so :meth:`list_changes` callers without a cursor
         # (e.g. tests, cold-start before persistence) still resume from
@@ -302,6 +303,7 @@ class M365CalendarConnector:
         # without re-hitting Graph for an item we already saw on the
         # current tick. Keyed by event_id; populated during ``_drain``.
         self._event_metadata_cache: dict[str, CalendarEventRecord] = {}
+        self._event_payload_cache: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # SourceConnector Protocol surface
@@ -321,6 +323,7 @@ class M365CalendarConnector:
         the :class:`ChangeEvent` payload preserves F42's narrow
         boundary surface.
         """
+        self._begin_batch()
         client = self._ensure_client()
         try:
             batch = self._drain(client, cursor)
@@ -328,7 +331,8 @@ class M365CalendarConnector:
             if cursor is None:
                 raise
             logger.warning("m365 calendar: stored delta cursor expired; restarting from the configured initial window")
-            batch = self._drain(client, None)
+            self._begin_batch()
+            batch = self._drain_initial(client)
         self._last_delta_link = batch.delta_link
         return iter(batch.events)
 
@@ -581,7 +585,8 @@ class M365CalendarConnector:
         that state by calling :meth:`seed_known_ids` with the ids
         already persisted in the documents table.
         """
-        self._known_ids.update(ids)
+        for event_id in ids:
+            self._remember_known_id(event_id)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -613,15 +618,15 @@ class M365CalendarConnector:
     # Internals
     # ------------------------------------------------------------------
 
-    _event_payload_cache: dict[str, str]
-
     def _ensure_client(self) -> M365GraphCalendarClient:
         if self._client is None:
             self._client = self._client_factory(self._config)
-            # Lazily attach the payload cache on first client build so
-            # the __init__ surface stays simple.
-            self._event_payload_cache = {}
         return self._client
+
+    def _begin_batch(self) -> None:
+        """Release item envelopes from the prior eager batch."""
+        self._event_payload_cache.clear()
+        self._event_metadata_cache.clear()
 
     def _drain(self, client: M365GraphCalendarClient, cursor: Cursor | None) -> _SyncBatch:
         """Walk Graph delta pages and convert to :class:`ChangeEvent`."""
@@ -642,12 +647,32 @@ class M365CalendarConnector:
                 batch.delta_link = page.delta_link
         return batch
 
+    def _drain_initial(self, client: M365GraphCalendarClient) -> _SyncBatch:
+        """Drain the configured initial window without consulting cached cursors."""
+        batch = _SyncBatch()
+        first_page = self._fetch_initial_page(client)
+        for page in iter_pages(client, first_page):
+            for record in page.events:
+                event = self._record_to_change_event(record)
+                if event is not None:
+                    batch.events.append(event)
+                    if not record.removed:
+                        self._event_payload_cache[record.event_id] = record.raw_payload
+                        self._event_metadata_cache[record.event_id] = record
+            if page.delta_link is not None:
+                batch.delta_link = page.delta_link
+        return batch
+
     def _fetch_first_page(self, client: M365GraphCalendarClient, cursor: Cursor | None) -> CalendarDeltaPage:
         """First page of a sync tick — either initial date-window or delta follow-up."""
         if cursor is not None:
             return client.fetch_delta_page(cursor)
         if self._last_delta_link is not None:
             return client.fetch_delta_page(self._last_delta_link)
+        return self._fetch_initial_page(client)
+
+    def _fetch_initial_page(self, client: M365GraphCalendarClient) -> CalendarDeltaPage:
+        """Fetch the configured initial window without any delta-link fallback."""
         now = self._clock()
         window_start = now - timedelta(days=self._config.window_days_back)
         window_end = now + timedelta(days=self._config.window_days_forward)
@@ -664,8 +689,8 @@ class M365CalendarConnector:
         if record.event_id in self._known_ids:
             op: Any = "modified"
         else:
-            self._known_ids.add(record.event_id)
             op = "created"
+        self._remember_known_id(record.event_id)
         return ChangeEvent(
             op=op,
             item_id=record.event_id,
@@ -679,6 +704,14 @@ class M365CalendarConnector:
                 "organiser": record.organiser,
             },
         )
+
+    def _remember_known_id(self, event_id: str) -> None:
+        """Retain bounded recent classification state for long-lived workers."""
+        self._known_ids.pop(event_id, None)
+        self._known_ids[event_id] = None
+        while len(self._known_ids) > self.known_id_cache_max_items:
+            oldest = next(iter(self._known_ids))
+            self._known_ids.pop(oldest)
 
     # ------------------------------------------------------------------
     # Wave E ON-branch internals
@@ -707,11 +740,6 @@ class M365CalendarConnector:
         if client is None:
             client = self._per_user_client_factory(self._config, upn)
             self._per_user_clients[upn] = client
-            # Lazily attach the payload cache on first client build so
-            # the __init__ surface stays simple — same shape as the
-            # legacy ``_ensure_client`` path.
-            if not hasattr(self, "_event_payload_cache"):
-                self._event_payload_cache = {}
         return client
 
     def _list_changes_scoped(self, container: Container) -> Iterator[ChangeEvent]:
@@ -729,6 +757,7 @@ class M365CalendarConnector:
         pollute one container's resume position with another's. The
         per-container drain reads only ``container.cursor_token``.
         """
+        self._begin_batch()
         upn = container.container_id
         client = self._ensure_client_for_upn(upn)
         try:
@@ -741,6 +770,7 @@ class M365CalendarConnector:
                 "restarting that calendar from the configured initial window",
                 upn,
             )
+            self._begin_batch()
             batch = self._drain_for_container(client, None)
         self._last_delta_link = batch.delta_link
         return iter(batch.events)
@@ -773,18 +803,12 @@ class M365CalendarConnector:
             batch.events.append(event)
             if not record.removed:
                 self._cache_payload(record.event_id, record.raw_payload)
+                self._event_metadata_cache[record.event_id] = record
         if page.delta_link is not None:
             batch.delta_link = page.delta_link
 
     def _cache_payload(self, event_id: str, raw_payload: str) -> None:
-        """Lazily attach + write the per-process Graph payload cache.
-
-        Mirrors the lazy-attach shape in :meth:`_ensure_client_for_upn`.
-        Lifted to a helper so :meth:`_absorb_page_into_batch` stays a
-        flat top-level loop.
-        """
-        if not hasattr(self, "_event_payload_cache"):
-            self._event_payload_cache = {}
+        """Write one payload into the current batch's Graph cache."""
         self._event_payload_cache[event_id] = raw_payload
 
     def _fetch_first_page_for_container(

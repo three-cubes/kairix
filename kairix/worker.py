@@ -792,6 +792,10 @@ def _new_connector_from_entry(entry: dict[str, Any]) -> Any:
     return resolve_connector(entry["kind"])(entry.get("config", {}))
 
 
+def _ignore_connector_failure(_entry: dict[str, Any], _connector: Any) -> None:
+    """One-shot sync callers do not retain connector state between ticks."""
+
+
 @dataclass
 class ConnectorSyncDeps:
     """Injectable dependencies for :func:`run_connector_sync_pipeline`.
@@ -822,6 +826,10 @@ class ConnectorSyncDeps:
       * ``connector_provider`` — returns the connector instance for an
         entry. Direct one-shot callers get a fresh connector; the worker's
         :class:`ConnectorSyncRuntime` supplies its lifetime-owned cache.
+      * ``connector_failure_handler`` — discards state owned by a failed
+        connector batch. One-shot callers retain nothing; the long-lived
+        runtime evicts and closes the exact failed instance so the next tick
+        resumes from the committed SQLite cursor.
     """
 
     disabled_fn: Callable[[], bool] = field(default_factory=lambda: connector_sync_disabled)
@@ -830,6 +838,9 @@ class ConnectorSyncDeps:
     db_factory: Callable[[], sqlite3.Connection] = field(default_factory=lambda: _open_db_default)
     bronze_root_resolver: Callable[[], Path] = field(default_factory=lambda: _bronze_root_default)
     connector_provider: Callable[[dict[str, Any]], Any] = field(default_factory=lambda: _new_connector_from_entry)
+    connector_failure_handler: Callable[[dict[str, Any], Any], None] = field(
+        default_factory=lambda: _ignore_connector_failure
+    )
 
 
 @dataclass
@@ -870,6 +881,19 @@ class _ConnectorOwner:
         self._connectors[key] = _OwnedConnector(config=config, instance=instance)
         return instance
 
+    def discard(self, entry: dict[str, Any], expected_instance: Any) -> None:
+        """Close and evict ``expected_instance`` after its batch rolls back.
+
+        The identity check prevents a stale failure notification from
+        discarding a newer replacement created for the same connector key.
+        """
+        key = (entry["kind"], entry["name"])
+        owned = self._connectors.get(key)
+        if owned is None or owned.instance is not expected_instance:
+            return
+        self._connectors.pop(key)
+        self._close_instance(owned.instance)
+
     def close(self) -> None:
         """Close every owned connector exactly once."""
         if self._closed:
@@ -894,11 +918,19 @@ class ConnectorSyncRuntime:
         from kairix.core.connectors import resolve_connector
 
         self._owner = _ConnectorOwner(connector_factory_resolver or resolve_connector)
-        self._deps = replace(deps or ConnectorSyncDeps(), connector_provider=self.connector_for)
+        self._deps = replace(
+            deps or ConnectorSyncDeps(),
+            connector_provider=self.connector_for,
+            connector_failure_handler=self.connector_failed,
+        )
 
     def connector_for(self, entry: dict[str, Any]) -> Any:
         """Resolve an entry through this runtime's lifetime-owned connector pool."""
         return self._owner.connector_for(entry)
+
+    def connector_failed(self, entry: dict[str, Any], connector: Any) -> None:
+        """Discard connector-local state after a rolled-back batch."""
+        self._owner.discard(entry, connector)
 
     def __call__(self) -> ConnectorSyncResult:
         return run_connector_sync_pipeline(self._deps)
@@ -975,6 +1007,7 @@ def _process_sync_entry(
     bronze_root: Path,
     acc: _SyncAccumulator,
     connector_provider: Callable[[dict[str, Any]], Any],
+    connector_failure_handler: Callable[[dict[str, Any], Any], None],
 ) -> None:
     """Run one connector batch, fold its outcome into ``acc``, stamp counters.
 
@@ -985,8 +1018,20 @@ def _process_sync_entry(
     """
     try:
         connector = connector_provider(entry)
+    except Exception as exc:
+        logger.warning("worker: connector %s failed to initialise — %s", entry.get("name"), exc)
+        return
+    try:
         outcome = _run_one_connector_batch(db, entry, bronze_root, connector)
     except Exception as exc:
+        try:
+            connector_failure_handler(entry, connector)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "worker: connector %s failed-state cleanup also failed — %s",
+                entry.get("name"),
+                cleanup_exc,
+            )
         logger.warning("worker: connector %s failed — %s", entry.get("name"), exc)
         return
     acc.fold(outcome)
@@ -1055,7 +1100,14 @@ def run_connector_sync_pipeline(deps: ConnectorSyncDeps | None = None) -> Connec
             if not connector_enabled(entry["kind"], deps.flag_reader):
                 logger.info("worker: connector %s gated off (flag connector_%s OFF)", entry["kind"], entry["kind"])
                 continue
-            _process_sync_entry(db, entry, bronze_root, acc, deps.connector_provider)
+            _process_sync_entry(
+                db,
+                entry,
+                bronze_root,
+                acc,
+                deps.connector_provider,
+                deps.connector_failure_handler,
+            )
         return acc.to_result()
     finally:
         db.close()

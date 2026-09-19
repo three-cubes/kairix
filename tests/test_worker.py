@@ -63,8 +63,18 @@ def test_connector_sync_runtime_reuses_replaces_and_rejects_after_close() -> Non
     same = runtime.connector_for(first_entry)
     changed = runtime.connector_for(changed_entry)
 
+    # Failure notifications are identity-scoped. A missing key or a stale
+    # instance must not evict the current connector for this entry.
+    runtime.connector_failed(
+        {"kind": "obsidian", "name": "other", "config": {"vault_root": "/other"}},
+        object(),
+    )
+    runtime.connector_failed(changed_entry, object())
+    retained = runtime.connector_for(changed_entry)
+
     assert same is first
     assert changed is not first
+    assert retained is changed
     assert [config for config, _instance in constructed] == [
         {"vault_root": "/vault-a"},
         {"vault_root": "/vault-b"},
