@@ -55,7 +55,7 @@ def test_github_app_rs256_signing_uses_supported_cryptography_backend() -> None:
 
 def test_apple_caldav_parses_real_icalendar_event_into_typed_record() -> None:
     """The installed caldav/icalendar pair preserves Kairix event fields."""
-    from caldav import Event
+    event_type = pytest.importorskip("caldav").Event
 
     assert _release_version("icalendar") >= (7, 3, 0)
 
@@ -77,7 +77,7 @@ END:VEVENT\r
 END:VCALENDAR\r
 """
     event_url = "https://caldav.example/calendars/dependency-contract-event.ics"
-    event = Event(url=event_url, data=raw_ics)
+    event = event_type(url=event_url, data=raw_ics)
     client = object.__new__(AppleCalDavClient)
 
     record = client._parse_event(event)
