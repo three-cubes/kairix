@@ -220,7 +220,7 @@ dev = [
 # and the marker keeps uv's universal resolver happy.
 [dependency-groups]
 fitness = [
-    "three-cubes-fitness @ git+https://github.com/three-cubes/tc-fitness.git@v0.14.1 ; python_version >= '3.12'",
+    "three-cubes-fitness @ git+https://github.com/three-cubes/tc-fitness.git@v0.16.1 ; python_version >= '3.12'",
 ]
 
 # Include the fitness group in every `uv sync` / `uv run` so the local gate

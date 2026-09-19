@@ -12,7 +12,7 @@ name: "Fresh-install smoke (F81)"
 # fresh-install surface.
 #
 # EPIC #499 Wave 3b: the build+smoke body now consumes the shared org
-# reusable three-cubes/tc-pipelines/fresh-install-smoke.yml@v1 (generalized
+# reusable three-cubes/tc-pipelines/fresh-install-smoke.yml@v2.2.0 (generalized
 # FROM this very workflow). The build half (buildx + gha-cached build-push,
 # tagged ghcr.io/three-cubes/kairix:fresh-smoke, load-only) and the smoke half
 # (export KAIRIX_IMAGE_TAG → bash scripts/checks/check-fresh-install-smoke.sh)
@@ -43,7 +43,7 @@ permissions:
 jobs:
   fresh-install-smoke:
     name: "Fresh install smoke"
-    uses: three-cubes/tc-pipelines/.github/workflows/fresh-install-smoke.yml@0541f75d6a3491ff83e643bc752d9722f17d865e # v1.19.1
+    uses: three-cubes/tc-pipelines/.github/workflows/fresh-install-smoke.yml@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
     with:
       image-name: ghcr.io/three-cubes/kairix
       image-tag: fresh-smoke
