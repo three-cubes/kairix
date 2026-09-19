@@ -292,7 +292,7 @@ def resolve_search_pipeline(
     via_prep: bool,
     err_sink: TextIO,
     builder_loader: Callable[[], Callable[[], SearchPipeline]] | None = None,
-) -> SearchPipeline | None | int:
+) -> SearchPipeline | int | None:
     """Resolve the SearchPipeline given the CLI mode + caller-supplied override.
 
     Priority:

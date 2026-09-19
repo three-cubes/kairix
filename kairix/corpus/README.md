@@ -11,10 +11,10 @@ collapse them onto one well-tested entry point.
 
 ```python
 from kairix.corpus.ingest import (
-    SessionPayload,        # one conversational session, source-agnostic
-    IngestRequest,         # a corpus-shaped unit of work
-    IngestResult,          # counters returned to operators + tests
-    ingest_corpus,         # the single shared primitive
+    SessionPayload,  # one conversational session, source-agnostic
+    IngestRequest,  # a corpus-shaped unit of work
+    IngestResult,  # counters returned to operators + tests
+    ingest_corpus,  # the single shared primitive
 )
 ```
 
@@ -38,10 +38,10 @@ override:
 
 ```python
 from kairix.corpus.wiring import (
-    make_production_fact_extractor,    # ACTIVE: wraps LLMFactExtractor
-    make_production_document_writer,   # Phase 2 deferral (raises F21-formatted NotImplementedError)
-    make_production_embedder,          # Phase 2 deferral
-    make_production_consolidation,     # Phase 3 deferral
+    make_production_fact_extractor,  # ACTIVE: wraps LLMFactExtractor
+    make_production_document_writer,  # Phase 2 deferral (raises F21-formatted NotImplementedError)
+    make_production_embedder,  # Phase 2 deferral
+    make_production_consolidation,  # Phase 3 deferral
 )
 ```
 

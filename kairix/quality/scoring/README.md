@@ -23,16 +23,16 @@ kairix.quality.scoring.NDCGScorer       — NDCG@k with graded relevance
 
 ```python
 from kairix.quality.scoring import (
-    QueryRunResult,          # wire format, frozen dataclass
-    ScorerResult,            # per-metric verdict
-    Scorer,                  # runtime-checkable Protocol
+    QueryRunResult,  # wire format, frozen dataclass
+    ScorerResult,  # per-metric verdict
+    Scorer,  # runtime-checkable Protocol
     NDCGScorer,
     HitAtKScorer,
     MRRScorer,
     LLMJudgeScorer,
     LatencyScorer,
     ScorerRegistry,
-    auto_select_scorers,     # suite-shape → registry
+    auto_select_scorers,  # suite-shape → registry
     aggregate_by_category,
     aggregate_overall,
 )
