@@ -29,7 +29,7 @@ dependencies = [
     "usearch>=2.8,<3",
     "langgraph>=1.0.10,<2",
     "lxml>=6.1.0",
-    "openai>=1.40,<3",
+    "openai>=1.40,<4",
     # Filesystem-event watcher — Apache 2.0, commercial-safe. First-party
     # Obsidian connector (``kairix/connectors/obsidian/``) tails vault
     # edits between full-scan reconciliation passes. Per F37, ``watchdog``
