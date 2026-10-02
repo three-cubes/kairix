@@ -118,7 +118,7 @@ jobs:
       # The arch-fitness-catalogue hook runs `uv run python3 …` so the
       # catalogue runner imports kairix + the shared three-cubes-fitness
       # package. Sync the venv (and put uv on PATH) before pre-commit runs.
-      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@b9d6408868eec5be56dbe57581aa086a95095d46 # v1
+      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
         with:
           python-version: "3.12"
           sync-args: "--all-extras --all-groups"
@@ -153,12 +153,11 @@ jobs:
     #  * PRIVATE_INFRA_PATTERNS (F73) is forwarded through the reusable's
     #    private-infra-patterns secret so the detector stays ENFORCED, not a
     #    silent no-op. Stage 1..5 (contracts / integration / e2e) are untouched.
-    uses: three-cubes/tc-pipelines/.github/workflows/python-quality-gate.yml@0541f75d6a3491ff83e643bc752d9722f17d865e # v1.19.1
+    uses: three-cubes/tc-pipelines/.github/workflows/python-quality-gate.yml@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
     with:
       python-version: "3.12"
       uv-version: "0.11.16"
       sync-args: "--all-extras --all-groups"
-      ci-requirements-path: ""
       fetch-depth: 0
       pytest-shards: 1
       run-node: false
@@ -186,8 +185,8 @@ jobs:
       # mcp>=1.20) are still present and the MCP transport contract test
       # runs here rather than being skipped by `importorskip("starlette")`.
       # kairix is a single package (not a uv workspace) — do NOT pass
-      # --all-packages. Pinned to @main until the action repo cuts tags.
-      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@b9d6408868eec5be56dbe57581aa086a95095d46 # v1
+      # --all-packages. The shared action is pinned to the v2.2.0 carrier.
+      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
         with:
           python-version: "3.12"
           sync-args: "--all-extras --all-groups"
@@ -422,7 +421,7 @@ jobs:
       # combine/xml CLI — both resolve from the synced venv. Use the org-shared
       # composite (same seam as union-coverage / arch-fitness) and run the
       # combine + floor under `uv run`.
-      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@b9d6408868eec5be56dbe57581aa086a95095d46 # v1
+      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
         with:
           python-version: "3.12"
           sync-args: "--all-extras --all-groups"
@@ -718,7 +717,7 @@ jobs:
       # package (tc_fitness, in the [dev] group), so this job needs the
       # synced venv — not a bare interpreter. Sync via the org-shared
       # composite and run the floor check under `uv run`.
-      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@b9d6408868eec5be56dbe57581aa086a95095d46 # v1
+      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
         with:
           python-version: "3.12"
           sync-args: "--all-extras --all-groups"

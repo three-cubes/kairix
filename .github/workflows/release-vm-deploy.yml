@@ -171,7 +171,7 @@ jobs:
     # Canonical tc-pipelines deploy: WIF Azure login → OS-disk snapshot →
     # `az vm run-command` the apply-script → smoke `systemctl is-active`.
     # Replaces the bespoke HMAC-webhook POST + commit-status poll.
-    uses: three-cubes/tc-pipelines/.github/workflows/azure-vm-deploy.yml@0541f75d6a3491ff83e643bc752d9722f17d865e # v1.19.1
+    uses: three-cubes/tc-pipelines/.github/workflows/azure-vm-deploy.yml@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
     with:
       # Deploy target (resource group + VM name) comes from repo variables, not
       # hardcoded literals, so infra identifiers stay out of this public repo.
@@ -248,7 +248,7 @@ jobs:
       # no GitHub-stored PAT). Same composite release.yml uses for tagging.
       - name: Mint three-cubes-agent App token
         id: app
-        uses: three-cubes/tc-pipelines/.github/actions/github-app-token@0541f75d6a3491ff83e643bc752d9722f17d865e # v1.19.1
+        uses: three-cubes/tc-pipelines/.github/actions/github-app-token@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}

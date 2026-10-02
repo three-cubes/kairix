@@ -128,7 +128,7 @@ jobs:
       # GitHub-stored secret. Canonical in tc-pipelines; don't reinvent.
       - name: Mint three-cubes-agent App token
         id: app
-        uses: three-cubes/tc-pipelines/.github/actions/github-app-token@0541f75d6a3491ff83e643bc752d9722f17d865e # v1.19.1
+        uses: three-cubes/tc-pipelines/.github/actions/github-app-token@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -155,7 +155,7 @@ jobs:
       # "baselines did not shrink"). Sync the venv via the org-shared
       # composite, then run the checks under it — mirrors the Stage 0
       # arch-fitness job in ci.yml.
-      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@b9d6408868eec5be56dbe57581aa086a95095d46 # v1
+      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
         with:
           python-version: "3.12"
           sync-args: "--all-extras --all-groups"
