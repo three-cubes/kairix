@@ -49,8 +49,8 @@ class _ScriptedNeo4jForSoak:
         self.cypher_calls.append((query, params))
         if "SET n.summary_indexed_at" in query:
             assert params is not None
-            self._pool.pop(params["name"], None)
-            return []
+            removed = self._pool.pop(params["name"], None)
+            return [{"name": params["name"]}] if removed is not None else []
         # Poll branch — return up to per_tick_max_items entries.
         per_tick = int((params or {}).get("per_tick_max_items", _PER_TICK_MAX_ITEMS))
         slice_keys = list(self._pool.keys())[:per_tick]
@@ -89,6 +89,7 @@ def test_projector_clears_10k_entity_backlog(tmp_path: Path) -> None:
         neo4j=neo4j,
         chunk_writer=writer,
         clock=lambda: "2026-06-09T00:00:00Z",
+        commit=db.commit,
     )
 
     ticks = 0

@@ -30,20 +30,19 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 import pytest
 
-from kairix.connectors.m365_calendar import (
-    M365CalendarConfig,
-    M365CalendarConnector,
-    make_connector,
-)
+from kairix.connectors.m365_calendar import make_connector
+from kairix.connectors.m365_calendar.connector import M365CalendarConfig, M365CalendarConnector
 from kairix.connectors.m365_calendar.graph_client import (
     CalendarDeltaPage,
     CalendarEventRecord,
     M365GraphCalendarClient,
 )
-from kairix.core.protocols import ChangeEvent, RawArtefact
+from kairix.core.protocols import ChangeEvent, Container, RawArtefact
 from kairix.secrets import SecretNotFoundError
+from kairix.transport.errors import GraphDeltaExpiredError
 from tests.fakes import FakeSecretsLoader
 
 
@@ -157,6 +156,51 @@ def _fixed_clock() -> datetime:
     return datetime(2026, 5, 22, 0, 0, 0, tzinfo=timezone.utc)
 
 
+_INITIAL_RECOVERY_PAYLOAD: dict[str, Any] = {
+    "value": [
+        {
+            "id": "event-recovered",
+            "subject": "Recovered",
+            "start": {"dateTime": "2026-05-25T09:00:00Z"},
+            "end": {"dateTime": "2026-05-25T10:00:00Z"},
+            "location": {"displayName": "Remote"},
+            "attendees": [],
+            "organizer": {"emailAddress": {"address": "operator@example.com"}},
+            "isCancelled": False,
+            "lastModifiedDateTime": "2026-05-25T08:00:00Z",
+        }
+    ]
+}
+
+
+def _real_calendar_connector_for_http(handler: Any) -> M365CalendarConnector:
+    """Compose the real connector and Graph client at the HTTP boundary."""
+    from kairix.connectors.m365_calendar.auth import OAuth2ClientCredsAuth, OAuth2Config
+
+    auth = OAuth2ClientCredsAuth(
+        OAuth2Config(
+            tenant_id="placeholder-tenant",
+            client_id="placeholder-client",
+            client_secret="placeholder-secret",  # pragma: allowlist secret
+        ),
+        token_fetcher=lambda _config: ("scripted-token", 3600.0),
+        clock=lambda: 0.0,
+    )
+    http = httpx.Client(transport=httpx.MockTransport(handler), auth=auth)
+    graph = M365GraphCalendarClient(
+        user_id="operator@example.com",
+        auth=auth,
+        http_client=http,
+        sleep_fn=lambda _seconds: None,
+    )
+    return M365CalendarConnector(
+        _config(),
+        client_factory=lambda _config: graph,
+        per_user_client_factory=lambda _config, _upn: graph,
+        clock=_fixed_clock,
+    )
+
+
 # ---------------------------------------------------------------------------
 # First-sync date-window query
 # ---------------------------------------------------------------------------
@@ -247,6 +291,147 @@ def test_delta_cursor_drives_delta_page_endpoint() -> None:
 
     assert factory.client.delta_calls == ["cursor-from-previous-tick"]
     assert factory.client.initial_calls == [], "delta-cursor sync must not call the initial-delta endpoint"
+
+
+@pytest.mark.contract
+def test_expired_stored_calendar_cursor_restarts_once_from_initial_window() -> None:
+    """Only a stored 410 cursor is discarded; the initial resync completes."""
+    requested: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if "expired-calendar-delta" in str(request.url):
+            return httpx.Response(410, request=request, json={"error": {"code": "syncStateNotFound"}})
+        return httpx.Response(
+            200,
+            request=request,
+            json={**_INITIAL_RECOVERY_PAYLOAD, "@odata.deltaLink": "fresh"},
+        )
+
+    connector = _real_calendar_connector_for_http(_handler)
+    events = list(connector.list_changes(cursor="https://graph.microsoft.com/v1.0/expired-calendar-delta"))
+
+    assert [event.item_id for event in events] == ["event-recovered"]
+    assert len(requested) == 2
+    assert "expired-calendar-delta" in requested[0]
+    assert "calendarView/delta" in requested[1]
+    assert connector.last_delta_link == "fresh"
+
+
+@pytest.mark.contract
+def test_expired_cursor_reseed_bypasses_connector_cached_delta_link() -> None:
+    """A later 410 recovery uses the initial window, never a cached delta URL.
+
+    The first tick primes ``last_delta_link``. The next tick's persisted cursor
+    expires. Recovery must bypass both the expired persisted cursor and the
+    connector's cached prior link, otherwise long-lived workers repeat the 410.
+    """
+
+    class _ExpiryClient(_RecordingClient):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.initial_count = 0
+
+        def fetch_initial_delta(self, start_iso: str, end_iso: str) -> CalendarDeltaPage:
+            self.initial_calls.append((start_iso, end_iso))
+            self.initial_count += 1
+            if self.initial_count == 1:
+                return _page(_event("before-expiry"), delta_link="cached-expired-link")
+            return _page(_event("after-reseed"), delta_link="fresh-link")
+
+        def fetch_delta_page(self, link: str) -> CalendarDeltaPage:
+            self.delta_calls.append(link)
+            request = httpx.Request("GET", link)
+            response = httpx.Response(410, request=request)
+            raise GraphDeltaExpiredError("delta expired", request=request, response=response)
+
+    client = _ExpiryClient()
+    connector = M365CalendarConnector(
+        _config(),
+        client_factory=lambda _config: client,
+        clock=_fixed_clock,
+    )
+
+    assert [event.item_id for event in connector.list_changes(cursor=None)] == ["before-expiry"]
+    recovered = list(connector.list_changes(cursor="persisted-expired-link"))
+
+    assert [event.item_id for event in recovered] == ["after-reseed"]
+    assert client.delta_calls == ["persisted-expired-link"]
+    assert len(client.initial_calls) == 2
+    assert connector.last_delta_link == "fresh-link"
+
+
+@pytest.mark.contract
+def test_calendar_seed_410_is_not_retried_forever() -> None:
+    """A 410 from the initial window is terminal after one request."""
+    requested: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(410, request=request, json={"error": {"code": "syncStateNotFound"}})
+
+    connector = _real_calendar_connector_for_http(_handler)
+    with pytest.raises(GraphDeltaExpiredError):
+        list(connector.list_changes(cursor=None))
+
+    assert len(requested) == 1
+
+
+@pytest.mark.contract
+def test_expired_per_container_calendar_cursor_restarts_only_that_container() -> None:
+    """The production per-container path recovers its own expired cursor once."""
+    requested: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if "expired-container-delta" in str(request.url):
+            return httpx.Response(410, request=request, json={"error": {"code": "syncStateNotFound"}})
+        return httpx.Response(
+            200,
+            request=request,
+            json={**_INITIAL_RECOVERY_PAYLOAD, "@odata.deltaLink": "fresh-container"},
+        )
+
+    connector = _real_calendar_connector_for_http(_handler)
+    container = Container(
+        cc_pair_id=7,
+        container_id="operator@example.com",
+        access_state="ACCESSIBLE",
+        cursor_token="https://graph.microsoft.com/v1.0/expired-container-delta",
+        last_synced_at=None,
+    )
+
+    events = list(connector.list_changes_for_container(container))
+
+    assert [event.item_id for event in events] == ["event-recovered"]
+    assert len(requested) == 2
+    assert "expired-container-delta" in requested[0]
+    assert "calendarView/delta" in requested[1]
+    assert connector.next_cursor() == "fresh-container"
+
+
+@pytest.mark.contract
+def test_per_container_calendar_seed_410_fails_after_one_request() -> None:
+    """A per-container initial-window 410 is terminal and never loops."""
+    requested: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(410, request=request, json={"error": {"code": "syncStateNotFound"}})
+
+    connector = _real_calendar_connector_for_http(_handler)
+    container = Container(
+        cc_pair_id=7,
+        container_id="operator@example.com",
+        access_state="ACCESSIBLE",
+        cursor_token=None,
+        last_synced_at=None,
+    )
+
+    with pytest.raises(GraphDeltaExpiredError):
+        list(connector.list_changes_for_container(container))
+
+    assert len(requested) == 1
 
 
 @pytest.mark.unit
@@ -362,6 +547,46 @@ def test_fetch_returns_cached_payload_after_list_changes() -> None:
     assert isinstance(artefact, RawArtefact)
     assert artefact.mime == "application/json"
     assert b"ev-alpha" in artefact.raw
+
+
+@pytest.mark.unit
+def test_successive_calendar_batches_release_prior_payload_and_metadata() -> None:
+    """Per-item envelopes live for one eager batch, not the worker lifetime."""
+    factory = _factory_for(
+        [
+            _page(_event("ev-old"), delta_link="cursor-1"),
+            _page(_event("ev-new"), delta_link="cursor-2"),
+        ]
+    )
+    connector = M365CalendarConnector(_config(), client_factory=factory, clock=_fixed_clock)
+
+    list(connector.list_changes(cursor=None))
+    assert connector.fetch("ev-old").raw
+    assert connector.metadata_for("ev-old").author == "organiser@example.com"
+
+    list(connector.list_changes(cursor="cursor-1"))
+
+    with pytest.raises(ValueError, match="no cached payload"):
+        connector.fetch("ev-old")
+    assert connector.metadata_for("ev-old").author is None
+    assert connector.fetch("ev-new").raw
+
+
+@pytest.mark.unit
+def test_calendar_known_id_history_is_bounded_without_losing_recent_classification() -> None:
+    """Long-lived classification state retains only the bounded recent set."""
+    factory = _factory_for([_page(_event("oldest"), _event("newest"))])
+    connector = M365CalendarConnector(_config(), client_factory=factory, clock=_fixed_clock)
+    history_size = connector.known_id_cache_max_items
+    connector.seed_known_ids(["oldest", *(f"seed-{index}" for index in range(history_size)), "newest"])
+
+    events = list(connector.list_changes(cursor="resume"))
+
+    assert [(event.item_id, event.op) for event in events] == [
+        ("oldest", "created"),
+        ("newest", "modified"),
+    ]
+    assert len(connector._known_ids) == history_size
 
 
 @pytest.mark.unit
