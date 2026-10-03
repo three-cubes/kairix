@@ -30,10 +30,11 @@ updates:
       semver-patch-days: 7
     # Group minor/patch updates to reduce PR noise
     # mcp 2.x changes the server and client APIs kairix's MCP interface uses;
-    # version updates wait for the PLA-415 migration. Security updates still surface.
+    # major version updates wait for the PLA-415 migration. `update-types` holds
+    # version updates only, so security updates for mcp still open PRs.
     ignore:
       - dependency-name: "mcp"
-        versions: [">=2"]
+        update-types: ["version-update:semver-major"]
     groups:
       dev-dependencies:
         patterns:
