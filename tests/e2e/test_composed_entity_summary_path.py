@@ -85,9 +85,11 @@ class _ScriptedNeo4jForE2E:
             assert params is not None
             name = str(params.get("name") or "")
             new_hash = str(params.get("hash") or "")
+            new_summary = str(params.get("summary") or "")
             if name in self._pool:
                 self._pool[name]["prior_hash"] = new_hash
-            return []
+                self._pool[name]["prior_summary"] = new_summary
+            return [{"name": name}] if name else []
         # Poll branch.
         per_tick = int((params or {}).get("per_tick_max_items", 200))
         slice_keys = list(self._pool.keys())[:per_tick]
