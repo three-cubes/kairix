@@ -25,8 +25,10 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from watchdog.observers.polling import PollingObserver
 
 from kairix.connectors.obsidian import ObsidianConnector, make_connector
+from kairix.connectors.obsidian.watcher import WatchdogSource
 from kairix.core.protocols import RawArtefact
 from kairix.knowledge.reflib.dedup import hash_content
 
@@ -67,9 +69,14 @@ def vault(tmp_path: Path) -> Path:
 
 def _connector_with_known(vault: Path, known: Mapping[str, str]) -> ObsidianConnector:
     """Construct a connector against a snapshot of ``known`` state."""
+
+    def _polling_watcher(root: Path) -> WatchdogSource:
+        return WatchdogSource(root, observer_factory=PollingObserver)
+
     return ObsidianConnector(
         vault_root=vault,
         known_state_resolver=lambda _c: known,
+        watcher_factory=_polling_watcher,
     )
 
 
@@ -86,8 +93,8 @@ def test_first_sync_emits_created_for_every_file(vault: Path) -> None:
     reconciler when ``cursor is None``; this test fails because no
     events fire on the first sync.
     """
-    connector = _connector_with_known(vault, {})
-    events = list(connector.list_changes(cursor=None))
+    with _connector_with_known(vault, {}) as connector:
+        events = list(connector.list_changes(cursor=None))
     assert {e.op for e in events} == {"created"}
     assert sorted(e.item_id for e in events) == ["alpha.md", "bravo.md", "charlie.md"]
 
@@ -108,8 +115,8 @@ def test_touch_file_surfaces_as_modified_event(vault: Path) -> None:
     known_before = _hash_snapshot(vault)
     (vault / "alpha.md").write_text("# Alpha\n\nEdited body.", encoding="utf-8")
 
-    connector = _connector_with_known(vault, known_before)
-    events = list(connector.list_changes(cursor=None))
+    with _connector_with_known(vault, known_before) as connector:
+        events = list(connector.list_changes(cursor=None))
 
     modified = [e for e in events if e.op == "modified"]
     assert [e.item_id for e in modified] == ["alpha.md"]
@@ -134,8 +141,8 @@ def test_delete_file_surfaces_as_deleted_event(vault: Path) -> None:
     known_before = _hash_snapshot(vault)
     (vault / "bravo.md").unlink()
 
-    connector = _connector_with_known(vault, known_before)
-    events = list(connector.list_changes(cursor=None))
+    with _connector_with_known(vault, known_before) as connector:
+        events = list(connector.list_changes(cursor=None))
 
     deleted = [e for e in events if e.op == "deleted"]
     assert [e.item_id for e in deleted] == ["bravo.md"]
@@ -351,8 +358,8 @@ def test_cursor_filters_out_old_events(vault: Path) -> None:
     # Pass a cursor in the future — every reconciliation event has
     # ``modified_at == now``, which is strictly less than the cursor.
     future_cursor = "2099-01-01T00:00:00Z"
-    connector = _connector_with_known(vault, known_before)
-    events = list(connector.list_changes(cursor=future_cursor))
+    with _connector_with_known(vault, known_before) as connector:
+        events = list(connector.list_changes(cursor=future_cursor))
     assert events == [], f"future cursor must filter all events, got {events!r}"
 
 
@@ -400,8 +407,8 @@ def test_reconciliation_emits_creates_then_modifies_then_deletes(vault: Path) ->
     (vault / "delta.md").write_text("# Delta\n\nNew note.", encoding="utf-8")
     (vault / "bravo.md").unlink()
 
-    connector = _connector_with_known(vault, known)
-    events = list(connector.list_changes(cursor=None))
+    with _connector_with_known(vault, known) as connector:
+        events = list(connector.list_changes(cursor=None))
     ops = [e.op for e in events]
     # Created events must precede modified, which must precede deleted.
     created_idx = max(i for i, o in enumerate(ops) if o == "created")
