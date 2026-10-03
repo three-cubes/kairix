@@ -1,7 +1,8 @@
 version: 2
 
 # Supply-chain hardening: every version update sits in a 7-day cooldown
-# (semver-major: 14 days). Cooldown only applies to version updates —
+# (semver-major: 14 days in ecosystems that support semver cooldowns;
+# github-actions takes the default only). Cooldown only applies to version updates —
 # security advisories still surface immediately so CVE patches aren't
 # delayed. Rationale: worm-injection attacks on package managers
 # (npm, PyPI) typically get caught and yanked within days of release.
@@ -97,6 +98,3 @@ updates:
       prefix: "chore(actions)"
     cooldown:
       default-days: 7
-      semver-major-days: 14
-      semver-minor-days: 7
-      semver-patch-days: 7
