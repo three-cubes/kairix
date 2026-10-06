@@ -1095,7 +1095,8 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         summary=(
             "gate-runner contract for shell gate scripts — no unguarded VAR=$(...) under set -e (#483 "
             "silent-death class), || true requires trailing rationale, shellcheck-clean at error "
-            "severity, safe-commit.sh/run-all.sh stages emit named OK/FAIL verdicts"
+            "severity, safe-commit.sh/run-all.sh stages emit named OK/FAIL verdicts, and quiet grep "
+            "output probes cannot produce false failures under pipefail"
         ),
         adr_origin="EPIC #499 Phase 0 — #483 silent gate-death class",
         # File-local: scans the shell gate scripts under scripts/ (incl.

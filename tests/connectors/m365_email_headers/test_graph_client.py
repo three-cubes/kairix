@@ -32,6 +32,7 @@ from kairix.connectors.m365_email_headers.graph_client import (
 from kairix.transport.auth.oauth2_client_creds import (
     OAuth2ClientCredsAuth,
 )
+from kairix.transport.errors import GraphDeltaExpiredError
 
 pytestmark = pytest.mark.unit
 
@@ -788,3 +789,33 @@ def test_authorised_get_default_http_client_path() -> None:
         http_client=None,
     )
     assert client._http_client is None
+
+
+def test_410_response_raises_typed_delta_expired_error() -> None:
+    """A Graph 410 is distinguishable from auth and transient failures."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if "/oauth2/v2.0/token" in str(request.url):
+            return httpx.Response(
+                200,
+                request=request,
+                json={"access_token": "fake-bearer", "expires_in": 3600, "token_type": "Bearer"},
+            )
+        return httpx.Response(
+            410,
+            request=request,
+            json={"error": {"code": "syncStateNotFound"}},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    auth, shared = _build_auth_with_transport(transport)
+    client = M365GraphClient(
+        user_principal_name="agent-alpha@example.com",
+        auth=auth,
+        http_client=shared,
+    )
+
+    with pytest.raises(GraphDeltaExpiredError) as raised:
+        client.fetch_page("https://graph.microsoft.com/v1.0/expired-message-delta")
+
+    assert raised.value.response.status_code == 410

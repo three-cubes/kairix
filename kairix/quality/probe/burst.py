@@ -188,6 +188,7 @@ def _build_timed_tasks(
     sampled: list[SampledQuery],
     fn: Callable[[SampledQuery], Any],
     run_start: float,
+    clock: Callable[[], float],
 ) -> list[Callable[[], tuple[Any, float]]]:
     """The completion timestamp is captured INSIDE the worker in monotonic time,
     relative to the shared ``run_start`` perf_counter — so bucket assignment
@@ -198,7 +199,7 @@ def _build_timed_tasks(
     def _make(sq: SampledQuery) -> Callable[[], tuple[Any, float]]:
         def _task() -> tuple[Any, float]:
             value = fn(sq)
-            completion = time.perf_counter() - run_start
+            completion = clock() - run_start
             return value, completion
 
         return _task
@@ -381,6 +382,7 @@ def run_probe_burst(
     *,
     suite_loader: Callable[[str], list[Any]] | None = None,
     searcher: Callable[[SampledQuery], Any] | None = None,
+    clock: Callable[[], float] = time.perf_counter,
 ) -> BurstResult:
     """Inject ``total_queries`` as fast as possible and measure throughput drop.
 
@@ -397,6 +399,9 @@ def run_probe_burst(
             ``peak_qps`` / ``sustained_qps`` reflect steady-state behaviour.
         suite_loader: test seam — returns list[BenchmarkCase] for a suite name.
         searcher: test seam — runs one SampledQuery through a search pipeline.
+        clock: monotonic clock used for run and completion timestamps. Defaults
+            to :func:`time.perf_counter`; deterministic callers may inject a
+            controlled monotonic timeline.
 
     Returns:
         BurstResult with the full per-bucket timeline, headline peak/sustained
@@ -420,10 +425,10 @@ def run_probe_burst(
     cases = loader(suite)
     sampled = _build_sampled_queries(cases, total_queries, seed)
 
-    run_start = time.perf_counter()
-    tasks = _build_timed_tasks(sampled, fn, run_start)
+    run_start = clock()
+    tasks = _build_timed_tasks(sampled, fn, run_start, clock)
     run = run_concurrent(tasks, concurrency=peak_concurrency)
-    wallclock_s = round(time.perf_counter() - run_start, 4)
+    wallclock_s = round(clock() - run_start, 4)
 
     # Completions: for failed tasks the executor returned None (no tuple), so
     # we approximate the completion time as the executor's wallclock end —

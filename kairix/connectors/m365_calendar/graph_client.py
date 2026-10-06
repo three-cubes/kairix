@@ -40,6 +40,7 @@ from tenacity import (
 )
 
 from kairix.connectors.m365_calendar.auth import OAuth2ClientCredsAuth
+from kairix.transport.errors import raise_for_graph_status
 
 logger = logging.getLogger(__name__)
 
@@ -238,9 +239,9 @@ class M365GraphCalendarClient:
             # :class:`httpx.HTTPStatusError` shape they did before retry
             # was added.
             final: httpx.Response = exc.last_attempt.result()
-            final.raise_for_status()
+            raise_for_graph_status(final)
             return final  # pragma: no cover — raise_for_status above always raises here
-        response.raise_for_status()
+        raise_for_graph_status(response)
         return response
 
     def _do_get(
