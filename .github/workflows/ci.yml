@@ -24,6 +24,12 @@ on:
     # then never go green (this stranded #632). The internal dorny/paths-filter
     # (`changes` job) still skips the heavy stages for a docs-only diff, so the
     # gate fans in green in ~15s rather than running the full pipeline.
+  # Merge queue (org-main-product): the required `Quality gate` and
+  # `no-attribution` contexts must report on the gh-readonly-queue ref, or a
+  # queued PR waits forever. The paths filter diffs the queued change against
+  # the queue's base commit, so the queue runs exactly the stages the change
+  # touches, tested on top of the latest main.
+  merge_group:
   workflow_dispatch:
 
 # Deny all permissions by default. Each job declares its own minimum.
@@ -31,7 +37,9 @@ permissions: {}
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a merge-queue run: GitHub treats a cancelled queue check as a
+  # failure and ejects the PR from the queue.
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -56,6 +64,9 @@ jobs:
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
+          # In the merge queue, diff against the queue's base commit (empty on
+          # other events, where the action's own default applies).
+          base: ${{ github.event.merge_group.base_sha }}
           filters: |
             python:
               - 'kairix/**/*.py'
@@ -164,7 +175,10 @@ jobs:
       fetch-depth: 0
       pytest-shards: 1
       run-node: false
-      run-no-attribution: true
+      # The bare `no-attribution` job below scans each PR's commits + title/body;
+      # in the merge queue there is no PR context and the only new commit is
+      # GitHub's merge commit, so the in-gate scan runs on PRs only.
+      run-no-attribution: ${{ github.event_name == 'pull_request' }}
       upload-coverage-artifact: false
     secrets:
       gh-token: ${{ secrets.GITHUB_TOKEN }}
