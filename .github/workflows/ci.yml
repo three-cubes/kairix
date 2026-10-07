@@ -403,6 +403,58 @@ jobs:
           path: .coverage.${{ matrix.group }}
           retention-days: 7
 
+  # ── Stage 2c: Python 3.12 product compatibility ────────────────────────────
+  # The gate interpreter is 3.13 (tc-fitness >= v0.17 requires it), but the
+  # published wheel still declares requires-python >=3.12. This lane installs
+  # the product extras WITHOUT the fitness dependency group on 3.12 and runs the
+  # unit/BDD/contract suite (no coverage, no mypy — those run on 3.13), so a
+  # 3.13-only API or behaviour can't reach 3.12 users undetected. Tests that need
+  # the engine (tests/checks, tests/architecture) skip themselves when
+  # tc_fitness is absent.
+  unit-py312:
+    name: "Stage 2c -- Unit (py3.12 compat, shard ${{ matrix.group }}/4)"
+    runs-on: ubuntu-latest
+    needs: [changes, contracts]
+    if: needs.changes.outputs.python == 'true'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install OCR runtime (tesseract binary)
+        run: sudo apt-get install -y tesseract-ocr
+
+      - name: Install dependencies (product extras, no fitness group)
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev,agents,markitdown,pdf_fallback,ocr,pptx,docx,xlsx]"
+
+      - name: Enable systemd --user bus for install-mode tests
+        # Same session-bus setup as Stage 2 (see that job for the rationale).
+        run: |
+          sudo loginctl enable-linger "$USER"
+          UID_N=$(id -u "$USER")
+          sudo systemctl start "user@${UID_N}.service"
+          timeout 30 bash -c "until systemctl --user --no-pager status >/dev/null 2>&1; do sleep 1; done"
+          echo "XDG_RUNTIME_DIR=/run/user/${UID_N}" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${UID_N}/bus" >> "$GITHUB_ENV"
+
+      - name: Unit + BDD + Contract tests on 3.12 (shard ${{ matrix.group }}/4)
+        run: |
+          pytest tests/ \
+            -m "unit or bdd or contract" \
+            --splits 4 --group ${{ matrix.group }} \
+            -v --tb=short
+
   # ── Stage 2b: Combine shard coverage + F7 per-file floor ───────────────────
   # The unit tier is sharded (pytest-split) across 4 runners; each shard writes
   # a partial .coverage.<group>. This job fans in over ALL shards, combines them
@@ -891,6 +943,7 @@ jobs:
       - pre-commit
       - contracts
       - unit-and-type
+      - unit-py312
       - unit-coverage
       - coverage
       - integration
@@ -907,6 +960,7 @@ jobs:
           RESULT_PRECOMMIT: ${{ needs.pre-commit.result }}
           RESULT_CONTRACTS: ${{ needs.contracts.result }}
           RESULT_UNIT: ${{ needs.unit-and-type.result }}
+          RESULT_UNIT_PY312: ${{ needs.unit-py312.result }}
           RESULT_UNIT_COVERAGE: ${{ needs.unit-coverage.result }}
           RESULT_COVERAGE: ${{ needs.coverage.result }}
           RESULT_INTEGRATION: ${{ needs.integration.result }}
@@ -919,6 +973,7 @@ jobs:
           echo "pre-commit:    $RESULT_PRECOMMIT"
           echo "contracts:     $RESULT_CONTRACTS"
           echo "unit-and-type: $RESULT_UNIT"
+          echo "unit-py312:    $RESULT_UNIT_PY312"
           echo "unit-coverage: $RESULT_UNIT_COVERAGE"
           echo "coverage:      $RESULT_COVERAGE"
           echo "integration:   $RESULT_INTEGRATION"
@@ -936,6 +991,7 @@ jobs:
             "$RESULT_PRECOMMIT" \
             "$RESULT_CONTRACTS" \
             "$RESULT_UNIT" \
+            "$RESULT_UNIT_PY312" \
             "$RESULT_UNIT_COVERAGE" \
             "$RESULT_INTEGRATION" \
             "$RESULT_E2E" \
