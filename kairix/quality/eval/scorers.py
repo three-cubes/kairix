@@ -102,7 +102,7 @@ class LLMJudgeScorer:
         )
 
 
-def _default_chat_backend() -> ChatBackend:  # pragma: no cover — prod wrapper; tests pass chat_backend=fake
+def _default_chat_backend() -> ChatBackend:
     """Production ``ChatBackend`` factory — wraps the configured provider plugin.
 
     Kept as a separate function so the lambda in ``LLMJudgeScorer.chat_backend``

@@ -117,7 +117,7 @@ def _default_converter_factory() -> _MarkitdownConverter:
     """
     try:
         from markitdown import MarkItDown
-    except ImportError as exc:  # pragma: no cover — import path validated by make_extractor() test
+    except ImportError as exc:
         raise RuntimeError(
             "markitdown: the upstream 'markitdown' package is not installed. "
             "fix: pip install 'Kairix-agentic-knowledge-mgt[markitdown]' "

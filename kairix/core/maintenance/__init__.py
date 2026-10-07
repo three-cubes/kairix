@@ -36,6 +36,7 @@ from kairix.core.maintenance.scheduler import (
     render_iso,
     tick_to_dict,
     tick_within_jitter_window,
+    usearch_parity_check,
 )
 
 __all__ = [
@@ -59,4 +60,5 @@ __all__ = [
     "render_iso",
     "tick_to_dict",
     "tick_within_jitter_window",
+    "usearch_parity_check",
 ]

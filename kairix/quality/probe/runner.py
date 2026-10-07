@@ -142,7 +142,7 @@ def _stats_to_envelope(s: LatencyStats) -> dict[str, float | int]:
     }
 
 
-def _default_suite_loader(suite: str) -> list[Any]:  # pragma: no cover — production path
+def _default_suite_loader(suite: str) -> list[Any]:
     """Resolve a suite name → list of BenchmarkCase. Production-only seam.
 
     Mirrors ``kairix benchmark run --suite SUITE`` resolution so the operator
@@ -154,7 +154,7 @@ def _default_suite_loader(suite: str) -> list[Any]:  # pragma: no cover — prod
     return load_suite(str(suite_path)).cases
 
 
-def _default_search_fn(q: SampledQuery) -> Any:  # pragma: no cover — production path
+def _default_search_fn(q: SampledQuery) -> Any:
     """Run one search via the production in-process pipeline.
 
     Thin shim over :class:`InProcessSearchClient` so existing callers keep

@@ -492,7 +492,7 @@ def embed_lock_held(lockfile: Path) -> bool:
     return False
 
 
-def _default_embed_pipeline(**kwargs: Any) -> Any:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_embed_pipeline(**kwargs: Any) -> Any:
     from kairix.core.embed.use_cases import run_incremental_embed_pipeline
 
     return run_incremental_embed_pipeline(**kwargs)
@@ -523,19 +523,19 @@ def _default_persist_credentials(
     api_key: str,
     endpoint: str,
     embed_model: str,
-) -> Path | None:  # pragma: no cover  # lazy-import DI-default delegation
+) -> Path | None:
     from kairix.platform.setup.wizard import persist_llm_credentials
 
     return persist_llm_credentials(api_key, endpoint, embed_model)
 
 
-def _default_credentials_probe() -> bool:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_credentials_probe() -> bool:
     from kairix.secrets.probe import llm_credentials_available
 
     return llm_credentials_available()
 
 
-def _default_configured_document_root() -> Path | None:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_configured_document_root() -> Path | None:
     from kairix.paths import document_root_override, load_paths_from_config
 
     return configured_document_root(
@@ -544,11 +544,11 @@ def _default_configured_document_root() -> Path | None:  # pragma: no cover  # l
     )
 
 
-# pragma rationale: lazy-import DI-default delegation — the write-target
-# resolution reads KAIRIX_CONFIG_OVERLAY_PATH / KAIRIX_CONFIG_PATH
-# through kairix.paths (F4); the testable logic lives in
-# write_config_updates.
-def _default_write_config(updates: Mapping[str, Any]) -> Path:  # pragma: no cover  # lazy-import DI-default delegation
+# Lazy-import DI-default delegation — the write-target resolution reads
+# KAIRIX_CONFIG_OVERLAY_PATH / KAIRIX_CONFIG_PATH through kairix.paths
+# (F4); the merge logic lives in write_config_updates. Executed by
+# tests/integration/test_setup_service_default_seams.py (F86).
+def _default_write_config(updates: Mapping[str, Any]) -> Path:
     from kairix.paths import config_overlay_path_override, config_path_override
 
     return write_config_updates(
@@ -558,9 +558,9 @@ def _default_write_config(updates: Mapping[str, Any]) -> Path:  # pragma: no cov
     )
 
 
-# pragma rationale: lazy-import DI-default delegation — mirrors
-# _default_write_config; the testable logic lives in wizard_config_target.
-def _default_config_target() -> Path:  # pragma: no cover  # lazy-import DI-default delegation
+# Lazy-import DI-default delegation — mirrors _default_write_config; the
+# resolution logic lives in wizard_config_target.
+def _default_config_target() -> Path:
     from kairix.paths import config_overlay_path_override, config_path_override
 
     return wizard_config_target(
@@ -569,21 +569,21 @@ def _default_config_target() -> Path:  # pragma: no cover  # lazy-import DI-defa
     )
 
 
-def _default_search_pipeline(paths: Any) -> Any:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_search_pipeline(paths: Any) -> Any:
     from kairix.core.factory import build_search_pipeline
 
     return build_search_pipeline(paths=paths)
 
 
-def _default_capability_probe() -> Mapping[str, Any]:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_capability_probe() -> Mapping[str, Any]:
     from kairix.agents.mcp.capability_probe import build_capability_probe
 
     return build_capability_probe()()
 
 
-# pragma rationale: lazy-import DI-default delegation — builds the real
-# FastMCP server in-process, which the unit tier must not pay for.
-def _default_tools_count() -> int:  # pragma: no cover  # lazy-import DI-default delegation
+# Lazy-import DI-default delegation — builds the real FastMCP server
+# in-process, so it is executed at the integration tier (F86), never unit.
+def _default_tools_count() -> int:
     import asyncio
 
     from kairix.agents.mcp.server import build_server
@@ -592,31 +592,31 @@ def _default_tools_count() -> int:  # pragma: no cover  # lazy-import DI-default
     return len(asyncio.run(server.list_tools()))
 
 
-def _default_run_prep(query: str) -> Any:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_run_prep(query: str) -> Any:
     from kairix.use_cases.prep import run_prep
 
     return run_prep(query)
 
 
-def _default_remember(agent: str, content: str) -> Any:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_remember(agent: str, content: str) -> Any:
     from kairix.use_cases.remember import remember
 
     return remember(agent, content)
 
 
-def _default_run_brief(agent: str) -> Any:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_run_brief(agent: str) -> Any:
     from kairix.use_cases.brief import run_brief
 
     return run_brief(agent)
 
 
-def _default_run_timeline(query: str) -> Any:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_run_timeline(query: str) -> Any:
     from kairix.use_cases.timeline import run_timeline
 
     return run_timeline(query)
 
 
-def _default_top_level_config() -> dict[str, Any] | None:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_top_level_config() -> dict[str, Any] | None:
     from kairix.paths import load_top_level_config
 
     return load_top_level_config()
@@ -627,13 +627,13 @@ def _default_listener_factory(origin: str, expected_state: str | None) -> Any:
     return WizardCallbackListener(origin=origin, expected_state=expected_state)
 
 
-def _default_persist_secret(name: str, value: str) -> Any:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_persist_secret(name: str, value: str) -> Any:
     from kairix.secrets.store import set_secret
 
     return set_secret(name, value)
 
 
-def _default_discover_units(  # pragma: no cover  # lazy-import DI-default delegation
+def _default_discover_units(
     provider: str,
     client: Any,
     tokens: Any,
@@ -667,11 +667,10 @@ def read_config_mapping(
     return loaded if isinstance(loaded, dict) else {}
 
 
-# pragma rationale: lazy-import DI-default delegation — the read-target
-# resolution reads KAIRIX_CONFIG_OVERLAY_PATH / KAIRIX_CONFIG_PATH
-# through kairix.paths (F4); the testable logic lives in
-# read_config_mapping.
-def _default_read_config() -> Mapping[str, Any]:  # pragma: no cover  # lazy-import DI-default delegation
+# Lazy-import DI-default delegation — the read-target resolution reads
+# KAIRIX_CONFIG_OVERLAY_PATH / KAIRIX_CONFIG_PATH through kairix.paths
+# (F4); the read logic lives in read_config_mapping.
+def _default_read_config() -> Mapping[str, Any]:
     from kairix.paths import config_overlay_path_override, config_path_override
 
     return read_config_mapping(

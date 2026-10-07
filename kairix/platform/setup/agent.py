@@ -15,7 +15,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _default_chat(prompt: str, _api_key: str, _endpoint: str) -> str:  # pragma: no cover — prod provider wrapper
+def _default_chat(prompt: str, _api_key: str, _endpoint: str) -> str:
     """Production chat callable — wraps the configured provider plugin.
 
     Kept as a top-level function so ``OnboardingAgentDeps.chat`` has a
@@ -109,7 +109,7 @@ def recommend_from_profile(
 
     # LLM enhancement (optional, additive)
     if api_key and endpoint:
-        if deps is None:  # pragma: no cover — production lazy default; tests pass deps=OnboardingAgentDeps(chat=fake)
+        if deps is None:
             deps = OnboardingAgentDeps()
         try:
             llm_advice = _call_llm(

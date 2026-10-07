@@ -482,13 +482,13 @@ def source_secret_leaves(
     return tuple((canonical_secret_name("connector", provider, instance or None, leaf), value) for leaf, value in pairs)
 
 
-def _default_slack_client(bot_token: str) -> Any:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_slack_client(bot_token: str) -> Any:
     from kairix.connectors.slack.web_client import SlackWebClient
 
     return SlackWebClient(token=bot_token)
 
 
-def _default_github_client(  # pragma: no cover  # lazy-import DI-default delegation
+def _default_github_client(
     client: ClientCredentials,
     tokens: CapturedTokens,
 ) -> Any:

@@ -28,7 +28,7 @@ from kairix.platform.setup.service import AZURE_PROVIDER_NAMES, PLUGIN_AZURE_FOU
 logger = logging.getLogger(__name__)
 
 
-def _default_setup_service() -> Any:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_setup_service() -> Any:
     """Production seam — the same SetupService backend the web wizard drives.
 
     Lazy call-time import: ``backends`` imports this module at load time
@@ -70,16 +70,15 @@ def _default_write_config(updates: Mapping[str, Any], output_path: str | None) -
 
     if output_path:
         return update_config_file(Path(output_path), updates)
-    # pragma rationale: lazy-import DI-default delegation — the no-output
-    # branch resolves KAIRIX_CONFIG_OVERLAY_PATH / KAIRIX_CONFIG_PATH
-    # through kairix.paths (F4); the testable merge logic lives in
-    # kairix.platform.setup.backends.write_config_updates.
-    from kairix.paths import (  # pragma: no cover — lazy-import DI-default delegation (rationale block above)
+    # The no-output branch resolves KAIRIX_CONFIG_OVERLAY_PATH /
+    # KAIRIX_CONFIG_PATH through kairix.paths (F4); the merge logic lives
+    # in kairix.platform.setup.backends.write_config_updates.
+    from kairix.paths import (
         config_overlay_path_override,
         config_path_override,
     )
 
-    return write_config_updates(  # pragma: no cover  # lazy-import DI-default delegation
+    return write_config_updates(
         updates,
         overlay_path=config_overlay_path_override(),
         config_path=config_path_override(),

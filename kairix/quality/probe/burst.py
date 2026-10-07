@@ -148,7 +148,7 @@ def _bucket_to_envelope(b: BurstBucket) -> dict[str, float | int]:
     }
 
 
-def _default_suite_loader(suite: str) -> list[Any]:  # pragma: no cover — production path
+def _default_suite_loader(suite: str) -> list[Any]:
     """Resolve a suite name → list of BenchmarkCase. Production-only seam.
 
     Mirrors ``run_probe_search``'s loader so the operator gets the same
@@ -160,7 +160,7 @@ def _default_suite_loader(suite: str) -> list[Any]:  # pragma: no cover — prod
     return load_suite(str(suite_path)).cases
 
 
-def _default_search_fn(q: SampledQuery) -> Any:  # pragma: no cover — production path
+def _default_search_fn(q: SampledQuery) -> Any:
     """Thin shim over :class:`InProcessSearchClient`.
 
     See :mod:`kairix.quality.probe.clients` for the Protocol contract +

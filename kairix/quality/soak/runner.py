@@ -101,7 +101,7 @@ class SoakResult:
         }
 
 
-def _default_workload_runner(suite: str) -> dict[str, Any]:  # pragma: no cover — prod-only
+def _default_workload_runner(suite: str) -> dict[str, Any]:
     """Default workload — runs the benchmark suite and returns its envelope.
 
     Production-only path; tests inject ``workload_runner=...`` instead.

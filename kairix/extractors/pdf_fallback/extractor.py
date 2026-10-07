@@ -145,7 +145,7 @@ def _default_pdf_opener() -> PdfOpener:
     """
     try:
         import pdfplumber
-    except ImportError as exc:  # pragma: no cover — import path validated by make_extractor() test
+    except ImportError as exc:
         raise RuntimeError(
             "pdf_fallback: the upstream 'pdfplumber' package is not installed. "
             "fix: pip install 'Kairix-agentic-knowledge-mgt[pdf_fallback]' "
