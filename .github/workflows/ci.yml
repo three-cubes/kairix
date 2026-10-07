@@ -61,6 +61,10 @@ jobs:
               - 'kairix/**/*.py'
               - 'tests/**/*.py'
               - 'pyproject.toml'
+              # The resolved dependency set: a lockfile-only bump (e.g. a
+              # Dependabot uv group update) changes what the tests run against,
+              # so it must run the Python stages, not skip them.
+              - 'uv.lock'
               # The fitness machinery itself: a change to the CHECK SCRIPTS,
               # the safe-commit driver, or the rule catalogue must always run Stage 0 arch-fitness (+
               # pre-commit + contracts, which share this filter). Without
@@ -102,6 +106,9 @@ jobs:
               - 'docker-compose*.yml'
               - 'docker/**'
               - 'pyproject.toml'
+              # A lockfile-only dependency bump changes the composed production
+              # path's dependencies too — run Stage 4.5, like pyproject.toml.
+              - 'uv.lock'
 
   # ── Pre-commit (linting, formatting, secrets, file hygiene) ────────────────
   pre-commit:
@@ -272,28 +279,29 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-
       - name: Install OCR runtime (tesseract binary)
         # MM-2 OCR extractor needs tesseract on PATH for tests to run;
         # skips drop F7 coverage below the 85% floor. apt-installable
         # Apache-2.0 binary; no untrusted inputs.
         run: sudo apt-get install -y tesseract-ocr
 
-      - name: Install dependencies (with type stubs)
-        # The [agents] extras pull in mcp>=1.20 (and starlette transitively) so
-        # tests/agents/mcp/test_transport_composition.py — which guards its
-        # imports with `pytest.importorskip("starlette")` — actually runs in
-        # the unit job rather than silently skipping. Without this, the
-        # transport composer's coverage measures as 0% even though the unit
-        # tests exist, and F7 fails the per-file floor.
-        run: |
-          pip install --upgrade pip  # PEP 735 --group support (pip >= 25.1)
-          pip install -e ".[dev,agents,markitdown,pdf_fallback,ocr,pptx,docx,xlsx]"
-          pip install --group fitness  # tc-fitness engine — moved out of the dev extra (PLA-286) so the published wheel stays PyPI-clean; required by tests/checks + tests/architecture
+      # The [agents] extras pull in mcp>=1.20 (and starlette transitively) so
+      # tests/agents/mcp/test_transport_composition.py — which guards its
+      # imports with `pytest.importorskip("starlette")` — actually runs in
+      # the unit job rather than silently skipping (F7 per-file floor).
+      # Install the COMMITTED resolution (uv.lock, --locked) rather than a
+      # fresh pip resolution of pyproject.toml, so the suite runs against the
+      # exact versions a dependency/lockfile PR changes. Same extras as before;
+      # the default `fitness` group (tc-fitness) comes with the sync.
+      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          sync-args: "--locked --extra dev --extra agents --extra markitdown --extra pdf_fallback --extra ocr --extra pptx --extra docx --extra xlsx"
+
+      - name: Put the locked venv on PATH
+        # setup-uv-cached installs into .venv without activating it; later
+        # steps call pytest / mypy / ruff / coverage directly.
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Type checking -- mypy strict
         # Engineering hub: "mypy -- zero errors". Strict mode from Phase 1.
@@ -425,18 +433,24 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          cache: pip
-
       - name: Install OCR runtime (tesseract binary)
         run: sudo apt-get install -y tesseract-ocr
 
-      - name: Install dependencies (product extras, no fitness group)
-        run: |
-          pip install --upgrade pip
-          pip install -e ".[dev,agents,markitdown,pdf_fallback,ocr,pptx,docx,xlsx]"
+      # On 3.12 the fitness group resolves empty (its python_version >= 3.13
+      # marker), so this is the product install the published wheel supports.
+      # Install the COMMITTED resolution (uv.lock, --locked) rather than a
+      # fresh pip resolution of pyproject.toml, so the suite runs against the
+      # exact versions a dependency/lockfile PR changes. Same extras as before;
+      # the default `fitness` group (tc-fitness) comes with the sync.
+      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
+        with:
+          python-version: "3.12"
+          sync-args: "--locked --extra dev --extra agents --extra markitdown --extra pdf_fallback --extra ocr --extra pptx --extra docx --extra xlsx"
+
+      - name: Put the locked venv on PATH
+        # setup-uv-cached installs into .venv without activating it; later
+        # steps call pytest / mypy / ruff / coverage directly.
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Enable systemd --user bus for install-mode tests
         # Same session-bus setup as Stage 2 (see that job for the rationale).
@@ -581,20 +595,23 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      # The agents extras (mcp>=1.20) are required for
+      # tests/integration/test_mcp_build_server.py — those probes exercise
+      # the production build_server() wiring and need the real FastMCP
+      # package, not a stub.
+      # Install the COMMITTED resolution (uv.lock, --locked) rather than a
+      # fresh pip resolution of pyproject.toml, so the suite runs against the
+      # exact versions a dependency/lockfile PR changes. Same extras as before;
+      # the default `fitness` group (tc-fitness) comes with the sync.
+      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
         with:
           python-version: "3.13"
-          cache: pip
+          sync-args: "--locked --extra dev --extra agents --extra markitdown --extra pdf_fallback --extra ocr --extra pptx --extra docx --extra xlsx"
 
-      - name: Install dependencies
-        # The agents extras (mcp>=1.20) are required for
-        # tests/integration/test_mcp_build_server.py — those probes exercise
-        # the production build_server() wiring and need the real FastMCP
-        # package, not a stub.
-        run: |
-          pip install --upgrade pip  # PEP 735 --group support (pip >= 25.1)
-          pip install -e ".[dev,agents,markitdown,pdf_fallback,ocr,pptx,docx,xlsx]"
-          pip install --group fitness  # tc-fitness engine — moved out of the dev extra (PLA-286); required by the tests/checks + tests/architecture conftests collected here
+      - name: Put the locked venv on PATH
+        # setup-uv-cached installs into .venv without activating it; later
+        # steps call pytest / mypy / ruff / coverage directly.
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Enable systemd --user bus for install-mode tests
         # Plan 1 integration tests (tests/integration/test_cli_init.py +
@@ -710,16 +727,19 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      # Install the COMMITTED resolution (uv.lock, --locked) rather than a
+      # fresh pip resolution of pyproject.toml, so the suite runs against the
+      # exact versions a dependency/lockfile PR changes. Same extras as before;
+      # the default `fitness` group (tc-fitness) comes with the sync.
+      - uses: three-cubes/tc-pipelines/actions/setup-uv-cached@07dad612b5f409a975c8356d556b07f3a855597c # v2.2.0
         with:
           python-version: "3.13"
-          cache: pip
+          sync-args: "--locked --extra dev --extra agents --extra markitdown --extra pdf_fallback --extra ocr --extra pptx --extra docx --extra xlsx"
 
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip  # PEP 735 --group support (pip >= 25.1)
-          pip install -e ".[dev,agents,markitdown,pdf_fallback,ocr,pptx,docx,xlsx]"
-          pip install --group fitness  # tc-fitness engine — moved out of the dev extra (PLA-286); required by the tests/checks + tests/architecture conftests collected here
+      - name: Put the locked venv on PATH
+        # setup-uv-cached installs into .venv without activating it; later
+        # steps call pytest / mypy / ruff / coverage directly.
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Enable systemd --user bus for install-mode tests
         # Plan 1 install BDD + E2E need a logind session bus to run
