@@ -67,10 +67,8 @@ distrust is worse than no detector):
     added through some other mechanism would need its own registration
     site. The wizard builds its table as one literal list.
 
-Baseline ``.architecture/baseline/f90-files.txt`` grandfathers any
-pre-existing dangling reference (ideally none — the tranche-3 web tier is
-clean); a net-new dangling URL / id / unreachable template blocks at
-pre-commit / safe-commit / CI Stage 0.
+There is no grandfathering: every dangling URL / id / unreachable
+template blocks at pre-commit / safe-commit / CI Stage 0.
 """
 
 from __future__ import annotations

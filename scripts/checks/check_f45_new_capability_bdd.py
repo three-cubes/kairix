@@ -51,7 +51,7 @@ of ``(surface, suggested_feature_path)`` tuples for any new surface
 that lacks coverage. Tests call this directly with a synthetic input;
 the ``main()`` entry point wraps it with git/tree discovery.
 
-Forward-only rule — baseline file is empty at introduction.
+There is no grandfathering: every violation fails the gate.
 """
 
 from __future__ import annotations
@@ -544,8 +544,8 @@ def _gather_new_surfaces_staged(repo_root: Path) -> list[tuple[str, str, str | N
 
 def _gather_new_surfaces_full_tree(repo_root: Path) -> list[tuple[str, str, str | None]]:
     """In ``--full-tree`` mode, every surface present in the tree is
-    treated as a potential violator; existing-feature lookup handles
-    the grandfathering.
+    treated as a potential violator; the existing-feature lookup clears
+    every surface that already has its BDD feature.
     """
     overrides = _tree_overrides(repo_root)
     out: list[tuple[str, str, str | None]] = []
@@ -590,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
     pairs = collect_violations(new_surfaces, staged_paths, tree_root)
     # Translate to the synthetic-Path form gate() expects: one path
     # per violating surface, with the surface label embedded so the
-    # baseline reads naturally. Variable name is ``offenders`` rather
+    # failure output reads naturally. Variable name is ``offenders`` rather
     # than ``violations`` so F21's append-literal heuristic doesn't
     # false-positive on the dynamic f-string below.
     offenders: set[Path] = set()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,9 +67,11 @@ def _seed_db(db_path: Path) -> None:
 def knowledge_store_with_docs() -> None:
     db_path = _state["tmp_path"] / "kairix.sqlite"
     _seed_db(db_path)
+    # Handed to GoldBuilder(db_path=...) — the constructor seam — so the
+    # scenario never mutates process env (a module-level teardown_function
+    # is never called by pytest for a pytest-bdd steps module, so an env
+    # write here would leak into every later test in the run).
     _state["db_path"] = db_path
-    _state["prev_db_env"] = os.environ.get("KAIRIX_DB_PATH")
-    os.environ["KAIRIX_DB_PATH"] = str(db_path)
 
 
 @given("a retriever that returns one document for the query")
@@ -169,7 +170,7 @@ def retriever_returns_nothing() -> None:
 
 @when("the operator pools candidates across BM25 variants and vector retrieval")
 def operator_pools_candidates() -> None:
-    builder = GoldBuilder(retriever=_state["retriever"])
+    builder = GoldBuilder(retriever=_state["retriever"], db_path=_state.get("db_path"))
     _state["candidates"] = builder.pool(
         _state["query"],
         systems=["bm25-equal", "bm25-title", "vector"],
@@ -184,6 +185,7 @@ def operator_builds_gold_suite() -> None:
     builder = GoldBuilder(
         llm_judge=_state.get("judge", FakeLLMJudge(grades_by_query={})),
         retriever=_state.get("retriever", FakeRetriever()),
+        db_path=_state.get("db_path"),
     )
     _state["report"] = builder.build_independent_gold(
         suite_path=_state["input_path"],
@@ -199,7 +201,7 @@ def operator_builds_gold_suite() -> None:
 @when("the operator builds the independent gold suite without credentials")
 def operator_builds_gold_suite_no_creds() -> None:
     output_path = _state["tmp_path"] / "gold.yaml"
-    builder = GoldBuilder()
+    builder = GoldBuilder(db_path=_state.get("db_path"))
     _state["report"] = builder.build_independent_gold(
         suite_path=_state["input_path"],
         output_path=output_path,
@@ -250,12 +252,3 @@ def report_one_query_processed() -> None:
 @then("the report records zero queries processed")
 def report_zero_queries_processed() -> None:
     assert _state["report"].queries_processed == 0
-
-
-def teardown_function() -> None:
-    """Restore KAIRIX_DB_PATH after scenarios that mutated it."""
-    prev = _state.get("prev_db_env")
-    if prev is None:
-        os.environ.pop("KAIRIX_DB_PATH", None)
-    else:
-        os.environ["KAIRIX_DB_PATH"] = prev

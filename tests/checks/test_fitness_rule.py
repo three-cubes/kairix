@@ -5,7 +5,7 @@ Pins:
 - Default ``is_in_scope`` filters by roots + extensions.
 - Default ``enumerate_files`` walks ``.py`` files under roots.
 - Non-``.py`` extensions trigger the generic fallback enumeration.
-- ``exempt_files`` skips known violators.
+- There is no exemption list: a declared ``exempt_files`` set grandfathers nothing.
 - Missing required class attributes raise on instantiation.
 """
 
@@ -75,14 +75,29 @@ def test_collect_violations_empty_when_no_violator() -> None:
     assert rule.collect_violations() == set()
 
 
-def test_exempt_files_skip_known_violators() -> None:
+def test_no_exemption_list_can_grandfather_a_violator(tmp_path: Path) -> None:
+    """PLA-472: FitnessRule has no per-file exemption mechanism. A subclass
+    that declares an ``exempt_files`` set (the retired grandfathering shape)
+    still gets that file reported, and a re-created baseline file naming it
+    changes nothing — ``run()`` fails.
+
+    Sabotage proof (executed): restoring the ``if rel in self.exempt_files:
+    continue`` skip in ``collect_violations`` drops ``kairix/legacy.py`` from
+    the set and this test goes red; restored → green.
+    """
+    (tmp_path / "kairix").mkdir()
+    (tmp_path / "kairix" / "legacy.py").write_text("x = 1\n", encoding="utf-8")
+    baseline = tmp_path / ".architecture" / "baseline" / "test-exemption-files.txt"
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("kairix/legacy.py\n", encoding="utf-8")
+
     class _RuleWithExemption(_RuleAllPyFilesViolate):
         name = "test-exemption"
-        exempt_files = frozenset({"kairix/worker.py"})
+        exempt_files = frozenset({"kairix/legacy.py"})
 
-    rule = _RuleWithExemption()
-    violations = rule.collect_violations()
-    assert all(str(p) != "kairix/worker.py" for p in violations)
+    rule = _RuleWithExemption(repo_root=tmp_path)
+    assert rule.collect_violations() == {Path("kairix/legacy.py")}
+    assert rule.run() == 1
 
 
 def test_custom_extension_uses_fallback_enumeration(tmp_path: Path) -> None:
@@ -111,5 +126,5 @@ def test_abstract_method_blocks_direct_instantiation() -> None:
 
 def test_run_returns_int_exit_code() -> None:
     rule = _RuleNoFilesViolate()
-    # No violations + no baseline file => clean exit 0.
+    # No violations => clean exit 0.
     assert rule.run() == 0

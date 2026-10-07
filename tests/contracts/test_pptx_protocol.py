@@ -152,27 +152,64 @@ def _extractor(request: pytest.FixtureRequest) -> Extractor:
     return factory()
 
 
-@pytest.mark.contract
-def test_pptx_extractor_satisfies_protocol() -> None:
-    """The real factory returns an instance that is a runtime ``Extractor``."""
-    real = _make_real_with_stub()
-    assert isinstance(real, Extractor)
-    assert isinstance(real, PptxExtractor)
+@pytest.fixture(
+    params=[
+        pytest.param(lambda: FakePptxExtractor(scripted_slide_count=0), id="fake"),
+        pytest.param(lambda: _make_real_with_stub(slide_count=0), id="real"),
+    ]
+)
+def _empty_deck_extractor(request: pytest.FixtureRequest) -> Extractor:
+    """Extractor facing a deck with no slides (near-empty output)."""
+    factory: _Factory = request.param
+    return factory()
 
 
 @pytest.mark.contract
-def test_extractor_declares_version() -> None:
-    """F40 requirement — module-level ``version`` is non-empty."""
+def test_pptx_extractor_satisfies_protocol(_extractor: Extractor) -> None:
+    """Fake and real (stubbed) instances are runtime ``Extractor``s.
+
+    Sabotage proof: rename ``PptxExtractor.quality_ok`` in
+    kairix/extractors/pptx/extractor.py — the real leg's runtime probe fails.
+    """
+    assert isinstance(_extractor, Extractor)
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    "factory",
+    [pytest.param(make_real_extractor, id="real"), pytest.param(FakePptxExtractor, id="fake")],
+)
+def test_extractor_declares_version(factory: _Factory) -> None:
+    """F40 requirement — module-level ``version`` is non-empty and every
+    impl carries it (the fake mirrors the plugin's declared version).
+
+    Sabotage proof: make ``make_extractor`` in kairix/extractors/pptx/__init__.py
+    pass ``version="0.0.0"`` — the real leg's equality fails.
+    """
     assert isinstance(pptx_version, str)
     assert pptx_version.strip() != ""
+    assert factory().version == pptx_version
 
 
 @pytest.mark.contract
-def test_real_factory_returns_pptx_instance() -> None:
-    """``make_extractor`` returns a real :class:`PptxExtractor`."""
-    real = make_real_extractor()
-    assert isinstance(real, PptxExtractor)
-    assert real.name == "pptx"
+@pytest.mark.parametrize(
+    "factory,expected_cls",
+    [
+        pytest.param(make_real_extractor, PptxExtractor, id="real"),
+        pytest.param(FakePptxExtractor, FakePptxExtractor, id="fake"),
+    ],
+)
+def test_real_factory_returns_pptx_instance(factory: _Factory, expected_cls: type) -> None:
+    """``make_extractor`` returns a real :class:`PptxExtractor`; both impls
+    are runtime ``Extractor``s under the ``pptx`` plugin name.
+
+    Sabotage proof: change ``PLUGIN_NAME`` in kairix/extractors/pptx/extractor.py
+    to ``"ppt"`` — the real leg's name assertion fails.
+    """
+    impl = factory()
+    assert isinstance(impl, expected_cls)
+    assert isinstance(impl, Extractor)
+    assert impl.name == "pptx"
 
 
 @pytest.mark.contract
@@ -182,17 +219,23 @@ def test_can_extract_claims_pptx_mime(_extractor: Extractor) -> None:
 
 
 @pytest.mark.contract
-def test_real_rejects_plain_text() -> None:
-    """The real impl refuses ``text/plain`` — that's passthrough's job."""
-    real = _make_real_with_stub()
-    assert real.can_extract("text/plain", b"hello") is False
+def test_real_rejects_plain_text(_extractor: Extractor) -> None:
+    """Fake and real refuse ``text/plain`` — that's passthrough's job.
+
+    Sabotage proof: make ``PptxExtractor.can_extract`` return ``True`` for
+    ``text/plain`` — the real leg fails.
+    """
+    assert _extractor.can_extract("text/plain", b"hello") is False
 
 
 @pytest.mark.contract
-def test_real_rejects_bare_zip_without_presentation_mime() -> None:
-    """ZIP magic alone is ambiguous (could be DOCX / XLSX / JAR)."""
-    real = _make_real_with_stub()
-    assert real.can_extract("application/octet-stream", b"PK\x03\x04") is False
+def test_real_rejects_bare_zip_without_presentation_mime(_extractor: Extractor) -> None:
+    """ZIP magic alone is ambiguous (could be DOCX / XLSX / JAR).
+
+    Sabotage proof: drop the ``mime.endswith("presentation")`` clause in
+    ``PptxExtractor.can_extract`` — the real leg claims the bare ZIP.
+    """
+    assert _extractor.can_extract("application/octet-stream", b"PK\x03\x04") is False
 
 
 @pytest.mark.contract
@@ -212,8 +255,11 @@ def test_quality_ok_true_on_substantive_output(_extractor: Extractor) -> None:
 
 
 @pytest.mark.contract
-def test_quality_ok_false_on_short_output() -> None:
-    """Quality gate fails when the loader returns near-empty content."""
-    extractor = _make_real_with_stub(slide_count=0)
-    doc = extractor.extract(b"PK\x03\x04" + b"y" * 4096, _PPTX_MIME)
-    assert extractor.quality_ok(doc) is False
+def test_quality_ok_false_on_short_output(_empty_deck_extractor: Extractor) -> None:
+    """Quality gate fails when the loader returns near-empty content.
+
+    Sabotage proof: make ``PptxExtractor.quality_ok`` return ``True``
+    unconditionally — the real leg's gate passes.
+    """
+    doc = _empty_deck_extractor.extract(b"PK\x03\x04" + b"y" * 4096, _PPTX_MIME)
+    assert _empty_deck_extractor.quality_ok(doc) is False

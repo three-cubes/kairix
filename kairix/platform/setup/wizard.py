@@ -23,11 +23,12 @@ from typing import Any
 import yaml
 
 from kairix.platform.setup.prompts import SetupContext, prompt, prompt_choice, prompt_yn
+from kairix.platform.setup.service import AZURE_PROVIDER_NAMES, PLUGIN_AZURE_FOUNDRY
 
 logger = logging.getLogger(__name__)
 
 
-def _default_setup_service() -> Any:  # pragma: no cover  # lazy-import DI-default delegation
+def _default_setup_service() -> Any:
     """Production seam — the same SetupService backend the web wizard drives.
 
     Lazy call-time import: ``backends`` imports this module at load time
@@ -69,16 +70,15 @@ def _default_write_config(updates: Mapping[str, Any], output_path: str | None) -
 
     if output_path:
         return update_config_file(Path(output_path), updates)
-    # pragma rationale: lazy-import DI-default delegation — the no-output
-    # branch resolves KAIRIX_CONFIG_OVERLAY_PATH / KAIRIX_CONFIG_PATH
-    # through kairix.paths (F4); the testable merge logic lives in
-    # kairix.platform.setup.backends.write_config_updates.
-    from kairix.paths import (  # pragma: no cover — lazy-import DI-default delegation (rationale block above)
+    # The no-output branch resolves KAIRIX_CONFIG_OVERLAY_PATH /
+    # KAIRIX_CONFIG_PATH through kairix.paths (F4); the merge logic lives
+    # in kairix.platform.setup.backends.write_config_updates.
+    from kairix.paths import (
         config_overlay_path_override,
         config_path_override,
     )
 
-    return write_config_updates(  # pragma: no cover  # lazy-import DI-default delegation
+    return write_config_updates(
         updates,
         overlay_path=config_overlay_path_override(),
         config_path=config_path_override(),
@@ -103,10 +103,9 @@ _LEGACY_AZURE_ENDPOINT_FRAGMENTS = ("openai.azure.com", "cognitiveservices.azure
 _FOUNDRY_ENDPOINT_FRAGMENT = "services.ai.azure.com"
 _OPENAI_DEFAULT_ENDPOINT = "https://api.openai.com/v1"
 
-# The two azure plugin names as they appear in the provider registry —
-# picks of either re-route through the endpoint-shape split below.
-_PLUGIN_AZURE_FOUNDRY = "azure_foundry"
-_AZURE_PLUGIN_NAMES = (_PLUGIN_AZURE_FOUNDRY, "azure_legacy")
+# The azure plugin names (owned by service.py — F85) as they appear in the
+# provider registry; picks of either re-route through the endpoint-shape
+# split below.
 
 
 def provider_plugin_name(provider_key: str, endpoint: str) -> str:
@@ -126,7 +125,7 @@ def provider_plugin_name(provider_key: str, endpoint: str) -> str:
         is_legacy = any(fragment in ep for fragment in _LEGACY_AZURE_ENDPOINT_FRAGMENTS)
         if is_legacy and _FOUNDRY_ENDPOINT_FRAGMENT not in ep:
             return "azure_legacy"
-        return _PLUGIN_AZURE_FOUNDRY
+        return PLUGIN_AZURE_FOUNDRY
     return "openai"
 
 
@@ -139,7 +138,7 @@ def picked_provider_plugin(picked: str, endpoint: str) -> str:
     the web wizard backend applies. Every other registry name passes
     through verbatim.
     """
-    if picked in _AZURE_PLUGIN_NAMES and endpoint:
+    if picked in AZURE_PROVIDER_NAMES and endpoint:
         return provider_plugin_name("azure", endpoint)
     return picked
 
@@ -291,7 +290,7 @@ def _prompt_llm_credentials(ctx: SetupContext, provider_names: tuple[str, ...]) 
     discarded.
     """
     names = list(provider_names) or ["openai"]
-    default_idx = names.index(_PLUGIN_AZURE_FOUNDRY) if _PLUGIN_AZURE_FOUNDRY in names else 0
+    default_idx = names.index(PLUGIN_AZURE_FOUNDRY) if PLUGIN_AZURE_FOUNDRY in names else 0
     idx = prompt_choice(ctx, "Which LLM provider are you using?", names, default=default_idx)
     picked = names[idx]
     endpoint = prompt(ctx, "Endpoint URL (blank for the provider's default)")

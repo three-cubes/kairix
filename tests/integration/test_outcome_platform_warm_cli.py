@@ -11,7 +11,7 @@ so the subprocess test can drive the warm-up against a tmp sandbox
 without setting any ``KAIRIX_*`` env vars (F2-clean by construction).
 The CLI threads both args into a :class:`kairix.paths.KairixPaths`
 overlay and passes that to ``build_search_pipeline(paths=...)`` via
-the existing ``pipeline_builder`` seam on ``run_warm``.
+the ``WarmDeps.build_pipeline`` seam on ``run_warm``.
 
 Boundary chain exercised:
 
@@ -21,7 +21,7 @@ Boundary chain exercised:
     → kairix/cli.py dispatch
     → kairix/platform/warm/cli.py:main
     → _build_pipeline_builder_for_paths → KairixPaths overlay
-    → run_warm(pipeline_builder=<lambda using overlay>)
+    → run_warm(deps=WarmDeps(build_pipeline=<lambda using overlay>))
     → JSON envelope to stdout
 
 Outcome assertion: the warm envelope is well-formed JSON with the
@@ -40,9 +40,9 @@ Sabotage-proof (executed locally):
     parseable JSON envelope failed. Restored after observing the
     failure.
 
-Latency baseline (2024 M-series Mac): subprocess wall ~600ms cold
-(Python startup + warm imports dominate); threshold 15000ms for CI
-variance + slower hardware.
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
@@ -50,7 +50,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -81,7 +80,6 @@ def test_warm_cli_subprocess_envelope_outcome(tmp_path: Path) -> None:
     sandbox = tmp_path / "kairix-sandbox"
     sandbox.mkdir()
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -98,7 +96,6 @@ def test_warm_cli_subprocess_envelope_outcome(tmp_path: Path) -> None:
         text=True,
         timeout=60,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     # In a tmp sandbox the build_search_pipeline step lands ok=False
     # (no provider configured), so returncode is 1 by design. The F30
@@ -125,8 +122,6 @@ def test_warm_cli_subprocess_envelope_outcome(tmp_path: Path) -> None:
         )
         assert isinstance(step["ok"], bool), f"step.ok not bool: {step!r}"
         assert isinstance(step["duration_s"], (int, float)), f"step.duration_s not numeric: {step!r}"
-
-    assert elapsed_ms < 15000.0, f"warm subprocess took {elapsed_ms:.1f}ms (threshold 15000ms)"
 
 
 def test_warm_cli_subprocess_emits_text_report_without_json_flag(tmp_path: Path) -> None:

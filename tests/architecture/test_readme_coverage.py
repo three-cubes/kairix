@@ -1,9 +1,8 @@
 """Unit tests for F23 (``scripts/checks/check_readme_coverage.py``).
 
 F23 enforces that every top-level directory (excluding allow-listed
-caches / dotfile trees) has a ``README.md`` resolver. Pre-existing
-bare directories are grandfathered in
-``.architecture/baseline/readme-coverage-files.txt``.
+caches / dotfile trees) has a ``README.md`` resolver. There is no
+grandfathering (PLA-472).
 
 Each test has a paired sabotage-proof: introduce a bare directory in
 a tmp repo and confirm the detector fires; add the README and
@@ -116,9 +115,7 @@ def test_is_exempt_recognises_well_known_names() -> None:
 
 def test_real_repo_readme_coverage_gate_is_green() -> None:
     """The real ``scripts/checks/check_readme_coverage.py`` run against
-    the full repo emits no net-new violations. Pre-existing bare
-    directories are grandfathered in
-    ``.architecture/baseline/readme-coverage-files.txt``.
+    the full repo emits no violations (there is no grandfathering).
     """
     detector = _load_detector()
     assert detector.main() == 0

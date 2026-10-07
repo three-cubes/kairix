@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kairix.platform.warm.runner import run_warm
+from kairix.platform.warm.runner import WarmDeps, run_warm
 
 if TYPE_CHECKING:
     from kairix.platform.warm.runner import WarmResult
@@ -97,7 +97,7 @@ def resolve_paths_overlay(db_path: str | None, document_root: str | None) -> Any
 
 
 def build_pipeline_builder_for_paths(db_path: str | None, document_root: str | None) -> Any:
-    """Construct the ``pipeline_builder`` callable for ``run_warm``.
+    """Construct the ``WarmDeps.build_pipeline`` callable for ``run_warm``.
 
     When neither override is supplied, returns ``None`` — ``run_warm``
     then uses its default ``_step_build_pipeline`` which resolves paths
@@ -146,7 +146,7 @@ def _format_text(result: WarmResult) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     builder = build_pipeline_builder_for_paths(args.db_path, args.document_root)
-    result = run_warm(pipeline_builder=builder) if builder is not None else run_warm()
+    result = run_warm(deps=WarmDeps(build_pipeline=builder)) if builder is not None else run_warm()
     if args.json:
         print(json.dumps(result.to_envelope(), indent=2))
     else:

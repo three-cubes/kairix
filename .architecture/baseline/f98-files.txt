@@ -1,8 +1,0 @@
-# F98 — agent result-row surfaces expose an expand-acceptable locator AND
-# expand accepts a source_uri-only call (the anti-dead-end lock, PLA-297).
-# Intentionally EMPTY: the contract shipped clean — every registered surface
-# (search / timeline / entity / prep / research / contradict / expand) already
-# exposes source_ref()/SourceRef/source_uri from PLA-274, and run_expand's seq
-# parameter is optional, so there are zero grandfathered offenders. A net-new
-# violation here means a new agent surface skipped the locator, or expand
-# re-required seq — fix the surface / signature, don't add a row.

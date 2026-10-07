@@ -206,7 +206,7 @@ def _default_presentation_loader(path: str) -> _PptxPresentation:
     """
     try:
         from pptx import Presentation
-    except ImportError as exc:  # pragma: no cover — import path validated by make_extractor() test
+    except ImportError as exc:
         raise RuntimeError(
             "pptx: the upstream 'python-pptx' package is not installed. "
             "fix: pip install 'Kairix-agentic-knowledge-mgt[pptx]' "

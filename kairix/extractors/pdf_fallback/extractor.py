@@ -37,8 +37,10 @@ map to three behaviours") for ``quality_ok`` semantics, and §10
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
 from collections.abc import Callable, Iterable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -143,7 +145,7 @@ def _default_pdf_opener() -> PdfOpener:
     """
     try:
         import pdfplumber
-    except ImportError as exc:  # pragma: no cover — import path validated by make_extractor() test
+    except ImportError as exc:
         raise RuntimeError(
             "pdf_fallback: the upstream 'pdfplumber' package is not installed. "
             "fix: pip install 'Kairix-agentic-knowledge-mgt[pdf_fallback]' "
@@ -237,10 +239,54 @@ def _pdf_metadata_to_doc_metadata(metadata: dict[str, Any], page_count: int) -> 
     return DocMetadata(
         title=_clean_string(metadata.get("Title")),
         author=_clean_string(metadata.get("Author")),
-        created_date=_clean_string(metadata.get("CreationDate")),
+        created_date=_pdf_date_to_iso(_clean_string(metadata.get("CreationDate"))),
         language=None,
         page_count=page_count,
     )
+
+
+#: PDF date string (PDF 32000-1 §7.9.4): ``D:YYYYMMDDHHmmSSOHH'mm'`` where every
+#: field after the year is optional and O is ``+``, ``-`` or ``Z``. Fixed-width
+#: digit groups keep the match linear.
+_PDF_DATE = re.compile(
+    r"(?:D:)?(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?"
+    r"(?:([Zz+-])(?:(\d{2})'?(?:(\d{2})'?)?)?)?"
+)
+
+
+def _pdf_date_to_iso(raw: str | None) -> str | None:
+    """Convert a PDF date string to ISO-8601, matching the docx / pptx extractors.
+
+    Missing month/day default to 1 and missing time fields to 0. A ``Z`` or an
+    explicit offset yields an aware datetime; no offset stays naive. Anything
+    that isn't a valid PDF date returns ``None`` rather than leaking the raw
+    string into the ``created_date`` column.
+    """
+    if raw is None:
+        return None
+    match = _PDF_DATE.fullmatch(raw)
+    if match is None:
+        return None
+    year, month, day, hour, minute, second, sign, off_h, off_m = match.groups()
+    tz: timezone | None = None
+    if sign in ("Z", "z"):
+        tz = timezone.utc
+    elif sign is not None:
+        offset = timedelta(hours=int(off_h or 0), minutes=int(off_m or 0))
+        tz = timezone(-offset if sign == "-" else offset)
+    try:
+        parsed = datetime(
+            int(year),
+            int(month or 1),
+            int(day or 1),
+            int(hour or 0),
+            int(minute or 0),
+            int(second or 0),
+            tzinfo=tz,
+        )
+    except ValueError:
+        return None
+    return parsed.isoformat()
 
 
 def _clean_string(value: Any) -> str | None:

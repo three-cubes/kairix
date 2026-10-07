@@ -2,8 +2,8 @@
 
 Pins composition behaviour: sampler picks cases by weight, executor times
 them, stats roll up overall + per-category, bottleneck heuristic fires
-appropriately. Real kairix is never imported — ``suite_loader`` and
-``searcher`` are injected so each test stays hermetic.
+appropriately. Real kairix is never imported — ``ProbeDeps(load_suite=,
+search=)`` is injected so each test stays hermetic.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import pytest
 
 from kairix.quality.probe.runner import (
     DEFAULT_P95_THRESHOLD_MS,
+    ProbeDeps,
     ProbeResult,
     SampledQuery,
     run_probe_search,
@@ -49,7 +50,7 @@ def _suite_loader(_suite: str) -> list[_Case]:
 class FakeFastSearchClient:
     """Implements the :class:`SearchClient` Protocol; returns immediately.
 
-    Used as the ``searcher=`` injection for tests that need the probe to
+    Used as the ``ProbeDeps.search`` injection for tests that need the probe to
     return quickly so the assertion target is the latency-stats / passed-
     flag logic, not the simulated search time.
     """
@@ -81,7 +82,7 @@ def test_queries_less_than_one_rejected() -> None:
     latency_stats silently passes 0-stats through.
     """
     with pytest.raises(ValueError, match="queries must be >= 1"):
-        run_probe_search(suite="x", queries=0, suite_loader=_suite_loader, searcher=_fast_client.search)
+        run_probe_search(suite="x", queries=0, deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search))
 
 
 def test_concurrency_less_than_one_rejected() -> None:
@@ -91,7 +92,9 @@ def test_concurrency_less_than_one_rejected() -> None:
     deeper in the stack as an executor ValueError instead.
     """
     with pytest.raises(ValueError, match="concurrency must be >= 1"):
-        run_probe_search(suite="x", queries=5, concurrency=0, suite_loader=_suite_loader, searcher=_fast_client.search)
+        run_probe_search(
+            suite="x", queries=5, concurrency=0, deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search)
+        )
 
 
 def test_passes_when_fast_search_under_threshold() -> None:
@@ -104,8 +107,7 @@ def test_passes_when_fast_search_under_threshold() -> None:
         suite="x",
         queries=20,
         concurrency=2,
-        suite_loader=_suite_loader,
-        searcher=_fast_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
     )
     assert isinstance(result, ProbeResult)
     assert result.queries == 20
@@ -124,8 +126,7 @@ def test_fails_when_p95_exceeds_threshold() -> None:
         suite="x",
         queries=4,
         concurrency=4,
-        suite_loader=_suite_loader,
-        searcher=_slow_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_slow_client.search),
     )
     assert result.passed is False
     assert result.overall.p95_ms >= DEFAULT_P95_THRESHOLD_MS
@@ -141,8 +142,7 @@ def test_per_category_stats_populated() -> None:
         suite="x",
         queries=60,  # large enough that every default-weight category lands at least one
         concurrency=4,
-        suite_loader=_suite_loader,
-        searcher=_fast_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
     )
     expected_cats = {"recall", "temporal", "entity", "conceptual", "multi_hop", "procedural"}
     assert set(result.per_category.keys()) == expected_cats
@@ -168,8 +168,12 @@ def test_seed_determinism_pins_query_order() -> None:
         seen_ids_b.append(q.case_id)
         return 0
 
-    run_probe_search(suite="x", queries=20, concurrency=1, seed=99, suite_loader=_suite_loader, searcher=collect_a)
-    run_probe_search(suite="x", queries=20, concurrency=1, seed=99, suite_loader=_suite_loader, searcher=collect_b)
+    run_probe_search(
+        suite="x", queries=20, concurrency=1, seed=99, deps=ProbeDeps(load_suite=_suite_loader, search=collect_a)
+    )
+    run_probe_search(
+        suite="x", queries=20, concurrency=1, seed=99, deps=ProbeDeps(load_suite=_suite_loader, search=collect_b)
+    )
     assert sorted(seen_ids_a) == sorted(seen_ids_b)
 
 
@@ -184,8 +188,7 @@ def test_envelope_round_trip_contains_required_keys() -> None:
         suite="x",
         queries=5,
         concurrency=2,
-        suite_loader=_suite_loader,
-        searcher=_fast_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
     )
     env = result.to_envelope()
     required = {
@@ -218,8 +221,7 @@ def test_envelope_serialises_bottleneck_as_dict_when_present() -> None:
         suite="x",
         queries=4,
         concurrency=4,
-        suite_loader=_suite_loader,
-        searcher=_slow_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_slow_client.search),
     )
     env = result.to_envelope()
     assert env["bottleneck"] is not None
@@ -241,8 +243,7 @@ def test_errors_in_search_fn_are_counted_not_raised() -> None:
         suite="x",
         queries=5,
         concurrency=2,
-        suite_loader=_suite_loader,
-        searcher=raiser,
+        deps=ProbeDeps(load_suite=_suite_loader, search=raiser),
     )
     assert result.errors == 5
     assert result.passed is False  # any error blocks passing
@@ -276,8 +277,7 @@ def test_stage_means_aggregated_from_search_result_stage_latencies() -> None:
         suite="x",
         queries=3,
         concurrency=1,
-        suite_loader=_suite_loader,
-        searcher=staged_searcher,
+        deps=ProbeDeps(load_suite=_suite_loader, search=staged_searcher),
     )
     assert result.stage_means_ms.get("classify") == 20.0
     assert result.stage_means_ms.get("dispatch") == 200.0
@@ -347,8 +347,7 @@ def test_stage_means_empty_when_searcher_omits_stage_latency() -> None:
         suite="x",
         queries=5,
         concurrency=2,
-        suite_loader=_suite_loader,
-        searcher=_fast_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
     )
     assert result.stage_means_ms == {}
 
@@ -378,8 +377,7 @@ def test_per_query_stages_one_record_per_query_with_full_metadata() -> None:
         suite="x",
         queries=4,
         concurrency=2,
-        suite_loader=_suite_loader,
-        searcher=staged_searcher,
+        deps=ProbeDeps(load_suite=_suite_loader, search=staged_searcher),
     )
     assert len(result.per_query_stages) == 4
     for record in result.per_query_stages:
@@ -423,8 +421,7 @@ def test_per_query_stages_preserves_task_to_sampled_mapping_under_concurrency() 
         suite="x",
         queries=12,
         concurrency=4,
-        suite_loader=_suite_loader,
-        searcher=staged_searcher,
+        deps=ProbeDeps(load_suite=_suite_loader, search=staged_searcher),
     )
     # Each record's category prefix appears in its case_id (per _build_cases).
     for record in result.per_query_stages:
@@ -451,8 +448,7 @@ def test_per_query_stages_handles_results_without_stage_latency() -> None:
         suite="x",
         queries=3,
         concurrency=1,
-        suite_loader=_suite_loader,
-        searcher=_fast_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
     )
     assert len(result.per_query_stages) == 3
     for record in result.per_query_stages:
@@ -477,8 +473,7 @@ def test_per_query_stages_envelope_serialises_as_list_of_dicts() -> None:
         suite="x",
         queries=5,
         concurrency=2,
-        suite_loader=_suite_loader,
-        searcher=_fast_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
     )
     env = result.to_envelope()
     assert "per_query_stages" in env
@@ -519,8 +514,7 @@ def test_per_query_stages_aggregation_pins_known_stage_maps() -> None:
         suite="x",
         queries=6,
         concurrency=1,  # deterministic order for the exact-equality check
-        suite_loader=_suite_loader,
-        searcher=staged_searcher,
+        deps=ProbeDeps(load_suite=_suite_loader, search=staged_searcher),
     )
     for record in result.per_query_stages:
         assert record["stage_latency_ms"]["classify"] == 7.0
@@ -551,8 +545,7 @@ def test_warmup_separates_cold_build_from_steady_state() -> None:
         suite="x",
         queries=5,
         concurrency=1,
-        suite_loader=_suite_loader,
-        searcher=recording_searcher,
+        deps=ProbeDeps(load_suite=_suite_loader, search=recording_searcher),
         warmup=True,
     )
 
@@ -583,8 +576,7 @@ def test_warmup_disabled_runs_single_pass_with_zero_cold_build() -> None:
         suite="x",
         queries=4,
         concurrency=1,
-        suite_loader=_suite_loader,
-        searcher=recording_searcher,
+        deps=ProbeDeps(load_suite=_suite_loader, search=recording_searcher),
         warmup=False,
     )
 
@@ -613,8 +605,7 @@ def test_warmup_defaults_on_when_omitted() -> None:
         suite="x",
         queries=3,
         concurrency=1,
-        suite_loader=_suite_loader,
-        searcher=recording_searcher,
+        deps=ProbeDeps(load_suite=_suite_loader, search=recording_searcher),
         # warmup intentionally omitted — exercises the default.
     )
 

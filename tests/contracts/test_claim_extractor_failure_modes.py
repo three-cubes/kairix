@@ -2,10 +2,11 @@
 
 Single Protocol method ``extract(content, *, top_n)``. The Protocol
 docstring promises "may return fewer for short inputs" — the
-``returns_empty`` failure class is observable when ``content`` is the
-empty string. We probe via the shipped
+``returns_empty`` failure class is observable when ``content`` is blank.
+Every body runs over BOTH the shipped
 :class:`kairix.knowledge.contradict.extract.EntityDensityClaimExtractor`
-plus an inline ``_RaisingClaimExtractor`` for the raises path.
+and the canonical :class:`tests.fakes.FakeClaimExtractor` (F43
+behavioural parity).
 
 Each test carries a "Sabotage proof:" comment describing the mutation
 that proves the assertion has teeth.
@@ -13,47 +14,52 @@ that proves the assertion has teeth.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any, cast
+
 import pytest
 
 from kairix.knowledge.contradict.extract import EntityDensityClaimExtractor
+from kairix.knowledge.contradict.protocols import ClaimExtractor
+from tests.fakes import FakeClaimExtractor
 
 pytestmark = pytest.mark.contract
 
+_IMPLEMENTATIONS: list[tuple[str, Callable[[], ClaimExtractor]]] = [
+    ("real", EntityDensityClaimExtractor),
+    ("fake", FakeClaimExtractor),
+]
 
-def test_extract_returns_empty_when_content_is_blank() -> None:
-    """The shipped :class:`EntityDensityClaimExtractor` MUST return an
-    empty list for blank input — downstream contradiction scorers
-    expect "no claims" as a valid signal (skip the pair, don't crash).
 
-    Sabotage proof: in :meth:`EntityDensityClaimExtractor.extract`
-    change ``return []`` to ``return ["ghost claim"]``. Re-run: the
-    test fails because the list has one entry instead of zero.
-    Restored.
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_extract_returns_empty_when_content_is_blank(name: str, factory: Callable[[], ClaimExtractor]) -> None:
+    """Blank input MUST return an empty list — downstream contradiction
+    scorers expect "no claims" as a valid signal (skip the pair, don't
+    crash). Non-blank input returns at most ``top_n`` claims.
+
+    Sabotage proof (executed): in :meth:`EntityDensityClaimExtractor.extract`
+    change the blank-input ``return []`` to ``return ["ghost claim"]``.
+    Re-run: the ``real`` case fails. Restored.
     """
-    extractor = EntityDensityClaimExtractor()
-    assert extractor.extract("", top_n=3) == []
-    assert extractor.extract("   \n  \t  ", top_n=3) == []
+    extractor = factory()
+    assert extractor.extract("", top_n=3) == [], name
+    assert extractor.extract("   \n  \t  ", top_n=3) == [], name
+    claims = extractor.extract("Alpha shipped. Beta is closed. Gamma is active. Delta must wait.", top_n=2)
+    assert 1 <= len(claims) <= 2, f"{name}: {claims!r}"
 
 
-def test_extract_raises_when_underlying_implementation_fails() -> None:
-    """A claim extractor whose ``extract`` raises must surface the
-    exception — silent fallback to an empty list would mask the
-    failure and break the contradiction pipeline's "no claims =
-    skip" signal.
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_extract_raises_when_underlying_implementation_fails(name: str, factory: Callable[[], ClaimExtractor]) -> None:
+    """Content that was never decoded (raw ``bytes`` from a connector)
+    must surface an exception — silent fallback to an empty list would
+    mask the failure and break the contradiction pipeline's "no claims
+    = skip" signal.
 
-    Sabotage proof: in ``_RaisingClaimExtractor.extract`` change
-    ``raise self._exc`` to ``return []``. Re-run: the test fails
+    Sabotage proof: in :meth:`EntityDensityClaimExtractor.extract` coerce
+    ``content = str(content)`` on entry. Re-run: the ``real`` case fails
     because no exception fires. Restored.
     """
-
-    class _RaisingClaimExtractor:
-        def __init__(self, exc: Exception) -> None:
-            self._exc = exc
-
-        def extract(self, content: str, *, top_n: int = 3) -> list[str]:
-            del content, top_n
-            raise self._exc
-
-    extractor = _RaisingClaimExtractor(RuntimeError("F68-claim-extract-failed"))
-    with pytest.raises(RuntimeError, match="F68-claim-extract-failed"):
-        extractor.extract("any text", top_n=3)
+    extractor = factory()
+    undecoded = cast(str, cast(Any, b"Alpha shipped. Beta is closed."))
+    with pytest.raises(TypeError):
+        extractor.extract(undecoded, top_n=3)

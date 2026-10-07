@@ -4,18 +4,24 @@
 method — :meth:`buffer` — but covers two distinct failure classes:
 
   * ``raises`` — the sink's underlying store raised (SQLite error,
-    disk full, etc.). The pipeline does NOT wrap the sink call in a
-    try/except, so the exception propagates and the per-chunk
+    disk full, missing table). The pipeline does NOT wrap the sink call
+    in a try/except, so the exception propagates and the per-chunk
     transaction rolls back.
-  * ``unavailable`` — the sink reports unavailable (the downstream
-    write target — Curator drain → Neo4j — is unreachable). The sink
-    returns 0 without raising; signals stay with ``pushed_to_neo4j=0``
-    in the staging table and the drain retries on its next tick.
-    This is the canonical #334 behaviour generalised: the staging
-    write is durable; the drain to the final sink is eventually
-    consistent.
+  * ``unavailable`` — the sink's DOWNSTREAM delivery target (Curator
+    drain → Neo4j) is unreachable. Staging is durable and decoupled
+    from delivery: the sink still stages the signals (``pushed_to_neo4j=0``)
+    and connector ingest keeps making forward progress; the drain
+    delivers them once the graph recovers (the #334 behaviour).
 
-Composition follows F47.
+Every body runs over BOTH the production ``_SqliteEntityGraphSink`` —
+the sink :func:`kairix.core.factory.build_connector_pipeline` composes
+by default — and the canonical :class:`tests.fakes.FakeEntityGraphSink`
+(F43 behavioural parity). Composition follows F47.
+
+Parity finding (PLA-472): the fake's ``available=False`` mode used to
+DROP the batch and return 0, while the production sink always stages
+durably (it has no knowledge of the downstream graph). The fake was made
+faithful — an outage window is counted but the batch is still staged.
 
 Each test carries a "Sabotage proof:" comment describing the mutation
 that proves the assertion has teeth.
@@ -24,7 +30,8 @@ that proves the assertion has teeth.
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -35,29 +42,80 @@ from tests.fakes import FakeChunkWriter, FakeEntityGraphSink, FakeExtractor, Fak
 
 pytestmark = pytest.mark.contract
 
-
-# ---------------------------------------------------------------------------
-# Helpers — factory-composed pipeline with canonical fakes (F47-compliant).
-# ---------------------------------------------------------------------------
+_ENTITY_BODY = b"# heading\n\nbody text with entities Acme Inc. and Globex Corporation met Alice Smith."
+_TABLE_ABSENT = "no such table: entity_signals"
 
 
-def _build_pipeline(
-    db: sqlite3.Connection,
-    *,
-    chunk_writer: FakeChunkWriter | None = None,
-    entity_graph_sink: FakeEntityGraphSink | None = None,
-):
-    """F47-compliant: ConnectorPipeline composed via the factory entry point."""
-    return build_connector_pipeline(
+@dataclass
+class _Harness:
+    """One impl under test: the db the pipeline runs on, the sink to inject
+    (``None`` = the production default sink), and how to read back the
+    signals the sink staged."""
+
+    db: sqlite3.Connection
+    sink: FakeEntityGraphSink | None
+    staged: Callable[[], int]
+    flip_available: Callable[[], None] = field(default=lambda: None)
+
+
+def _real_harness(store_healthy: bool, downstream_up: bool) -> _Harness:
+    del downstream_up  # the production sink never consults the downstream graph
+    db = sqlite3.connect(":memory:")
+    create_schema(db)
+    if not store_healthy:
+        db.execute("DROP TABLE entity_signals")
+    return _Harness(
         db=db,
-        collection="default",
-        chunk_writer=chunk_writer if chunk_writer is not None else FakeChunkWriter(),
-        entity_graph_sink=entity_graph_sink if entity_graph_sink is not None else FakeEntityGraphSink(),
+        sink=None,
+        staged=lambda: int(db.execute("SELECT COUNT(*) FROM entity_signals WHERE pushed_to_neo4j = 0").fetchone()[0]),
     )
+
+
+def _fake_harness(store_healthy: bool, downstream_up: bool) -> _Harness:
+    db = sqlite3.connect(":memory:")
+    create_schema(db)
+    sink = (
+        FakeEntityGraphSink(available=downstream_up)
+        if store_healthy
+        else FakeEntityGraphSink(raise_on_stage=sqlite3.OperationalError(_TABLE_ABSENT))
+    )
+    return _Harness(
+        db=db,
+        sink=sink,
+        staged=lambda: sum(len(batch) for batch in sink.staged),
+        flip_available=lambda: sink.set_available(True),
+    )
+
+
+HarnessFactory = Callable[[bool, bool], _Harness]
+
+_IMPLEMENTATIONS: list[tuple[str, HarnessFactory]] = [
+    ("real", _real_harness),
+    ("fake", _fake_harness),
+]
+
+
+@pytest.fixture
+def harnesses() -> Iterator[list[_Harness]]:
+    built: list[_Harness] = []
+    yield built
+    for h in built:
+        h.db.close()
 
 
 def _make_event(item_id: str, modified_at: str = "2026-01-01T00:00:00Z") -> ChangeEvent:
     return ChangeEvent(op="created", item_id=item_id, modified_at=modified_at)
+
+
+def _run_tick(h: _Harness, writer: FakeChunkWriter, item_id: str, modified_at: str) -> object:
+    """F47-compliant: ConnectorPipeline composed via the factory entry point."""
+    pipeline = build_connector_pipeline(db=h.db, collection="default", chunk_writer=writer, entity_graph_sink=h.sink)
+    source = FakeSourceConnector(
+        name="sink-contract",
+        events=[_make_event(item_id, modified_at)],
+        content={item_id: _ENTITY_BODY},
+    )
+    return pipeline.run_batch(source, FakeExtractor())
 
 
 # ---------------------------------------------------------------------------
@@ -65,148 +123,79 @@ def _make_event(item_id: str, modified_at: str = "2026-01-01T00:00:00Z") -> Chan
 # ---------------------------------------------------------------------------
 
 
-def test_buffer_raises_propagates_and_rolls_back_chunk(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_buffer_raises_propagates_and_rolls_back_chunk(
+    name: str, factory: HarnessFactory, harnesses: list[_Harness]
+) -> None:
     """When ``entity_graph_sink.buffer`` raises, the
     :class:`ConnectorPipeline` does NOT absorb it — the exception
     propagates from ``_process_item`` → ``_process_batch``, which
     rolls back the failing chunk (and re-raises).
 
-    Sabotage proof: in ``FakeEntityGraphSink.buffer`` comment out the
-    ``if self._raise_on_stage is not None: raise ...`` block. Re-run:
-    the test fails because ``pytest.raises`` sees no exception and the
-    chunk processes cleanly. Restored.
+    Sabotage proof (executed): in ``_SqliteEntityGraphSink.buffer``
+    ``return 0`` before the ``executemany`` (swallowing the store). Re-run:
+    the ``real`` case fails because ``pytest.raises`` sees no exception.
+    Restored.
     """
-    db = sqlite3.connect(":memory:")
-    create_schema(db)
-    writer = FakeChunkWriter()
-    source = FakeSourceConnector(
-        name="sink-raises",
-        events=[_make_event("item-001")],
-        content={"item-001": b"body-content"},
-    )
-    sink = FakeEntityGraphSink(raise_on_stage=RuntimeError("F68-sink-raises"))
-    pipeline = _build_pipeline(db, chunk_writer=writer, entity_graph_sink=sink)
+    h = factory(False, True)
+    harnesses.append(h)
+    with pytest.raises(sqlite3.OperationalError, match=_TABLE_ABSENT):
+        _run_tick(h, FakeChunkWriter(), "item-001", "2026-01-01T00:00:00Z")
 
-    with pytest.raises(RuntimeError, match="F68-sink-raises"):
-        pipeline.run_batch(source, FakeExtractor())
-
-    # writer.upsert is called BEFORE sink.buffer in _process_item, so it
-    # WILL have been invoked on the in-flight batch. The rollback is at
-    # the SQLite transaction layer (bronze_records rolled back); the
-    # captured FakeChunkWriter records the call but the persistent DB
-    # state is the contract. Assert the SQLite-side rollback held:
-    # bronze_records is empty for the source.
+    # The rollback is at the SQLite transaction layer: bronze_records
+    # must be empty for the source.
     bronze_count = int(
-        db.execute(
-            "SELECT COUNT(*) FROM bronze_records WHERE source_name = ?",
-            ("sink-raises",),
-        ).fetchone()[0]
+        h.db.execute("SELECT COUNT(*) FROM bronze_records WHERE source_name = ?", ("sink-contract",)).fetchone()[0]
     )
-    assert bronze_count == 0, f"bronze_records must roll back on sink raise; got {bronze_count} row(s)"
-    db.close()
+    assert bronze_count == 0, f"{name}: bronze_records must roll back on sink raise; got {bronze_count} row(s)"
 
 
 # ---------------------------------------------------------------------------
-# EntityGraphSink.buffer — unavailable (mirrors #334 drain-unreachable)
+# EntityGraphSink.buffer — unavailable downstream (mirrors #334)
 # ---------------------------------------------------------------------------
 
 
-def test_buffer_unavailable_returns_zero_signals_stay_in_staging(tmp_path: Path) -> None:
-    """The ``unavailable`` failure class — the sink's downstream write
-    target (Curator drain → Neo4j) is unreachable. The sink returns
-    0 without raising; the per-chunk transaction commits normally so
-    the connector continues making forward progress. Signals stay
-    with ``pushed_to_neo4j=0`` (or in this fake's case, are never
-    recorded against the sink's captured batches) and the drain
-    retries later.
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_buffer_unavailable_downstream_signals_stay_in_staging(
+    name: str, factory: HarnessFactory, harnesses: list[_Harness]
+) -> None:
+    """The ``unavailable`` failure class — the downstream write target
+    (Curator drain → Neo4j) is unreachable. Ingest is decoupled from
+    delivery: the chunk commits, nothing dead-letters, and the signals
+    sit durably in staging awaiting the drain.
 
-    This is the generalised #334 behaviour: durable staging is
-    decoupled from eventual delivery. A drain outage must NOT block
-    connector ingest.
-
-    Sabotage proof: in ``FakeEntityGraphSink.buffer`` change the
-    ``if not self._available: ... return 0`` branch to ``return len(batch)``
-    (lying about the durability). Re-run: the test fails because the
-    ``unavailable_calls`` counter is 0 (no path took the unavailable
-    branch) and ``sink.staged`` has one entry instead of 0. Restored.
+    Sabotage proof (executed): in ``_SqliteEntityGraphSink.buffer``
+    ``return 0`` before the ``executemany``. Re-run: the ``real`` case
+    fails because nothing is staged. Restored.
     """
-    db = sqlite3.connect(":memory:")
-    create_schema(db)
+    h = factory(True, False)
+    harnesses.append(h)
     writer = FakeChunkWriter()
-    source = FakeSourceConnector(
-        name="sink-unavailable",
-        events=[_make_event("item-001")],
-        content={"item-001": b"# heading\n\nbody text with entities Acme Inc."},
-    )
-    sink = FakeEntityGraphSink(available=False)
-    pipeline = _build_pipeline(db, chunk_writer=writer, entity_graph_sink=sink)
-
-    # The pipeline runs to completion — connector ingest is decoupled
-    # from sink delivery. ``result.processed == 1`` proves the chunk
-    # committed.
-    result = pipeline.run_batch(source, FakeExtractor())
-    assert result.processed == 1
-    assert result.dead_lettered == 0
-
-    # The sink WAS asked to buffer — the call happened, the sink
-    # reported unavailable, and the durability of the staging is the
-    # connector's responsibility (the SQLite ``entity_signals`` row
-    # would still be written by the real ``_SqliteEntityGraphSink``;
-    # the fake here records the attempt for assertion).
-    assert sink.unavailable_calls == 1, (
-        f"sink should have been called once and reported unavailable; got unavailable_calls={sink.unavailable_calls}"
-    )
-    # Sink's captured-batches list stays empty — the fake's
-    # contract is "if not available, do NOT record the batch".
-    assert sink.staged == []
-    # Chunk written by the writer — connector ingest succeeded despite
-    # sink unavailability.
-    assert len(writer.writes) == 1, (
-        f"writer should still receive the chunk batch when only the sink is unavailable; got {writer.writes!r}"
-    )
-    db.close()
+    result = _run_tick(h, writer, "item-001", "2026-01-01T00:00:00Z")
+    assert getattr(result, "processed", None) == 1, name
+    assert getattr(result, "dead_lettered", None) == 0, name
+    assert len(writer.writes) == 1, f"{name}: the writer must still receive the chunk; got {writer.writes!r}"
+    assert h.staged() >= 1, f"{name}: signals must stay staged while the downstream graph is unavailable"
 
 
-def test_buffer_recovers_after_unavailable_window_signals_eventually_staged(tmp_path: Path) -> None:
-    """When the sink flips from unavailable → available between two
-    ticks, the second tick stages the new batch normally. Proves the
-    sink's availability state is honoured per-call (not cached) — the
-    drain-recovery path is intact.
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_buffer_recovers_after_unavailable_window_signals_eventually_staged(
+    name: str, factory: HarnessFactory, harnesses: list[_Harness]
+) -> None:
+    """Across an outage window and its recovery, every tick's signals
+    are staged — nothing from the outage tick is lost, and the post-
+    recovery tick adds to (not replaces) the staged backlog.
 
-    Sabotage proof: in ``FakeEntityGraphSink.set_available`` set
-    ``self._available = False`` regardless of the ``value`` arg. Re-run:
-    the test fails because tick 2 sees the sink as still unavailable
-    and ``sink.staged`` stays empty. Restored.
+    Sabotage proof (executed): in ``_SqliteEntityGraphSink.buffer``
+    ``return 0`` before the ``executemany`` (dropping the batch). Re-run:
+    the ``real`` case fails on the backlog assertion. Restored.
     """
-    db = sqlite3.connect(":memory:")
-    create_schema(db)
-    source_tick1 = FakeSourceConnector(
-        name="sink-recovery",
-        events=[_make_event("item-001")],
-        content={"item-001": b"first body"},
-    )
-    sink = FakeEntityGraphSink(available=False)
-    pipeline = _build_pipeline(db, entity_graph_sink=sink)
+    h = factory(True, False)
+    harnesses.append(h)
+    _run_tick(h, FakeChunkWriter(), "item-001", "2026-01-01T00:00:00Z")
+    after_outage = h.staged()
+    assert after_outage >= 1, name
 
-    # Tick 1: sink unavailable.
-    pipeline.run_batch(source_tick1, FakeExtractor())
-    assert sink.unavailable_calls == 1
-    assert sink.staged == []
-
-    # Operator flips the sink available; tick 2 brings new items.
-    sink.set_available(True)
-    source_tick2 = FakeSourceConnector(
-        name="sink-recovery",
-        events=[_make_event("item-002", modified_at="2026-01-02T00:00:00Z")],
-        content={"item-002": b"second body"},
-    )
-    pipeline2 = _build_pipeline(db, entity_graph_sink=sink)
-    pipeline2.run_batch(source_tick2, FakeExtractor())
-
-    # Sink received tick 2's batch — recovery worked.
-    assert sink.unavailable_calls == 1, "no further unavailable calls after recovery"
-    # The fake records every available buffer call (even when the batch
-    # carries zero signals — the call happened). Assert the call count
-    # is consistent with the two-tick run.
-    assert len(sink.staged) >= 1, f"sink should have received at least one batch after recovery; got {sink.staged!r}"
-    db.close()
+    h.flip_available()
+    _run_tick(h, FakeChunkWriter(), "item-002", "2026-01-02T00:00:00Z")
+    assert h.staged() > after_outage, f"{name}: the recovery tick must stage its batch on top of the backlog"

@@ -93,8 +93,8 @@ def test_factory_composition_root_is_exempt(tmp_path: Path) -> None:
     """``kairix/core/factory.py`` is the composition root — by architectural
     design it crosses the layer boundary to wire concrete providers into
     pipelines. The rule encodes this as an explicit allowlist (see
-    ``_ALLOWLIST_PATHS`` in ``check_provider_layer_imports.py``); the
-    f26-files baseline must stay empty.
+    ``_ALLOWLIST_PATHS`` in ``check_provider_layer_imports.py``) — part of
+    the rule's definition, not a grandfather list.
 
     Sabotage-proof inline: the same import lands in a sibling file
     (``some_other.py``) and IS flagged — proving the allowlist is
@@ -157,7 +157,7 @@ def test_kairix_providers_sibling_module_does_not_match_prefix(tmp_path: Path) -
 
 def test_real_repo_gate_is_green() -> None:
     """The real F26 detector run against the full repo emits no
-    net-new violations vs ``.architecture/baseline/F26-files.txt``.
+    violations (there is no grandfathering).
     """
     detector = _load_detector()
     assert detector.main() == 0

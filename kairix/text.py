@@ -39,21 +39,20 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
 # Frontmatter helpers (pure text — no file I/O)
 # ---------------------------------------------------------------------------
 
-# YAML frontmatter block — \A anchor ensures match only at string start
-_FRONTMATTER_RE = re.compile(
-    r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL
-)  # NOSONAR — non-greedy `.*?` bounded by `\n---\s*\n`; file-bounded frontmatter input.
+# YAML frontmatter block — \A anchor ensures match only at string start. The
+# opening fence takes only same-line trailing spaces (``[^\S\n]*``) so it can't
+# trade newlines with the block body — linear-time; any blank lines after the
+# fence stay in the block, where the line-oriented parse ignores them.
+_FRONTMATTER_RE = re.compile(r"\A---[^\S\n]*\n(.*?)\n---\s*\n", re.DOTALL)
 
 # Same pattern without capture group, for strip_frontmatter
-_FRONTMATTER_STRIP_RE = re.compile(
-    r"\A---\s*\n.*?\n---\s*\n", re.DOTALL
-)  # NOSONAR — same rationale as _FRONTMATTER_RE: bounded input.
+_FRONTMATTER_STRIP_RE = re.compile(r"\A---[^\S\n]*\n.*?\n---\s*\n", re.DOTALL)
 
-# First markdown heading — `(.+)` is anchored to a single line via re.MULTILINE
-# so backtracking is bounded by line length.
-_FIRST_HEADING_RE = re.compile(
-    r"^#{1,3}\s+(.+)$", re.MULTILINE
-)  # NOSONAR — single-line input via re.MULTILINE; no polynomial blowup.
+# First markdown heading. Only same-line spaces may follow the ``#`` run (an
+# empty ``# `` heading must not borrow the next line as its title), and the
+# title starts at its first non-space character — the two never overlap, so
+# the match is linear-time.
+_FIRST_HEADING_RE = re.compile(r"^#{1,3}[^\S\n]+(\S.*)$", re.MULTILINE)
 
 
 def strip_frontmatter(text: str) -> str:

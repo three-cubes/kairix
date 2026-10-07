@@ -31,10 +31,8 @@ Generic placeholders that are explicitly OK:
 
 These never appear in ``REAL_NAMES`` so they pass the filter trivially.
 
-Baseline at ``.architecture/baseline/no-real-names-in-fixtures-files.txt``
-grandfathers pre-existing offenders so the rule lands without forcing
-a sweep. The baseline shrinks over time as fixtures are migrated to
-generic placeholders.
+There is no grandfathering: every in-scope match fails the gate. Migrate
+the fixture to a generic placeholder at source.
 
 Failure output follows F21: leads with the fix, includes ``run:`` for
 re-running the gate, and shows a Pass/Forbidden example.
@@ -55,7 +53,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BASELINE_FILE = ROOT / ".architecture" / "baseline" / "no-real-names-in-fixtures-files.txt"
 
 # Identifiers the project has historically embedded in fixtures / docs
 # that should now be generic. Whole-word match only (``re.compile`` with
@@ -133,16 +130,6 @@ Forbidden example:
 """
 
 
-def _load_baseline() -> set[str]:
-    if not BASELINE_FILE.exists():
-        return set()
-    return {
-        line.strip()
-        for line in BASELINE_FILE.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-
-
 def _is_in_scope(rel: str) -> bool:
     """True iff the repo-relative path falls under one of the F32 scopes."""
     return any(rel.startswith(prefix) and rel.endswith(suffixes) for prefix, suffixes in _SCOPES)
@@ -168,6 +155,23 @@ def _scan_file(path: Path, rel: str) -> list[str]:
     ]
 
 
+def _is_exempt(rel: str) -> bool:
+    return rel in EXEMPT_FILES or any(rel.startswith(prefix) for prefix in EXEMPT_PATH_PREFIXES)
+
+
+def collect_violations(root: Path, files: list[str]) -> list[str]:
+    """Scan every in-scope tracked path in ``files`` (repo-relative, under ``root``).
+
+    Returns every hit in every non-exempt file — there is no grandfathering.
+    """
+    return [
+        hit
+        for rel in files
+        if not _is_exempt(rel) and _is_in_scope(rel) and (root / rel).is_file()
+        for hit in _scan_file(root / rel, rel)
+    ]
+
+
 def main() -> int:
     try:
         files = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).splitlines()
@@ -175,56 +179,16 @@ def main() -> int:
         print("FAIL no_real_names_in_fixtures: could not enumerate tracked files", file=sys.stderr)
         return 1
 
-    baseline = _load_baseline()
-    net_new: list[str] = []
-    matched_baseline_files: set[str] = set()
-
-    for rel in files:
-        if rel in EXEMPT_FILES:
-            continue
-        if any(rel.startswith(prefix) for prefix in EXEMPT_PATH_PREFIXES):
-            continue
-        if not _is_in_scope(rel):
-            continue
-        path = ROOT / rel
-        if not path.is_file():
-            continue
-        hits = _scan_file(path, rel)
-        if not hits:
-            continue
-        if rel in baseline:
-            matched_baseline_files.add(rel)
-            continue
-        net_new.extend(hits)
-
-    if net_new:
-        print("FAIL F32 no_real_names_in_fixtures: net-new violations", file=sys.stderr)
-        for v in net_new:
+    violations = collect_violations(ROOT, files)
+    if violations:
+        print("FAIL F32 no_real_names_in_fixtures: violations found", file=sys.stderr)
+        for v in violations:
             print(f"  {v}", file=sys.stderr)
         print("", file=sys.stderr)
         print(REMEDIATION, file=sys.stderr)
         return 1
 
-    stale = baseline - matched_baseline_files
-    if stale:
-        # Baseline shrinks when a grandfathered file is cleaned up — keep the
-        # baseline file truthful by failing on stale entries.
-        print(
-            "FAIL F32 no_real_names_in_fixtures: baseline has stale entries"
-            " (file no longer offends or no longer exists)",
-            file=sys.stderr,
-        )
-        for s in sorted(stale):
-            print(f"  remove from baseline: {s}", file=sys.stderr)
-        print("", file=sys.stderr)
-        print(
-            f"fix: remove the listed lines from {BASELINE_FILE.relative_to(ROOT)}",
-            file=sys.stderr,
-        )
-        print('run: bash scripts/safe-commit.sh "chore(baseline): shrink F32"', file=sys.stderr)
-        return 1
-
-    print(f"PASS F32 no_real_names_in_fixtures ({len(files)} files scanned)")
+    print(f"ok F32 no_real_names_in_fixtures — clean ({len(files)} files scanned).")
     return 0
 
 

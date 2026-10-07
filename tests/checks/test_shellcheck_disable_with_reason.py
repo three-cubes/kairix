@@ -32,6 +32,7 @@ _CHECKS_DIR = _REPO_ROOT / "scripts" / "checks"
 if str(_CHECKS_DIR) not in sys.path:
     sys.path.insert(0, str(_CHECKS_DIR))
 
+import check_shellcheck_disable_with_reason as f33  # noqa: E402
 from check_shellcheck_disable_with_reason import _scan_file  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -109,3 +110,33 @@ def test_short_preceding_comment_does_not_count_as_rationale(tmp_path: Path) -> 
 
     assert len(violations) == 1
     assert "stub.sh:3" in violations[0]
+
+
+def _recreate_retired_baseline(root: Path, gate_file: str, entry: str) -> None:
+    """Write a file at the retired ``.architecture/baseline/`` location naming
+    ``entry`` — the shape that used to grandfather it. PLA-472: it must have
+    no effect on the verdict."""
+    baseline = root / ".architecture" / "baseline" / gate_file
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    baseline.write_text(f"{entry}\n", encoding="utf-8")
+
+
+def test_violation_fails_even_with_a_recreated_baseline_file(tmp_path: Path) -> None:
+    """PLA-472: no grandfathering. A bare disable in a file listed in a
+    re-created ``shellcheck-disable-with-reason-files.txt`` is still reported.
+
+    Sabotage proof (executed): re-adding the ``if rel in baseline: continue``
+    skip to ``collect_violations`` drops the hit and this test goes red;
+    restored → green.
+    """
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "run.sh").write_text(
+        '#!/usr/bin/env bash\n# shellcheck disable=SC1090\n. "$X"\n', encoding="utf-8"
+    )
+    _recreate_retired_baseline(tmp_path, "shellcheck-disable-with-reason-files.txt", "scripts/run.sh")
+
+    violations = f33.collect_violations(tmp_path, ["scripts/run.sh"])
+
+    assert violations == ["scripts/run.sh:2: shellcheck disable without rationale"]
+    assert not hasattr(f33, "_load_baseline")
+    assert f33._is_exempt_path(".architecture/baseline/run.sh") is False

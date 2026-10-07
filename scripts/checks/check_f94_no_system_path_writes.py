@@ -41,8 +41,8 @@ Allow-list:
   ``/etc/systemd/system``). That is a deliberate install-time action, not
   runtime; hardened deployments use the container / pip path instead.
 
-Baseline at ``.architecture/baseline/f94-files.txt`` grandfathers any
-pre-existing offenders. Net-new violations block at safe-commit + CI.
+There is no grandfathering: every literal system-path write in scope
+fails the gate at safe-commit + CI. Fix the write target at source.
 Failure output follows F21: leads with the fix, names ``run:`` to re-run
 the gate, and shows a Pass/Forbidden example.
 """
@@ -55,7 +55,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BASELINE_FILE = ROOT / ".architecture" / "baseline" / "f94-files.txt"
 
 # Core OS / system locations that are read-only on hardened deployments.
 # ``/var`` is intentionally excluded — ``/var/lib/kairix`` is the writable
@@ -171,60 +170,23 @@ def _scan_file(path: Path, rel: str) -> list[str]:
     return hits
 
 
-def _load_baseline() -> set[str]:
-    if not BASELINE_FILE.exists():
-        return set()
-    return {
-        line.strip()
-        for line in BASELINE_FILE.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-
-
 def _is_exempt_path(rel: str) -> bool:
     if not (rel.startswith(SCOPE_PREFIX) and rel.endswith(".py")):
         return True
     return any(rel.startswith(p) for p in EXEMPT_PREFIX)
 
 
-def _partition(files: list[str], baseline: set[str]) -> tuple[list[str], set[str]]:
-    """Split scanned files into net-new violation lines + matched-baseline files."""
-    net_new: list[str] = []
-    matched: set[str] = set()
-    for rel in files:
-        if _is_exempt_path(rel):
-            continue
-        path = ROOT / rel
-        if not path.is_file():
-            continue
-        hits = _scan_file(path, rel)
-        if not hits:
-            continue
-        if rel in baseline:
-            matched.add(rel)
-        else:
-            net_new.extend(hits)
-    return net_new, matched
+def collect_violations(root: Path, files: list[str]) -> list[str]:
+    """Scan every in-scope tracked path in ``files`` (repo-relative, under ``root``).
 
-
-def _report_net_new(net_new: list[str]) -> None:
-    print("FAIL F94 no_system_path_writes: net-new violations", file=sys.stderr)
-    for v in net_new:
-        print(f"  {v}", file=sys.stderr)
-    print("", file=sys.stderr)
-    print(REMEDIATION, file=sys.stderr)
-
-
-def _report_stale(stale: set[str]) -> None:
-    print(
-        "FAIL F94 no_system_path_writes: baseline has stale entries (file no longer offends or no longer exists)",
-        file=sys.stderr,
-    )
-    for s in sorted(stale):
-        print(f"  remove from baseline: {s}", file=sys.stderr)
-    print("", file=sys.stderr)
-    print(f"fix: remove the listed lines from {BASELINE_FILE.relative_to(ROOT)}", file=sys.stderr)
-    print('run: bash scripts/safe-commit.sh "chore(baseline): shrink F94"', file=sys.stderr)
+    Returns every hit in every non-exempt file — there is no grandfathering.
+    """
+    return [
+        hit
+        for rel in files
+        if not _is_exempt_path(rel) and (root / rel).is_file()
+        for hit in _scan_file(root / rel, rel)
+    ]
 
 
 def main() -> int:
@@ -234,18 +196,16 @@ def main() -> int:
         print("FAIL F94 no_system_path_writes: could not enumerate tracked files", file=sys.stderr)
         return 1
 
-    baseline = _load_baseline()
-    net_new, matched = _partition(files, baseline)
-    if net_new:
-        _report_net_new(net_new)
+    violations = collect_violations(ROOT, files)
+    if violations:
+        print("FAIL F94 no_system_path_writes: violations found", file=sys.stderr)
+        for v in violations:
+            print(f"  {v}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print(REMEDIATION, file=sys.stderr)
         return 1
 
-    stale = baseline - matched
-    if stale:
-        _report_stale(stale)
-        return 1
-
-    print(f"PASS F94 no_system_path_writes ({len(files)} kairix files scanned)")
+    print(f"ok F94 no_system_path_writes — clean ({len(files)} kairix files scanned).")
     return 0
 
 

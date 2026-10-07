@@ -48,12 +48,11 @@ def _write(path: Path, body: str = "") -> None:
 
 def test_real_repo_gate_is_green() -> None:
     """The real F55 detector run against the full repo emits no
-    net-new violations vs ``.architecture/baseline/f55-files.txt``.
+    violations (there is no grandfathering).
 
-    Today (Wave A) the only Chunk(...) call sites without
-    chunker_version live in kairix/core/connectors/silver.py, which is
-    grandfathered in the baseline. Sabotage proof for this assertion:
-    delete the baseline file and re-run — the gate fires.
+    Sabotage proof for this assertion: the tmp-tree cases below prove the
+    detector fires on a chunker ``Chunk(...)`` without ``chunker_version``;
+    this case proves the real tree is clean with no baseline to lean on.
     """
     detector = _load_detector()
     assert detector.main() == 0  # type: ignore[attr-defined]  # detector loaded by path; mypy can't see attrs

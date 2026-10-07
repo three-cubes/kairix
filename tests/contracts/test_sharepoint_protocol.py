@@ -198,17 +198,8 @@ def test_connector_default_sensitivity_is_internal(name: str, factory: Callable[
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.contract
-def test_real_connector_with_path_filter_still_satisfies_protocol() -> None:
-    """SharePointConnector with include_paths set still satisfies the
-    SourceConnector Protocol shape — the filter is pure post-processing,
-    no Protocol surface changes.
-
-    The canonical Fake doesn't need to model filtering (filter is a
-    real-connector implementation detail); the real connector must
-    structurally satisfy the Protocol regardless of whether a filter is
-    active. This test pins the contract.
-    """
+def _filtered_real_factory() -> SourceConnector:
+    """Real connector with ``include_paths`` active over a one-envelope Graph stub."""
     transport = httpx.MockTransport(_handler_returning_one_envelope())
     shared = httpx.Client(transport=transport)
     auth = OAuth2ClientCredsAuth(
@@ -218,7 +209,7 @@ def test_real_connector_with_path_filter_still_satisfies_protocol() -> None:
         scope="https://graph.microsoft.com/.default",
         http_client=shared,
     )
-    connector = SharePointConnector(
+    return SharePointConnector(
         drives=[SharePointDriveSpec(drive_id=_DRIVE_ID, include_paths=("/Curated-Content",))],
         credentials=SharePointCredentials(
             tenant_id="t",
@@ -228,11 +219,49 @@ def test_real_connector_with_path_filter_still_satisfies_protocol() -> None:
         auth=auth,
         client_builder=lambda a: SharePointGraphClient(auth=a, http_client=shared),
     )
+
+
+def _filtered_fake_factory() -> SourceConnector:
+    """Fake seeded with the one in-scope envelope the filtered real connector keeps."""
+    return FakeSharePointConnector(
+        items=[
+            {
+                "id": "contract-item",
+                "name": "doc.md",
+                "mimeType": "text/markdown",
+                "lastModifiedDateTime": "2026-05-22T10:00:00Z",
+                "driveId": _DRIVE_ID,
+            }
+        ],
+        delta_link=_DELTA_LINK,
+    )
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    "factory",
+    [_filtered_real_factory, _filtered_fake_factory],
+    ids=["real", "fake"],
+)
+def test_real_connector_with_path_filter_still_satisfies_protocol(factory: Callable[[], SourceConnector]) -> None:
+    """SharePointConnector with include_paths set still satisfies the
+    SourceConnector Protocol shape — the filter is pure post-processing,
+    no Protocol surface changes.
+
+    The fake leg is seeded with exactly the in-scope envelope (the fake
+    does not model filtering — a real-connector implementation detail);
+    both legs must stream the same well-formed ChangeEvents.
+
+    Sabotage proof: in ``SharePointConnector._item_passes_spec_filter``
+    return ``False`` unconditionally → the real leg yields no events and
+    the item-id assertion fails → restored.
+    """
+    connector = factory()
     # Same Protocol assertions as the no-filter case — none of these
     # depend on whether items get filtered.
     assert isinstance(connector, SourceConnector)
     events = list(connector.list_changes(cursor=None))
-    assert isinstance(events, list)
+    assert [e.item_id for e in events] == ["contract-item"]
     for e in events:
         assert isinstance(e.item_id, str) and e.item_id
         assert isinstance(e.op, str) and e.op in ("created", "modified", "deleted")

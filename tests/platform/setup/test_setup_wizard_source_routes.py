@@ -8,6 +8,8 @@ rendered HTML / headers (F30 spirit), never on status codes alone.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 # starlette ships via the optional [agents] extra (transitive dep of mcp);
@@ -85,6 +87,27 @@ def test_source_step_offers_folder_and_oauth_cards() -> None:
     # The folder card routes to the existing folder screen.
     assert "/setup/folder" in response.text
     assert "/setup/source/connect?provider=slack" in response.text
+
+
+def test_source_cards_say_how_each_one_connects() -> None:
+    """Folder and sign-in cards carry distinct visible link text.
+
+    Two links that read the same but go to different places confuse screen
+    reader and keyboard users. The folder card tells you it picks a local
+    folder; every sign-in card tells you it connects by signing in, so no two
+    cards with different targets share the same text. Sabotage: drop the
+    call-to-action ``<span>`` from either card in ``setup/source.html`` and
+    the matching assertion fails.
+    """
+    response = _build_client().get(_SOURCE_URL)
+    cards = re.findall(r'<a class="kx-provider-card"[^>]*href="([^"]+)">(.*?)</a>', response.text, re.DOTALL)
+    texts = {href: " ".join(re.sub(r"<[^>]+>", " ", body).split()) for href, body in cards}
+
+    assert "Pick a folder on this machine" in texts["/setup/folder"]
+    oauth = {href: text for href, text in texts.items() if href.startswith("/setup/source/connect")}
+    assert oauth
+    assert all("Sign in to connect" in text for text in oauth.values())
+    assert len(set(texts.values())) == len(texts)
 
 
 # ---------------------------------------------------------------------------

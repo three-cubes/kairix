@@ -10,8 +10,8 @@ Provides session-scoped fixtures that:
 
 Usage:
   @pytest.mark.integration
-  def test_something(real_db, real_document_root):
-      ...
+  def test_something(real_db, real_db_path):
+      results = bm25_search(query="...", db_path=real_db_path)
 """
 
 from __future__ import annotations
@@ -173,20 +173,37 @@ def _integration_paths(
 
 
 @pytest.fixture
-def real_document_root(
-    _integration_paths: tuple[Path, Path],
-    monkeypatch: pytest.MonkeyPatch,
-) -> Path:
-    """Per-test fixture that sets KAIRIX_DOCUMENT_ROOT and KAIRIX_DB_PATH."""
-    tmp_root, db_path = _integration_paths
-    monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", str(tmp_root))
-    monkeypatch.setenv("KAIRIX_DB_PATH", str(db_path))
+def real_document_root(_integration_paths: tuple[Path, Path]) -> Path:
+    """The session's indexed document root (reflib fixture + synthetic agents).
 
-    # Clear the cached path resolution so modules pick up the new env vars
-    from kairix.paths import clear_cache
+    Tests pass it (or :func:`real_db_path` / :func:`real_agents_config`)
+    explicitly to the unit under test — no ``KAIRIX_*`` env mutation (F2).
+    """
+    tmp_root, _db_path = _integration_paths
+    return tmp_root
 
-    clear_cache()
 
-    yield tmp_root
+@pytest.fixture
+def real_db_path(_integration_paths: tuple[Path, Path]) -> Path:
+    """Path to the session's real SQLite index — pass as ``db_path=``."""
+    _tmp_root, db_path = _integration_paths
+    return db_path
 
-    clear_cache()
+
+@pytest.fixture
+def real_agents_config(real_document_root: Path) -> dict[str, object]:
+    """Parsed-config dict pointing agent memory discovery at the synthetic agents.
+
+    Explicit ``agents:`` surfaces for the two synthetic agents plus an
+    ``agent_defaults`` block so any other agent name resolves under the same
+    tmp tree. Passed as ``config=`` to the timeline / briefing readers
+    instead of steering them through ``KAIRIX_DOCUMENT_ROOT`` (F2).
+    """
+    memory_root = real_document_root / "04-Agent-Knowledge"
+    return {
+        "agents": {
+            name: {"surfaces": [{"path": str(memory_root / name), "label": "memory"}]}
+            for name in ("agent-alpha", "agent-beta")
+        },
+        "agent_defaults": {"memory_root": str(memory_root)},
+    }

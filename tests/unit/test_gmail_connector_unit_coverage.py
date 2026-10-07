@@ -509,6 +509,19 @@ def test_load_hierarchy_emits_single_root_folder() -> None:
     assert _USER in n.display_name
 
 
+def test_load_hierarchy_root_link_keeps_path_separator_before_fragment() -> None:
+    """The root FOLDER links to the exact Gmail inbox URL.
+
+    Regression (PLA-472): the link was built with ``str.rstrip('#inbox/')``,
+    which strips a character SET rather than a suffix, so the ``/`` before
+    the ``#inbox`` fragment was eaten (``.../u/0#inbox``).
+    """
+    client = _FakeGmailClient()
+    connector = GmailConnector(user_email=_USER, client=client)  # type: ignore[arg-type]  # F3 rationale: test-local stub mirrors GmailClient shape.
+    (node,) = list(connector.load_hierarchy(cc_pair_id=7))
+    assert node.link == "https://mail.google.com/mail/u/0/#inbox"
+
+
 def test_load_from_checkpoint_delegates_to_list_changes() -> None:
     """The Checkpointed shim threads the checkpoint string into list_changes.
 

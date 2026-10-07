@@ -52,7 +52,10 @@ PLUGIN_NAME = "sheet_row"
 
 #: Regex matching the ``## Sheet: <title>`` header XlsxExtractor emits
 #: per sheet. Capturing group: the sheet title.
-_SHEET_HEADER_RE = re.compile(r"^##\s+Sheet:\s*(.+?)\s*$", re.MULTILINE)
+#: Only same-line spaces are allowed around the marker, so an unnamed sheet
+#: (``## Sheet:``) never borrows its table header as the name; the name group is
+#: then absent. Linear-time: no two adjacent quantifiers share a class.
+_SHEET_HEADER_RE = re.compile(r"^##[^\S\n]+Sheet:[^\S\n]*(\S.*)?$", re.MULTILINE)
 
 #: Pipe-syntax table row prefix and suffix.
 _ROW_PIPE = "|"
@@ -137,7 +140,7 @@ def _parse_sheet(text: str) -> tuple[str, list[str]]:
     match = _SHEET_HEADER_RE.search(text)
     if match is None:
         return "", [line for line in text.splitlines() if line.strip()]
-    sheet_name = match.group(1).strip()
+    sheet_name = (match.group(1) or "").strip()
     body = text[match.end() :]
     table_lines = [line for line in body.splitlines() if line.strip()]
     return sheet_name, table_lines

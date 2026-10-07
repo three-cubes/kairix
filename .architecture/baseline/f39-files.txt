@@ -1,8 +1,0 @@
-# F39 baseline — files that construct Chunk(...) without all three of
-# source_uri / source_modified_at / sensitivity. Grandfathered offenders
-# only; baseline is shrink-only per F49.
-#
-# Today: empty — no Chunk class with these fields exists yet (Wave 1
-# scaffold lands the class). The detector shape-matches the future
-# constructor; once Wave 1 ships, any non-conforming callsite must be
-# fixed (not added to this file).

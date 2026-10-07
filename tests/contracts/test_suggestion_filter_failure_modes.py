@@ -7,56 +7,71 @@ One method (``apply``). Failure surface:
     a code-level error (the suggestion would slip through unfiltered).
   * ``returns_empty`` — when every suggestion is filtered out the
     return is ``[]``, not None.
+
+F43 parity: each body runs over a real shipped filter
+(:mod:`kairix.knowledge.entities.filters`) AND the canonical
+:class:`tests.fakes.FakeSuggestionFilter`.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
+from kairix.knowledge.entities.filters import ChainedSuggestionFilter, RolePhraseFilter
 from kairix.knowledge.entities.protocols import Suggestion, SuggestionFilter
+from tests.fakes import FakeSuggestionFilter
 
 pytestmark = pytest.mark.contract
 
-
-class _FailingFilter:
-    """Inline :class:`SuggestionFilter` with raises-knob on ``apply``."""
-
-    def __init__(self, *, raises: BaseException | None = None) -> None:
-        self._raises = raises
-
-    def apply(self, suggestions: list[Suggestion], context: str) -> list[Suggestion]:
-        del context
-        if self._raises is not None:
-            raise self._raises
-        # Filter-all default: drop every suggestion
-        return []
+_ROLE_PHRASE: Suggestion = {"text": "the regional team", "label": "ORG", "source": "ner", "confidence": 0.9}
 
 
-def test_apply_raises_propagates_typed_exception() -> None:
+def _real_chain_with_crashing_member() -> SuggestionFilter:
+    # The production chain composing a member whose ``apply`` crashes.
+    return ChainedSuggestionFilter(
+        filters=[RolePhraseFilter(), FakeSuggestionFilter(raises=RuntimeError("F68-filter-raises"))],
+    )
+
+
+def _fake_crashing_filter() -> SuggestionFilter:
+    return FakeSuggestionFilter(raises=RuntimeError("F68-filter-raises"))
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [_real_chain_with_crashing_member, _fake_crashing_filter],
+    ids=["real", "fake"],
+)
+def test_apply_raises_propagates_typed_exception(factory: Callable[[], SuggestionFilter]) -> None:
     """A filter parse failure surfaces — caller must not interpret a
     silently-empty return as "all suggestions filtered" when the filter
     crashed mid-pass.
 
-    Sabotage proof: in ``_FailingFilter.apply`` change
-    ``raise self._raises`` to ``return suggestions``. Re-run:
-    pytest.raises sees nothing. Restored.
+    Sabotage proof: in ``ChainedSuggestionFilter.apply`` wrap the
+    ``filt.apply(current, context)`` call in ``try/except Exception:
+    continue``. Re-run: the real leg's pytest.raises sees nothing.
+    Restored.
     """
-    flt: SuggestionFilter = _FailingFilter(raises=RuntimeError("F68-filter-raises"))
+    flt = factory()
     with pytest.raises(RuntimeError, match="F68-filter-raises"):
         flt.apply([{"text": "Acme", "label": "ORG", "source": "ner", "confidence": 0.9}], "context")
 
 
-def test_apply_returns_empty_when_all_suggestions_filtered() -> None:
+@pytest.mark.parametrize(
+    "factory",
+    [RolePhraseFilter, lambda: FakeSuggestionFilter(drop_texts=("the regional team",))],
+    ids=["real", "fake"],
+)
+def test_apply_returns_empty_when_all_suggestions_filtered(factory: Callable[[], SuggestionFilter]) -> None:
     """When every suggestion is filtered out the return is ``[]`` —
     callers iterate without a None check.
 
-    Sabotage proof: change ``_FailingFilter.apply`` to
-    ``return [{}]`` instead of ``[]``. Re-run: ``== []`` fails.
-    Restored.
+    Sabotage proof: in ``RolePhraseFilter.apply`` return
+    ``list(suggestions)`` instead of the filtered comprehension. Re-run:
+    the real leg's ``== []`` fails. Restored.
     """
-    flt: SuggestionFilter = _FailingFilter()
-    out = flt.apply(
-        [{"text": "Acme", "label": "ORG", "source": "ner", "confidence": 0.9}],
-        "context",
-    )
+    flt = factory()
+    out = flt.apply([_ROLE_PHRASE], "context")
     assert out == [], f"all-filtered must yield []; got {out!r}"

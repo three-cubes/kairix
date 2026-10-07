@@ -117,7 +117,7 @@ def given_low_disk(budget_state: _BudgetState) -> None:
         collection="per-tick-budget-test",
         chunk_writer=FakeChunkWriter(),
         entity_graph_sink=FakeEntityGraphSink(),
-        disk_free_resolver=lambda: budget_state.disk_free_bytes,
+        deps=factory.FactoryDeps(disk_free_override=lambda: budget_state.disk_free_bytes),
     )
 
 

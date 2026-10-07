@@ -1,9 +1,0 @@
-# F21 baseline — empty after 2026-06-06 paydown.
-#
-# Every previously-listed scripts/checks/check_*.py REMEDIATION constant
-# now ships both `Pass example:` and `Forbidden example:` blocks alongside
-# the canonical fix:/next:/run: action markers. Net-new violations will
-# block at pre-commit and CI Stage 0.
-#
-# See docs/architecture/fitness-functions.md §F21 for the rule spec and
-# scripts/checks/check_actionable_feedback.py for the detector.

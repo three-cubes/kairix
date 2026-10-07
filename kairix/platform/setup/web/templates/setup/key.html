@@ -45,14 +45,9 @@
         hx-indicator="#validating-indicator">
   Validate key
 </button>
-<button type="submit" form="key-form" class="kx-btn-primary kx-btn-reveal" id="save-key-btn">Save and continue</button>
+<button type="submit" form="key-form" class="kx-btn-primary kx-btn-reveal" id="save-key-btn"
+        data-kx-reveal-on=".kx-validation-success">Save and continue</button>
 {% endblock %}
 {% block scripts %}
-<script>
-  document.addEventListener('htmx:afterSwap', function () {
-    if (document.querySelector('.kx-validation-success')) {
-      document.getElementById('save-key-btn').classList.add('kx-revealed');
-    }
-  });
-</script>
+<script src="/setup/static/kx-reveal.js" defer></script>
 {% endblock %}

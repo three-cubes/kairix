@@ -40,9 +40,8 @@ Detection (AST):
    the obvious "I forgot the kwarg" shape at the callsite).
 
 A file appears in the violation set if any ``Chunk(...)`` call inside
-it is missing one or more of the three required kwargs. Baseline at
-``.architecture/baseline/f39-files.txt`` grandfathers existing
-offenders; net-new violations block at pre-commit and CI.
+it is missing one or more of the three required kwargs. There is no
+grandfathering: every violation blocks at pre-commit and CI.
 
 Allow-list: ``tests/`` is exempt because test fixtures may construct
 synthetic chunks for boundary unit tests where the fields aren't

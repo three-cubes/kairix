@@ -314,6 +314,10 @@ Per-fixture cap: ≤500 KB each, ≤5 MB total corpus. Pre-commit hook `scripts/
 
 ## 6.8 Expected F-rule baseline movements
 
+> **Historical.** PLA-472 removed all `.architecture/baseline/` files; every F-rule now
+> runs over the full tree and a new connector slice must land at zero violations. The
+> table below is the record of what the Wave E landing expected at the time.
+
 Landing Wave E SharePoint per §6.6 WILL move baselines. Cherry-pick review must expect this delta; movement outside this envelope is a flag for the reviewer.
 
 | Baseline | Expected delta | Why |

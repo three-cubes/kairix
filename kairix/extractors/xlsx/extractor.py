@@ -105,7 +105,7 @@ def _default_workbook_loader() -> _WorkbookLoader:
     """
     try:
         from openpyxl import load_workbook
-    except ImportError as exc:  # pragma: no cover — import path validated by extract() test
+    except ImportError as exc:
         raise RuntimeError(
             "xlsx: the upstream 'openpyxl' package is not installed. "
             "fix: pip install 'Kairix-agentic-knowledge-mgt[xlsx]' "

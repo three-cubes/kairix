@@ -1,7 +1,7 @@
 """Step definitions for eval_monitor.feature.
 
 Drives ``run_monitor`` through its public surface — injected suite loader
-and benchmark runner via the ``suite_loader=`` / ``benchmark_runner=`` kwargs.
+and benchmark runner via ``MonitorDeps(load_suite=, run_benchmark=)``.
 No @patch on ``kairix.quality.benchmark.*``; the real run_monitor logic is
 exercised end-to-end against fakes.
 """
@@ -18,7 +18,7 @@ from pytest_bdd import given, parsers, then, when
 
 from kairix.quality.benchmark.runner import BenchmarkResult
 from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
-from kairix.quality.eval.monitor import run_monitor
+from kairix.quality.eval.monitor import MonitorDeps, run_monitor
 
 pytestmark = pytest.mark.bdd
 
@@ -158,8 +158,7 @@ def _when_run_monitor(_scenario_state: dict[str, Any]) -> None:
         suite_path=str(_scenario_state["tmp_path"] / "canary.yaml"),
         log_path=str(_scenario_state["log_path"]),
         alert_threshold=_scenario_state["alert_threshold"],
-        suite_loader=_scenario_state["suite_loader"],
-        benchmark_runner=_build_runner(_scenario_state),
+        deps=MonitorDeps(load_suite=_scenario_state["suite_loader"], run_benchmark=_build_runner(_scenario_state)),
     )
 
 
@@ -171,8 +170,7 @@ def _when_run_monitor_n_times(_scenario_state: dict[str, Any], n: int) -> None:
             suite_path=str(_scenario_state["tmp_path"] / "canary.yaml"),
             log_path=str(_scenario_state["log_path"]),
             alert_threshold=_scenario_state["alert_threshold"],
-            suite_loader=_scenario_state["suite_loader"],
-            benchmark_runner=_build_runner(_scenario_state),
+            deps=MonitorDeps(load_suite=_scenario_state["suite_loader"], run_benchmark=_build_runner(_scenario_state)),
         )
     _scenario_state["result"] = last
 

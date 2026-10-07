@@ -240,6 +240,51 @@ def test_session_start_never_raises_even_when_bootstrap_returns_garbage(
     assert ctx.appended == [plugin.FALLBACK_MESSAGE] * 4
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["bootstrap-ok", "bootstrap-fails", "blank-agent", "empty-stdout"])
+def test_session_start_contains_raising_append_system_context(
+    plugin: ModuleType, path: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A raising ``appendSystemContext`` never escapes ``on_session_start`` (PLA-472).
+
+    The documented contract is "never block session start". Bootstrap
+    failures were contained, but openclaw's own ``appendSystemContext``
+    raising propagated straight out of the hook. It must be logged at
+    WARNING after exactly ONE attempt — no retry, no second fallback
+    append (which would double-write a half-assembled prompt).
+
+    Sabotage proof: removing the try/except around the append in the
+    plugin lets the RuntimeError escape and every case fails.
+    """
+    from tests.fakes import FakeOpenclawContext as RaisingOpenclawContext
+
+    envelope = "# Bootstrap envelope: agent-alpha\n"
+
+    def bootstrap_fails(_agent: str) -> str:
+        raise RuntimeError("kairix bootstrap exited 2")
+
+    run_bootstrap: dict[str, Any] = {
+        "bootstrap-ok": lambda _agent: envelope,
+        "bootstrap-fails": bootstrap_fails,
+        "blank-agent": lambda _agent: envelope,
+        "empty-stdout": lambda _agent: "   ",
+    }
+    expected_text = envelope if path == "bootstrap-ok" else plugin.FALLBACK_MESSAGE
+    ctx = RaisingOpenclawContext(
+        agent_name="" if path == "blank-agent" else "agent-alpha",
+        append_raises=RuntimeError("openclaw prompt assembly failed"),
+    )
+
+    with caplog.at_level("WARNING"):
+        plugin.on_session_start(ctx, deps=plugin.PluginDeps(run_bootstrap=run_bootstrap[path]))
+
+    assert ctx.append_attempts == [expected_text], "exactly one append attempt, no retry"
+    assert ctx.appended == []
+    assert any(
+        r.levelname == "WARNING" and "openclaw prompt assembly failed" in r.getMessage() for r in caplog.records
+    ), "the append failure must be logged at WARNING for operator review"
+
+
 # ---------------------------------------------------------------------------
 # Plugin manifest — operator-facing contract
 # ---------------------------------------------------------------------------

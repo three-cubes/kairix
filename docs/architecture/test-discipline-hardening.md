@@ -1,18 +1,20 @@
 # Test discipline hardening — Wave 0 lock-in before the connector framework
 
 > **Status**: Implemented. Wave 0 of the connector-framework rollout landed on
-> `main`: F45–F49 are canonised in `fitness-functions.md` / `_rule_catalogue.py`
+> `main`: F45–F48 are canonised in `fitness-functions.md` / `_rule_catalogue.py`
 > and enforced per-commit (pre-commit + `scripts/safe-commit.sh` + CI Stage 0,
-> with the F48 composed-path E2E selector running in CI Stage 4.5). All three
-> grandfathered baselines (`f30-operator-outcome-tests-files.txt`,
-> `f46-files.txt`, `f47-integration-factory-files.txt`) have since paid down to
-> zero. This document remains the canonical spec for the three principles and
+> with the F48 composed-path E2E selector running in CI Stage 4.5). The three
+> seeded baselines (`f30-operator-outcome-tests-files.txt`, `f46-files.txt`,
+> `f47-integration-factory-files.txt`) paid down to zero, and PLA-472 removed
+> all baseline files: these rules now run over the full tree, every violation
+> blocks, and F49 (baseline shrinking) is retired. This document remains the
+> canonical spec for the three principles and
 > the canonical test shapes; the section below names the testing-discipline gaps
 > the original audit found and records how each was closed.
 >
 > Companion to: `connector-ingestion-architecture.md` (the Wave 1+ feature work
 > this hardening gated, now itself implemented), `fitness-functions.md` (F-rule
-> canon — F45–F49 live there), `provider-plugin-architecture.md` (the pattern
+> canon — F45–F48 live there), `provider-plugin-architecture.md` (the pattern
 > this hardening preserves quality for at scale).
 
 ## 1. Why this landed first
@@ -30,7 +32,7 @@ The pre-Wave-0 audit returned a precise picture: ceremony was good, composition 
 - **`tests/e2e/` was empty** (`__init__.py` only) — no filesystem-level end-to-end test existed. *Closed by F48:* `tests/e2e/test_composed_production_path.py` is the canonical exemplar and many sibling capability paths now live alongside it (connectors, setup wizard, install, entity-summary, recommender, etc.).
 - **Only 1 integration test** used `kairix.core.factory` composition; the other 65 built pipelines ad-hoc, leaving the production composition mostly unexercised. *Closed by F47:* the integration suite now builds multi-component pipelines through `kairix.core.factory.build_*`; the `f47-integration-factory-files.txt` baseline has paid down to zero.
 - **No test did config → real provider → ingest → query → assertion** through the composed production code — the exact gap the Plan-B-parity / LoCoMo post-mortem (5233 green tests; 5% real recall) named. *Closed by F48* (composed production path E2E running in CI Stage 4.5).
-- **The F30 baseline carried 35 grandfathered entries** — CLI subcommands + MCP tools without subprocess / direct-handler outcome tests. *Closed:* `f30-operator-outcome-tests-files.txt` has paid down to zero; every CLI subcommand and MCP tool now carries an outcome test, and net-new surfaces hard-fail the gate without one.
+- **The F30 baseline carried 35 exempted entries** — CLI subcommands + MCP tools without subprocess / direct-handler outcome tests. *Closed:* `f30-operator-outcome-tests-files.txt` has paid down to zero; every CLI subcommand and MCP tool now carries an outcome test, and net-new surfaces hard-fail the gate without one.
 - **No rule forced new capabilities to ship with a `.feature` file** — F12 only governed the content of features that already existed, so a new CLI subcommand could land with zero behaviour spec. *Closed by F45.*
 - **No rule forced BDD step impls or integration tests through `factory.build_*`** — F13 caught negative leakage (no Mock in scenarios) but not the positive requirement (real production path exercised). *Closed by F46 (BDD steps) and F47 (integration tests); the `f46-files.txt` baseline has paid down to zero.*
 
@@ -70,7 +72,7 @@ Locked by **F45** (BDD feature presence) and **F30** (outcome test presence — 
 
 ## 3. Fitness functions F45–F49
 
-Each follows the F21 action-marked-failure template (`fix:` / `next:` / `run:`), has a per-rule baseline file under `.architecture/baseline/`, and wires into pre-commit + `scripts/safe-commit.sh` + CI Stage 0.
+Each follows the F21 action-marked-failure template (`fix:` / `next:` / `run:`), runs over the full tree with no baseline file, and wires into pre-commit + `scripts/safe-commit.sh` + CI Stage 0.
 
 ### F45 — New capability ships with a BDD feature
 
@@ -86,7 +88,7 @@ Naming convention: `tests/bdd/features/{cli_<name>,mcp_<tool>,provider_<name>,co
 
 **Failure text**: `F45: new surface <surface> introduced without a .feature file. fix: add tests/bdd/features/<convention>.feature with a happy-path scenario. next: see docs/architecture/test-discipline-hardening.md §2.3 (new-capability principle).`
 
-**Baseline**: empty at introduction; forward-only.
+**Baseline**: none — every violation blocks.
 
 ### F46 — BDD step impls call factory-composed production code
 
@@ -101,7 +103,7 @@ Direct construction of `SearchPipeline(...)`, `EmbedPipeline(...)`, `ConnectorPi
 
 **Failure text**: `F46: tests/bdd/steps/<file>.py constructs a pipeline directly instead of going through the factory. fix: use factory.build_search_pipeline(paths=FakePaths(...)) — see tests/integration/test_vec_index_lifecycle.py for the canonical pattern. next: see docs/architecture/test-discipline-hardening.md §4.1 (canonical factory shape).`
 
-**Baseline**: `.architecture/baseline/f46-files.txt` — seeded with 6 files by the initial AST scan, now paid down to zero (all step files route through `factory.build_*`). Forward-only; net-new violations hard-fail the gate.
+**Baseline**: none. The initial AST scan found 6 files; they were paid down to zero (all step files route through `factory.build_*`). Every violation hard-fails the gate.
 
 ### F47 — Integration tests build through the factory
 
@@ -115,7 +117,7 @@ Allowed exceptions:
 
 **Failure text**: `F47: tests/integration/<file>.py constructs <Pipeline> directly. fix: use kairix.core.factory.build_<pipeline>(paths=FakePaths(...)). next: see tests/integration/test_vec_index_lifecycle.py for the canonical pattern, and docs/architecture/test-discipline-hardening.md §4.2.`
 
-**Baseline**: `.architecture/baseline/f47-integration-factory-files.txt` — seeded substantially by the initial scan (only 1 integration test used the factory at audit time), now paid down to zero. Forward-only; net-new violations hard-fail the gate.
+**Baseline**: none. The initial scan found many violations (only 1 integration test used the factory at audit time); they were paid down to zero. Every violation hard-fails the gate.
 
 ### F48 — Composed production path E2E test exists and runs
 
@@ -129,19 +131,9 @@ For Wave 1+: every new top-level capability (provider, connector, extractor, ret
 
 **Baseline**: not applicable — binary presence check.
 
-### F49 — Test-discipline baselines shrink per release
+### F49 — Test-discipline baselines shrink per release (retired)
 
-**Rule**: each release tag (any tag matching `v[0-9]*.[0-9]*.[0-9]*`) must reduce each of the following baseline files by at least one entry compared to the previous tagged release, OR keep all three at zero (all three are now at zero, so the rule holds vacuously until a new violation is grandfathered):
-
-- `.architecture/baseline/f30-operator-outcome-tests-files.txt`
-- `.architecture/baseline/f46-files.txt`
-- `.architecture/baseline/f47-integration-factory-files.txt`
-
-**Detection**: a `scripts/checks/check_baseline_shrinking.py` runs in `release.yml` before the tag is cut. Compares per-rule baseline length at HEAD vs at the previous release tag (`git show <prev-tag>:.architecture/baseline/<file>`).
-
-**Failure text**: `F49: baseline <file> grew from <N> to <M> since <prev-tag>, or did not shrink. next: pay down at least one entry before tagging the release. Affected entries: <diff>.`
-
-**Baseline**: not applicable — delta check.
+Retired in PLA-472. F49 made each release shrink the F30 / F46 / F47 baseline files. All three reached zero, and PLA-472 removed baseline files entirely, so there is nothing left to shrink — those rules now block every violation directly.
 
 ## 4. Canonical patterns (the shapes contributors must match)
 
@@ -270,7 +262,7 @@ def e2e_db(tmp_path) -> KairixPaths:
 
 ## 5. F30 paydown plan — full, not triaged (completed)
 
-Per the standing direction ("we need to get it all done; let's continue to lift the codebase standard as we are only going to keep moving quicker"), the F30 baseline paid down **to zero** in Wave 0, not in phases. `.architecture/baseline/f30-operator-outcome-tests-files.txt` now carries no entries; every CLI subcommand and MCP tool has an outcome test, and net-new surfaces hard-fail the gate without one. The original 35-entry baseline, grouped for the parallel dispatch that cleared it, is retained below as the paydown record and as the canonical outcome-test pattern reference.
+Per the standing direction ("we need to get it all done; let's continue to lift the codebase standard as we are only going to keep moving quicker"), the F30 baseline paid down **to zero** in Wave 0, not in phases (the baseline file itself was removed in PLA-472). Every CLI subcommand and MCP tool has an outcome test, and any surface without one hard-fails the gate. The original 35-entry baseline, grouped for the parallel dispatch that cleared it, is retained below as the paydown record and as the canonical outcome-test pattern reference.
 
 Original baseline (35 entries) grouped for parallel dispatch:
 
@@ -346,7 +338,7 @@ Each group dispatches as one worktree. Per F30's existing contract: each new out
 4. **Use `sys.executable -m kairix.cli <sub>`** in `subprocess.run` (NOT `-m kairix`; `kairix.__main__` doesn't exist as a separate module — `kairix = "kairix.cli:main"` is the console-script entry).
 5. **Two tests per surface**: one happy-path envelope assertion (returncode + stdout JSON parse + content keys), one error-path assertion (returncode non-zero + stderr error prefix).
 6. **Sabotage-proof both tests** before commit: mutate the production code path the test is supposed to cover, confirm both tests fail, restore.
-7. **Remove the entry from `.architecture/baseline/f30-operator-outcome-tests-files.txt`** in the same commit. Baseline shrinks only.
+7. **Run F30** (`uv run tc-fitness run` or `safe-commit.sh`) and confirm it passes. There is no baseline file to edit.
 
 Canonical CLI outcome-test shape:
 
@@ -457,19 +449,18 @@ Append to the Engineering practices table:
 
 ## 8. What this document is *not*
 
-- **Not a rewrite of the existing F1–F33 regime.** F12, F13, F28, F30 stay as they are; F45–F49 are additive and close the gaps the audit named.
-- **Not a refactor of every existing BDD step or integration test.** F46 and F47 baselines seed at the introduction; the baselines shrink (F49); the existing tests stay running. New code is held to the new bar; old code drains over time.
+- **Not a rewrite of the existing F1–F33 regime.** F12, F13, F28, F30 stay as they are; F45–F48 are additive and close the gaps the audit named (F49 was too, until PLA-472 retired it).
+- **Not a refactor of every existing BDD step or integration test.** F46 and F47 originally seeded baselines that were paid down to zero; since PLA-472 there are no baselines and every test is held to the bar.
 - **Not a replacement for the connector-ingestion architecture doc.** That doc owns Wave 1+ feature work; this doc owns the discipline that Wave 1+ runs on top of.
-- **Not the place F45–F49 are formally canonised.** The canonical home is `docs/architecture/fitness-functions.md` and `scripts/checks/_rule_catalogue.py`; W0-10 landed the entries there. This document is the spec/rationale, not the rule registry.
+- **Not the place F45–F48 are formally canonised.** The canonical home is `docs/architecture/fitness-functions.md` and `scripts/checks/_rule_catalogue.py`; W0-10 landed the entries there. This document is the spec/rationale, not the rule registry.
 
 ## 9. References
 
 - `docs/architecture/connector-ingestion-architecture.md` — Wave 1+ feature work this hardening gated (now implemented)
-- `docs/architecture/fitness-functions.md` — F-rule canon (F45–F49 live here; landed in W0-10)
+- `docs/architecture/fitness-functions.md` — F-rule canon (F45–F48 live here; landed in W0-10)
 - `docs/architecture/provider-plugin-architecture.md` — the pattern this discipline preserves at scale
 - `tests/integration/test_vec_index_lifecycle.py` — canonical factory-composition shape
 - `tests/e2e/test_composed_production_path.py` — the F48 composed-path E2E exemplar
 - `tests/fakes.py` — canonical fakes (Protocol-compliant, no monkey-patching)
-- `.architecture/baseline/f30-operator-outcome-tests-files.txt` — the 35 entries W0-8 paid down to zero
 - Architectural context: the two-scope architecture (engagement vs firm)
   and the Python-only language strategy that drive this discipline

@@ -3,7 +3,7 @@
 Pins composition behaviour: sampler picks cases by weight, executor times
 them, completion timestamps captured INSIDE the worker, bucketing rolls up
 peak vs sustained QPS, threshold gates pass/fail. Real kairix is never
-imported — ``suite_loader`` and ``searcher`` are injected so each test
+imported — ``ProbeDeps(load_suite=, search=)`` is injected so each test
 stays hermetic.
 """
 
@@ -20,7 +20,7 @@ from kairix.quality.probe.burst import (
     BurstResult,
     run_probe_burst,
 )
-from kairix.quality.probe.runner import SampledQuery
+from kairix.quality.probe.runner import ProbeDeps, SampledQuery
 
 pytestmark = pytest.mark.unit
 
@@ -51,7 +51,7 @@ def _suite_loader(_suite: str) -> list[_Case]:
 class FakeFastSearchClient:
     """Implements the :class:`SearchClient` Protocol; returns immediately.
 
-    Bound-method ``.search`` is callable-compatible with the ``searcher=`` kwarg
+    Bound-method ``.search`` is callable-compatible with the ``ProbeDeps.search`` field
     so the same fake class shape applies across the probe tests.
     """
 
@@ -72,8 +72,7 @@ def test_zero_queries_rejected() -> None:
         run_probe_burst(
             suite="x",
             total_queries=0,
-            suite_loader=_suite_loader,
-            searcher=_fast_client.search,
+            deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
         )
 
 
@@ -88,8 +87,7 @@ def test_zero_peak_concurrency_rejected() -> None:
             suite="x",
             total_queries=5,
             peak_concurrency=0,
-            suite_loader=_suite_loader,
-            searcher=_fast_client.search,
+            deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
         )
 
 
@@ -103,8 +101,7 @@ def test_zero_bucket_ms_rejected() -> None:
             suite="x",
             total_queries=5,
             bucket_ms=0,
-            suite_loader=_suite_loader,
-            searcher=_fast_client.search,
+            deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
         )
 
 
@@ -118,8 +115,7 @@ def test_happy_path_runs_and_buckets() -> None:
         total_queries=50,
         peak_concurrency=10,
         bucket_ms=200,
-        suite_loader=_suite_loader,
-        searcher=_fast_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
     )
     assert isinstance(result, BurstResult)
     assert result.total_queries == 50
@@ -145,8 +141,7 @@ def test_errors_counted_not_raised() -> None:
         total_queries=10,
         peak_concurrency=2,
         bucket_ms=100,
-        suite_loader=_suite_loader,
-        searcher=raiser,
+        deps=ProbeDeps(load_suite=_suite_loader, search=raiser),
     )
     assert result.errors == 10
     assert result.passed is False
@@ -180,8 +175,7 @@ def test_sustained_qps_skips_warmup_buckets() -> None:
         total_queries=30,
         peak_concurrency=1,
         bucket_ms=20,
-        suite_loader=_suite_loader,
-        searcher=slow_then_fast,
+        deps=ProbeDeps(load_suite=_suite_loader, search=slow_then_fast),
     )
     # We need enough buckets for the warmup-skip logic to kick in.
     assert len(result.buckets) >= 3, f"expected >=3 buckets, got {len(result.buckets)}"
@@ -218,8 +212,7 @@ def test_qps_drop_threshold_gates_pass_synthetic() -> None:
         peak_concurrency=2,
         bucket_ms=80,
         qps_drop_threshold_pct=0.0,  # any drop fails
-        suite_loader=_suite_loader,
-        searcher=slow_then_fast,
+        deps=ProbeDeps(load_suite=_suite_loader, search=slow_then_fast),
     )
     # If the run produced any QPS variance across buckets, the 0% threshold
     # forces a fail. If buckets are perfectly flat (no variance), the run
@@ -241,8 +234,7 @@ def test_envelope_round_trip_contains_required_keys() -> None:
         total_queries=10,
         peak_concurrency=2,
         bucket_ms=100,
-        suite_loader=_suite_loader,
-        searcher=_fast_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
     )
     env = result.to_envelope()
     required = {
@@ -297,8 +289,7 @@ def test_seed_determinism_pins_sampled_queries() -> None:
         peak_concurrency=1,
         bucket_ms=100,
         seed=77,
-        suite_loader=_suite_loader,
-        searcher=collect_a,
+        deps=ProbeDeps(load_suite=_suite_loader, search=collect_a),
     )
     run_probe_burst(
         suite="x",
@@ -306,8 +297,7 @@ def test_seed_determinism_pins_sampled_queries() -> None:
         peak_concurrency=1,
         bucket_ms=100,
         seed=77,
-        suite_loader=_suite_loader,
-        searcher=collect_b,
+        deps=ProbeDeps(load_suite=_suite_loader, search=collect_b),
     )
     run_probe_burst(
         suite="x",
@@ -315,8 +305,7 @@ def test_seed_determinism_pins_sampled_queries() -> None:
         peak_concurrency=1,
         bucket_ms=100,
         seed=999,
-        suite_loader=_suite_loader,
-        searcher=collect_c,
+        deps=ProbeDeps(load_suite=_suite_loader, search=collect_c),
     )
     assert sorted(seen_a) == sorted(seen_b), "same seed must yield the same case set"
     assert sorted(seen_a) != sorted(seen_c), "different seed must change the case set"
@@ -359,8 +348,7 @@ def test_cold_start_pre_completion_buckets_are_auto_skipped() -> None:
         total_queries=20,
         peak_concurrency=1,
         bucket_ms=20,
-        suite_loader=_suite_loader,
-        searcher=slow_first_then_fast,
+        deps=ProbeDeps(load_suite=_suite_loader, search=slow_first_then_fast),
     )
     # Cold-start buckets must be detected and surfaced.
     assert result.first_completion_bucket_idx >= 1, (
@@ -397,8 +385,7 @@ def test_include_warmup_disables_auto_skip() -> None:
         total_queries=20,
         peak_concurrency=1,
         bucket_ms=20,
-        suite_loader=_suite_loader,
-        searcher=_fast_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
         clock=scripted_clock(),
     )
     raw = run_probe_burst(
@@ -407,8 +394,7 @@ def test_include_warmup_disables_auto_skip() -> None:
         peak_concurrency=1,
         bucket_ms=20,
         include_warmup=True,
-        suite_loader=_suite_loader,
-        searcher=_fast_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
         clock=scripted_clock(),
     )
     assert raw.include_warmup is True
@@ -448,8 +434,7 @@ def test_skipped_buckets_serialise_in_envelope() -> None:
         total_queries=15,
         peak_concurrency=1,
         bucket_ms=20,
-        suite_loader=_suite_loader,
-        searcher=slow_first_then_fast,
+        deps=ProbeDeps(load_suite=_suite_loader, search=slow_first_then_fast),
     )
     env = result.to_envelope()
     assert "skipped_buckets" in env
@@ -486,8 +471,7 @@ def test_partial_final_bucket_flagged_when_wallclock_clips_window() -> None:
         total_queries=5,
         peak_concurrency=1,
         bucket_ms=500,
-        suite_loader=_suite_loader,
-        searcher=_fast_client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_fast_client.search),
     )
     assert result.partial_final_bucket is True, (
         f"expected partial-final bucket; wallclock={result.wallclock_s} "

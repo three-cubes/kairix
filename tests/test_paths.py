@@ -41,62 +41,53 @@ def _clear_path_cache():
 @pytest.mark.unit
 class TestKairixPaths:
     @pytest.mark.unit
-    def test_document_root_from_env(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/custom/vault")
-        paths = KairixPaths.resolve()
+    def test_document_root_from_env(self) -> None:
+        paths = KairixPaths.resolve(env={"KAIRIX_DOCUMENT_ROOT": "/custom/vault"})
         assert paths.document_root == Path("/custom/vault")
 
     @pytest.mark.unit
-    def test_db_path_from_env(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_DB_PATH", "/custom/db/index.sqlite")
-        paths = KairixPaths.resolve()
+    def test_db_path_from_env(self) -> None:
+        paths = KairixPaths.resolve(env={"KAIRIX_DB_PATH": "/custom/db/index.sqlite"})
         assert paths.db_path == Path("/custom/db/index.sqlite")
 
     @pytest.mark.unit
-    def test_log_dir_from_env(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_LOG_DIR", "/custom/logs")
-        paths = KairixPaths.resolve()
+    def test_log_dir_from_env(self) -> None:
+        paths = KairixPaths.resolve(env={"KAIRIX_LOG_DIR": "/custom/logs"})
         assert paths.log_dir == Path("/custom/logs")
 
     @pytest.mark.unit
-    def test_workspace_root_from_env(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_WORKSPACE_ROOT", "/custom/workspaces")
-        paths = KairixPaths.resolve()
+    def test_workspace_root_from_env(self) -> None:
+        paths = KairixPaths.resolve(env={"KAIRIX_WORKSPACE_ROOT": "/custom/workspaces"})
         assert paths.workspace_root == Path("/custom/workspaces")
 
     @pytest.mark.unit
-    def test_defaults_not_data_paths(self, monkeypatch) -> None:
+    def test_defaults_not_data_paths(self) -> None:
         """Default paths should not contain /data/ (TC-specific)."""
-        monkeypatch.delenv("KAIRIX_DOCUMENT_ROOT", raising=False)
-        monkeypatch.delenv("KAIRIX_DB_PATH", raising=False)
-        monkeypatch.delenv("KAIRIX_LOG_DIR", raising=False)
-        monkeypatch.delenv("KAIRIX_WORKSPACE_ROOT", raising=False)
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        paths = KairixPaths.resolve()
+        paths = KairixPaths.resolve(env={})
         assert "/data/" not in str(paths.document_root)
         assert "/data/" not in str(paths.db_path)
 
     @pytest.mark.unit
-    def test_docker_detection_via_env(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_DOCKER", "1")
-        monkeypatch.delenv("KAIRIX_DOCUMENT_ROOT", raising=False)
-        monkeypatch.delenv("KAIRIX_DB_PATH", raising=False)
-        paths = KairixPaths.resolve()
+    def test_docker_detection_via_env(self) -> None:
+        paths = KairixPaths.resolve(env={"KAIRIX_DOCKER": "1"})
         assert str(paths.document_root) == "/data/documents"
 
     @pytest.mark.unit
-    def test_clear_cache_allows_re_resolution(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/first")
-        paths1 = KairixPaths.resolve()
-        clear_cache()
-        monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/second")
-        paths2 = KairixPaths.resolve()
-        assert paths1.document_root != paths2.document_root
+    def test_explicit_env_resolution_is_not_cached(self) -> None:
+        """An explicit ``env`` mapping is a one-off resolution — two different
+        mappings resolve to two different roots (never a stale cached answer).
+
+        Sabotage: route ``resolve(env=...)`` through the lru_cache'd
+        ``_resolve_cached`` and the second call returns ``/first``.
+        """
+        paths1 = KairixPaths.resolve(env={"KAIRIX_DOCUMENT_ROOT": "/first"})
+        paths2 = KairixPaths.resolve(env={"KAIRIX_DOCUMENT_ROOT": "/second"})
+        assert paths1.document_root == Path("/first")
+        assert paths2.document_root == Path("/second")
 
     @pytest.mark.unit
-    def test_tilde_expansion(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "~/my-vault")
-        paths = KairixPaths.resolve()
+    def test_tilde_expansion(self) -> None:
+        paths = KairixPaths.resolve(env={"KAIRIX_DOCUMENT_ROOT": "~/my-vault"})
         assert "~" not in str(paths.document_root)
         assert str(paths.document_root).endswith("/my-vault")
 
@@ -104,25 +95,14 @@ class TestKairixPaths:
 @pytest.mark.unit
 class TestDocumentRootEnvVar:
     @pytest.mark.unit
-    def test_document_root_from_env(self, monkeypatch, tmp_path):
-        from kairix.paths import clear_cache
-
-        clear_cache()
-        monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", str(tmp_path))
-        result = document_root()
+    def test_document_root_from_env(self, tmp_path):
+        result = document_root(env={"KAIRIX_DOCUMENT_ROOT": str(tmp_path)})
         assert result == tmp_path
-        clear_cache()
 
     @pytest.mark.unit
-    def test_document_root_default_when_unset(self, monkeypatch):
-        from kairix.paths import clear_cache
-
-        clear_cache()
-        monkeypatch.delenv("KAIRIX_DOCUMENT_ROOT", raising=False)
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        result = document_root()
+    def test_document_root_default_when_unset(self):
+        result = document_root(env={})
         assert result == Path.home() / "Documents"
-        clear_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -133,35 +113,28 @@ class TestDocumentRootEnvVar:
 @pytest.mark.unit
 class TestIsDocker:
     @pytest.mark.unit
-    def test_dockerenv_file_present(self, monkeypatch) -> None:
+    def test_dockerenv_file_present(self) -> None:
         """/.dockerenv existing should trigger docker detection."""
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
         with patch("os.path.exists", return_value=True):
-            assert is_docker_runtime_check() is True
+            assert is_docker_runtime_check(env={}) is True
 
     @pytest.mark.unit
-    def test_kairix_docker_env_var(self, monkeypatch) -> None:
+    def test_kairix_docker_env_var(self) -> None:
         """KAIRIX_DOCKER=1 should trigger docker detection."""
-        monkeypatch.setenv("KAIRIX_DOCKER", "1")
         with patch("os.path.exists", return_value=False):
-            assert is_docker_runtime_check() is True
+            assert is_docker_runtime_check(env={"KAIRIX_DOCKER": "1"}) is True
 
     @pytest.mark.unit
-    def test_container_env_var(self, monkeypatch) -> None:
+    def test_container_env_var(self) -> None:
         """Non-empty 'container' env var should trigger docker detection."""
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.setenv("container", "podman")
         with patch("os.path.exists", return_value=False):
-            assert is_docker_runtime_check() is True
+            assert is_docker_runtime_check(env={"container": "podman"}) is True
 
     @pytest.mark.unit
-    def test_not_docker_when_nothing_set(self, monkeypatch) -> None:
+    def test_not_docker_when_nothing_set(self) -> None:
         """Should return False when no docker indicators present."""
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
         with patch("os.path.exists", return_value=False):
-            assert is_docker_runtime_check() is False
+            assert is_docker_runtime_check(env={}) is False
 
 
 # ---------------------------------------------------------------------------
@@ -206,39 +179,28 @@ class TestDefaultDataDir:
         assert result == Path("/var/lib/kairix")
 
     @pytest.mark.unit
-    def test_xdg_data_home(self, monkeypatch) -> None:
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
-        monkeypatch.setenv("XDG_DATA_HOME", "/custom/data")
+    def test_xdg_data_home(self) -> None:
         with patch("os.path.exists", return_value=False):
             with patch.object(Path, "exists", return_value=False):
-                result = default_data_dir()
+                result = default_data_dir(env={"XDG_DATA_HOME": "/custom/data"})
         assert result == Path("/custom/data/kairix")
 
     @pytest.mark.unit
-    def test_windows_localappdata(self, monkeypatch) -> None:
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
-        monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\test\\AppData\\Local")
-        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    def test_windows_localappdata(self) -> None:
         with (
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=False),
         ):
-            result = default_data_dir(platform="win32")
+            result = default_data_dir(platform="win32", env={"LOCALAPPDATA": "C:\\Users\\test\\AppData\\Local"})
         assert result == Path("C:\\Users\\test\\AppData\\Local") / "kairix"
 
     @pytest.mark.unit
-    def test_default_fallback(self, monkeypatch) -> None:
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
-        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-        monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    def test_default_fallback(self) -> None:
         with (
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=False),
         ):
-            result = default_data_dir()
+            result = default_data_dir(env={})
         assert result == Path.home() / ".local" / "share" / "kairix"
 
 
@@ -264,41 +226,30 @@ class TestDefaultCacheDir:
         assert result == Path("/var/cache/kairix")
 
     @pytest.mark.unit
-    def test_xdg_cache_home(self, monkeypatch) -> None:
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
-        monkeypatch.setenv("XDG_CACHE_HOME", "/custom/cache")
+    def test_xdg_cache_home(self) -> None:
         with (
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=False),
         ):
-            result = default_cache_dir()
+            result = default_cache_dir(env={"XDG_CACHE_HOME": "/custom/cache"})
         assert result == Path("/custom/cache/kairix")
 
     @pytest.mark.unit
-    def test_windows_localappdata_cache(self, monkeypatch) -> None:
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
-        monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\test\\AppData\\Local")
-        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    def test_windows_localappdata_cache(self) -> None:
         with (
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=False),
         ):
-            result = default_cache_dir(platform="win32")
+            result = default_cache_dir(platform="win32", env={"LOCALAPPDATA": "C:\\Users\\test\\AppData\\Local"})
         assert result == Path("C:\\Users\\test\\AppData\\Local") / "kairix" / "cache"
 
     @pytest.mark.unit
-    def test_default_fallback(self, monkeypatch) -> None:
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
-        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
-        monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    def test_default_fallback(self) -> None:
         with (
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=False),
         ):
-            result = default_cache_dir()
+            result = default_cache_dir(env={})
         assert result == Path.home() / ".cache" / "kairix"
 
 
@@ -310,35 +261,31 @@ class TestDefaultCacheDir:
 @pytest.mark.unit
 class TestLoadPathsFromConfig:
     @pytest.mark.unit
-    def test_returns_empty_when_no_config(self, monkeypatch, tmp_path) -> None:
-        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(tmp_path / "nonexistent.yaml"))
-        result = load_paths_from_config()
+    def test_returns_empty_when_no_config(self, tmp_path) -> None:
+        result = load_paths_from_config(env={"KAIRIX_CONFIG_PATH": str(tmp_path / "nonexistent.yaml")})
         assert result == {}
 
     @pytest.mark.integration
-    def test_loads_paths_from_yaml(self, monkeypatch, tmp_path) -> None:
+    def test_loads_paths_from_yaml(self, tmp_path) -> None:
         config_file = tmp_path / "kairix.config.yaml"
         config_file.write_text("paths:\n  document_root: /from/config\n  db_path: /from/config/db.sqlite\n")
-        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(config_file))
-        result = load_paths_from_config()
+        result = load_paths_from_config(env={"KAIRIX_CONFIG_PATH": str(config_file)})
         assert result.get("document_root") == "/from/config"
         assert result.get("db_path") == "/from/config/db.sqlite"
 
     @pytest.mark.integration
-    def test_graceful_fallback_on_malformed_yaml(self, monkeypatch, tmp_path) -> None:
+    def test_graceful_fallback_on_malformed_yaml(self, tmp_path) -> None:
         config_file = tmp_path / "bad.yaml"
         config_file.write_text("not: [valid: yaml: {{")
-        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(config_file))
-        result = load_paths_from_config()
+        result = load_paths_from_config(env={"KAIRIX_CONFIG_PATH": str(config_file)})
         # Should return {} rather than raising
         assert isinstance(result, dict)
 
     @pytest.mark.integration
-    def test_returns_empty_when_no_paths_section(self, monkeypatch, tmp_path) -> None:
+    def test_returns_empty_when_no_paths_section(self, tmp_path) -> None:
         config_file = tmp_path / "kairix.config.yaml"
         config_file.write_text("logging:\n  level: DEBUG\n")
-        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(config_file))
-        result = load_paths_from_config()
+        result = load_paths_from_config(env={"KAIRIX_CONFIG_PATH": str(config_file)})
         assert result == {}
 
 
@@ -350,15 +297,20 @@ class TestLoadPathsFromConfig:
 @pytest.mark.unit
 class TestClearCache:
     @pytest.mark.unit
-    def test_clear_cache_invalidates(self, monkeypatch) -> None:
-        """Calling clear_cache() should allow re-resolution with new env vars."""
-        monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/alpha")
+    def test_clear_cache_invalidates(self) -> None:
+        """``clear_cache()`` drops the cached process-wide resolution.
+
+        Observed through object identity on the public ``resolve()`` (the
+        process cache is the unit under test) rather than by mutating the
+        process env between resolves.
+
+        Sabotage: make ``clear_cache`` a no-op and the post-clear resolve
+        returns the very same cached instance.
+        """
         p1 = KairixPaths.resolve()
+        assert KairixPaths.resolve() is p1, "resolve() must be cached per process"
         clear_cache()
-        monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/beta")
-        p2 = KairixPaths.resolve()
-        assert p1.document_root == Path("/alpha")
-        assert p2.document_root == Path("/beta")
+        assert KairixPaths.resolve() is not p1
 
 
 # ---------------------------------------------------------------------------
@@ -373,64 +325,54 @@ class TestClearCache:
 @pytest.mark.unit
 class TestServiceInstallDefaults:
     @pytest.mark.unit
-    def test_service_install_document_root(self, monkeypatch) -> None:
+    def test_service_install_document_root(self) -> None:
         """When /opt/kairix/.venv exists and Docker is not, doc root is /var/lib/kairix/documents."""
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
         with (
             patch("os.path.exists", return_value=False),  # not Docker
             patch.object(Path, "exists", return_value=True),  # /opt/kairix/.venv present
         ):
-            assert default_document_root() == Path("/var/lib/kairix/documents")
+            assert default_document_root(env={}) == Path("/var/lib/kairix/documents")
 
     @pytest.mark.unit
-    def test_service_install_data_dir(self, monkeypatch) -> None:
+    def test_service_install_data_dir(self) -> None:
         """Service install → data dir is /var/lib/kairix."""
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
         with (
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=True),
         ):
-            assert default_data_dir() == Path("/var/lib/kairix")
+            assert default_data_dir(env={}) == Path("/var/lib/kairix")
 
     @pytest.mark.unit
-    def test_service_install_cache_dir(self, monkeypatch) -> None:
+    def test_service_install_cache_dir(self) -> None:
         """Service install → cache dir is /var/cache/kairix (NOT /var/lib/kairix)."""
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
         with (
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=True),
         ):
-            assert default_cache_dir() == Path("/var/cache/kairix")
+            assert default_cache_dir(env={}) == Path("/var/cache/kairix")
 
     @pytest.mark.unit
-    def test_service_install_workspace_root(self, monkeypatch) -> None:
+    def test_service_install_workspace_root(self) -> None:
         """Service install → workspaces under /var/lib/kairix/workspaces (FHS).
 
         #447 / PLA-276 reconciled this off the old /data/workspaces default
         so agent-memory logs sit on the same persistent data tree as the
         SQLite index. Docker shares the same FHS workspace root.
         """
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
         with (
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=True),
         ):
-            assert default_workspace_root() == Path("/var/lib/kairix/workspaces")
+            assert default_workspace_root(env={}) == Path("/var/lib/kairix/workspaces")
 
     @pytest.mark.unit
-    def test_workspace_root_user_default(self, monkeypatch) -> None:
+    def test_workspace_root_user_default(self) -> None:
         """Neither Docker nor service install → workspaces under ~/.kairix/workspaces."""
-        monkeypatch.delenv("KAIRIX_DOCKER", raising=False)
-        monkeypatch.delenv("container", raising=False)
         with (
             patch("os.path.exists", return_value=False),
             patch.object(Path, "exists", return_value=False),
         ):
-            assert default_workspace_root() == Path.home() / ".kairix" / "workspaces"
+            assert default_workspace_root(env={}) == Path.home() / ".kairix" / "workspaces"
 
 
 # ---------------------------------------------------------------------------
@@ -446,24 +388,22 @@ class TestServiceInstallDefaults:
 @pytest.mark.unit
 class TestPrimaryIndexUnderDataDir:
     @pytest.mark.unit
-    def test_db_path_defaults_under_data_dir_not_cache(self, monkeypatch) -> None:
+    def test_db_path_defaults_under_data_dir_not_cache(self) -> None:
         """``KairixPaths.resolve().db_path`` falls back to
         ``default_data_dir()/index.sqlite`` (the persistent data dir), NOT
         ``default_cache_dir()/index.sqlite`` — matching ``index_path()``.
 
-        ``delenv`` (not ``setenv``) keeps this F2-clean: it only strips any
-        ambient override so the documented FALLBACK is exercised; the
-        hermetic conftest already empties the config search path.
+        An empty ``env`` mapping strips any ambient override so the
+        documented FALLBACK is exercised (F2-clean); the hermetic conftest
+        already empties the config search path.
 
         Sabotage: revert the ``_resolve_cached`` db_path fallback to
         ``cache_dir / "index.sqlite"`` and this fails on any host where the
         data dir differs from the cache dir.
         """
-        monkeypatch.delenv("KAIRIX_DB_PATH", raising=False)
-        clear_cache()
-        resolved = KairixPaths.resolve()
-        assert resolved.db_path == default_data_dir() / "index.sqlite"
-        assert resolved.db_path != default_cache_dir() / "index.sqlite"
+        resolved = KairixPaths.resolve(env={})
+        assert resolved.db_path == default_data_dir(env={}) / "index.sqlite"
+        assert resolved.db_path != default_cache_dir(env={}) / "index.sqlite"
 
     @pytest.mark.unit
     def test_index_path_container_is_on_fhs_data_tree(self) -> None:
@@ -477,6 +417,70 @@ class TestPrimaryIndexUnderDataDir:
 
         assert index_path(Mode.container) == data_dir(Mode.container) / "index.sqlite"
         assert index_path(Mode.container) == Path("/var/lib/kairix/index.sqlite")
+
+
+@pytest.mark.unit
+class TestDataDirOverride:
+    @pytest.mark.unit
+    def test_kairix_data_dir_override_expands_user(self) -> None:
+        """Regression: ``data_dir()`` ``~``-expands ``KAIRIX_DATA_DIR`` like
+        ``default_data_dir`` does — pre-fix it returned ``Path("~/kairix-data")``
+        so every cache under ``data_dir()`` landed in a literal ``~`` dir under
+        the CWD. Sabotage: drop ``.expanduser()`` → fails.
+        """
+        from kairix.paths import data_dir
+
+        assert data_dir(env={"KAIRIX_DATA_DIR": "~/kairix-data"}) == Path.home() / "kairix-data"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("resolver", "var"),
+        [("reference_library_root", "KAIRIX_REFLIB_ROOT"), ("bundled_suites_root", "KAIRIX_SUITES_ROOT")],
+    )
+    def test_root_overrides_expand_user(self, resolver: str, var: str) -> None:
+        """Regression: the reference-library / suites root overrides
+        ``~``-expand like ``KAIRIX_DATA_DIR`` — pre-fix they returned
+        ``Path("~/x")``, a literal ``~`` dir under the CWD. Sabotage: return
+        ``Path(override)`` without ``.expanduser()`` in
+        ``resolve_first_existing_dir`` → both cases fail.
+        """
+        import kairix.paths as paths
+
+        assert getattr(paths, resolver)(env={var: "~/kairix-root"}) == Path.home() / "kairix-root"
+
+    @pytest.mark.unit
+    def test_user_mode_data_dir_honours_supplied_xdg_data_home(self) -> None:
+        """Regression: the ``env=`` seam reaches the user-mode XDG branch —
+        pre-fix ``data_dir(env=...)`` dispatched on the supplied mapping's mode
+        but then read ``XDG_DATA_HOME`` from the live process env. Sabotage:
+        drop ``env=e`` from the recursive ``data_dir`` call → fails.
+        """
+        from kairix.paths import Mode, data_dir
+
+        env = {"XDG_DATA_HOME": "/injected-xdg-data"}
+        assert data_dir(Mode.user, env=env) == Path("/injected-xdg-data/kairix")
+        if Mode.detect(env) == Mode.user:
+            assert data_dir(env=env) == Path("/injected-xdg-data/kairix")
+
+    @pytest.mark.unit
+    def test_warm_flag_override_expands_user(self) -> None:
+        """Regression: ``KAIRIX_WARM_FLAG_PATH=~/warm.flag`` resolves under the
+        home directory, not a literal ``~`` dir. Sabotage: drop
+        ``.expanduser()`` in ``warm_flag_path`` → fails.
+        """
+        from kairix.paths import warm_flag_path
+
+        assert warm_flag_path(env={"KAIRIX_WARM_FLAG_PATH": "~/warm.flag"}) == Path.home() / "warm.flag"
+
+    @pytest.mark.unit
+    def test_summaries_db_override_expands_user(self) -> None:
+        """Regression: ``KAIRIX_SUMMARIES_DB=~/s.db`` resolves under the home
+        directory, not a literal ``~`` dir. Sabotage: drop ``.expanduser()`` in
+        ``summaries_db_path`` → fails.
+        """
+        from kairix.paths import summaries_db_path
+
+        assert summaries_db_path(env={"KAIRIX_SUMMARIES_DB": "~/s.db"}) == Path.home() / "s.db"
 
 
 @pytest.mark.unit
@@ -518,18 +522,17 @@ class TestDockerFhsLayout:
 @pytest.mark.unit
 class TestShippedAssetPaths:
     @pytest.mark.unit
-    def test_reference_library_root_env_override(self, monkeypatch) -> None:
+    def test_reference_library_root_env_override(self) -> None:
         """KAIRIX_REFLIB_ROOT overrides every candidate, even when missing.
 
         The override is returned as-is so a misconfigured operator path
         surfaces as an explicit downstream error rather than silently
         falling back to a resolved candidate (#450).
         """
-        monkeypatch.setenv("KAIRIX_REFLIB_ROOT", "/custom/reflib")
-        assert reference_library_root() == Path("/custom/reflib")
+        assert reference_library_root(env={"KAIRIX_REFLIB_ROOT": "/custom/reflib"}) == Path("/custom/reflib")
 
     @pytest.mark.unit
-    def test_reference_library_root_fallback_when_no_candidate(self, monkeypatch) -> None:
+    def test_reference_library_root_fallback_when_no_candidate(self) -> None:
         """With the env unset and no candidate dir on disk, falls back to the
         CWD-relative ``reference-library`` (legacy behaviour).
 
@@ -538,7 +541,6 @@ class TestShippedAssetPaths:
         doesn't shadow the assertion — F2-clean: the only env touched is the
         documented cache override, not a kairix-internal seam.
         """
-        monkeypatch.delenv("KAIRIX_REFLIB_ROOT", raising=False)
         # default_cache_dir honours KAIRIX_CACHE_DIR; point it at an empty
         # tmp tree so the cache candidate doesn't exist, and stub the
         # repo-root candidate out by asserting only when /opt + repo-root
@@ -555,14 +557,14 @@ class TestShippedAssetPaths:
         assert result == Path("reference-library")
 
     @pytest.mark.unit
-    def test_reference_corpus_install_dir_is_cache_candidate(self, monkeypatch, tmp_path) -> None:
+    def test_reference_corpus_install_dir_is_cache_candidate(self, tmp_path) -> None:
         """``reference_corpus_install_dir`` equals the cache-dir candidate the
         resolver looks in — so a fetch lands where the next run reads from.
         """
         from kairix.paths import reference_corpus_install_dir
 
-        monkeypatch.setenv("KAIRIX_CACHE_DIR", str(tmp_path))
-        assert reference_corpus_install_dir() == tmp_path / "reference-library"
+        env = {"KAIRIX_CACHE_DIR": str(tmp_path)}
+        assert reference_corpus_install_dir(env=env) == tmp_path / "reference-library"
 
     @pytest.mark.unit
     def test_bundled_suites_root_resolves_in_package_copy(self) -> None:
@@ -577,10 +579,9 @@ class TestShippedAssetPaths:
         assert (root / "contract-suite.yaml").is_file()
 
     @pytest.mark.unit
-    def test_bundled_suites_root_env_override(self, monkeypatch) -> None:
+    def test_bundled_suites_root_env_override(self) -> None:
         """KAIRIX_SUITES_ROOT overrides every other lookup (step 1 of #268 resolution)."""
-        monkeypatch.setenv("KAIRIX_SUITES_ROOT", "/custom/suites")
-        assert bundled_suites_root() == Path("/custom/suites")
+        assert bundled_suites_root(env={"KAIRIX_SUITES_ROOT": "/custom/suites"}) == Path("/custom/suites")
 
 
 # ---------------------------------------------------------------------------
@@ -592,9 +593,8 @@ class TestShippedAssetPaths:
 @pytest.mark.unit
 class TestLogDirWrapper:
     @pytest.mark.unit
-    def test_log_dir_from_env(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_LOG_DIR", "/custom/logs")
-        assert log_dir() == Path("/custom/logs")
+    def test_log_dir_from_env(self) -> None:
+        assert log_dir(env={"KAIRIX_LOG_DIR": "/custom/logs"}) == Path("/custom/logs")
 
 
 # ---------------------------------------------------------------------------
@@ -606,25 +606,23 @@ class TestLogDirWrapper:
 @pytest.mark.unit
 class TestMaintenanceSkipNoopThreshold:
     @pytest.mark.unit
-    def test_unset_returns_default_10(self, monkeypatch) -> None:
+    def test_unset_returns_default_10(self) -> None:
         """Without the env var, threshold falls back to 10."""
-        monkeypatch.delenv("KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD", raising=False)
-        assert maintenance_skip_noop_threshold() == 10
+        assert maintenance_skip_noop_threshold(env={}) == 10
 
     @pytest.mark.unit
-    def test_valid_int_override(self, monkeypatch) -> None:
+    def test_valid_int_override(self) -> None:
         """A valid integer string is parsed and returned."""
-        monkeypatch.setenv("KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD", "42")
-        assert maintenance_skip_noop_threshold() == 42
+        assert maintenance_skip_noop_threshold(env={"KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD": "42"}) == 42
 
     @pytest.mark.unit
-    def test_invalid_falls_back_to_10_and_warns(self, monkeypatch, caplog) -> None:
+    def test_invalid_falls_back_to_10_and_warns(self, caplog) -> None:
         """An unparseable value logs a warning and falls back to 10."""
         import logging
 
-        monkeypatch.setenv("KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD", "not-an-int")
+        env = {"KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD": "not-an-int"}
         with caplog.at_level(logging.WARNING, logger="kairix.paths"):
-            assert maintenance_skip_noop_threshold() == 10
+            assert maintenance_skip_noop_threshold(env=env) == 10
         assert any("not an int" in rec.message for rec in caplog.records), (
             "expected a warning about the invalid int value"
         )
@@ -638,31 +636,28 @@ class TestMaintenanceSkipNoopThreshold:
 @pytest.mark.unit
 class TestEntityOverridesPath:
     @pytest.mark.unit
-    def test_explicit_env_override_wins(self, monkeypatch, tmp_path) -> None:
+    def test_explicit_env_override_wins(self, tmp_path) -> None:
         """``KAIRIX_ENTITY_OVERRIDES_PATH`` takes precedence over the default."""
         from kairix.paths import entity_overrides_path
 
         custom = tmp_path / "custom-overrides.md"
-        monkeypatch.setenv("KAIRIX_ENTITY_OVERRIDES_PATH", str(custom))
-        assert entity_overrides_path() == custom
+        assert entity_overrides_path(env={"KAIRIX_ENTITY_OVERRIDES_PATH": str(custom)}) == custom
 
     @pytest.mark.unit
-    def test_default_lives_under_document_root(self, monkeypatch, tmp_path) -> None:
+    def test_default_lives_under_document_root(self, tmp_path) -> None:
         """Without the override env var, the path sits under
         ``{document_root}/04-Agent-Knowledge/_entity-overrides.md``."""
         from kairix.paths import entity_overrides_path
 
-        monkeypatch.delenv("KAIRIX_ENTITY_OVERRIDES_PATH", raising=False)
-        monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", str(tmp_path))
-        assert entity_overrides_path() == tmp_path / "04-Agent-Knowledge" / "_entity-overrides.md"
+        env = {"KAIRIX_DOCUMENT_ROOT": str(tmp_path)}
+        assert entity_overrides_path(env=env) == tmp_path / "04-Agent-Knowledge" / "_entity-overrides.md"
 
     @pytest.mark.unit
-    def test_explicit_env_expands_user(self, monkeypatch) -> None:
+    def test_explicit_env_expands_user(self) -> None:
         """A ``~``-prefixed override path is expanded to the home directory."""
         from kairix.paths import entity_overrides_path
 
-        monkeypatch.setenv("KAIRIX_ENTITY_OVERRIDES_PATH", "~/overrides.md")
-        result = entity_overrides_path()
+        result = entity_overrides_path(env={"KAIRIX_ENTITY_OVERRIDES_PATH": "~/overrides.md"})
         assert "~" not in str(result)
         assert str(result).endswith("overrides.md")
 
@@ -685,100 +680,89 @@ class TestEntityOverridesPath:
 
 class TestReadIntEnv:
     @pytest.mark.unit
-    def test_returns_int_when_set_valid(self, monkeypatch) -> None:
+    def test_returns_int_when_set_valid(self) -> None:
         """Set env → parsed int. Sabotage: replace return int(raw) with default → fails."""
         from kairix.paths import read_int_env
 
-        monkeypatch.setenv("KAIRIX_TEST_INT", "42")
-        assert read_int_env("KAIRIX_TEST_INT", default=10) == 42
+        assert read_int_env("KAIRIX_TEST_INT", default=10, env={"KAIRIX_TEST_INT": "42"}) == 42
 
     @pytest.mark.unit
-    def test_returns_default_when_unset(self, monkeypatch) -> None:
+    def test_returns_default_when_unset(self) -> None:
         """Unset env → default. Sabotage: drop the None early-return → int(None) raises."""
         from kairix.paths import read_int_env
 
-        monkeypatch.delenv("KAIRIX_TEST_INT", raising=False)
-        assert read_int_env("KAIRIX_TEST_INT", default=7) == 7
+        assert read_int_env("KAIRIX_TEST_INT", default=7, env={}) == 7
 
     @pytest.mark.unit
-    def test_returns_default_when_invalid(self, monkeypatch) -> None:
+    def test_returns_default_when_invalid(self) -> None:
         """Garbage → default + warning. Sabotage: remove try/except → int('abc') crashes."""
         from kairix.paths import read_int_env
 
-        monkeypatch.setenv("KAIRIX_TEST_INT", "not-an-int")
-        assert read_int_env("KAIRIX_TEST_INT", default=99) == 99
+        assert read_int_env("KAIRIX_TEST_INT", default=99, env={"KAIRIX_TEST_INT": "not-an-int"}) == 99
 
 
 class TestReadFloatEnv:
     @pytest.mark.unit
-    def test_returns_float_when_set_valid(self, monkeypatch) -> None:
+    def test_returns_float_when_set_valid(self) -> None:
         """Set env → parsed float. Sabotage: change return to default."""
         from kairix.paths import read_float_env
 
-        monkeypatch.setenv("KAIRIX_TEST_FLOAT", "3.5")
-        assert read_float_env("KAIRIX_TEST_FLOAT", default=1.0) == 3.5
+        assert read_float_env("KAIRIX_TEST_FLOAT", default=1.0, env={"KAIRIX_TEST_FLOAT": "3.5"}) == 3.5
 
     @pytest.mark.unit
-    def test_returns_default_when_unset(self, monkeypatch) -> None:
+    def test_returns_default_when_unset(self) -> None:
         """Unset → default. Sabotage: drop None early-return → float(None) raises."""
         from kairix.paths import read_float_env
 
-        monkeypatch.delenv("KAIRIX_TEST_FLOAT", raising=False)
-        assert read_float_env("KAIRIX_TEST_FLOAT", default=2.5) == 2.5
+        assert read_float_env("KAIRIX_TEST_FLOAT", default=2.5, env={}) == 2.5
 
     @pytest.mark.unit
-    def test_returns_default_when_invalid(self, monkeypatch) -> None:
+    def test_returns_default_when_invalid(self) -> None:
         """Garbage → fallback. Sabotage: remove try/except → ValueError on float('xyz')."""
         from kairix.paths import read_float_env
 
-        monkeypatch.setenv("KAIRIX_TEST_FLOAT", "xyz")
-        assert read_float_env("KAIRIX_TEST_FLOAT", default=0.5) == 0.5
+        assert read_float_env("KAIRIX_TEST_FLOAT", default=0.5, env={"KAIRIX_TEST_FLOAT": "xyz"}) == 0.5
 
 
 class TestEmbedPoolKeepalive:
     @pytest.mark.unit
-    def test_valid_env_returns_set_value(self, monkeypatch) -> None:
+    def test_valid_env_returns_set_value(self) -> None:
         """KAIRIX_EMBED_POOL_KEEPALIVE=25 → 25. Sabotage: ignore env → default."""
         from kairix.paths import embed_pool_keepalive
 
-        monkeypatch.setenv("KAIRIX_EMBED_POOL_KEEPALIVE", "25")
-        assert embed_pool_keepalive(10) == 25
+        assert embed_pool_keepalive(10, env={"KAIRIX_EMBED_POOL_KEEPALIVE": "25"}) == 25
 
     @pytest.mark.unit
-    def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
+    def test_invalid_env_falls_back_to_default(self) -> None:
         """Garbage → default + warning. Sabotage: remove try/except → int() raises."""
         from kairix.paths import embed_pool_keepalive
 
-        monkeypatch.setenv("KAIRIX_EMBED_POOL_KEEPALIVE", "bad")
-        assert embed_pool_keepalive(10) == 10
+        assert embed_pool_keepalive(10, env={"KAIRIX_EMBED_POOL_KEEPALIVE": "bad"}) == 10
 
 
 class TestEmbedPoolExpiry:
     @pytest.mark.unit
-    def test_valid_env_returns_set_value(self, monkeypatch) -> None:
+    def test_valid_env_returns_set_value(self) -> None:
         """KAIRIX_EMBED_POOL_EXPIRY_S=45.5 → 45.5. Sabotage: ignore env → default."""
         from kairix.paths import embed_pool_expiry_s
 
-        monkeypatch.setenv("KAIRIX_EMBED_POOL_EXPIRY_S", "45.5")
-        assert embed_pool_expiry_s(30.0) == 45.5
+        assert embed_pool_expiry_s(30.0, env={"KAIRIX_EMBED_POOL_EXPIRY_S": "45.5"}) == 45.5
 
     @pytest.mark.unit
-    def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
+    def test_invalid_env_falls_back_to_default(self) -> None:
         """Garbage → default. Sabotage: remove try/except → float() raises."""
         from kairix.paths import embed_pool_expiry_s
 
-        monkeypatch.setenv("KAIRIX_EMBED_POOL_EXPIRY_S", "nope")
-        assert embed_pool_expiry_s(30.0) == 30.0
+        assert embed_pool_expiry_s(30.0, env={"KAIRIX_EMBED_POOL_EXPIRY_S": "nope"}) == 30.0
 
 
 class TestEmbedVectorDimsFallback:
     @pytest.mark.unit
-    def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
+    def test_invalid_env_falls_back_to_default(self) -> None:
         """KAIRIX_EMBED_DIMS=abc → default + warning. Sabotage: remove try/except → int() raises."""
         from kairix.paths import embed_vector_dims
 
-        monkeypatch.setenv("KAIRIX_EMBED_DIMS", "abc")
-        assert embed_vector_dims(default=1536) == 1536
+        assert embed_vector_dims(default=1536, env={"KAIRIX_EMBED_DIMS": "abc"}) == 1536
 
 
 class TestEmbedCoalesceWindowMs:
@@ -790,7 +774,7 @@ class TestEmbedCoalesceWindowMs:
     """
 
     @pytest.mark.unit
-    def test_default_when_unset(self, monkeypatch) -> None:
+    def test_default_when_unset(self) -> None:
         """Unset env → documented default 50.
 
         Sabotage: change the default in ``embed_coalesce_window_ms``
@@ -799,11 +783,10 @@ class TestEmbedCoalesceWindowMs:
         """
         from kairix.paths import embed_coalesce_window_ms
 
-        monkeypatch.delenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", raising=False)
-        assert embed_coalesce_window_ms() == 50
+        assert embed_coalesce_window_ms(env={}) == 50
 
     @pytest.mark.unit
-    def test_valid_int_passes_through(self, monkeypatch) -> None:
+    def test_valid_int_passes_through(self) -> None:
         """An in-range value comes back unchanged.
 
         Sabotage: hard-code the return value and the operator's
@@ -811,11 +794,10 @@ class TestEmbedCoalesceWindowMs:
         """
         from kairix.paths import embed_coalesce_window_ms
 
-        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "100")
-        assert embed_coalesce_window_ms() == 100
+        assert embed_coalesce_window_ms(env={"KAIRIX_EMBED_COALESCE_WINDOW_MS": "100"}) == 100
 
     @pytest.mark.unit
-    def test_oob_high_clamps_to_500(self, monkeypatch) -> None:
+    def test_oob_high_clamps_to_500(self) -> None:
         """Out-of-range high value clamps to the documented upper bound.
 
         Sabotage: drop the ``min(500, value)`` clamp and an operator
@@ -824,11 +806,10 @@ class TestEmbedCoalesceWindowMs:
         """
         from kairix.paths import embed_coalesce_window_ms
 
-        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "99999")
-        assert embed_coalesce_window_ms() == 500
+        assert embed_coalesce_window_ms(env={"KAIRIX_EMBED_COALESCE_WINDOW_MS": "99999"}) == 500
 
     @pytest.mark.unit
-    def test_oob_low_clamps_to_zero(self, monkeypatch) -> None:
+    def test_oob_low_clamps_to_zero(self) -> None:
         """Negative value clamps to 0 (which is the documented "disable" mode).
 
         Sabotage: drop the ``max(0, ...)`` clamp and a negative window
@@ -836,39 +817,35 @@ class TestEmbedCoalesceWindowMs:
         """
         from kairix.paths import embed_coalesce_window_ms
 
-        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "-100")
-        assert embed_coalesce_window_ms() == 0
+        assert embed_coalesce_window_ms(env={"KAIRIX_EMBED_COALESCE_WINDOW_MS": "-100"}) == 0
 
     @pytest.mark.unit
-    def test_invalid_falls_back_to_default(self, monkeypatch) -> None:
+    def test_invalid_falls_back_to_default(self) -> None:
         """Garbage → default. Sabotage: remove try/except → int() raises."""
         from kairix.paths import embed_coalesce_window_ms
 
-        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_WINDOW_MS", "nope")
-        assert embed_coalesce_window_ms() == 50
+        assert embed_coalesce_window_ms(env={"KAIRIX_EMBED_COALESCE_WINDOW_MS": "nope"}) == 50
 
 
 class TestEmbedCoalesceMaxBatch:
     """Round-trip tests for ``embed_coalesce_max_batch`` (#288)."""
 
     @pytest.mark.unit
-    def test_default_when_unset(self, monkeypatch) -> None:
+    def test_default_when_unset(self) -> None:
         """Unset env → documented default 16."""
         from kairix.paths import embed_coalesce_max_batch
 
-        monkeypatch.delenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", raising=False)
-        assert embed_coalesce_max_batch() == 16
+        assert embed_coalesce_max_batch(env={}) == 16
 
     @pytest.mark.unit
-    def test_valid_int_passes_through(self, monkeypatch) -> None:
+    def test_valid_int_passes_through(self) -> None:
         """In-range value comes back unchanged."""
         from kairix.paths import embed_coalesce_max_batch
 
-        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "32")
-        assert embed_coalesce_max_batch() == 32
+        assert embed_coalesce_max_batch(env={"KAIRIX_EMBED_COALESCE_MAX_BATCH": "32"}) == 32
 
     @pytest.mark.unit
-    def test_oob_high_clamps_to_64(self, monkeypatch) -> None:
+    def test_oob_high_clamps_to_64(self) -> None:
         """Out-of-range high value clamps to 64.
 
         Sabotage: drop the ``min(64, value)`` clamp and an operator
@@ -877,11 +854,10 @@ class TestEmbedCoalesceMaxBatch:
         """
         from kairix.paths import embed_coalesce_max_batch
 
-        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "999")
-        assert embed_coalesce_max_batch() == 64
+        assert embed_coalesce_max_batch(env={"KAIRIX_EMBED_COALESCE_MAX_BATCH": "999"}) == 64
 
     @pytest.mark.unit
-    def test_oob_low_clamps_to_one(self, monkeypatch) -> None:
+    def test_oob_low_clamps_to_one(self) -> None:
         """A zero or negative max-batch clamps to 1 (minimum useful batch).
 
         Sabotage: drop the ``max(1, ...)`` clamp and a 0 batch size
@@ -889,39 +865,35 @@ class TestEmbedCoalesceMaxBatch:
         """
         from kairix.paths import embed_coalesce_max_batch
 
-        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "0")
-        assert embed_coalesce_max_batch() == 1
+        assert embed_coalesce_max_batch(env={"KAIRIX_EMBED_COALESCE_MAX_BATCH": "0"}) == 1
 
     @pytest.mark.unit
-    def test_invalid_falls_back_to_default(self, monkeypatch) -> None:
+    def test_invalid_falls_back_to_default(self) -> None:
         """Garbage → default. Sabotage: remove try/except → int() raises."""
         from kairix.paths import embed_coalesce_max_batch
 
-        monkeypatch.setenv("KAIRIX_EMBED_COALESCE_MAX_BATCH", "nope")
-        assert embed_coalesce_max_batch() == 16
+        assert embed_coalesce_max_batch(env={"KAIRIX_EMBED_COALESCE_MAX_BATCH": "nope"}) == 16
 
 
 class TestTraceEnabled:
     """Round-trip tests for ``trace_enabled`` (Plan B-parity D4)."""
 
     @pytest.mark.unit
-    def test_default_off(self, monkeypatch) -> None:
+    def test_default_off(self) -> None:
         """Unset env → trace stays off."""
         from kairix.paths import trace_enabled
 
-        monkeypatch.delenv("KAIRIX_TRACE", raising=False)
-        assert trace_enabled() is False
+        assert trace_enabled(env={}) is False
 
     @pytest.mark.unit
-    def test_one_turns_on(self, monkeypatch) -> None:
+    def test_one_turns_on(self) -> None:
         """``KAIRIX_TRACE=1`` opts in."""
         from kairix.paths import trace_enabled
 
-        monkeypatch.setenv("KAIRIX_TRACE", "1")
-        assert trace_enabled() is True
+        assert trace_enabled(env={"KAIRIX_TRACE": "1"}) is True
 
     @pytest.mark.unit
-    def test_other_values_stay_off(self, monkeypatch) -> None:
+    def test_other_values_stay_off(self) -> None:
         """Only the literal ``1`` opts in — ``true``/``yes`` etc. stay off.
 
         Sabotage: relax to ``bool(value)`` and ``KAIRIX_TRACE=0`` would
@@ -929,42 +901,38 @@ class TestTraceEnabled:
         """
         from kairix.paths import trace_enabled
 
-        monkeypatch.setenv("KAIRIX_TRACE", "true")
-        assert trace_enabled() is False
-        monkeypatch.setenv("KAIRIX_TRACE", "0")
-        assert trace_enabled() is False
+        assert trace_enabled(env={"KAIRIX_TRACE": "true"}) is False
+        assert trace_enabled(env={"KAIRIX_TRACE": "0"}) is False
 
 
 class TestWorkerWritesVecIndex:
     """Round-trip tests for ``worker_writes_vec_index`` (#335 OOM gate)."""
 
     @pytest.mark.unit
-    def test_default_off(self, monkeypatch) -> None:
+    def test_default_off(self) -> None:
         """Unset env → worker skips usearch writes (default safe)."""
         from kairix.paths import worker_writes_vec_index
 
-        monkeypatch.delenv("KAIRIX_WORKER_WRITES_VEC_INDEX", raising=False)
-        assert worker_writes_vec_index() is False
+        assert worker_writes_vec_index(env={}) is False
 
     @pytest.mark.unit
-    def test_one_opts_in(self, monkeypatch) -> None:
+    def test_one_opts_in(self) -> None:
         """``KAIRIX_WORKER_WRITES_VEC_INDEX=1`` opts in to the legacy write path."""
         from kairix.paths import worker_writes_vec_index
 
-        monkeypatch.setenv("KAIRIX_WORKER_WRITES_VEC_INDEX", "1")
-        assert worker_writes_vec_index() is True
+        assert worker_writes_vec_index(env={"KAIRIX_WORKER_WRITES_VEC_INDEX": "1"}) is True
 
     @pytest.mark.unit
-    def test_true_and_yes_also_opt_in(self, monkeypatch) -> None:
+    def test_true_and_yes_also_opt_in(self) -> None:
         """Accept the conventional truthy spellings, case-insensitive."""
         from kairix.paths import worker_writes_vec_index
 
         for value in ("true", "True", "TRUE", "yes", "Yes"):
-            monkeypatch.setenv("KAIRIX_WORKER_WRITES_VEC_INDEX", value)
-            assert worker_writes_vec_index() is True, f"expected True for {value!r}"
+            env = {"KAIRIX_WORKER_WRITES_VEC_INDEX": value}
+            assert worker_writes_vec_index(env=env) is True, f"expected True for {value!r}"
 
     @pytest.mark.unit
-    def test_falsey_strings_stay_off(self, monkeypatch) -> None:
+    def test_falsey_strings_stay_off(self) -> None:
         """``0`` / ``false`` / ``no`` / empty stay OFF.
 
         Sabotage: relax the truthy set to ``bool(value)`` and
@@ -974,8 +942,8 @@ class TestWorkerWritesVecIndex:
         from kairix.paths import worker_writes_vec_index
 
         for value in ("0", "false", "no", "", "off"):
-            monkeypatch.setenv("KAIRIX_WORKER_WRITES_VEC_INDEX", value)
-            assert worker_writes_vec_index() is False, f"expected False for {value!r}"
+            env = {"KAIRIX_WORKER_WRITES_VEC_INDEX": value}
+            assert worker_writes_vec_index(env=env) is False, f"expected False for {value!r}"
 
 
 class TestFeatureFlagOverride:
@@ -988,33 +956,30 @@ class TestFeatureFlagOverride:
     """
 
     @pytest.mark.unit
-    def test_unset_returns_none(self, monkeypatch) -> None:
+    def test_unset_returns_none(self) -> None:
         """No env var → ``None`` so the resolver falls through layers."""
         from kairix.paths import feature_flag_override
 
-        monkeypatch.delenv("KAIRIX_FEATURE_CANARY", raising=False)
-        assert feature_flag_override("canary") is None
+        assert feature_flag_override("canary", env={}) is None
 
     @pytest.mark.unit
     @pytest.mark.parametrize("truthy", ["1", "true", "True", "yes", "on", "ON"])
-    def test_truthy_values_return_true(self, monkeypatch, truthy: str) -> None:
+    def test_truthy_values_return_true(self, truthy: str) -> None:
         """Documented truthy values resolve to ``True`` (case-insensitive)."""
         from kairix.paths import feature_flag_override
 
-        monkeypatch.setenv("KAIRIX_FEATURE_CANARY", truthy)
-        assert feature_flag_override("canary") is True
+        assert feature_flag_override("canary", env={"KAIRIX_FEATURE_CANARY": truthy}) is True
 
     @pytest.mark.unit
     @pytest.mark.parametrize("falsy", ["0", "false", "False", "no", "off"])
-    def test_falsy_values_return_false(self, monkeypatch, falsy: str) -> None:
+    def test_falsy_values_return_false(self, falsy: str) -> None:
         """Documented falsy values resolve to ``False``."""
         from kairix.paths import feature_flag_override
 
-        monkeypatch.setenv("KAIRIX_FEATURE_CANARY", falsy)
-        assert feature_flag_override("canary") is False
+        assert feature_flag_override("canary", env={"KAIRIX_FEATURE_CANARY": falsy}) is False
 
     @pytest.mark.unit
-    def test_garbage_value_returns_none_with_warning(self, monkeypatch, caplog) -> None:
+    def test_garbage_value_returns_none_with_warning(self, caplog) -> None:
         """A non-boolean string logs a warning and returns ``None``.
 
         Sabotage: remove the warning log → the operator's typo silently
@@ -1022,22 +987,21 @@ class TestFeatureFlagOverride:
         """
         from kairix.paths import feature_flag_override
 
-        monkeypatch.setenv("KAIRIX_FEATURE_CANARY", "maybe")
         with caplog.at_level("WARNING"):
-            result = feature_flag_override("canary")
+            result = feature_flag_override("canary", env={"KAIRIX_FEATURE_CANARY": "maybe"})
         assert result is None
         assert any("not a recognised boolean" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.unit
-    def test_uppercases_the_flag_name(self, monkeypatch) -> None:
+    def test_uppercases_the_flag_name(self) -> None:
         """The env var name is ``KAIRIX_FEATURE_<UPPERCASE>`` regardless
         of the case the caller passes. Locks the spec §3.4 contract.
         """
         from kairix.paths import feature_flag_override
 
-        monkeypatch.setenv("KAIRIX_FEATURE_MY_FLAG", "1")
-        assert feature_flag_override("my_flag") is True
-        assert feature_flag_override("My_Flag") is True
+        env = {"KAIRIX_FEATURE_MY_FLAG": "1"}
+        assert feature_flag_override("my_flag", env=env) is True
+        assert feature_flag_override("My_Flag", env=env) is True
 
 
 class TestFeatureFlagConfigOverlay:
@@ -1050,57 +1014,48 @@ class TestFeatureFlagConfigOverlay:
     """
 
     @pytest.mark.unit
-    def test_returns_empty_dict_when_config_missing(self, monkeypatch, tmp_path) -> None:
+    def test_returns_empty_dict_when_config_missing(self, tmp_path) -> None:
         """No config file → empty dict."""
         from kairix.paths import feature_flag_config_overlay
 
-        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(tmp_path / "missing.yaml"))
-        assert feature_flag_config_overlay() == {}
+        assert feature_flag_config_overlay(environ={"KAIRIX_CONFIG_PATH": str(tmp_path / "missing.yaml")}) == {}
 
     @pytest.mark.unit
-    def test_reads_features_section(self, monkeypatch, tmp_path) -> None:
+    def test_reads_features_section(self, tmp_path) -> None:
         """``features: {flag_a: true, flag_b: false}`` parses round-trip."""
         from kairix.paths import feature_flag_config_overlay
 
         cfg = tmp_path / "kairix.config.yaml"
         cfg.write_text("features:\n  flag_a: true\n  flag_b: false\n", encoding="utf-8")
-        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg))
-
-        overlay = feature_flag_config_overlay()
+        overlay = feature_flag_config_overlay(environ={"KAIRIX_CONFIG_PATH": str(cfg)})
         assert overlay == {"flag_a": True, "flag_b": False}
 
     @pytest.mark.unit
-    def test_returns_empty_dict_when_features_section_absent(self, monkeypatch, tmp_path) -> None:
+    def test_returns_empty_dict_when_features_section_absent(self, tmp_path) -> None:
         """Config file exists but ``features:`` key missing → empty dict."""
         from kairix.paths import feature_flag_config_overlay
 
         cfg = tmp_path / "kairix.config.yaml"
         cfg.write_text("paths:\n  document_root: /tmp\n", encoding="utf-8")
-        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg))
-
-        assert feature_flag_config_overlay() == {}
+        assert feature_flag_config_overlay(environ={"KAIRIX_CONFIG_PATH": str(cfg)}) == {}
 
     @pytest.mark.unit
-    def test_malformed_yaml_returns_empty_dict(self, monkeypatch, tmp_path) -> None:
+    def test_malformed_yaml_returns_empty_dict(self, tmp_path) -> None:
         """Malformed YAML doesn't raise — gracefully falls back to empty."""
         from kairix.paths import feature_flag_config_overlay
 
         cfg = tmp_path / "kairix.config.yaml"
         cfg.write_text("features: this is not a dict\n  - oops\n", encoding="utf-8")
-        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg))
-
-        assert feature_flag_config_overlay() == {}
+        assert feature_flag_config_overlay(environ={"KAIRIX_CONFIG_PATH": str(cfg)}) == {}
 
     @pytest.mark.unit
-    def test_non_dict_features_section_returns_empty_dict(self, monkeypatch, tmp_path) -> None:
+    def test_non_dict_features_section_returns_empty_dict(self, tmp_path) -> None:
         """``features: []`` (a list, not a dict) → empty overlay."""
         from kairix.paths import feature_flag_config_overlay
 
         cfg = tmp_path / "kairix.config.yaml"
         cfg.write_text("features: []\n", encoding="utf-8")
-        monkeypatch.setenv("KAIRIX_CONFIG_PATH", str(cfg))
-
-        assert feature_flag_config_overlay() == {}
+        assert feature_flag_config_overlay(environ={"KAIRIX_CONFIG_PATH": str(cfg)}) == {}
 
 
 class TestAgentKnowledgeDirName:
@@ -1154,39 +1109,31 @@ class TestBronzeTtlDays:
     """`bronze_ttl_days()` — #316 TTL for bronze raw blobs."""
 
     @pytest.mark.unit
-    def test_default_is_seven_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_is_seven_when_unset(self) -> None:
         from kairix.paths import bronze_ttl_days
 
-        monkeypatch.delenv("KAIRIX_BRONZE_TTL_DAYS", raising=False)
-        assert bronze_ttl_days() == 7
+        assert bronze_ttl_days(env={}) == 7
 
     @pytest.mark.unit
-    def test_parses_integer_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_parses_integer_override(self) -> None:
         from kairix.paths import bronze_ttl_days
 
-        monkeypatch.setenv("KAIRIX_BRONZE_TTL_DAYS", "14")
-        assert bronze_ttl_days() == 14
+        assert bronze_ttl_days(env={"KAIRIX_BRONZE_TTL_DAYS": "14"}) == 14
 
     @pytest.mark.unit
-    def test_non_integer_falls_back_to_default(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_non_integer_falls_back_to_default(self, caplog: pytest.LogCaptureFixture) -> None:
         from kairix.paths import bronze_ttl_days
 
-        monkeypatch.setenv("KAIRIX_BRONZE_TTL_DAYS", "not-an-int")
         with caplog.at_level("WARNING"):
-            assert bronze_ttl_days() == 7
+            assert bronze_ttl_days(env={"KAIRIX_BRONZE_TTL_DAYS": "not-an-int"}) == 7
         assert any("not an int" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.unit
-    def test_negative_falls_back_to_default(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_negative_falls_back_to_default(self, caplog: pytest.LogCaptureFixture) -> None:
         from kairix.paths import bronze_ttl_days
 
-        monkeypatch.setenv("KAIRIX_BRONZE_TTL_DAYS", "-1")
         with caplog.at_level("WARNING"):
-            assert bronze_ttl_days() == 7
+            assert bronze_ttl_days(env={"KAIRIX_BRONZE_TTL_DAYS": "-1"}) == 7
         assert any("negative" in r.getMessage() for r in caplog.records)
 
 
@@ -1209,46 +1156,39 @@ class TestBronzeTtlDays:
 @pytest.mark.unit
 class TestEmbeddingCachePath:
     @pytest.mark.unit
-    def test_default_resolves_through_cache_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_resolves_through_cache_dir(self) -> None:
         """The mode=None default uses default_cache_dir() — not document_root.
 
         default_cache_dir honours KAIRIX_CACHE_DIR env first, so an operator
         override (e.g. /var/cache/kairix on FHS) wins over platform defaults.
         """
-        from kairix.paths import clear_cache, default_cache_dir, embedding_cache_path
+        from kairix.paths import default_cache_dir, embedding_cache_path
 
-        monkeypatch.setenv("KAIRIX_CACHE_DIR", "/tmp/test-cache")
-        monkeypatch.delenv("KAIRIX_DOCUMENT_ROOT", raising=False)
-        clear_cache()
+        env = {"KAIRIX_CACHE_DIR": "/tmp/test-cache"}
 
-        result = embedding_cache_path()
-        assert result == default_cache_dir() / "embedding_cache.sqlite"
+        result = embedding_cache_path(env=env)
+        assert result == default_cache_dir(env=env) / "embedding_cache.sqlite"
         assert result == Path("/tmp/test-cache/embedding_cache.sqlite")
 
     @pytest.mark.unit
-    def test_default_does_not_land_under_document_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_does_not_land_under_document_root(self) -> None:
         """Regression for #426 — cache must NOT land under the operator's
         document_root (which is typically a synced knowledge store)."""
-        from kairix.paths import clear_cache, embedding_cache_path
+        from kairix.paths import embedding_cache_path
 
-        monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/data/obsidian-vault")
-        monkeypatch.setenv("KAIRIX_CACHE_DIR", "/var/cache/kairix")
-        clear_cache()
+        env = {"KAIRIX_DOCUMENT_ROOT": "/data/obsidian-vault", "KAIRIX_CACHE_DIR": "/var/cache/kairix"}
 
-        result = embedding_cache_path()
+        result = embedding_cache_path(env=env)
         assert "/data/obsidian-vault" not in str(result)
         assert "/var/cache/kairix" in str(result)
 
     @pytest.mark.unit
-    def test_explicit_mode_uses_data_dir_per_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_explicit_mode_uses_data_dir_per_mode(self) -> None:
         """The explicit-mode branch (installer + contract test surface)
         resolves to data_dir(mode)/cache/embedding_cache.sqlite. Pinning
         this so the fix to the mode=None branch doesn't accidentally
         change the mode-explicit behaviour."""
-        from kairix.paths import Mode, clear_cache, data_dir, embedding_cache_path
-
-        monkeypatch.delenv("KAIRIX_DATA_DIR", raising=False)
-        clear_cache()
+        from kairix.paths import Mode, data_dir, embedding_cache_path
 
         result_system = embedding_cache_path(Mode.system)
         assert result_system == data_dir(Mode.system) / "cache" / "embedding_cache.sqlite"
@@ -1258,23 +1198,18 @@ class TestEmbeddingCachePath:
 class TestRechunkSweepPerTickCap:
     """ADR-028 Wave F.4 — KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP env resolution."""
 
-    def test_default_when_unset(self, monkeypatch) -> None:
-        monkeypatch.delenv("KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP", raising=False)
-        assert rechunk_sweep_per_tick_cap() == 200
+    def test_default_when_unset(self) -> None:
+        assert rechunk_sweep_per_tick_cap(env={}) == 200
 
-    def test_valid_positive_int_from_env(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP", "50")
-        assert rechunk_sweep_per_tick_cap() == 50
+    def test_valid_positive_int_from_env(self) -> None:
+        assert rechunk_sweep_per_tick_cap(env={"KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP": "50"}) == 50
 
-    def test_non_int_falls_back_to_default(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP", "not-a-number")
-        assert rechunk_sweep_per_tick_cap() == 200
+    def test_non_int_falls_back_to_default(self) -> None:
+        assert rechunk_sweep_per_tick_cap(env={"KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP": "not-a-number"}) == 200
 
-    def test_non_positive_falls_back_to_default(self, monkeypatch) -> None:
-        monkeypatch.setenv("KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP", "0")
-        assert rechunk_sweep_per_tick_cap() == 200
-        monkeypatch.setenv("KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP", "-5")
-        assert rechunk_sweep_per_tick_cap() == 200
+    def test_non_positive_falls_back_to_default(self) -> None:
+        assert rechunk_sweep_per_tick_cap(env={"KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP": "0"}) == 200
+        assert rechunk_sweep_per_tick_cap(env={"KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP": "-5"}) == 200
 
 
 # ---------------------------------------------------------------------------

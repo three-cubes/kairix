@@ -1,7 +1,0 @@
-# F35 baseline — kairix/connectors/<a>/** may not import another connector
-# or any extractor.
-#
-# Empty at landing — no kairix/connectors/ or kairix/extractors/ surfaces
-# exist yet (Wave 0 ships the rule with the surfaces scheduled for Wave 1).
-# F49 shrinking still applies once Wave 1 lands; the baseline only ever
-# shrinks.

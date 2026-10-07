@@ -37,14 +37,9 @@
         hx-indicator="#scan-indicator">
   Scan folder
 </button>
-<button type="submit" form="folder-form" class="kx-btn-primary kx-btn-reveal" id="start-indexing-btn">Start indexing</button>
+<button type="submit" form="folder-form" class="kx-btn-primary kx-btn-reveal" id="start-indexing-btn"
+        data-kx-reveal-on=".kx-scan-result">Start indexing</button>
 {% endblock %}
 {% block scripts %}
-<script>
-  document.addEventListener('htmx:afterSwap', function () {
-    if (document.querySelector('.kx-scan-result')) {
-      document.getElementById('start-indexing-btn').classList.add('kx-revealed');
-    }
-  });
-</script>
+<script src="/setup/static/kx-reveal.js" defer></script>
 {% endblock %}

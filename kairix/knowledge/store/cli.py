@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -61,6 +61,10 @@ class StoreCliDeps:
     get_neo4j_client_fn: Callable[[], Any] = field(default_factory=lambda: _default_neo4j_client)
     run_store_health_fn: Callable[..., Any] = field(default_factory=lambda: _default_run_store_health)
     format_health_text_fn: Callable[[Any], str] = field(default_factory=lambda: _default_format_health_text)
+    # Env mapping the ``KAIRIX_DOCUMENT_ROOT`` fallback is read from. ``None``
+    # (production) reads the live process env inside kairix.paths (F4); tests
+    # pass an explicit mapping so no process env is mutated (F2).
+    environ: Mapping[str, str] | None = None
 
 
 def main(
@@ -145,12 +149,12 @@ def main(
         sys.exit(1)
 
 
-def _resolve_document_root(arg: str | None) -> str:
+def _resolve_document_root(arg: str | None, *, environ: Mapping[str, str] | None = None) -> str:
     from kairix.paths import document_root_override
 
     if arg:
         return arg
-    env = document_root_override()
+    env = document_root_override(environ)
     if env:
         return env
     print("Error: --document-root or KAIRIX_DOCUMENT_ROOT required", file=sys.stderr)
@@ -270,7 +274,7 @@ def _cmd_crawl(
     resolved_noninteractive = _resolve_noninteractive(noninteractive)
     _guard_reset_interlock(args, noninteractive=resolved_noninteractive)
 
-    document_root = _resolve_document_root(args.document_root)
+    document_root = _resolve_document_root(args.document_root, environ=d.environ)
 
     if neo4j_client is None:
         neo4j_client = d.get_neo4j_client_fn()

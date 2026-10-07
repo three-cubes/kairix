@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from kairix.core.search.pipeline import SearchPipeline
@@ -73,9 +73,10 @@ class KairixNativeMemoryStore:
       frontmatter carrying ``metadata``. Returns the id. Does NOT
       re-index — the caller runs ``kairix embed`` for that.
     - ``search(query, top_k)``: delegates to ``pipeline.search`` and
-      maps each hit (``path``/``title``/``snippet``/``score``/
-      ``collection``) into a :class:`KairixNativeMemory`. Empty list
-      on "no relevant content".
+      maps each ``BudgetedResult`` row into a :class:`KairixNativeMemory`
+      whose ``id`` is the same id ``add`` returned (the file stem), so
+      it round-trips into ``update``/``delete``. Empty list on "no
+      relevant content".
     - ``update(memory_id, content)``: rewrites the file body (preserves
       frontmatter). Raises ``KeyError`` if the file does not exist.
     - ``delete(memory_id)``: removes the file. No-op if absent.
@@ -165,21 +166,32 @@ class KairixNativeMemoryStore:
 
     @staticmethod
     def _hit_to_memory(hit: Any) -> KairixNativeMemory:
-        """Map a SearchPipeline hit (BM25/vec/fused row) to a Memory.
+        """Map a SearchPipeline ``BudgetedResult`` row to a Memory.
 
-        Hits in the pipeline carry path/title/snippet/score/collection
-        as attributes (see :func:`kairix.use_cases.search.search`).
-        The id we surface is the document path — that's what ``update``/
-        ``delete`` accept and what re-ingest stamps onto chunk records.
+        ``SearchPipeline.search`` returns
+        :class:`kairix.core.search.budget.BudgetedResult` rows: the
+        document identity (path/title/collection/score) lives on the
+        wrapped ``FusedResult`` at ``hit.result``, and the tier-selected
+        text at ``hit.content`` (same projection as
+        :func:`kairix.use_cases.search.run_search`).
+
+        The id we surface is the file stem — the same id :meth:`add`
+        returns — so it round-trips into :meth:`update` / :meth:`delete`
+        (which resolve ``document_root/memories/<id>.md``). The
+        document-relative path is kept in ``metadata["path"]``.
         """
+        inner = getattr(hit, "result", None)
+        path = str(getattr(inner, "path", "") or "")
+        content = getattr(hit, "content", "") or getattr(inner, "snippet", "") or ""
         return KairixNativeMemory(
-            id=getattr(hit, "path", "") or "",
-            content=getattr(hit, "snippet", "") or "",
-            score=float(getattr(hit, "score", 0.0) or 0.0),
+            id=PurePosixPath(path).stem if path else "",
+            content=str(content),
+            score=float(getattr(inner, "boosted_score", 0.0) or 0.0),
             metadata={
-                "title": getattr(hit, "title", "") or "",
-                "collection": getattr(hit, "collection", "") or "",
-                "tier": getattr(hit, "tier", "") or "",
-                "tokens": getattr(hit, "tokens", 0) or 0,
+                "path": path,
+                "title": str(getattr(inner, "title", "") or ""),
+                "collection": str(getattr(inner, "collection", "") or ""),
+                "tier": str(getattr(hit, "tier", "") or ""),
+                "tokens": int(getattr(hit, "token_estimate", 0) or 0),
             },
         )

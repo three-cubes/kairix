@@ -16,8 +16,8 @@ _BADGE_RE = re.compile(
 )
 
 # HTML block tags to strip (but preserve content between them)
-_HTML_BLOCK_STRIP_RE = re.compile(  # NOSONAR — bounded by `>`; fixed tag alternation; reflib input.
-    r"</?(?:div|span|center|font|b|i|u|em|strong|br|hr)\s*[^>]*?>",
+_HTML_BLOCK_STRIP_RE = re.compile(
+    r"</?(?:div|span|center|font|b|i|u|em|strong|br|hr)\b[^>]*?>",
     re.IGNORECASE,
 )
 
@@ -25,8 +25,10 @@ _HTML_BLOCK_STRIP_RE = re.compile(  # NOSONAR — bounded by `>`; fixed tag alte
 _HTML_IMG_RE = re.compile(r"<img\s[^>]*?>", re.IGNORECASE)  # NOSONAR — bounded by `>` terminator; reflib input.
 
 # HTML anchor tags — convert to markdown links
-_HTML_ANCHOR_RE = re.compile(  # NOSONAR — non-greedy `?` bounded by literal terminators; reflib input.
-    r'<a\s+(?:[^>]*?\s+)?href=["\']([^"\']*)["\'][^>]*?>(.*?)</a>',
+# Attributes before ``href`` start at a non-space character and end at a single
+# space, so ``\s+`` and the attribute run never share characters (linear-time).
+_HTML_ANCHOR_RE = re.compile(
+    r'<a\s+(?:[^\s>][^>]*?\s)?href=["\']([^"\']*)["\'][^>]*?>(.*?)</a>',
     re.IGNORECASE | re.DOTALL,
 )
 

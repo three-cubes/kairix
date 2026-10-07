@@ -29,9 +29,7 @@ The check is **vacuous-green** — no plugin directories → no violations.
 A Wave 1 commit landing ``kairix/extractors/markitdown/__init__.py``
 without a ``version`` declaration immediately triggers the rule.
 
-Baseline at ``.architecture/baseline/f40-files.txt`` grandfathers any
-pre-existing offenders (empty today); net-new violations block at
-pre-commit and CI.
+There is no grandfathering: every violation blocks at pre-commit and CI.
 """
 
 from __future__ import annotations

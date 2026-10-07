@@ -20,8 +20,7 @@ calls:
 is allowed — that's CLI output, not logging. ``fmt.Sprintf`` (string
 formatting) is allowed.
 
-Baseline: ``.architecture/baseline/go-logging-discipline-files.txt``
-ships empty.
+There is no grandfathering: every violation fails the gate.
 """
 
 from __future__ import annotations

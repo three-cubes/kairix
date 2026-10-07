@@ -23,8 +23,8 @@ permanent ship tag, the category is mutable metadata.
 
 Status vocabulary
 -----------------
-* ``shipped`` — fully enforced; baseline grandfathers existing
-  offenders; net-new violations block at pre-commit / CI.
+* ``shipped`` — fully enforced over the full tree; any violation
+  blocks at pre-commit / CI (there is no baseline / grandfathering).
 * ``vacuous`` — shipped detector but no current violations because
   the relevant tree doesn't exist yet (e.g. ``kairix/chunkers/``).
   Fires the moment Wave N lands the tree.
@@ -99,9 +99,9 @@ Status = Literal[
 #   F26 / F8 / F76 / …). A staged change can only NEWLY violate the rule if a
 #   staged file is in the rule's path-scope, AND only the staged files need
 #   re-checking — the non-staged files were clean at the previous commit and
-#   their content is unchanged, so the baseline-diff verdict for them is
-#   unchanged. Deleting a file can only REMOVE a file-local violation, never
-#   add one. → run over ``staged ∩ scope``; skip when that intersection is
+#   their content is unchanged, so the verdict for them is unchanged.
+#   Deleting a file can only REMOVE a file-local violation, never add one.
+#   → run over ``staged ∩ scope``; skip when that intersection is
 #   empty. This is the default residue.
 #
 # * ``"relational"`` — a violation depends on cross-file state: a code
@@ -113,8 +113,8 @@ Status = Literal[
 #   isn't itself staged. → if any staged path is within the rule's scope,
 #   run the rule over its FULL scope (not just the staged files).
 #
-# * ``"always-run"`` — the trigger is "any change at all": net-new-file
-#   detection (F50), catalogue currency (F92), README / path-naming
+# * ``"always-run"`` — the trigger is "any change at all": catalogue
+#   currency (F92), README / path-naming
 #   invariants that fire on any new tracked path. → always run.
 #
 # ``StagedClass`` is now imported from ``tc_fitness.catalogue`` (above) — the
@@ -777,17 +777,6 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         task_type=("adding-a-connector",),
     ),
     RuleEntry(
-        id="F50",
-        gate="net-new-baseline-additions",
-        check="f50_net_new_file_violations",
-        category="production-safety",
-        scope="per-commit",
-        summary="net-new files may not appear in any per-file F-rule baseline",
-        # Any net-new file in the commit can trip this — the trigger is "a
-        # file was added", not a path-scope. Always run.
-        staged_class="always-run",
-    ),
-    RuleEntry(
         id="F63",
         gate="f63-unbounded-fetchall",
         check="f63_unbounded_fetchall",
@@ -1037,6 +1026,10 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         category="coverage",
         scope="per-file",
         summary="new-code coverage ≥ 80% on changed lines (Sonar new-code, local)",
+        # Needs the coverage.xml pytest writes. Since tc-fitness v0.18 the check
+        # fails closed on a missing report, so it runs as the post-pytest step
+        # (Makefile `quality`) instead of inside the pre-test catalogue sweep.
+        run_all=False,
     ),
     RuleEntry(
         id="F18",
@@ -1310,33 +1303,14 @@ _ENTRIES: tuple[RuleEntry, ...] = (
     ),
     # ----- coverage --------------------------------------------------------
     RuleEntry(
-        id="baseline-shrinking",
-        gate="baseline-shrinking",
-        check="baseline_shrinking",
-        category="coverage",
-        scope="cross-cutting",
-        summary="F49: each release tag reduces F30/F46/F47 baselines by ≥1 (or keeps at zero)",
-        run_all=False,
-    ),
-    RuleEntry(
-        id="paydown-doc-currency",
-        gate="paydown-doc-currency",
-        check="paydown_doc_currency",
-        category="agent-affordance",
-        scope="cross-cutting",
-        summary="grandfathering paydown doc reflects current baseline state",
-        run_all=False,
-    ),
-    RuleEntry(
         id="sonar-new-code",
         gate="sonar-new-code",
         check="sonar_new_code",
         category="coverage",
         scope="cross-cutting",
         summary=(
-            "SonarCloud per-file count ratchet — current per-file open-issue/hotspot counts "
-            "may not exceed the committed baseline (.architecture/baseline/sonar-per-file*.json); "
-            "deterministic, no live leak period, no skip flag"
+            "SonarCloud zero open findings — no open issue/hotspot may still be present in the "
+            "working copy (line-hash matched against main's analysis); no baseline, no skip flag"
         ),
         adr_origin="EPIC #499 Phase 2 — escape #11 KAIRIX_SKIP_SONAR_PARITY retirement",
         run_all=False,
@@ -1489,26 +1463,7 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         adr_origin="SGO-156 — Autonomous Delivery Platform SP-A (identity & attribution)",
         tags=("process",),
         # Literal signature scan across the configured first-party source/docs roots;
-        # any authored file could carry residue. Always run (guard-forward via the
-        # per-file baseline, decision D2).
-        staged_class="always-run",
-    ),
-    RuleEntry(
-        id="SGO-158",
-        gate="canonical-commit-identity",
-        check="core:canonical_commit_identity",
-        category="process",
-        scope="per-commit",
-        summary=(
-            "every commit author AND committer over the PR range (cutover..HEAD) carries an "
-            "allow-listed identity — the canonical three-cubes-agent App, the named human "
-            "maintainer, and the platform merge/bot committers — so an off-allowlist or "
-            "marker-in-name identity can't slip in; guard-forward via cutover_ref (decision D2)"
-        ),
-        adr_origin="SGO-158 — Autonomous Delivery Platform SP-A (identity & attribution)",
-        tags=("process",),
-        # Range check over git log (no file surface); a staged file can't scope it.
-        # Always run.
+        # any authored file could carry residue. Always run, full tree.
         staged_class="always-run",
     ),
     RuleEntry(
@@ -1630,7 +1585,7 @@ _ENTRIES: tuple[RuleEntry, ...] = (
 
 
 CATALOGUE: dict[str, RuleEntry] = {entry.gate: entry for entry in _ENTRIES}
-"""Indexed by gate name — the stable baseline-filename identifier.
+"""Indexed by gate name — the stable gate identifier.
 
 Note: a few catalogue entries share the same ``gate`` deliberately
 (e.g. F12 + F13 both surface through ``bdd-no-implementation-leaks``).

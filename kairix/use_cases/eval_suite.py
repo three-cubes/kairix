@@ -275,8 +275,8 @@ def resolve_deps(
 def import_search_pipeline_builder() -> Callable[[], SearchPipeline]:
     """Import :func:`kairix.core.factory.build_search_pipeline`.
 
-    Extracted so the import is a single seam tests can swap by passing
-    a ``builder_loader`` to :func:`resolve_search_pipeline`. Raises
+    Extracted so the import is a single seam tests can swap via
+    :attr:`EvalWiringDeps.import_pipeline_builder`. Raises
     :class:`ImportError` straight through; the caller handles the
     operator-visible warning.
     """
@@ -286,12 +286,40 @@ def import_search_pipeline_builder() -> Callable[[], SearchPipeline]:
     return builder
 
 
+@dataclasses.dataclass
+class EvalWiringDeps:
+    """Injectable wiring-layer importers for the eval composition root.
+
+    Canonical Deps shape (``kairix/worker.py::WorkerDeps``). Both fields
+    are the documented swap points between the :func:`resolve_deps`
+    orchestrator and the wiring layer; both degrade gracefully (operator-
+    visible F21 warning) when the wiring subpackage is unwired in a
+    partial install. Production omits ``deps``; tests construct
+    ``EvalWiringDeps(import_pipeline_builder=<raising loader>)`` to drive
+    the ImportError branches.
+
+    - ``import_pipeline_builder``: returns
+      :func:`kairix.core.factory.build_search_pipeline`. Default
+      :func:`import_search_pipeline_builder`.
+    - ``import_extractor_factory``: returns
+      :func:`kairix.corpus.wiring.make_production_fact_extractor`. Default
+      :func:`import_production_extractor_factory`.
+    """
+
+    import_pipeline_builder: Callable[[], Callable[[], SearchPipeline]] = dataclasses.field(
+        default_factory=lambda: import_search_pipeline_builder
+    )
+    import_extractor_factory: Callable[[], Callable[[LLMBackend], FactExtractor]] = dataclasses.field(
+        default_factory=lambda: import_production_extractor_factory
+    )
+
+
 def resolve_search_pipeline(
     *,
     override: SearchPipeline | None,
     via_prep: bool,
     err_sink: TextIO,
-    builder_loader: Callable[[], Callable[[], SearchPipeline]] | None = None,
+    deps: EvalWiringDeps | None = None,
 ) -> SearchPipeline | int | None:
     """Resolve the SearchPipeline given the CLI mode + caller-supplied override.
 
@@ -305,17 +333,18 @@ def resolve_search_pipeline(
        via :func:`build_search_pipeline`. Returns exit code 2 with an
        actionable error on ImportError.
 
-    ``builder_loader`` is the documented composition seam — tests inject
-    a raising loader to drive the ImportError branch. NOT test-only
-    (F6 clean): same swap-point shape as ``resolve_production_fact_extractor``.
+    ``deps`` (:class:`EvalWiringDeps`) is the documented composition seam —
+    tests inject a raising ``import_pipeline_builder`` to drive the
+    ImportError branch; same swap-point shape as
+    ``resolve_production_fact_extractor``.
     """
     if override is not None:
         return override
     if not via_prep:
         return None
-    loader = builder_loader if builder_loader is not None else import_search_pipeline_builder
+    deps = deps if deps is not None else EvalWiringDeps()
     try:
-        builder = loader()
+        builder = deps.import_pipeline_builder()
     except ImportError as exc:
         err_sink.write(
             f"{_ERROR_PREFIX}cannot import build_search_pipeline — {exc}. "
@@ -574,7 +603,7 @@ def resolve_production_fact_extractor(
     llm: LLMBackend,
     *,
     err_sink: TextIO,
-    factory_loader: Callable[[], Callable[[LLMBackend], FactExtractor]] | None = None,
+    deps: EvalWiringDeps | None = None,
 ) -> FactExtractor:
     """Return the production :class:`FactExtractor` or the Null fallback.
 
@@ -600,19 +629,17 @@ def resolve_production_fact_extractor(
         The resolved :class:`LLMBackend` to thread through the wiring.
     err_sink:
         Writable text sink — operator-visible warnings land here.
-    factory_loader:
-        Composition seam — when ``None``, production resolves via
-        :func:`import_production_extractor_factory`. Tests inject a
-        raising loader to drive the ImportError fallback OR a loader
-        that returns a raising factory to drive the broad-except
-        fallback. This kwarg is NOT test-only (F6 clean): it is the
-        documented swap point between the ``resolve_deps`` orchestrator
-        and the wiring layer, used by any future caller wanting to
-        pin a non-default factory resolution strategy.
+    deps:
+        :class:`EvalWiringDeps` composition seam — when ``None``,
+        production resolves via :func:`import_production_extractor_factory`.
+        Tests inject a raising ``import_extractor_factory`` to drive the
+        ImportError fallback OR one that returns a raising factory to drive
+        the broad-except fallback. It is the documented swap point between
+        the ``resolve_deps`` orchestrator and the wiring layer.
     """
-    loader = factory_loader if factory_loader is not None else import_production_extractor_factory
+    deps = deps if deps is not None else EvalWiringDeps()
     try:
-        factory = loader()
+        factory = deps.import_extractor_factory()
     except ImportError as exc:
         err_sink.write(
             f"{_ERROR_PREFIX}cannot import kairix.corpus.wiring — {exc}. "

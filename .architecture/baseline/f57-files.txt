@@ -1,9 +1,0 @@
-# F57 baseline — files that issue UPDATE topology_cc_pairs.status SQL
-# but do not declare an _ALLOWED_TRANSITIONS dispatch matrix in the
-# same module. Grandfathered offenders only; baseline is shrink-only
-# per F49.
-#
-# Today: empty — no production code references topology_cc_pairs.
-# Wave A landed the schema; Wave C will add the lifecycle code. F57
-# is armed and waiting — any Wave C UPDATE that bypasses the matrix
-# trips immediately.

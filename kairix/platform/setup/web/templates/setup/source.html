@@ -11,14 +11,14 @@
   <a class="kx-provider-card" aria-label="Connect {{ option.label }}" href="/setup/source/connect?provider={{ option.key }}">
     <div class="kx-provider-body">
       <strong>{{ option.label }}</strong>
-      <div class="kx-provider-meta"><span>{{ option.description }}</span></div>
+      <div class="kx-provider-meta"><span>{{ option.description }}</span><span>Sign in to connect</span></div>
     </div>
   </a>
   {% else %}
   <a class="kx-provider-card" aria-label="Use a local folder for {{ option.label }}" href="/setup/folder">
     <div class="kx-provider-body">
       <strong>{{ option.label }}</strong>
-      <div class="kx-provider-meta"><span>{{ option.description }}</span></div>
+      <div class="kx-provider-meta"><span>{{ option.description }}</span><span>Pick a folder on this machine</span></div>
     </div>
   </a>
   {% endif %}

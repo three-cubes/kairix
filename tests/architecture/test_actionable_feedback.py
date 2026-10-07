@@ -7,7 +7,7 @@ or ``run:``. These tests exercise three slices:
 1. A synthetic Python check whose REMEDIATION carries ``fix:`` passes.
 2. A synthetic Python check whose REMEDIATION carries no marker fails.
 3. The real ``scripts/checks/check_*.py`` files in the repo emit no
-   *net-new* violations (existing offenders are baselined; this is the
+   violations (there is no grandfathering; this is the
    gate-in-action test).
 
 Each test has a paired sabotage-proof, either inline or as a derived
@@ -139,9 +139,8 @@ def test_shell_remediation_marker_required(tmp_path: Path) -> None:
 
 def test_real_kairix_checks_all_pass() -> None:
     """The actual ``scripts/checks/check_*.{py,sh}`` files emit no
-    net-new violations. Existing offenders are grandfathered in
-    ``.architecture/baseline/actionable-feedback-files.txt``; the gate
-    must remain green on every commit.
+    violations. There is no grandfathering; the gate must remain green
+    on every commit.
 
     Sabotage-proof: the dogfood self-scan (F21 reads its own
     REMEDIATION) means removing all three markers from

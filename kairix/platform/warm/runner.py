@@ -292,32 +292,58 @@ def _emit_progress(callback: Callable[[str], None] | None, stage_name: str) -> N
         logger.warning("warm progress callback for stage %s raised: %s", stage_name, exc, exc_info=True)
 
 
+def _default_load_cross_encoder(model_name: str) -> Any:
+    """Production cross-encoder loader — force-loads + caches the singleton.
+
+    Lazy import: keeps the runner importable on call sites that don't link
+    sentence-transformers, and the module-level rerank import is cheap
+    (torch only loads inside ``get_cross_encoder``, on first call).
+    """
+    from kairix.core.search.rerank import get_cross_encoder
+
+    return get_cross_encoder(model_name)
+
+
+@dataclass
+class WarmDeps:
+    """Injectable step collaborators for :func:`run_warm`.
+
+    Canonical Deps shape (``kairix/worker.py::WorkerDeps``). Production
+    callers omit ``deps`` and every field's ``default_factory`` binds the
+    real step. ``kairix warm`` (``kairix.platform.warm.cli``) overrides
+    ``build_pipeline`` to warm a pipeline built against an operator-supplied
+    ``--db-path`` / ``--document-root``; tests construct
+    ``WarmDeps(build_pipeline=lambda: fake, ...)`` to avoid spinning up the
+    full search pipeline.
+
+    - ``build_pipeline``: zero-arg pipeline builder.
+    - ``search_probe``: one-arg ``(pipeline) -> Any`` no-op probe search.
+    - ``open_graph_client``: zero-arg Neo4j client opener.
+    - ``ensure_sqlite_stats``: zero-arg ANALYZE bootstrap; may return a
+      ``WarmStepResult``-shaped object whose ``detail`` is hoisted.
+    - ``load_cross_encoder``: one-arg ``(model_name) -> encoder`` loader for
+      the rerank warm step (PLA-271). Tests inject a recording fake to prove
+      the model load is requested only when rerank is wired on the built
+      pipeline's config.
+    """
+
+    build_pipeline: Callable[[], Any] = field(default_factory=lambda: _step_build_pipeline)
+    search_probe: Callable[[Any], Any] = field(default_factory=lambda: _step_probe_search)
+    open_graph_client: Callable[[], Any] = field(default_factory=lambda: _step_open_graph_client)
+    ensure_sqlite_stats: Callable[[], Any] = field(default_factory=lambda: _step_ensure_sqlite_stats)
+    load_cross_encoder: Callable[[str], Any] = field(default_factory=lambda: _default_load_cross_encoder)
+
+
 def run_warm(
     *,
-    pipeline_builder: Callable[[], Any] | None = None,
-    search_probe: Callable[[Any], Any] | None = None,
-    graph_client_opener: Callable[[], Any] | None = None,
-    sqlite_stats_ensurer: Callable[[], Any] | None = None,
-    cross_encoder_loader: Callable[[str], Any] | None = None,
+    deps: WarmDeps | None = None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> WarmResult:
     """Run all warm-up steps and return a structured result.
 
     Args:
-        pipeline_builder: injectable; tests pass a fake to avoid spinning
-            up the full search pipeline. Production omits.
-        search_probe: injectable; tests pass a no-op that accepts the
-            pipeline argument and returns immediately.
-        graph_client_opener: injectable; tests pass a fake.
-        sqlite_stats_ensurer: injectable; tests pass a fake that drives
-            the ANALYZE bootstrap without opening a real SQLite
-            connection. Production omits.
-        cross_encoder_loader: injectable one-arg ``(model_name) -> encoder``
-            loader for the rerank warm step. Default ``None`` binds the
-            production :func:`kairix.core.search.rerank.get_cross_encoder`
-            (force-loads + caches the cross-encoder singleton). Tests inject
-            a recording fake to prove the model load is requested only when
-            rerank is wired on the built pipeline's config.
+        deps: :class:`WarmDeps` carrying the per-step collaborators.
+            ``None`` (production) binds the real steps.
         progress_callback: optional one-arg callable invoked with the
             stage name each time a step completes (success or failure).
             Default ``None`` — preserves prior behaviour. The CLI wires a
@@ -331,19 +357,12 @@ def run_warm(
     """
     from kairix.platform.warm.state import mark_warm, mark_warming
 
-    build = pipeline_builder or _step_build_pipeline
-    probe = search_probe or _step_probe_search
-    open_graph = graph_client_opener or _step_open_graph_client
-    ensure_stats = sqlite_stats_ensurer or _step_ensure_sqlite_stats
-    if cross_encoder_loader is None:
-        # Lazy import: keeps the runner importable on call sites that don't
-        # link sentence-transformers, and the module-level rerank import is
-        # cheap (torch only loads inside get_cross_encoder, on first call).
-        from kairix.core.search.rerank import get_cross_encoder
-
-        load_cross_encoder: Callable[[str], Any] = get_cross_encoder
-    else:
-        load_cross_encoder = cross_encoder_loader
+    deps = deps if deps is not None else WarmDeps()
+    build = deps.build_pipeline
+    probe = deps.search_probe
+    open_graph = deps.open_graph_client
+    ensure_stats = deps.ensure_sqlite_stats
+    load_cross_encoder = deps.load_cross_encoder
 
     mark_warming()
     t_total_start = time.perf_counter()

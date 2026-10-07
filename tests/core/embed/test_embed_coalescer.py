@@ -477,6 +477,37 @@ def test_max_batch_full_wakes_dispatcher_early() -> None:
         coalescer.shutdown()
 
 
+def test_already_full_batch_dispatches_without_waiting_the_window() -> None:
+    """A batch that is already full when the dispatcher reaches its window
+    wait is dispatched at once — never parked for the full window.
+
+    Regression (lost wakeup, PLA-472 / #810 CI): the window wait was an
+    unconditional ``wait(timeout=window)``. When the batch-full ``notify()``
+    landed while the dispatcher was not yet in that wait (e.g. still waking
+    from the "no work yet" wait), the notify was lost and the full batch sat
+    out the whole window. ``max_batch_size=1`` makes it deterministic: the
+    single caller's notify is always consumed by the first wait, so the
+    pre-fix dispatcher ALWAYS waited the full 10s window here.
+
+    Sabotage-proof (executed): restore the unconditional
+    ``self._cv.wait(timeout=self._window_s)`` → the worker is still blocked
+    after the 2s liveness join and this test fails. Restored.
+    """
+    fake = _CountingBatchFn()
+    coalescer = EmbedCoalescer(embed_batch_fn=fake, coalesce_window_ms=10_000, max_batch_size=1)
+    try:
+        result: list[list[float]] = []
+        worker = threading.Thread(target=lambda: result.append(coalescer.embed("only-text")))
+        worker.start()
+        worker.join(timeout=2.0)
+
+        assert not worker.is_alive(), "a full batch must not wait out the 10s coalesce window"
+        assert len(fake.calls) == 1
+        assert fake.calls[0] == ["only-text"]
+    finally:
+        coalescer.shutdown()
+
+
 # ---------------------------------------------------------------------------
 # Stats round-trip
 # ---------------------------------------------------------------------------

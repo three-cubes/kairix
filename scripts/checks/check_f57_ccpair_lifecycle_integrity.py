@@ -35,7 +35,7 @@ Detection (AST + string scan):
   F57. The check is vacuous-green pre-Wave-C because no production code
   references ``topology_cc_pairs`` yet (confirmed by grep at landing).
 
-Empty baseline ``.architecture/baseline/f57-files.txt``. Wave C cc_pair
+No grandfathering — every violation fails. Wave C cc_pair
 lifecycle code WILL trip F57 if it doesn't centralise transitions.
 
 Per F21, ``REMEDIATION`` carries ``fix:`` / ``next:`` / ``run:`` markers.

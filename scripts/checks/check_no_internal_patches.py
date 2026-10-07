@@ -23,8 +23,8 @@ To extend with a new shape: add the detection branch to
 tests to ``tests/architecture/test_check_no_internal_patches.py``.
 
 Output: one violation file path per line on stdout, sorted,
-deduplicated. Pipes into ``arch_gate`` from ``_lib.sh`` for baseline
-diff.
+deduplicated. Pipes into ``arch_gate`` from ``_lib.sh``, which fails on
+any path.
 """
 
 from __future__ import annotations

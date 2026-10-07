@@ -190,8 +190,38 @@ def test_extract_propagates_pdf_metadata() -> None:
     doc = extractor.extract(b"%PDF-1.4\n" + b"x" * 64, "application/pdf")
     assert doc.metadata.title == "PDF Title"
     assert doc.metadata.author == "Author Name"
-    assert doc.metadata.created_date == "D:20260522000000Z"
+    assert doc.metadata.created_date == "2026-05-22T00:00:00+00:00"
     assert doc.metadata.page_count == 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Full PDF date with an explicit offset (PDF 32000 §7.9.4).
+        ("D:20260522143005+10'00'", "2026-05-22T14:30:05+10:00"),
+        ("D:20260522143005-05'30'", "2026-05-22T14:30:05-05:30"),
+        # UTC marker, and the "D:" prefix is optional in practice.
+        ("D:20260522143005Z", "2026-05-22T14:30:05+00:00"),
+        ("20260522143005Z00'00'", "2026-05-22T14:30:05+00:00"),
+        # Truncated forms default the missing fields; no offset stays naive.
+        ("D:2026", "2026-01-01T00:00:00"),
+        ("D:20260522", "2026-05-22T00:00:00"),
+        # Not a PDF date: dropped rather than stored as an unparseable string.
+        ("yesterday", None),
+        ("D:20261399000000Z", None),
+    ],
+)
+def test_extract_normalises_pdf_creation_date_to_iso(raw: str, expected: str | None) -> None:
+    """The documents_media created_date column holds ISO-8601 for docx / pptx;
+    PDF must match instead of leaking the raw ``D:YYYYMMDD...`` string.
+
+    Sabotage proof: return ``_clean_string(metadata.get("CreationDate"))`` from
+    ``_pdf_metadata_to_doc_metadata`` (the pre-fix behaviour) — every case
+    fails. Restored.
+    """
+    extractor, _ = _make_extractor(metadata={"CreationDate": raw})
+    doc = extractor.extract(b"%PDF-1.4\n" + b"x" * 64, "application/pdf")
+    assert doc.metadata.created_date == expected
 
 
 def test_extract_handles_missing_metadata() -> None:

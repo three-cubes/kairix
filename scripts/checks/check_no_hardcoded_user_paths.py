@@ -27,14 +27,11 @@ Allow-list rules:
   workspace and legitimately appears in workflow fixtures and CI log
   parsing tests.
 - ``/Users/runner/...`` is exempt — same rationale for macOS runners.
-- Files inside ``.architecture/baseline/`` are exempt — baselines exist
-  to record state, not to enforce.
 - Files inside ``reference-library/`` and ``benchmark-results/`` are
   exempt — these are data fixtures.
 
-Baseline at ``.architecture/baseline/no-hardcoded-user-paths-files.txt``
-grandfathers any pre-existing offenders so the rule lands without
-forcing a sweep. Net-new violations block at safe-commit and CI.
+There is no grandfathering: every offending line anywhere in the tracked
+tree fails the gate. Fix the path at source.
 
 Failure output follows F21: leads with the fix, includes ``run:`` for
 re-running the gate, and shows a Pass/Forbidden example.
@@ -48,7 +45,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BASELINE_FILE = ROOT / ".architecture" / "baseline" / "no-hardcoded-user-paths-files.txt"
 
 # Two patterns: macOS ``/Users/<x>/...`` and Linux ``/home/<x>/...``.
 # The negative lookahead excludes ``/home/runner/`` and ``/Users/runner/``
@@ -61,7 +57,6 @@ PATTERNS = (
 
 EXEMPT_SUFFIX = (".md",)
 EXEMPT_PREFIX = (
-    ".architecture/baseline/",
     "reference-library/",
     "benchmark-results/",
 )
@@ -93,16 +88,6 @@ Forbidden example:
 """
 
 
-def _load_baseline() -> set[str]:
-    if not BASELINE_FILE.exists():
-        return set()
-    return {
-        line.strip()
-        for line in BASELINE_FILE.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-
-
 def _is_exempt_path(rel: str) -> bool:
     if rel.endswith(EXEMPT_SUFFIX):
         return True
@@ -130,6 +115,19 @@ def _scan_file(path: Path, rel: str) -> list[str]:
     ]
 
 
+def collect_violations(root: Path, files: list[str]) -> list[str]:
+    """Scan every tracked path in ``files`` (repo-relative, under ``root``).
+
+    Returns every hit in every non-exempt file — there is no grandfathering.
+    """
+    return [
+        hit
+        for rel in files
+        if not _is_exempt_path(rel) and (root / rel).is_file()
+        for hit in _scan_file(root / rel, rel)
+    ]
+
+
 def main() -> int:
     try:
         files = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).splitlines()
@@ -137,51 +135,16 @@ def main() -> int:
         print("FAIL no_hardcoded_user_paths: could not enumerate tracked files", file=sys.stderr)
         return 1
 
-    baseline = _load_baseline()
-    net_new: list[str] = []
-    matched_baseline_files: set[str] = set()
-
-    for rel in files:
-        if _is_exempt_path(rel):
-            continue
-        path = ROOT / rel
-        if not path.is_file():
-            continue
-        hits = _scan_file(path, rel)
-        if not hits:
-            continue
-        if rel in baseline:
-            matched_baseline_files.add(rel)
-            continue
-        net_new.extend(hits)
-
-    if net_new:
-        print("FAIL F31 no_hardcoded_user_paths: net-new violations", file=sys.stderr)
-        for v in net_new:
+    violations = collect_violations(ROOT, files)
+    if violations:
+        print("FAIL F31 no_hardcoded_user_paths: violations found", file=sys.stderr)
+        for v in violations:
             print(f"  {v}", file=sys.stderr)
         print("", file=sys.stderr)
         print(REMEDIATION, file=sys.stderr)
         return 1
 
-    stale = baseline - matched_baseline_files
-    if stale:
-        # Baseline shrinks when a grandfathered file is cleaned up — keep the
-        # baseline file truthful by failing on stale entries.
-        print(
-            "FAIL F31 no_hardcoded_user_paths: baseline has stale entries (file no longer offends or no longer exists)",
-            file=sys.stderr,
-        )
-        for s in sorted(stale):
-            print(f"  remove from baseline: {s}", file=sys.stderr)
-        print("", file=sys.stderr)
-        print(
-            f"fix: remove the listed lines from {BASELINE_FILE.relative_to(ROOT)}",
-            file=sys.stderr,
-        )
-        print('run: bash scripts/safe-commit.sh "chore(baseline): shrink F31"', file=sys.stderr)
-        return 1
-
-    print(f"PASS F31 no_hardcoded_user_paths ({len(files)} files scanned)")
+    print(f"ok F31 no_hardcoded_user_paths — clean ({len(files)} files scanned).")
     return 0
 
 

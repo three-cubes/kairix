@@ -98,10 +98,10 @@ _HX_REDIRECT = "HX-Redirect"
 # reflected value from being sniffed into a script, framed by a
 # clickjacking page, or used to pull in off-origin code.
 #
-# The CSP permits ``'unsafe-inline'`` for scripts and styles because the
-# wizard ships a small amount of inline HTMX glue (the afterSwap
-# reveal listeners in key.html / folder.html) and inline-styled Pico
-# classless CSS. That inline surface is deliberately small and is itself
+# The CSP permits ``'unsafe-inline'`` for scripts and styles so a
+# template may carry a small amount of inline HTMX glue and inline-styled
+# Pico classless CSS. (The key / folder afterSwap reveal listeners now
+# ship as the 'self'-served static/kx-reveal.js.) Any inline script is
 # governed by F91 Limb B (rationale-tagged, size-capped, de-duplicated)
 # — so the ``'unsafe-inline'`` allowance stays a reviewed, bounded
 # surface rather than an open door. ``default-src 'self'`` plus

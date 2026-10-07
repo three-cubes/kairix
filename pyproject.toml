@@ -214,13 +214,14 @@ dev = [
 # that runs the fitness checks still installs the engine via the group.
 # tc_fitness is imported by scripts/checks/*.py AND the tests/checks +
 # tests/architecture conftests, so the group is fed to every pytest-collecting
-# gate consumer (see ci.yml Stage 2/3/4.5, soak-suite, baseline-audit,
+# gate consumer (see ci.yml Stage 2/3/4.5, soak-suite,
 # mutation-suite, and safe-commit.sh --pre-pr). The python_version marker is
-# retained: the engine pins >=3.12 and kairix is >=3.12 so it always resolves,
-# and the marker keeps uv's universal resolver happy.
+# load-bearing: the engine requires >=3.13 (tc-fitness v0.17 dropped 3.12) while
+# the kairix wheel still supports >=3.12, so the gate interpreter is 3.13
+# (.python-version, CI) and a 3.12 resolve simply omits the dev-only group.
 [dependency-groups]
 fitness = [
-    "three-cubes-fitness @ git+https://github.com/three-cubes/tc-fitness.git@v0.16.1 ; python_version >= '3.12'",
+    "three-cubes-fitness @ git+https://github.com/three-cubes/tc-fitness.git@v0.19.0 ; python_version >= '3.13'",
 ]
 
 # Include the fitness group in every `uv sync` / `uv run` so the local gate
@@ -363,9 +364,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Engineering hub: per-file floor at 90% (F7/F9). Overall fail_under
-# tracks the current achievable floor while the per-file baseline burns
-# down; raise toward 90 as the 34 grandfathered low-coverage files lift.
+# Engineering hub: per-file floor at 90% (F7/F9), enforced on every file.
+# Overall fail_under is the project-wide no-regression floor.
 fail_under = 88
 show_missing = true
 exclude_lines = [
@@ -651,7 +651,7 @@ name = "test-skip-rationale"
 roots = ["kairix"]
 extensions = [".py"]
 patterns = ["default_access_mode", "_is_write_query"]
-exempt_files = ["kairix/knowledge/graph/client.py"]
+chokepoint_files = ["kairix/knowledge/graph/client.py"]
 name = "cypher-write-mode-chokepoint"
 
 # F96 — embed-discovery completeness queries must key on a STATE column. A
@@ -667,31 +667,13 @@ name = "embed-discovery-state-predicate"
 
 # SGO-156 — no AI/LLM self-attribution residue (Autonomous Delivery Platform SP-A,
 # decision D1). The banned-signature set is intrinsic to the engine; kairix binds
-# only the first-party source/docs scan scope. NET-NEW residue fails; the per-file
-# baseline (.architecture/baseline/no-llm-attribution-files.txt) grandfathers any
-# pre-cutover residue (guard-forward, decision D2). This block is CODEOWNERS-gated
+# only the first-party source/docs scan scope. Any residue on the full tree fails
+# (no grandfathering since tc-fitness v0.17). This block is CODEOWNERS-gated
 # (/pyproject.toml → @three-cubes/maintainers) so an agent cannot self-exempt.
 [tool.tc_fitness.core_checks.no_llm_attribution]
 roots = ["kairix", "scripts", "services", "docs"]
 extensions = [".py", ".md", ".rst", ".txt", ".sh", ".yaml", ".yml", ".go", ".toml"]
 name = "no-llm-attribution"
-
-# SGO-158 — canonical commit identity (Autonomous Delivery Platform SP-A). Every
-# commit author AND committer over cutover_ref..HEAD must be on allowed_emails: the
-# canonical three-cubes-agent App, the named human maintainer, and the platform
-# merge/bot committers observed on origin/main. cutover_ref (origin/main HEAD at
-# adoption) bounds enforcement to commits made forward, so pre-cutover history is
-# grandfathered (guard-forward, decision D2). CODEOWNERS-gated (see above): the
-# allow-list can only be extended via a maintainer-approved control-plane edit.
-[tool.tc_fitness.core_checks.canonical_commit_identity]
-allowed_emails = [
-    "295831460+three-cubes-agent[bot]@users.noreply.github.com",
-    "10286112+quanyeomans@users.noreply.github.com",
-    "noreply@github.com",
-    "49699333+dependabot[bot]@users.noreply.github.com",
-]
-cutover_ref = "f40aad21a773222ef1d407d3ed32d62ad5d52ba4"  # pragma: allowlist secret — cutover SHA
-name = "canonical-commit-identity"
 
 # SGO-270 Wave 2 — the root harness references the central engineering canon. As a
 # repo_type="product", kairix must carry the full root harness set (CLAUDE.md,

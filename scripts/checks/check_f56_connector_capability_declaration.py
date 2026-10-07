@@ -23,8 +23,7 @@ Required minimum capability set:
     — every connector needs some way to surface changes.
 
 Violations are reported by the plugin directory path
-(``kairix/connectors/<name>``) and grandfathered through
-``.architecture/baseline/f56-files.txt``.
+(``kairix/connectors/<name>``). There is no grandfathering: every violation fails the gate.
 
 Per F21, REMEDIATION carries ``fix:`` / ``next:`` / ``run:`` markers.
 """

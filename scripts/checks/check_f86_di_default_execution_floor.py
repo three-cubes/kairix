@@ -75,12 +75,8 @@ Intentionally NOT caught
     walk descends), but a nested seam that the coverage report attributes
     to its enclosing function's lines is covered transitively — accepted.
 
-Baseline ``.architecture/baseline/f86-files.txt`` grandfathers the
-pre-existing dead zone (the ~42 pragma'd ``_default_*`` seams across the
-platform/setup, extractor, health, maintenance, and probe trees that
-predate this rule). Net-new pragma'd DI-default seams block at
-pre-commit / safe-commit / CI Stage 0; the baseline is expected to shrink
-as each dead seam earns an executing test.
+There is no grandfathering: every pragma'd DI-default seam blocks at
+pre-commit / safe-commit / CI Stage 0 until it earns an executing test.
 """
 
 from __future__ import annotations
@@ -114,9 +110,8 @@ binding, or call the public caller with deps=None so the production
 default resolves. If the seam genuinely cannot be executed in-process
 (it shells out to a system service, opens a real native handle), refactor
 it to a thin adapter and push the testable logic behind a deps seam — do
-not re-pragma it. As a last resort for a pre-existing seam, add the file
-to .architecture/baseline/f86-files.txt with a PR rationale (expect
-pushback — the baseline shrinks, it does not grow).
+not re-pragma it. There is no baseline to fall back on — every seam is
+fixed at source.
 
 fix (dynamic half — seam present but never executed): some test must run
 at least one line of the seam's body. Add an outcome test that binds the

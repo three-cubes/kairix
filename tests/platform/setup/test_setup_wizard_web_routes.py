@@ -174,6 +174,30 @@ def test_static_assets_are_served_from_the_package() -> None:
     assert client.get("/setup/static/pico.classless.min.css").status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("path", "params", "button_id", "success_selector"),
+    [
+        pytest.param("/setup/key", {"provider": "anthropic"}, "save-key-btn", ".kx-validation-success", id="key"),
+        pytest.param("/setup/folder", {}, "start-indexing-btn", ".kx-scan-result", id="folder"),
+    ],
+)
+def test_reveal_buttons_are_wired_to_the_served_reveal_script(
+    path: str, params: dict[str, str], button_id: str, success_selector: str
+) -> None:
+    """The hidden action button opts into the static reveal glue (F91 —
+    no inline script) and the script it relies on is actually served."""
+    client = _build_client()
+    html = client.get(path, params=params).text
+    button = re.search(rf'<button[^>]*id="{button_id}"[^>]*>', html)
+    assert button is not None
+    assert f'data-kx-reveal-on="{success_selector}"' in button.group(0)
+    assert '<script src="/setup/static/kx-reveal.js"' in html
+    script = client.get("/setup/static/kx-reveal.js")
+    assert script.status_code == 200
+    assert "data-kx-reveal-on" in script.text
+    assert "kx-revealed" in script.text
+
+
 # ---------------------------------------------------------------------------
 # Key validation + save
 # ---------------------------------------------------------------------------

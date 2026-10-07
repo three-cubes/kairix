@@ -1253,6 +1253,31 @@ def _run_embed_loop_serial(
     return embedded, failed_chunks
 
 
+def _log_embed_outcome(all_chunks: list[dict[str, Any]], failed_chunks: list[dict[str, Any]], total: int) -> int:
+    """Log the post-run failure sample + chunk_date coverage; return the
+    number of chunks carrying a ``chunk_date`` (``total`` must be > 0)."""
+    if failed_chunks:
+        failed_paths = list({c["path"] for c in failed_chunks})[:10]
+        sample = [str(p)[:200] for p in failed_paths]
+        logger.warning("%d chunks failed. Affected paths (sample): %s", len(failed_chunks), sample)
+
+    chunk_date_count = sum(1 for c in all_chunks if c.get(_KEY_CHUNK_DATE))
+    if chunk_date_count == 0 and total > 0:
+        logger.warning(
+            "embed: 0/%d chunks have chunk_date — temporal boost (TMP-7B) will be inert. "
+            "Ensure documents have a date in frontmatter (date: YYYY-MM-DD) or in their filename.",
+            total,
+        )
+    else:
+        logger.info(
+            "embed: chunk_date populated for %d/%d chunks (%.1f%%)",
+            chunk_date_count,
+            total,
+            100 * chunk_date_count / total,
+        )
+    return chunk_date_count
+
+
 def run_embed(
     db: sqlite3.Connection,
     force: bool = False,
@@ -1421,25 +1446,7 @@ def run_embed(
     estimated_tokens = embedded * 200
     estimated_cost = (estimated_tokens / 1000) * 0.00013
 
-    if failed_chunks:
-        failed_paths = list({c["path"] for c in failed_chunks})[:10]
-        sample = [str(p)[:200] for p in failed_paths]
-        logger.warning("%d chunks failed. Affected paths (sample): %s", len(failed_chunks), sample)
-
-    chunk_date_count = sum(1 for c in all_chunks if c.get(_KEY_CHUNK_DATE))
-    if chunk_date_count == 0 and total > 0:
-        logger.warning(
-            "embed: 0/%d chunks have chunk_date — temporal boost (TMP-7B) will be inert. "
-            "Ensure documents have a date in frontmatter (date: YYYY-MM-DD) or in their filename.",
-            total,
-        )
-    else:
-        logger.info(
-            "embed: chunk_date populated for %d/%d chunks (%.1f%%)",
-            chunk_date_count,
-            total,
-            100 * chunk_date_count / total,
-        )
+    chunk_date_count = _log_embed_outcome(all_chunks, failed_chunks, total)
 
     return {
         "embedded": embedded,

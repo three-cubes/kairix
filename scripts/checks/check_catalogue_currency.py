@@ -27,8 +27,8 @@ design — the test is a unit-suite proof, F92 is the pre-commit / Stage 0
 gate that fires on every commit, including doc and shell-script edits the
 unit suite might not be re-run for.
 
-This rule has no per-file baseline: a currency invariant is binary, not
-ratcheted. Either the catalogue is current or it is not.
+A currency invariant is binary: either the catalogue is current or it
+is not.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ confirm the gate goes green.
 run: bash scripts/safe-commit.sh "chore(fitness): keep the catalogue current (#499 phase 2)"
 
 Pass example: a new rule F86 added as ONE RuleEntry row + its
-check_f86_<name>.py script + its baseline, then
+check_f86_<name>.py script, then
 `generate_catalogue_docs.py` run to refresh the doc regions — every
 invariant holds, F92 stays green.
 

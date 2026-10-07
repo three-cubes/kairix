@@ -53,11 +53,33 @@ def encode_bundle_value(value: str) -> str:
     common case — API keys, tokens, endpoints). Multi-line values are
     escaped and double-quoted so the bundle file stays one
     ``KEY=VALUE`` pair per line.
+
+    A single-line value that already LOOKS encoded — fully double-quoted
+    and carrying a literal ``\\n`` / ``\\r`` sequence — is escaped too:
+    passed through verbatim, the decoder would mistake it for its own
+    encoding and turn the literal backslash-n into a real newline (an
+    F87 escape-lookalike round-trip loss).
     """
-    if "\n" not in value and "\r" not in value:
+    if "\n" not in value and "\r" not in value and not _is_encoded(value):
         return value
     escaped = value.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
     return f'"{escaped}"'
+
+
+def split_bundle_lines(text: str) -> list[str]:
+    """Split bundle file text into ``KEY=VALUE`` lines on LF only.
+
+    The bundle's record separator is ``\\n`` (CRLF tolerated — a trailing
+    ``\\r`` is dropped). :meth:`str.splitlines` is deliberately NOT used:
+    it also breaks on Unicode line/paragraph separators (U+2028, U+2029,
+    U+0085, form feed, ...), which :func:`encode_bundle_value` leaves
+    verbatim inside a single-line value — so a token carrying one would
+    be torn across two "lines" on read (an F87 round-trip loss).
+    """
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
 def _is_encoded(raw: str) -> bool:
@@ -82,4 +104,4 @@ def decode_bundle_value(raw: str) -> str:
     return _DECODE_PATTERN.sub(lambda match: _UNESCAPE.get(match.group(1), "\\" + match.group(1)), inner)
 
 
-__all__ = ["decode_bundle_value", "encode_bundle_value"]
+__all__ = ["decode_bundle_value", "encode_bundle_value", "split_bundle_lines"]

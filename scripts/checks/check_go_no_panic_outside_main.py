@@ -16,8 +16,7 @@ sometimes use panic for explicit test-shaping. The `package main` files
 in ``cmd/<name>/`` are also exempt; that's where ``panic`` is allowed
 for fatal startup conditions.
 
-Baseline: ``.architecture/baseline/go-no-panic-outside-main-files.txt``
-ships empty. New library code lands at zero violations.
+There is no grandfathering: every violation fails the gate.
 """
 
 from __future__ import annotations

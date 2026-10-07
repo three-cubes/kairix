@@ -23,7 +23,7 @@ Detection:
      violation.
 
 Violation file paths use the registry path with a ``:flag=<name>``
-suffix so each flag entry produces a distinguishable baseline line.
+suffix so each flag entry produces a distinguishable violation line.
 
 Per F21, REMEDIATION carries ``fix:`` / ``next:`` / ``run:`` markers.
 """

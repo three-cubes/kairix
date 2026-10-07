@@ -27,7 +27,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -346,19 +345,21 @@ def test_in_process_io_seam_captures_stderr_on_explicit_sink(tmp_path: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# Performance / clock interaction — sanity floor
+# Clock interaction — elapsed_ms envelope shape
 # ---------------------------------------------------------------------------
 
 
-def test_maintenance_tick_elapsed_ms_is_reasonable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Sanity: a tick on a tiny DB completes in well under a second."""
+def test_maintenance_tick_reports_integer_elapsed_ms(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The tick envelope reports ``elapsed_ms`` as a non-negative integer.
+
+    Asserts the deterministic contract (the field is a clock-deltaed
+    integer alongside the completed tick's outcome) rather than a
+    wall-clock ceiling, which measures the host scheduler (F82).
+    """
     db_path = _bootstrap_with_orphan(tmp_path, n_orphans=1)
-    start = time.monotonic()
-    worker_main(["maintenance", "--db-path", str(db_path), "--json"])
-    elapsed_wall = time.monotonic() - start
+    rc = worker_main(["maintenance", "--db-path", str(db_path), "--json"])
     payload = json.loads(capsys.readouterr().out)
-    # Wall-clock should be well under 5 seconds for a single-orphan DB.
-    assert elapsed_wall < 5.0, f"maintenance tick took {elapsed_wall:.2f}s — too slow"
-    # The reported elapsed_ms is a clock-deltaed integer; on a tiny DB
-    # it's almost always under 1 second.
-    assert payload["elapsed_ms"] < 5000
+    assert rc == 0
+    assert payload["orphans_pruned"] == 1, f"tick should prune the seeded orphan; got {payload!r}"
+    assert isinstance(payload["elapsed_ms"], int), f"elapsed_ms must be an int; got {payload['elapsed_ms']!r}"
+    assert payload["elapsed_ms"] >= 0

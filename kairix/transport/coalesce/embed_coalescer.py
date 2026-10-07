@@ -280,10 +280,17 @@ class EmbedCoalescer:
                 self._cv.wait()
                 if self._stop or not self._pending:
                     return []
-            # Wait up to window_s for the batch to grow, OR for
-            # max_batch_size to be hit (caller .notify()s in that
-            # path). ``wait`` releases the lock for the duration.
-            self._cv.wait(timeout=self._window_s)
+            # Wait up to window_s for the batch to grow, OR until
+            # max_batch_size is reached. A predicate wait, not a bare
+            # ``wait(timeout)``: the caller's batch-full ``notify()`` can land
+            # while this thread isn't waiting yet (still waking from the
+            # "no work yet" wait above), and a bare wait would then lose that
+            # wakeup and park a FULL batch for the entire window. ``wait_for``
+            # re-checks the condition first and releases the lock while it waits.
+            self._cv.wait_for(
+                lambda: self._stop or len(self._pending) >= self._max_batch_size,
+                timeout=self._window_s,
+            )
             if self._stop:
                 return []
             return self._drain_pending()

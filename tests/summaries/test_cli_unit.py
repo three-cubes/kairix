@@ -376,27 +376,13 @@ def test_main_resolves_defaults_when_neither_kwarg_provided(tmp_path: Path) -> N
 
 def test_default_document_root_path_delegates_to_kairix_paths(tmp_path: Path) -> None:
     """``default_document_root_path`` returns whatever ``kairix.paths.document_root``
-    returns. Drive it through the real env-var resolution (KAIRIX_DOCUMENT_ROOT
-    is the documented operator boundary; F2 blocks ``monkeypatch.setenv``
-    on KAIRIX_*, but the real env-var read in paths.py is the production
-    contract — testing it here exercises both the wrapper and the real
-    resolution path).
+    resolves. Drives the real ``KAIRIX_DOCUMENT_ROOT`` resolution through the
+    ``env=`` mapping seam (F2-clean — no process-env mutation, no LRU-cache
+    invalidation), exercising both the wrapper and the real resolution path.
     """
-    import os as _os
-
     from kairix.knowledge.summaries.cli import default_document_root_path
-    from kairix.paths import clear_cache
 
-    prev = _os.environ.pop("KAIRIX_DOCUMENT_ROOT", None)
-    _os.environ["KAIRIX_DOCUMENT_ROOT"] = str(tmp_path)
-    clear_cache()  # KairixPaths.resolve() is LRU-cached; invalidate so the env mutation takes effect
-    try:
-        assert default_document_root_path() == tmp_path
-    finally:
-        del _os.environ["KAIRIX_DOCUMENT_ROOT"]
-        if prev is not None:
-            _os.environ["KAIRIX_DOCUMENT_ROOT"] = prev
-        clear_cache()  # restore so sibling tests see fresh resolution
+    assert default_document_root_path(env={"KAIRIX_DOCUMENT_ROOT": str(tmp_path)}) == tmp_path
 
 
 def test_default_summaries_db_path_fn_delegates_to_kairix_paths() -> None:

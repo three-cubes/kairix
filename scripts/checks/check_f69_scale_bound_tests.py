@@ -53,11 +53,9 @@ Detection
    body / bulk-seed helper call). Pass if any shape is satisfied.
 4. Violations are reported as
    ``tests/integration/<file>.py::<test_function_name>`` so each
-   distinct test surfaces as its own baseline entry.
+   distinct test surfaces as its own violation.
 
-The first pass against the current tree captures the grandfathered
-set into ``.architecture/baseline/f69-scale-bound-tests-files.txt``;
-forward-only thereafter (per F50 — net-new tests cannot accrete debt).
+There is no grandfathering: every violation fails the gate.
 """
 
 from __future__ import annotations
@@ -460,7 +458,7 @@ def collect_violations(repo_root: Path = REPO_ROOT) -> set[Path]:
 
     Returns repo-relative synthetic paths of the form
     ``tests/integration/<file>.py::<test_function_name>`` so each
-    distinct test surfaces as its own baseline entry.
+    distinct test surfaces as its own violation.
     """
     integration_dir = repo_root / INTEGRATION_ROOT
     if not integration_dir.exists():

@@ -463,7 +463,7 @@ class GmailConnector:
             raw_node_id=_HIERARCHY_ROOT_ID,
             raw_parent_id=None,
             display_name=f"Gmail ({self._user})",
-            link=f"{_GMAIL_WEB_BASE.rstrip('#inbox/')}#inbox",
+            link=_GMAIL_WEB_BASE.removesuffix("/"),
             node_type="FOLDER",
             external_access_json=None,
             sensitivity_hint=None,

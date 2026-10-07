@@ -27,6 +27,7 @@ def _mock_openai_module(monkeypatch):
 from kairix.platform.llm.embed_provider import (  # noqa: E402  # import deferred until after openai mock is installed
     AzureEmbedProvider,
     EmbedProvider,
+    EmbedProviderDeps,
     OpenAIEmbedProvider,
     get_embed_provider,
 )
@@ -94,14 +95,14 @@ class TestGetEmbedProvider:
             endpoint="https://test.openai.azure.com",
             model="text-embedding-3-large",
         )
-        provider = get_embed_provider(creds_resolver=lambda: creds)
+        provider = get_embed_provider(deps=EmbedProviderDeps(credentials=lambda: creds))
         assert isinstance(provider, AzureEmbedProvider)
 
     @pytest.mark.unit
     def test_falls_back_to_openai_via_env(self) -> None:
-        """When the creds_resolver returns None, the OPENAI_API_KEY env entry wins."""
+        """When the credentials resolver returns None, the OPENAI_API_KEY env entry wins."""
         provider = get_embed_provider(
-            creds_resolver=lambda: None,
+            deps=EmbedProviderDeps(credentials=lambda: None),
             env={"OPENAI_API_KEY": "sk-test"},  # pragma: allowlist secret
         )
         assert isinstance(provider, OpenAIEmbedProvider)
@@ -109,4 +110,4 @@ class TestGetEmbedProvider:
     @pytest.mark.unit
     def test_raises_when_no_credentials(self) -> None:
         with pytest.raises(OSError, match="No embedding provider"):
-            get_embed_provider(creds_resolver=lambda: None, env={})
+            get_embed_provider(deps=EmbedProviderDeps(credentials=lambda: None), env={})

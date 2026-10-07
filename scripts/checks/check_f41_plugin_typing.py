@@ -35,8 +35,8 @@ is a plugin. Files at the trees' roots (``__init__.py``, ``_base.py``)
 are NOT plugins.
 
 Violations are reported by the plugin directory path (one entry per
-plugin missing ``py.typed`` or carrying an unjustified ``type: ignore``)
-and grandfathered through ``.architecture/baseline/f41-files.txt``.
+plugin missing ``py.typed`` or carrying an unjustified ``type: ignore``).
+There is no grandfathering: every violation fails the gate.
 
 If none of ``kairix/connectors/``, ``kairix/extractors/``,
 ``kairix/providers/`` exist (fresh checkout), or all are empty of

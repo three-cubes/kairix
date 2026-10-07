@@ -272,9 +272,6 @@ pytest_plugins = [
     # retired post-cutover (task #132); CLI/MCP surfaces stay.
     "tests.bdd.steps.cli_cc_pair_steps",
     "tests.bdd.steps.mcp_cc_pair_steps",
-    # KFEAT-018 — release-time paydown doc snapshot currency gate.
-    # See docs/features/KFEAT-018-paydown-doc-refresh/BRIEF.md.
-    "tests.bdd.steps.check_paydown_doc_currency_steps",
     # Wave 5 Gmail — Google Workspace mailbox connector. Single-mailbox
     # per cc_pair (Onyx pattern); full-message body + envelope; History
     # API for change detection. ``connector_gmail`` (introduce stage)
@@ -416,43 +413,44 @@ _os.environ.setdefault("KAIRIX_CONNECT_DISABLE_BROWSER", "1")
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
 from tests.fixtures.neo4j_mock import FakeNeo4jClient  # noqa: E402
 
-
-@pytest.fixture(autouse=True)
-def no_azure_calls(monkeypatch, request):
-    """Block accidental Azure API calls in all tests except those marked e2e.
-
-    The ``delenv`` calls are the load-bearing protection — they remove
-    real operator credentials (``KAIRIX_AZURE_API_KEY`` /
-    ``KAIRIX_LLM_API_KEY``) from the per-test env so a test that hits a
-    code path through ``kairix.secrets`` doesn't accidentally use the
-    developer's Azure account. Tests marked ``@pytest.mark.e2e``
-    bypass this and must set ``KAIRIX_E2E=1`` to confirm intent.
-
-    This fixture is the reason ``tests/conftest.py`` stays baselined for
-    F2 — the ``delenv`` operation is a deliberate safety net at the env
-    boundary, not a test-shaping hack. F2 stays baselined here on
-    purpose; promoting the fixture out of monkeypatch would lose the
-    per-test isolation that prevents env leak between tests.
-    """
-    if "e2e" not in request.keywords:
-        monkeypatch.delenv("KAIRIX_AZURE_API_KEY", raising=False)
-        monkeypatch.delenv("KAIRIX_LLM_API_KEY", raising=False)
-
-
 # Operator-override env vars a dev running kairix may have exported in their
 # shell. Each one wins over the clean XDG/HOME defaults the session fixture
 # installs, so they are cleared for the whole run — otherwise a dev's
 # ``export KAIRIX_DATA_DIR=...`` would still route tests at the real dogfood
 # store even after HOME/XDG were redirected. ``LOG_DIR`` is the non-KAIRIX_
-# sibling ``KairixPaths.resolve`` reads for the log dir.
+# sibling ``KairixPaths.resolve`` reads for the log dir. Clearing
+# ``KAIRIX_DOCUMENT_ROOT`` lets the document root fall through to its
+# platform default ``$HOME/Documents`` — which the session fixture points at
+# a clean dir — so no KAIRIX_* value is ever SET for the run (F2).
 _HERMETIC_DATA_ENV_OVERRIDES = (
     "KAIRIX_DATA_DIR",
     "KAIRIX_CACHE_DIR",
     "KAIRIX_DB_PATH",
     "KAIRIX_WORKSPACE_ROOT",
     "KAIRIX_LOG_DIR",
+    "KAIRIX_DOCUMENT_ROOT",
     "LOG_DIR",
 )
+
+# Real operator credentials a dev may have exported. Cleared for the whole
+# run so a test whose code path reaches ``kairix.secrets`` can never call the
+# developer's Azure account. A live-credential run opts back in explicitly
+# with ``KAIRIX_E2E=1`` (the e2e credential gate — see pyproject's ``e2e``
+# marker), in which case the credentials are left in place.
+_OPERATOR_CREDENTIAL_ENV = (
+    "KAIRIX_AZURE_API_KEY",
+    "KAIRIX_LLM_API_KEY",
+    # Canonical names the SecretsLoader resolves (``kairix.secrets.loader``).
+    "KAIRIX_PROVIDER_LLM_API_KEY",
+    "KAIRIX_PROVIDER_EMBED_API_KEY",
+)
+
+
+def _ambient_env_to_clear() -> tuple[str, ...]:
+    """The operator env vars the hermetic session baseline removes."""
+    if _os.environ.get("KAIRIX_E2E") == "1":
+        return _HERMETIC_DATA_ENV_OVERRIDES
+    return _HERMETIC_DATA_ENV_OVERRIDES + _OPERATOR_CREDENTIAL_ENV
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -474,19 +472,18 @@ def _hermetic_data_dirs(tmp_path_factory):
     ``~/.local/share/kairix/vectors.usearch``.
 
     This session-scoped, autouse baseline replicates CI's clean env for the
-    whole run: ``HOME``, ``XDG_DATA_HOME``, ``XDG_CACHE_HOME``,
-    ``XDG_CONFIG_HOME`` and ``KAIRIX_DOCUMENT_ROOT`` point at empty
-    per-session temp dirs, and the operator-override vars in
-    :data:`_HERMETIC_DATA_ENV_OVERRIDES` are cleared so a dev's shell export
-    can't shadow those defaults. It is only the BASELINE — a test that needs
-    specific data injects it explicitly (``tmp_path`` / ``FakePaths`` / the
-    per-test ``monkeypatch`` fixtures, which layer on top and undo after each
-    test).
+    whole run: ``HOME``, ``XDG_DATA_HOME``, ``XDG_CACHE_HOME`` and
+    ``XDG_CONFIG_HOME`` point at empty per-session temp dirs (so the
+    document root's platform default ``$HOME/Documents`` is clean too), and
+    the operator vars in :func:`_ambient_env_to_clear` (data-dir overrides +
+    real credentials) are cleared so a dev's shell export can't shadow those
+    defaults or reach a live account. No ``KAIRIX_*`` value is set (F2). It
+    is only the BASELINE — a test that needs specific data injects it
+    explicitly (``tmp_path`` / ``FakePaths`` / an ``env=`` mapping).
 
-    These are env-boundary safety nets (like ``no_azure_calls`` and
-    ``_hermetic_user_config``), not test-shaping hacks — the session
-    ``pytest.MonkeyPatch`` is undone at session teardown so the real env is
-    restored for the process.
+    These are env-boundary safety nets (like ``_hermetic_user_config``), not
+    test-shaping hacks — the session ``pytest.MonkeyPatch`` is undone at
+    session teardown so the real env is restored for the process.
     """
     # tmp_path_factory / the builtin ``monkeypatch`` fixture are function-
     # scoped; a session fixture builds its own MonkeyPatch and undoes it at
@@ -497,7 +494,7 @@ def _hermetic_data_dirs(tmp_path_factory):
     xdg_data = base / "xdg-data"
     xdg_cache = base / "xdg-cache"
     xdg_config = base / "xdg-config"
-    documents = base / "documents"
+    documents = home / "Documents"
     for clean_dir in (home, xdg_data, xdg_cache, xdg_config, documents):
         clean_dir.mkdir(parents=True, exist_ok=True)
 
@@ -519,14 +516,13 @@ def _hermetic_data_dirs(tmp_path_factory):
         kairix_subdir.mkdir(parents=True, exist_ok=True)
 
     # ``Path.home()`` reads ``HOME`` on POSIX, so this redirects every
-    # ``~/...`` fallback in kairix/paths.py; the XDG vars redirect the
-    # XDG-first branches; KAIRIX_DOCUMENT_ROOT redirects the document root.
+    # ``~/...`` fallback in kairix/paths.py — including the document root's
+    # ``$HOME/Documents`` default; the XDG vars redirect the XDG-first branches.
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_data))
     monkeypatch.setenv("XDG_CACHE_HOME", str(xdg_cache))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
-    monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", str(documents))
-    for name in _HERMETIC_DATA_ENV_OVERRIDES:
+    for name in _ambient_env_to_clear():
         monkeypatch.delenv(name, raising=False)
 
     # Drop any path resolution cached before the env was redirected so the

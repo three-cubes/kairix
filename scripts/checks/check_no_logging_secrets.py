@@ -26,9 +26,8 @@ Detection (AST):
    into ``ast.FormattedValue`` children to catch interpolations.
 
 A file appears in the violation set if any sink site inside it has a
-suspect argument. Baseline at
-``.architecture/baseline/no-logging-secrets-files.txt`` grandfathers
-existing offenders; net-new violations block at pre-commit and CI.
+suspect argument. There is no grandfathering: every violation blocks
+at pre-commit and CI.
 
 The detector is deliberately conservative: it only fires on AST nodes
 that are unambiguously a sink-with-a-named-secret. Hand-redacted

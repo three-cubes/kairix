@@ -3,7 +3,7 @@
 F22 enforces per-tree filename conventions: ``kairix/**/*.py`` →
 snake_case, ``tests/**/test_*.py``, ``tests/bdd/features/*.feature``
 → snake_case, ``scripts/checks/check_*.{py,sh}``, ``docs/**/runbooks/*.md``
-→ kebab-case, and ``.architecture/baseline/<rule>-files.txt``.
+→ kebab-case. There is no baseline tree any more (PLA-472).
 
 Each test has a paired sabotage-proof: flip the path to a non-
 conforming shape and confirm the detector now fires (and vice versa).
@@ -120,15 +120,19 @@ def test_runbook_naming() -> None:
     assert detector.file_violates("docs/runbooks/my-runbook.md") is False
 
 
-def test_baseline_filename_naming() -> None:
-    """``.architecture/baseline/<rule>-files.txt`` is the required shape.
+def test_retired_baseline_tooling_is_not_a_sanctioned_check_script_name() -> None:
+    """PLA-472 deleted ``audit_baselines.py`` and the ``.architecture/baseline/``
+    tree. F22 no longer sanctions either: a re-created ``audit_baselines.py``
+    under ``scripts/checks/`` is a naming violation, and the baseline tree
+    has no tree-rule of its own.
 
-    Sabotage-proof inline: a path missing the ``-files.txt`` suffix is
-    flagged.
+    Sabotage proof (executed): re-adding ``audit_baselines`` to
+    ``_CHECK_SCRIPT_PY`` flips the first assertion red; re-adding the
+    ``.architecture/baseline/`` tree-rule flips the second. Restored → green.
     """
     detector = _load_detector()
-    assert detector.file_violates(".architecture/baseline/path-naming-files.txt") is False
-    assert detector.file_violates(".architecture/baseline/PathNaming.txt") is True
+    assert detector.file_violates("scripts/checks/audit_baselines.py") is True
+    assert not any(prefix.startswith(".architecture") for prefix, _, _ in detector._TREE_RULES)
 
 
 def test_out_of_scope_paths_pass_silently() -> None:
@@ -146,8 +150,7 @@ def test_out_of_scope_paths_pass_silently() -> None:
 
 def test_real_repo_path_naming_gate_is_green() -> None:
     """The real ``scripts/checks/check_path_naming.py`` run against the
-    full repo emits no net-new violations. Pre-existing offenders are
-    grandfathered in ``.architecture/baseline/path-naming-files.txt``.
+    full repo emits no violations (there is no grandfathering).
 
     Sabotage-proof: the unit-level cases above prove the detector
     fires on bad shapes; this case proves the *real run* is green.

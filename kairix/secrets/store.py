@@ -39,7 +39,7 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
-from kairix.secrets.encoding import encode_bundle_value
+from kairix.secrets.encoding import encode_bundle_value, split_bundle_lines
 from kairix.secrets.naming import canonical_env_var, parse_canonical_name
 
 # Container layout: the Docker-secrets tmpfs dir. When this directory
@@ -141,7 +141,7 @@ def set_secret(
         path = resolve_bundle_path(env=env, home=home, container_dir=container_dir)
     path = _confine_to_allowed_root(path, home=home)
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    existing = split_bundle_lines(path.read_text(encoding="utf-8")) if path.exists() else []
     merged = _upsert_line(existing, env_var, stored_value)
     if not path.exists():
         path.touch(mode=0o600)

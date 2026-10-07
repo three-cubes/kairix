@@ -1,8 +1,8 @@
 """Step definitions for warm.feature.
 
-Drives ``kairix.platform.warm.runner.run_warm`` through its three
-injection seams (``pipeline_builder``, ``search_probe``,
-``graph_client_opener``). No real factory build, no Azure pool, no
+Drives ``kairix.platform.warm.runner.run_warm`` through its
+``WarmDeps`` injection seam (``build_pipeline``, ``search_probe``,
+``open_graph_client``, ``ensure_sqlite_stats``). No real factory build, no Azure pool, no
 Neo4j connection.
 
 The runner stamps process-global warm-state via
@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 from pytest_bdd import given, then, when
 
-from kairix.platform.warm.runner import WarmResult, run_warm
+from kairix.platform.warm.runner import WarmDeps, WarmResult, run_warm
 from kairix.platform.warm.state import is_warm, reset_warm_state
 
 pytestmark = pytest.mark.bdd
@@ -97,10 +97,12 @@ def _given_already_warm(_warm_state: dict[str, Any]) -> None:
     _warm_state["sqlite_stats_ensurer"] = lambda: object()
 
     first = run_warm(
-        pipeline_builder=_warm_state["pipeline_builder"],
-        search_probe=_warm_state["search_probe"],
-        graph_client_opener=_warm_state["graph_opener"],
-        sqlite_stats_ensurer=_warm_state["sqlite_stats_ensurer"],
+        deps=WarmDeps(
+            build_pipeline=_warm_state["pipeline_builder"],
+            search_probe=_warm_state["search_probe"],
+            open_graph_client=_warm_state["graph_opener"],
+            ensure_sqlite_stats=_warm_state["sqlite_stats_ensurer"],
+        ),
     )
     _warm_state["first_result"] = first
     # Swap the slow builder out for an instant one — this is what the
@@ -116,20 +118,24 @@ def _given_already_warm(_warm_state: dict[str, Any]) -> None:
 @when("the operator runs warm")
 def _when_run_warm(_warm_state: dict[str, Any]) -> None:
     _warm_state["result"] = run_warm(
-        pipeline_builder=_warm_state["pipeline_builder"],
-        search_probe=_warm_state["search_probe"],
-        graph_client_opener=_warm_state["graph_opener"],
-        sqlite_stats_ensurer=_warm_state["sqlite_stats_ensurer"],
+        deps=WarmDeps(
+            build_pipeline=_warm_state["pipeline_builder"],
+            search_probe=_warm_state["search_probe"],
+            open_graph_client=_warm_state["graph_opener"],
+            ensure_sqlite_stats=_warm_state["sqlite_stats_ensurer"],
+        ),
     )
 
 
 @when("the operator runs warm again")
 def _when_run_warm_again(_warm_state: dict[str, Any]) -> None:
     _warm_state["second_result"] = run_warm(
-        pipeline_builder=_warm_state["pipeline_builder"],
-        search_probe=_warm_state["search_probe"],
-        graph_client_opener=_warm_state["graph_opener"],
-        sqlite_stats_ensurer=_warm_state["sqlite_stats_ensurer"],
+        deps=WarmDeps(
+            build_pipeline=_warm_state["pipeline_builder"],
+            search_probe=_warm_state["search_probe"],
+            open_graph_client=_warm_state["graph_opener"],
+            ensure_sqlite_stats=_warm_state["sqlite_stats_ensurer"],
+        ),
     )
 
 

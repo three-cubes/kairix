@@ -1,9 +1,0 @@
-# F89 grandfathered files — vendored browser-assets under a web/static/
-# tree without a sha256-pinned ASSETS.lock manifest row (EPIC #499 Phase
-# 3; the un-pinned vendored-asset class). Empty at landing: the manifest
-# kairix/platform/setup/web/static/ASSETS.lock was created WITH the
-# current assets (htmx 1.9.12, pico 2.1.1, the first-party kairix.css),
-# their real sha256s computed, so the tree is green from the first
-# commit. Keep it empty — a new entry here means a served static file
-# shipped un-pinned, or a sha mismatch (a swap/tamper) was waved through
-# instead of fixed.

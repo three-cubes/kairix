@@ -503,29 +503,39 @@ class ObsidianConnector:
             return SourceMetadata()
         modified_at = _iso_z(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
         created_at = _iso_z(datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc))
-        author: str | None = None
-        tags: tuple[str, ...] = ()
         try:
             head_bytes = abs_path.read_bytes()[:4096]
             head = head_bytes.decode("utf-8", errors="replace")
             front = _parse_frontmatter(head)
         except OSError:
             front = {}
-        if front:
-            raw_author = front.get("author")
-            if isinstance(raw_author, str) and raw_author.strip():
-                author = raw_author.strip()
-            raw_tags = front.get("tags")
-            if isinstance(raw_tags, list):
-                tags = tuple(str(t) for t in raw_tags if isinstance(t, str) and t.strip())
-            elif isinstance(raw_tags, str) and raw_tags.strip():
-                tags = (raw_tags.strip(),)
+        author, tags = _frontmatter_author_tags(front)
         return SourceMetadata(
             modified_at=modified_at,
             created_at=created_at,
             author=author,
             tags=tags,
         )
+
+
+def _frontmatter_author_tags(front: dict[str, Any]) -> tuple[str | None, tuple[str, ...]]:
+    """Extract ``(author, tags)`` from parsed frontmatter.
+
+    ``author:`` must be a non-blank string; ``tags:`` may be a list of
+    strings (blank entries dropped) or a single non-blank string. Any
+    other shape yields ``None`` / ``()``.
+    """
+    author: str | None = None
+    raw_author = front.get("author")
+    if isinstance(raw_author, str) and raw_author.strip():
+        author = raw_author.strip()
+    tags: tuple[str, ...] = ()
+    raw_tags = front.get("tags")
+    if isinstance(raw_tags, list):
+        tags = tuple(str(t) for t in raw_tags if isinstance(t, str) and t.strip())
+    elif isinstance(raw_tags, str) and raw_tags.strip():
+        tags = (raw_tags.strip(),)
+    return author, tags
 
 
 def _parse_frontmatter(head: str) -> dict[str, Any]:
