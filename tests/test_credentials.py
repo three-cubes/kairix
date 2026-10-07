@@ -1,8 +1,9 @@
 """Tests for kairix.credentials — resolved Credentials/GraphCredentials.
 
-Uses real env-var injection via monkeypatch (this file is baselined for F2
-because kairix.credentials wraps the secret env-vars; injecting them is the
-public interface). No @patch on kairix internals.
+Env-var resolution is driven through the real :class:`SecretsLoader` built
+with an explicit ``env`` mapping + a tmp ``kv_mount`` (F2-clean — no
+``monkeypatch.setenv`` of ``KAIRIX_*``), and the HTTP-pool knobs through
+``make_openai_client(env=...)``. No @patch on kairix internals.
 """
 
 from __future__ import annotations
@@ -16,8 +17,15 @@ from kairix.credentials import (
     get_credentials,
     make_openai_client,
 )
-from kairix.secrets import SecretNotFoundError
+from kairix.secrets import SecretNotFoundError, SecretsLoader
 from tests.fakes import FakeSecretsLoader
+
+
+def _env_loader(tmp_path, env: dict[str, str]) -> SecretsLoader:
+    """Real production loader scoped to ``env`` with a nonexistent KV mount
+    so only the canonical env-var step can resolve (no process-env reads)."""
+    return SecretsLoader(env=env, kv_mount=tmp_path / "no-such-dir")
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -88,16 +96,15 @@ def test_get_credentials_unknown_purpose_raises() -> None:
 
 
 @pytest.mark.unit
-def test_resolve_llm_with_explicit_model(monkeypatch, tmp_path) -> None:
+def test_resolve_llm_with_explicit_model(tmp_path) -> None:
     """When all three canonical env vars set, returns a Credentials with that model."""
-    monkeypatch.setenv("KAIRIX_PROVIDER_LLM_API_KEY", "test-key")  # pragma: allowlist secret
-    monkeypatch.setenv("KAIRIX_PROVIDER_LLM_ENDPOINT", "https://api.openai.com/v1")
-    monkeypatch.setenv("KAIRIX_PROVIDER_LLM_MODEL", "gpt-4o")
-    # Point secrets dir at non-existent path so file/KV steps short-circuit
-    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(tmp_path / "no-such-dir"))
-    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
+    env = {
+        "KAIRIX_PROVIDER_LLM_API_KEY": "test-key",  # pragma: allowlist secret
+        "KAIRIX_PROVIDER_LLM_ENDPOINT": "https://api.openai.com/v1",
+        "KAIRIX_PROVIDER_LLM_MODEL": "gpt-4o",
+    }
 
-    creds = get_credentials("llm")
+    creds = get_credentials("llm", secrets=_env_loader(tmp_path, env))
     assert isinstance(creds, Credentials)
     assert creds.api_key == "test-key"  # pragma: allowlist secret
     assert creds.endpoint == "https://api.openai.com/v1"
@@ -105,33 +112,29 @@ def test_resolve_llm_with_explicit_model(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_resolve_llm_uses_default_model(monkeypatch, tmp_path) -> None:
+def test_resolve_llm_uses_default_model(tmp_path) -> None:
     """When KAIRIX_PROVIDER_LLM_MODEL is unset, falls back to 'gpt-4o-mini'."""
-    monkeypatch.setenv("KAIRIX_PROVIDER_LLM_API_KEY", "test-key")  # pragma: allowlist secret
-    monkeypatch.setenv("KAIRIX_PROVIDER_LLM_ENDPOINT", "https://api.openai.com/v1")
-    monkeypatch.delenv("KAIRIX_PROVIDER_LLM_MODEL", raising=False)
-    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(tmp_path / "no-such-dir"))
-    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
+    env = {
+        "KAIRIX_PROVIDER_LLM_API_KEY": "test-key",  # pragma: allowlist secret
+        "KAIRIX_PROVIDER_LLM_ENDPOINT": "https://api.openai.com/v1",
+    }
 
-    creds = get_credentials("llm")
+    creds = get_credentials("llm", secrets=_env_loader(tmp_path, env))
     assert isinstance(creds, Credentials)
     assert creds.model == "gpt-4o-mini"
 
 
 @pytest.mark.unit
-def test_resolve_llm_raises_when_missing(monkeypatch, tmp_path) -> None:
+def test_resolve_llm_raises_when_missing(tmp_path) -> None:
     """When required canonical env var missing, raises SecretNotFoundError.
 
     The credentials module surfaces the loader's typed
     :class:`SecretNotFoundError` (LookupError subclass) — message
     carries the canonical KV name + the loader's F21 fix/next/run markers.
     """
-    monkeypatch.delenv("KAIRIX_PROVIDER_LLM_API_KEY", raising=False)
-    monkeypatch.delenv("KAIRIX_PROVIDER_LLM_ENDPOINT", raising=False)
-    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(tmp_path / "no-such-dir"))
-    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
+    env: dict[str, str] = {}
     with pytest.raises(SecretNotFoundError):
-        get_credentials("llm")
+        get_credentials("llm", secrets=_env_loader(tmp_path, env))
 
 
 # ---------------------------------------------------------------------------
@@ -140,16 +143,14 @@ def test_resolve_llm_raises_when_missing(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_resolve_embed_uses_embed_specific_secrets(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("KAIRIX_PROVIDER_EMBED_API_KEY", "embed-key")
-    monkeypatch.setenv("KAIRIX_PROVIDER_EMBED_ENDPOINT", "https://embed.example.com")
-    monkeypatch.setenv("KAIRIX_PROVIDER_EMBED_MODEL", "text-embedding-3-small")
-    monkeypatch.delenv("KAIRIX_PROVIDER_LLM_API_KEY", raising=False)
-    monkeypatch.delenv("KAIRIX_PROVIDER_LLM_ENDPOINT", raising=False)
-    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(tmp_path / "no-such-dir"))
-    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
+def test_resolve_embed_uses_embed_specific_secrets(tmp_path) -> None:
+    env = {
+        "KAIRIX_PROVIDER_EMBED_API_KEY": "embed-key",  # pragma: allowlist secret — test fixture value, not a credential
+        "KAIRIX_PROVIDER_EMBED_ENDPOINT": "https://embed.example.com",
+        "KAIRIX_PROVIDER_EMBED_MODEL": "text-embedding-3-small",
+    }
 
-    creds = get_credentials("embed")
+    creds = get_credentials("embed", secrets=_env_loader(tmp_path, env))
     assert isinstance(creds, Credentials)
     assert creds.api_key == "embed-key"  # pragma: allowlist secret
     assert creds.endpoint == "https://embed.example.com"
@@ -158,17 +159,14 @@ def test_resolve_embed_uses_embed_specific_secrets(monkeypatch, tmp_path) -> Non
 
 
 @pytest.mark.unit
-def test_resolve_embed_falls_back_to_llm_secrets(monkeypatch, tmp_path) -> None:
+def test_resolve_embed_falls_back_to_llm_secrets(tmp_path) -> None:
     """When embed-specific creds are missing, falls back to LLM creds."""
-    monkeypatch.delenv("KAIRIX_PROVIDER_EMBED_API_KEY", raising=False)
-    monkeypatch.delenv("KAIRIX_PROVIDER_EMBED_ENDPOINT", raising=False)
-    monkeypatch.delenv("KAIRIX_PROVIDER_EMBED_MODEL", raising=False)
-    monkeypatch.setenv("KAIRIX_PROVIDER_LLM_API_KEY", "llm-key")
-    monkeypatch.setenv("KAIRIX_PROVIDER_LLM_ENDPOINT", "https://api.openai.com/v1")
-    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(tmp_path / "no-such-dir"))
-    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
+    env = {
+        "KAIRIX_PROVIDER_LLM_API_KEY": "llm-key",  # pragma: allowlist secret — test fixture value, not a credential
+        "KAIRIX_PROVIDER_LLM_ENDPOINT": "https://api.openai.com/v1",
+    }
 
-    creds = get_credentials("embed")
+    creds = get_credentials("embed", secrets=_env_loader(tmp_path, env))
     assert isinstance(creds, Credentials)
     assert creds.api_key == "llm-key"  # pragma: allowlist secret
     assert creds.endpoint == "https://api.openai.com/v1"
@@ -182,21 +180,19 @@ def test_resolve_embed_falls_back_to_llm_secrets(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_resolve_graph_returns_none_without_password(monkeypatch, tmp_path) -> None:
-    monkeypatch.delenv("KAIRIX_INFRA_NEO4J_PASSWORD", raising=False)
-    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(tmp_path / "no-such-dir"))
-    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
-    assert get_credentials("graph") is None
+def test_resolve_graph_returns_none_without_password(tmp_path) -> None:
+    env: dict[str, str] = {}
+    assert get_credentials("graph", secrets=_env_loader(tmp_path, env)) is None
 
 
 @pytest.mark.unit
-def test_resolve_graph_returns_credentials_with_password(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("KAIRIX_INFRA_NEO4J_PASSWORD", "secret-pw")
-    monkeypatch.setenv("KAIRIX_INFRA_NEO4J_URI", "bolt://neo4j.test:7687")
-    monkeypatch.setenv("KAIRIX_INFRA_NEO4J_USER", "alice")
-    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(tmp_path / "no-such-dir"))
-    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
-    creds = get_credentials("graph")
+def test_resolve_graph_returns_credentials_with_password(tmp_path) -> None:
+    env = {
+        "KAIRIX_INFRA_NEO4J_PASSWORD": "secret-pw",  # pragma: allowlist secret — test fixture value, not a credential
+        "KAIRIX_INFRA_NEO4J_URI": "bolt://neo4j.test:7687",
+        "KAIRIX_INFRA_NEO4J_USER": "alice",
+    }
+    creds = get_credentials("graph", secrets=_env_loader(tmp_path, env))
     assert isinstance(creds, GraphCredentials)
     assert creds.uri == "bolt://neo4j.test:7687"
     assert creds.user == "alice"
@@ -204,14 +200,12 @@ def test_resolve_graph_returns_credentials_with_password(monkeypatch, tmp_path) 
 
 
 @pytest.mark.unit
-def test_resolve_graph_uses_default_uri_when_unset(monkeypatch, tmp_path) -> None:
+def test_resolve_graph_uses_default_uri_when_unset(tmp_path) -> None:
     """KAIRIX_INFRA_NEO4J_URI defaults to bolt://localhost:7687 when unset."""
-    monkeypatch.setenv("KAIRIX_INFRA_NEO4J_PASSWORD", "pw")
-    monkeypatch.delenv("KAIRIX_INFRA_NEO4J_URI", raising=False)
-    monkeypatch.delenv("KAIRIX_INFRA_NEO4J_USER", raising=False)
-    monkeypatch.setenv("KAIRIX_SECRETS_DIR", str(tmp_path / "no-such-dir"))
-    monkeypatch.delenv("KAIRIX_KV_NAME", raising=False)
-    creds = get_credentials("graph")
+    env = {
+        "KAIRIX_INFRA_NEO4J_PASSWORD": "pw",  # pragma: allowlist secret — test fixture value, not a credential
+    }
+    creds = get_credentials("graph", secrets=_env_loader(tmp_path, env))
     assert isinstance(creds, GraphCredentials)
     assert creds.uri == "bolt://localhost:7687"
     assert creds.user == "neo4j"
@@ -476,7 +470,7 @@ def test_make_openai_client_passes_http_client_with_limits() -> None:
 
 
 @pytest.mark.unit
-def test_http_client_limits_match_configured_pool_size(monkeypatch) -> None:
+def test_http_client_limits_match_configured_pool_size() -> None:
     """The httpx pool on the resulting client matches the configured triple.
 
     Drives through the ``make_openai_client`` public surface — no internal
@@ -487,12 +481,15 @@ def test_http_client_limits_match_configured_pool_size(monkeypatch) -> None:
     the pool ``_max_connections`` no longer matches the requested 20 — the
     assertion fails.
     """
-    monkeypatch.setenv("KAIRIX_EMBED_POOL_SIZE", "20")
-    monkeypatch.setenv("KAIRIX_EMBED_POOL_KEEPALIVE", "10")
-    monkeypatch.setenv("KAIRIX_EMBED_POOL_EXPIRY_S", "30.0")
+    env = {
+        "KAIRIX_EMBED_POOL_SIZE": "20",
+        "KAIRIX_EMBED_POOL_KEEPALIVE": "10",
+        "KAIRIX_EMBED_POOL_EXPIRY_S": "30.0",
+    }
     client = make_openai_client(
         api_key="test-key",  # pragma: allowlist secret
         endpoint="https://api.openai.com/v1",
+        env=env,
     )
     pool = client._client._transport._pool
     assert pool._max_connections == 20
@@ -501,7 +498,7 @@ def test_http_client_limits_match_configured_pool_size(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_default_pool_size_is_20_when_secret_unset(monkeypatch) -> None:
+def test_default_pool_size_is_20_when_secret_unset() -> None:
     """``KAIRIX_EMBED_POOL_SIZE`` unset → default of 20 is used.
 
     Drives through the public ``make_openai_client`` surface so the
@@ -512,17 +509,17 @@ def test_default_pool_size_is_20_when_secret_unset(monkeypatch) -> None:
     from ``EMBED_POOL_MAX_CONNECTIONS = 20`` to another value and the
     resulting pool no longer reports 20 — the assertion fails.
     """
-    monkeypatch.delenv("KAIRIX_EMBED_POOL_SIZE", raising=False)
     client = make_openai_client(
         api_key="test-key",  # pragma: allowlist secret
         endpoint="https://api.openai.com/v1",
+        env={},
     )
     pool = client._client._transport._pool
     assert pool._max_connections == 20
 
 
 @pytest.mark.unit
-def test_pool_size_overrides_default_when_secret_set(monkeypatch) -> None:
+def test_pool_size_overrides_default_when_secret_set() -> None:
     """``KAIRIX_EMBED_POOL_SIZE=50`` → resolved client pool uses 50 connections.
 
     Sabotage: stop wiring ``_resolve_pool_config()`` into
@@ -530,17 +527,17 @@ def test_pool_size_overrides_default_when_secret_set(monkeypatch) -> None:
     default) and the pool ``_max_connections`` reverts to the SDK default
     of 1000 — the assertion fails.
     """
-    monkeypatch.setenv("KAIRIX_EMBED_POOL_SIZE", "50")
     client = make_openai_client(
         api_key="test-key",  # pragma: allowlist secret
         endpoint="https://api.openai.com/v1",
+        env={"KAIRIX_EMBED_POOL_SIZE": "50"},
     )
     pool = client._client._transport._pool
     assert pool._max_connections == 50
 
 
 @pytest.mark.unit
-def test_pool_size_invalid_falls_back_to_default(monkeypatch, caplog) -> None:
+def test_pool_size_invalid_falls_back_to_default(caplog) -> None:
     """Non-integer ``KAIRIX_EMBED_POOL_SIZE`` → falls back to default 20 with a logged warning.
 
     Sabotage: remove the ``try/except ValueError`` in
@@ -549,11 +546,11 @@ def test_pool_size_invalid_falls_back_to_default(monkeypatch, caplog) -> None:
     """
     import logging
 
-    monkeypatch.setenv("KAIRIX_EMBED_POOL_SIZE", "abc")
     with caplog.at_level(logging.WARNING):
         client = make_openai_client(
             api_key="test-key",  # pragma: allowlist secret
             endpoint="https://api.openai.com/v1",
+            env={"KAIRIX_EMBED_POOL_SIZE": "abc"},
         )
     pool = client._client._transport._pool
     assert pool._max_connections == 20
@@ -561,24 +558,23 @@ def test_pool_size_invalid_falls_back_to_default(monkeypatch, caplog) -> None:
 
 
 @pytest.mark.unit
-def test_explicit_pool_kwarg_overrides_env_value(monkeypatch) -> None:
+def test_explicit_pool_kwarg_overrides_env_value() -> None:
     """``pool_max_connections=99`` kwarg wins even when env sets a different value.
 
     Pins the precedence contract: explicit kwargs beat env fallback.
-    Tests at this site (not in integration) because this file is the
-    F2-baselined home for env-monkeypatch tests over kairix.credentials
-    — env IS the public secret-interface here. The kwarg-precedence rule
+    The env value arrives through the ``env=`` mapping seam (F2-clean).
+    The kwarg-precedence rule
     lives in production code (``_resolve_pool_config`` uses ``... if
     pool_max_connections is None else pool_max_connections``).
 
     Sabotage: invert that conditional so env beats kwarg, and the kwarg's
     99 value loses to the env's 7.
     """
-    monkeypatch.setenv("KAIRIX_EMBED_POOL_SIZE", "7")
     client = make_openai_client(
         api_key="test-key",  # pragma: allowlist secret
         endpoint="https://api.openai.com/v1",
         pool_max_connections=99,
+        env={"KAIRIX_EMBED_POOL_SIZE": "7"},
     )
     pool = client._client._transport._pool
     assert pool._max_connections == 99

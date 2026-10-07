@@ -236,8 +236,8 @@ def test_missing_plugin_trees_passes(tmp_path: Path) -> None:
 
 
 def test_real_repo_gate_is_green() -> None:
-    """The real F43 detector against the full repo emits no net-new
-    violations vs ``.architecture/baseline/f43-files.txt``.
+    """The real F43 detector against the full repo emits no
+    violations (there is no grandfathering).
     """
     detector = _load_detector()
     assert detector.main() == 0

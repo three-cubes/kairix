@@ -4,7 +4,7 @@ Silver is the work that turns a Bronze record into ``(chunks,
 entity_signals)`` — chunking + entity-signal extraction. F38 keeps every
 chunking primitive (``def`` names matching ``chunk_*`` / ``_chunk*`` /
 ``tokenize_into_chunks``) in one canonical home, with the existing
-conversational-corpus chunkers grandfathered by an allow-list of legacy roots.
+conversational-corpus chunkers permitted by the rule's declared legacy roots.
 
 Thin shim over :mod:`_location_engine` (#499 Phase 2). The rule is one
 ``LocationRule`` row in ``def-name`` kind; this module re-exports the

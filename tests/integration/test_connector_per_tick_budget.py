@@ -41,7 +41,7 @@ from pathlib import Path
 import pytest
 
 from kairix.core.db.schema import create_schema
-from kairix.core.factory import build_connector_pipeline
+from kairix.core.factory import FactoryDeps, build_connector_pipeline
 from kairix.core.protocols import ChangeEvent
 from tests.fakes import FakeChunkWriter, FakeEntityGraphSink, FakeExtractor, FakeSourceConnector
 
@@ -175,7 +175,7 @@ def test_watermark_skip_preserves_cursor(tmp_path: Path) -> None:
         collection="watermark-test",
         chunk_writer=FakeChunkWriter(),
         entity_graph_sink=FakeEntityGraphSink(),
-        disk_free_resolver=lambda: 1 * 1024**3,  # 1 GiB free
+        deps=FactoryDeps(disk_free_override=lambda: 1 * 1024**3),  # 1 GiB free
     )
     events = _make_events(10)
     body = ("body. " * 30).encode("utf-8")

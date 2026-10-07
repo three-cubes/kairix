@@ -85,10 +85,8 @@ distrust is worse than no detector):
   * Two sites sharing one function name in different files are covered
     together — names, not qualified paths, key the convention.
 
-Baseline ``.architecture/baseline/f84-files.txt`` grandfathers
-pre-existing uncovered sites (empty at landing — the #492 fix's
-exemplar test already covers the whole tree); net-new uncovered config
-writers block at pre-commit / safe-commit / CI Stage 0.
+There is no grandfathering: every uncovered config writer blocks at
+pre-commit / safe-commit / CI Stage 0.
 """
 
 from __future__ import annotations

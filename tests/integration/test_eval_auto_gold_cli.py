@@ -13,13 +13,13 @@ This file replaces it with two integration tests that:
   2. Run the real CLI against a missing DB and verify the error path
      (sys.exit code 1) without patching ``get_db_path``.
 
-Both use direct ``os.environ`` manipulation for ``KAIRIX_DB_PATH`` (operator
-config, not a code substitution seam — see feedback_no_monkeypatch).
+The seeded DB path reaches the CLI through ``EvalCliDeps(index_db_path=...)``
+— the CLI's own constructor seam — so the test never mutates process env
+(no ``KAIRIX_DB_PATH`` write that could leak into later tests).
 """
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from pathlib import Path
 
@@ -28,7 +28,7 @@ import yaml
 
 from kairix.core.db.fts import rebuild_fts
 from kairix.core.db.schema import create_schema
-from kairix.quality.eval.cli import main
+from kairix.quality.eval.cli import EvalCliDeps, main
 
 pytestmark = pytest.mark.integration
 
@@ -63,23 +63,15 @@ def _seed_corpus(db_path: Path, *, n_docs: int = 5) -> None:
 
 
 @pytest.fixture
-def kairix_db_at_env_path(tmp_path: Path):
-    """Build a kairix-schema SQLite at a tmp path, point KAIRIX_DB_PATH at it."""
+def kairix_db(tmp_path: Path) -> Path:
+    """Build a kairix-schema SQLite at a tmp path (handed to the CLI via EvalCliDeps)."""
     db_path = tmp_path / "kairix.sqlite"
     _seed_corpus(db_path)
-    prev = os.environ.get("KAIRIX_DB_PATH")
-    os.environ["KAIRIX_DB_PATH"] = str(db_path)
-    yield db_path
-    if prev is None:
-        os.environ.pop("KAIRIX_DB_PATH", None)
-    else:
-        os.environ["KAIRIX_DB_PATH"] = prev
+    return db_path
 
 
 @pytest.mark.integration
-def test_auto_gold_cli_writes_yaml_with_real_queries_against_seeded_corpus(
-    kairix_db_at_env_path: Path, tmp_path: Path
-) -> None:
+def test_auto_gold_cli_writes_yaml_with_real_queries_against_seeded_corpus(kairix_db: Path, tmp_path: Path) -> None:
     """The real auto-gold pipeline runs end-to-end against a seeded SQLite.
 
     Asserts: exit code 0, YAML written with N queries, every query carries
@@ -91,7 +83,10 @@ def test_auto_gold_cli_writes_yaml_with_real_queries_against_seeded_corpus(
     output_path = tmp_path / "auto-gold.yaml"
 
     with pytest.raises(SystemExit) as exc_info:
-        main(["auto-gold", "--output", str(output_path), "--count", "12"])
+        main(
+            ["auto-gold", "--output", str(output_path), "--count", "12"],
+            deps=EvalCliDeps(index_db_path=lambda: kairix_db),
+        )
 
     assert exc_info.value.code == 0, "auto-gold CLI exited non-zero"
     assert output_path.exists(), "suite YAML was not written"

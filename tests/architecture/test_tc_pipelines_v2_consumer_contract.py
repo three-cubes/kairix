@@ -19,7 +19,7 @@ pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PIPELINES_V2_SHA = "07dad612b5f409a975c8356d556b07f3a855597c"  # pragma: allowlist secret -- public GitHub commit pin
-FITNESS_VERSION = "v0.16.1"
+FITNESS_VERSION = "v0.19.0"
 
 
 def _workflow(name: str) -> dict[str, object]:

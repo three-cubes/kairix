@@ -11,6 +11,7 @@ from kairix.core.protocols import SourceRef
 from kairix.core.search.scope import Scope
 from kairix.use_cases.enumeration import default_expand_callable
 from kairix.use_cases.prep import (
+    ChatAdapterDeps,
     PrepDeps,
     PrepOutput,
     default_chat_callable,
@@ -399,7 +400,7 @@ class _StubBackend:
 def test_default_chat_callable_resolves_provider_and_forwards_to_backend() -> None:
     """Happy path: name resolves, provider is built, backend.chat is called.
 
-    The ``chat_backend_factory`` kwarg lets the test substitute the
+    ``ChatAdapterDeps.make_backend`` lets the test substitute the
     ProviderChatBackend constructor with a stub so the assertions stay on
     the wiring, not on the production backend.
     """
@@ -411,9 +412,11 @@ def test_default_chat_callable_resolves_provider_and_forwards_to_backend() -> No
         return stub
 
     out = default_chat_callable(
-        provider_name_fn=lambda: "azure_foundry",
-        provider_resolver=lambda name: f"provider-for-{name}",
-        chat_backend_factory=fake_backend_factory,
+        deps=ChatAdapterDeps(
+            provider_name=lambda: "azure_foundry",
+            resolve_provider=lambda name: f"provider-for-{name}",
+            make_backend=fake_backend_factory,
+        ),
         messages=[{"role": "user", "content": "hi"}],
         max_tokens=150,
     )
@@ -432,9 +435,11 @@ def test_default_chat_callable_raises_value_error_when_no_provider_configured() 
     """
     with pytest.raises(ValueError, match="provider:"):
         default_chat_callable(
-            provider_name_fn=lambda: None,
-            provider_resolver=lambda _name: pytest.fail("resolver must not be called"),
-            chat_backend_factory=lambda _p: pytest.fail("backend factory must not be called"),
+            deps=ChatAdapterDeps(
+                provider_name=lambda: None,
+                resolve_provider=lambda _name: pytest.fail("resolver must not be called"),
+                make_backend=lambda _p: pytest.fail("backend factory must not be called"),
+            ),
             messages=[],
             max_tokens=10,
         )

@@ -101,27 +101,67 @@ def _extractor(request: pytest.FixtureRequest) -> Extractor:
     return factory()
 
 
-@pytest.mark.contract
-def test_pdf_fallback_extractor_satisfies_protocol() -> None:
-    """The real factory returns an instance that is a runtime ``Extractor``."""
-    real = _make_real_with_stub()
-    assert isinstance(real, Extractor)
-    assert isinstance(real, PdfFallbackExtractor)
+@pytest.fixture(
+    params=[
+        pytest.param(lambda: FakePdfFallbackExtractor(scripted_markdown="", scripted_page_text=""), id="fake"),
+        pytest.param(lambda: _make_real_with_stub(page_text=""), id="real"),
+    ]
+)
+def _image_only_extractor(request: pytest.FixtureRequest) -> Extractor:
+    """Extractor facing a scanned (image-only) PDF — every page's text layer is empty."""
+    factory: _Factory = request.param
+    return factory()
 
 
 @pytest.mark.contract
-def test_extractor_declares_version() -> None:
-    """F40 requirement — module-level ``version`` is non-empty."""
+def test_pdf_fallback_extractor_satisfies_protocol(_extractor: Extractor) -> None:
+    """Fake and real (stubbed) instances are runtime ``Extractor``s.
+
+    Sabotage proof: rename ``PdfFallbackExtractor.quality_ok`` in
+    kairix/extractors/pdf_fallback/extractor.py — the real leg's runtime
+    probe fails.
+    """
+    assert isinstance(_extractor, Extractor)
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    "factory",
+    [pytest.param(make_real_extractor, id="real"), pytest.param(FakePdfFallbackExtractor, id="fake")],
+)
+def test_extractor_declares_version(factory: _Factory) -> None:
+    """F40 requirement — module-level ``version`` is non-empty and every
+    impl carries it (the fake mirrors the plugin's declared version).
+
+    Sabotage proof: make ``make_extractor`` in
+    kairix/extractors/pdf_fallback/__init__.py pass ``version="0.0.0"`` —
+    the real leg's equality fails.
+    """
     assert isinstance(pdf_fallback_version, str)
     assert pdf_fallback_version.strip() != ""
+    assert factory().version == pdf_fallback_version
 
 
 @pytest.mark.contract
-def test_real_factory_returns_pdf_fallback_instance() -> None:
-    """``make_extractor`` returns a real :class:`PdfFallbackExtractor`."""
-    real = make_real_extractor()
-    assert isinstance(real, PdfFallbackExtractor)
-    assert real.name == "pdf_fallback"
+@pytest.mark.parametrize(
+    "factory,expected_cls",
+    [
+        pytest.param(make_real_extractor, PdfFallbackExtractor, id="real"),
+        pytest.param(FakePdfFallbackExtractor, FakePdfFallbackExtractor, id="fake"),
+    ],
+)
+def test_real_factory_returns_pdf_fallback_instance(factory: _Factory, expected_cls: type) -> None:
+    """``make_extractor`` returns a real :class:`PdfFallbackExtractor`; both
+    impls are runtime ``Extractor``s under the ``pdf_fallback`` plugin name.
+
+    Sabotage proof: change ``PLUGIN_NAME`` in
+    kairix/extractors/pdf_fallback/extractor.py to ``"pdf"`` — the real
+    leg's name assertion fails.
+    """
+    impl = factory()
+    assert isinstance(impl, expected_cls)
+    assert isinstance(impl, Extractor)
+    assert impl.name == "pdf_fallback"
 
 
 @pytest.mark.contract
@@ -137,10 +177,13 @@ def test_can_extract_claims_pdf_by_magic_bytes(_extractor: Extractor) -> None:
 
 
 @pytest.mark.contract
-def test_real_rejects_plain_text() -> None:
-    """The real impl refuses ``text/plain`` — that's passthrough's job."""
-    real = _make_real_with_stub()
-    assert real.can_extract("text/plain", b"hello") is False
+def test_real_rejects_plain_text(_extractor: Extractor) -> None:
+    """Fake and real refuse ``text/plain`` — that's passthrough's job.
+
+    Sabotage proof: make ``PdfFallbackExtractor.can_extract`` return
+    ``True`` for ``text/plain`` — the real leg fails.
+    """
+    assert _extractor.can_extract("text/plain", b"hello") is False
 
 
 @pytest.mark.contract
@@ -166,8 +209,12 @@ def test_quality_ok_true_on_substantive_output(_extractor: Extractor) -> None:
 
 
 @pytest.mark.contract
-def test_quality_ok_false_on_image_only_output() -> None:
-    """Quality gate fails when pdfplumber returns empty page text (scanned PDF)."""
-    extractor = _make_real_with_stub(page_text="")
-    doc = extractor.extract(b"%PDF-1.4\n" + b"y" * 4096, "application/pdf")
-    assert extractor.quality_ok(doc) is False
+def test_quality_ok_false_on_image_only_output(_image_only_extractor: Extractor) -> None:
+    """Quality gate fails when pdfplumber returns empty page text (scanned PDF).
+
+    Sabotage proof: set ``_QUALITY_MIN_CHARS = 0`` and drop the per-page
+    text check in ``PdfFallbackExtractor.quality_ok`` — the real leg's
+    gate passes.
+    """
+    doc = _image_only_extractor.extract(b"%PDF-1.4\n" + b"y" * 4096, "application/pdf")
+    assert _image_only_extractor.quality_ok(doc) is False

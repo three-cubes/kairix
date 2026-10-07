@@ -87,3 +87,27 @@ class TestRecommendFromProfile:
         assert result is not None
         assert "llm_advice" not in result  # LLM failed, no advice added
         assert result["temporal_boost"] is True  # rule-based still works
+
+
+def test_default_chat_seam_without_a_provider_degrades_to_rule_based_advice() -> None:
+    """With no ``deps`` injected, the production chat seam runs: on the
+    hermetic test platform no ``provider:`` is configured, so it raises inside
+    and the optional LLM leg is skipped — rule-based advice still returns.
+
+    Sabotage proof (executed): make ``recommend_from_profile`` re-raise from
+    its ``except Exception`` around the LLM call → this test errors with the
+    missing-provider ValueError. Restored.
+    """
+    rec = recommend_from_profile(
+        total_docs=10,
+        format_counts={"md": 10},
+        date_file_pct=0.5,
+        procedural_pct=0.0,
+        entity_pct=0.0,
+        api_key="fake-key-for-tests",  # pragma: allowlist secret — fixture value, not a real key
+        endpoint="https://example.test",
+    )
+
+    assert rec is not None
+    assert rec["temporal_boost"] is True
+    assert "llm_advice" not in rec

@@ -47,10 +47,9 @@ to ``kairix/use_cases/brief.py`` makes ``agent-alpha`` return an
 InvalidAgent envelope → the happy-path test fails on ``returncode == 0``
 (it gets exit 1 + "Error generating briefing" on stderr). Restored.
 
-Latency baseline (2024 M-series Mac): subprocess wall ~300-500ms
-(interpreter + brief import graph + health probes). Test threshold:
-10000ms (generous for the heavier brief module graph; bootstrap was
-5000ms but brief pulls in more transitive imports).
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
@@ -59,7 +58,6 @@ import os
 import subprocess
 import sys
 import textwrap
-import time
 from pathlib import Path
 
 import pytest
@@ -143,7 +141,6 @@ def test_brief_cli_subprocess_configured_agent_outcome(tmp_path: Path) -> None:
     """
     _seed_minimal_brief_workspace(tmp_path, "agent-alpha")
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -158,7 +155,6 @@ def test_brief_cli_subprocess_configured_agent_outcome(tmp_path: Path) -> None:
         env=_subprocess_env_without_llm_keys(),
         cwd=str(tmp_path),
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"brief exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -168,8 +164,6 @@ def test_brief_cli_subprocess_configured_agent_outcome(tmp_path: Path) -> None:
     )
     # Degraded path: no error message, no write-confirmation, no content body.
     assert "Error generating briefing" not in proc.stderr, f"unexpected error path in stderr: {proc.stderr!r}"
-
-    assert elapsed_ms < 10000.0, f"brief subprocess took {elapsed_ms:.1f}ms (baseline ~300-500ms, threshold 10000ms)"
 
 
 def test_brief_cli_subprocess_no_surface_agent_exits_non_zero(tmp_path: Path) -> None:

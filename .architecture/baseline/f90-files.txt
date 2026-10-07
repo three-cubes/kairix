@@ -1,9 +1,0 @@
-# F90 grandfathered files — setup-wizard templates with a dangling
-# reference (an hx-get/hx-post/href/action pointing at an unregistered
-# /setup route, an hx-target/hx-include id defined in no template, or a
-# template no route renders) that predate the rule (EPIC #499 Phase 3;
-# the dangling-button class). Empty at landing: the tranche-3 web tier
-# is referentially clean — every template URL resolves to a Route/Mount
-# in routes.py, every hx-target id is defined, every template is reached
-# by a route or extended by base.html. Keep it empty — a new entry means
-# a dead button / dead link / orphan template shipped silently.

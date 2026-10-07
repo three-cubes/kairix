@@ -3,18 +3,17 @@
 Covers ``scripts/checks/mutation_parity.py`` — the mechanical sabotage
 control. The runner is itself a correctness gate, so it carries the same
 discipline it enforces: every branch is driven through the module's public
-functions, the survivor/killed verdict is proven both ways, and the
-ratchet's never-grow invariant is pinned.
+functions, the survivor/killed verdict is proven both ways, and the absence of any
+survivor list (PLA-472 — any survivor fails) is pinned.
 
 Sabotage proofs (executed; mutate prod -> confirm fail -> restore):
 
   * generate_mutants: change ``_COMPARE_SWAPS[ast.Gt]`` from ``(">", ">=")``
     to ``(">", ">")`` -> ``test_generate_mutants_swaps_comparisons`` fails
     (the produced mutation no longer differs); restore -> green.
-  * _verdict ratchet: change ``_ratchet``'s ``len(survivor_keys) >
-    len(previous)`` to ``>=`` -> ``test_ratchet_refuses_to_grow`` fails (an
-    equal-size set would wrongly be rejected) AND
-    ``test_ratchet_holds_when_steady`` fails; restore -> green.
+  * _verdict: change ``if not survivors`` to ``if len(survivors) < 2``
+    -> ``test_no_survivor_list_can_excuse_a_survivor`` fails (a single
+    survivor would pass); restore -> green.
   * changed_lines: change the hunk-count guard ``if count > 0`` to
     ``if count >= 0`` -> ``test_changed_lines_ignores_pure_deletions``
     fails (a 0-line deletion hunk would add a phantom line); restore.
@@ -142,35 +141,6 @@ def test_generated_mutant_source_is_a_one_token_delta() -> None:
     assert "a == b" not in mutant.mutated_source
 
 
-# ── ratchet: never-grow invariant ───────────────────────────────────────
-
-
-def test_ratchet_holds_when_steady(tmp_path: Path) -> None:
-    """A surviving set equal in size to the baseline is accepted + written."""
-    baseline = tmp_path / "surv.txt"
-    baseline.write_text("kairix/a.py:1:>->>=\n", encoding="utf-8")
-    rc = mp._ratchet({"kairix/b.py:2:==->!="}, baseline)
-    assert rc == 0
-    assert "kairix/b.py:2:==->!=" in baseline.read_text(encoding="utf-8")
-
-
-def test_ratchet_shrinks_ok(tmp_path: Path) -> None:
-    """Fewer survivors than the baseline is the goal — accepted."""
-    baseline = tmp_path / "surv.txt"
-    baseline.write_text("kairix/a.py:1:>->>=\nkairix/b.py:2:==->!=\n", encoding="utf-8")
-    assert mp._ratchet({"kairix/a.py:1:>->>="}, baseline) == 0
-
-
-def test_ratchet_refuses_to_grow(tmp_path: Path) -> None:
-    """More survivors than the baseline fails AND leaves the baseline intact."""
-    baseline = tmp_path / "surv.txt"
-    baseline.write_text("kairix/a.py:1:>->>=\n", encoding="utf-8")
-    before = baseline.read_text(encoding="utf-8")
-    rc = mp._ratchet({"kairix/a.py:1:>->>=", "kairix/b.py:2:==->!="}, baseline)
-    assert rc == 1
-    assert baseline.read_text(encoding="utf-8") == before  # untouched
-
-
 # ── verdict translation ─────────────────────────────────────────────────
 
 
@@ -187,29 +157,45 @@ def _result(key_path: str, lineno: int, original: str, mutation: str) -> mp.Muta
 
 
 def test_verdict_clean_when_no_survivors() -> None:
-    assert mp._verdict([], baseline_path=None, write_baseline=False, skipped=0) == 0
+    assert mp._verdict([]) == 0
 
 
-def test_verdict_fails_on_new_survivor_without_baseline() -> None:
-    """Strict (safe-commit) mode: any survivor fails."""
-    survivors = [_result("kairix/a.py", 1, ">", ">=")]
-    assert mp._verdict(survivors, baseline_path=None, write_baseline=False, skipped=0) == 1
+def test_verdict_fails_on_any_survivor(capsys: pytest.CaptureFixture[str]) -> None:
+    """Any survivor fails and every survivor is reported — no survivor list
+    can excuse one (PLA-472 retired the ratchet)."""
+    survivors = [_result("kairix/a.py", 1, ">", ">="), _result("kairix/b.py", 9, "==", "!=")]
+    assert mp._verdict(survivors) == 1
+    err = capsys.readouterr().err
+    assert "2 survivor(s)" in err
+    assert "kairix/a.py:1" in err
+    assert "kairix/b.py:9" in err
 
 
-def test_verdict_passes_when_survivor_in_baseline(tmp_path: Path) -> None:
-    """Nightly mode: a survivor already in the ratchet does not fail."""
-    baseline = tmp_path / "surv.txt"
-    baseline.write_text("kairix/a.py:1:>->>=\n", encoding="utf-8")
-    survivors = [_result("kairix/a.py", 1, ">", ">=")]
-    assert mp._verdict(survivors, baseline_path=baseline, write_baseline=False, skipped=0) == 0
+def test_no_survivor_list_can_excuse_a_survivor(tmp_path: Path) -> None:
+    """PLA-472: the runner has no survivor-list channel. The old
+    ``--baseline`` / ``--write-baseline`` flags are rejected by the CLI
+    (argparse exit 2, before any diff is read), the verdict takes only the
+    survivor list, and the module no longer loads or writes a survivors file —
+    so a re-created ``mutation-survivors-files.txt`` naming the exact
+    survivor cannot rescue it.
 
+    Sabotage proof (executed): re-adding a ``--baseline`` argument to
+    ``main``'s parser flips the SystemExit assertion red (argparse accepts
+    it and the run proceeds); re-adding a module-level ``_load_baseline``
+    flips the hasattr assertion red. Restored -> green.
+    """
+    survivors_file = tmp_path / ".architecture" / "baseline" / "mutation-survivors-files.txt"
+    survivors_file.parent.mkdir(parents=True)
+    survivors_file.write_text("kairix/a.py:1:>->>=\n", encoding="utf-8")
 
-def test_verdict_fails_on_survivor_not_in_baseline(tmp_path: Path) -> None:
-    """A survivor outside the ratchet fails even in baseline mode."""
-    baseline = tmp_path / "surv.txt"
-    baseline.write_text("kairix/a.py:1:>->>=\n", encoding="utf-8")
-    survivors = [_result("kairix/b.py", 9, "==", "!=")]
-    assert mp._verdict(survivors, baseline_path=baseline, write_baseline=False, skipped=0) == 1
+    for flag in (["--baseline", str(survivors_file)], ["--write-baseline"]):
+        with pytest.raises(SystemExit) as exc:
+            mp.main(flag)
+        assert exc.value.code == 2
+
+    assert mp._verdict([_result("kairix/a.py", 1, ">", ">=")]) == 1
+    assert not hasattr(mp, "_load_baseline")
+    assert not hasattr(mp, "_ratchet")
 
 
 # ── impacted-test selection + report shape ──────────────────────────────
@@ -286,20 +272,3 @@ def test_survivor_report_carries_f21_action_markers() -> None:
     assert "next:" in report
     assert "run:" in report
     assert "mutant survived" in report
-
-
-def test_survivor_key_is_stable_and_unique() -> None:
-    a = mp.Mutant(Path("kairix/a.py"), 1, 0, ">", ">=", "")
-    b = mp.Mutant(Path("kairix/a.py"), 2, 0, ">", ">=", "")
-    assert mp._survivor_key(a) != mp._survivor_key(b)
-    assert mp._survivor_key(a) == "kairix/a.py:1:>->>="
-
-
-def test_load_baseline_skips_comments_and_blanks(tmp_path: Path) -> None:
-    p = tmp_path / "b.txt"
-    p.write_text("# header\n\nkairix/a.py:1:>->>=\n", encoding="utf-8")
-    assert mp._load_baseline(p) == {"kairix/a.py:1:>->>="}
-
-
-def test_load_baseline_missing_file_is_empty(tmp_path: Path) -> None:
-    assert mp._load_baseline(tmp_path / "nope.txt") == set()

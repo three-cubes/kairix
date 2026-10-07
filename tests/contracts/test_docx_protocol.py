@@ -19,9 +19,12 @@ Sabotage-proofs:
   * Deleting ``version`` from :mod:`kairix.extractors.docx` breaks
     ``test_extractor_declares_version``.
   * Flipping ``can_extract`` to ``return True`` for ``text/plain``
-    on the real impl breaks ``test_real_rejects_plain_text``.
-  * Flipping the quality gate's char threshold to ``0`` breaks
-    ``test_quality_ok_false_on_short_output``.
+    on the real impl breaks ``test_real_rejects_plain_text[real]``.
+  * The ``make_extractor`` concrete-type check lives in
+    ``tests/extractors/test_docx.py::test_factory_returns_docx_instance``.
+  * Flipping the quality gate to always pass (char threshold ``0`` AND
+    the heading check to ``True``) breaks
+    ``test_quality_ok_false_on_short_output[real]`` (executed).
 """
 
 from __future__ import annotations
@@ -35,9 +38,6 @@ import pytest
 from kairix.extractors import ExtractedDocument, Extractor
 from kairix.extractors.docx import (
     DocxExtractor,
-)
-from kairix.extractors.docx import (
-    make_extractor as make_real_extractor,
 )
 from kairix.extractors.docx import (
     version as docx_version,
@@ -150,26 +150,19 @@ def _extractor(request: pytest.FixtureRequest) -> Extractor:
 
 
 @pytest.mark.contract
-def test_docx_extractor_satisfies_protocol() -> None:
-    """The real factory returns an instance that is a runtime ``Extractor``."""
-    real = _make_real_with_stub()
-    assert isinstance(real, Extractor)
-    assert isinstance(real, DocxExtractor)
+def test_docx_extractor_satisfies_protocol(_extractor: Extractor) -> None:
+    """Both fake and real are runtime ``Extractor`` instances named ``docx``."""
+    assert isinstance(_extractor, Extractor)
+    assert getattr(_extractor, "name", None) == "docx"
 
 
 @pytest.mark.contract
-def test_extractor_declares_version() -> None:
-    """F40 requirement — module-level ``version`` is non-empty."""
-    assert isinstance(docx_version, str)
-    assert docx_version.strip() != ""
-
-
-@pytest.mark.contract
-def test_real_factory_returns_docx_instance() -> None:
-    """``make_extractor`` returns a real :class:`DocxExtractor`."""
-    real = make_real_extractor()
-    assert isinstance(real, DocxExtractor)
-    assert real.name == "docx"
+def test_extractor_declares_version(_extractor: Extractor) -> None:
+    """F40 requirement — the extractor carries a non-empty ``version``
+    (the real one threads the module-level declaration through)."""
+    ver = getattr(_extractor, "version", None)
+    assert isinstance(ver, str)
+    assert ver.strip() != ""
 
 
 @pytest.mark.contract
@@ -185,10 +178,9 @@ def test_can_extract_rejects_octet_stream_without_document_hint(_extractor: Extr
 
 
 @pytest.mark.contract
-def test_real_rejects_plain_text() -> None:
-    """The real impl refuses ``text/plain`` — that's passthrough's job."""
-    real = _make_real_with_stub()
-    assert real.can_extract("text/plain", b"hello") is False
+def test_real_rejects_plain_text(_extractor: Extractor) -> None:
+    """Both impls refuse ``text/plain`` — that's passthrough's job."""
+    assert _extractor.can_extract("text/plain", b"hello") is False
 
 
 @pytest.mark.contract
@@ -206,13 +198,20 @@ def test_quality_ok_true_on_substantive_output(_extractor: Extractor) -> None:
     assert _extractor.quality_ok(doc) is True
 
 
+def _short_doc() -> _StubDocument:
+    return _StubDocument(paragraphs=[_StubParagraph(text="x")])
+
+
+_SHORT_OUTPUT_IMPLEMENTATIONS: list[tuple[str, _Factory]] = [
+    ("real", lambda: _make_real_with_stub(doc_factory=_short_doc)),
+    ("fake", lambda: FakeDocxExtractor(scripted_markdown="x")),
+]
+
+
 @pytest.mark.contract
-def test_quality_ok_false_on_short_output() -> None:
+@pytest.mark.parametrize("name,factory", _SHORT_OUTPUT_IMPLEMENTATIONS)
+def test_quality_ok_false_on_short_output(name: str, factory: _Factory) -> None:
     """Quality gate fails when the document is essentially empty."""
-
-    def _short_doc() -> _StubDocument:
-        return _StubDocument(paragraphs=[_StubParagraph(text="x")])
-
-    extractor = _make_real_with_stub(doc_factory=_short_doc)
+    extractor = factory()
     doc = extractor.extract(b"PK\x03\x04" + b"y" * 4096, _DOCX_MIME)
-    assert extractor.quality_ok(doc) is False
+    assert extractor.quality_ok(doc) is False, name

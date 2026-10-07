@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -72,40 +73,60 @@ class OpenAIEmbedProvider:
         return [item.embedding for item in response.data]
 
 
+def _default_embed_credentials() -> object | None:
+    """Production default — resolve the ``embed`` role credentials chain."""
+    from kairix.credentials import get_credentials
+
+    return get_credentials("embed")
+
+
+@dataclass
+class EmbedProviderDeps:
+    """Injectable collaborators for :func:`get_embed_provider`.
+
+    Canonical Deps shape (``kairix/worker.py::WorkerDeps``):
+
+    - ``credentials``: returns a ``Credentials`` instance or ``None``.
+      Defaults to ``kairix.credentials.get_credentials("embed")`` which
+      checks env vars (KAIRIX_EMBED_* / KAIRIX_LLM_*), secrets file, then
+      Azure Key Vault. Multi-tenant / per-call credential injection (see
+      docs/architecture/provider-plugin-architecture.md) and tests pass
+      their own callable; ``lambda: None`` skips credential resolution and
+      exercises the OPENAI_API_KEY fallback.
+    """
+
+    credentials: Callable[[], object | None] = field(default_factory=lambda: _default_embed_credentials)
+
+
 def get_embed_provider(
     *,
-    creds_resolver: Callable[[], object | None] | None = None,
+    deps: EmbedProviderDeps | None = None,
     env: Mapping[str, str] | None = None,
 ) -> EmbedProvider:
     """Get the configured embed provider.
 
     Resolution order:
-      1. ``creds_resolver()`` — returns a ``Credentials`` instance or None.
-         Defaults to ``kairix.credentials.get_credentials("embed")`` which
-         checks env vars (KAIRIX_EMBED_* / KAIRIX_LLM_*), secrets file, then
-         Azure Key Vault. Tests pass ``lambda: None`` to skip credential
-         resolution and exercise the OPENAI_API_KEY fallback.
+      1. ``deps.credentials()`` — returns a ``Credentials`` instance or None
+         (see :class:`EmbedProviderDeps`; production default is
+         ``kairix.credentials.get_credentials("embed")``).
       2. ``OPENAI_API_KEY`` from ``env`` (defaults to ``os.environ``) — the
          backwards-compat fallback.
 
     Selects AzureEmbedProvider when the endpoint is an Azure URL, otherwise
     falls back to OpenAIEmbedProvider.
 
-    ``creds_resolver`` and ``env`` are DI seams; tests pass them explicitly
-    rather than mutating the process environment or stubbing get_credentials.
+    ``deps`` and ``env`` are DI seams; tests pass them explicitly rather
+    than mutating the process environment or stubbing get_credentials.
 
     Raises OSError if no credentials are available.
     """
     from kairix.credentials import Credentials
 
-    if creds_resolver is None:
-        from kairix.credentials import get_credentials
-
-        creds_resolver = lambda: get_credentials("embed")  # noqa: E731
+    deps = deps if deps is not None else EmbedProviderDeps()
     if env is None:
         env = os.environ
 
-    creds = creds_resolver()
+    creds = deps.credentials()
 
     if isinstance(creds, Credentials) and creds.api_key and creds.endpoint:
         if creds.is_azure:

@@ -2,10 +2,11 @@ name: "8 · Mutation suite (nightly + on-demand)"
 
 # Mechanical sabotage control, full-scope leg (#499 Phase 1). The
 # per-commit safe-commit.sh stage (step 4b) runs the SAME runner
-# diff-scoped against the staged change and fails on any new survivor.
-# This workflow runs it at a wider scope on a schedule and ratchets the
-# surviving-mutant baseline so survivors in pre-gate code are tracked and
-# can only ever shrink.
+# diff-scoped against the staged change and fails on any survivor.
+# This workflow runs it at a wider scope on a schedule with the SAME
+# verdict: any surviving mutant fails the run. There is no committed
+# survivor list and no ratchet (PLA-472) — a survivor is fixed at source
+# by strengthening the impacted test.
 #
 # Scope: changed-since-the-last-release-tag. Mutating the entire kairix/
 # tree every night is unbounded; the delta since the last tag is the
@@ -21,8 +22,8 @@ name: "8 · Mutation suite (nightly + on-demand)"
 # (mirrors soak-suite.yml):
 #   - the per-commit diff-scoped stage in ci.yml / safe-commit.sh is the
 #     blocking gate; it catches survivors on the change that introduces them
-#   - the nightly leg is the ratchet + the pre-gate-debt tracker, not a
-#     per-PR gate
+#   - the nightly leg widens the scope to everything since the last
+#     release tag, surfacing survivors the per-commit caps deferred
 # Failure does NOT block PR merge. On-call reads the nightly notification.
 #
 # No untrusted input is referenced in run: blocks — this workflow only
@@ -41,7 +42,7 @@ on:
         default: ""
         type: string
 
-# Restrict to main — mutation ratcheting is about the trunk's test
+# Restrict to main — the nightly mutation leg is about the trunk's test
 # strength, not branch-experimental code.
 permissions: {}
 
@@ -51,7 +52,7 @@ concurrency:
 
 jobs:
   mutation:
-    name: "Mutation — diff-scoped vs last release (ratcheted)"
+    name: "Mutation — diff-scoped vs last release (any survivor fails)"
     runs-on: ubuntu-latest
     # Only ever run on main. workflow_dispatch from a non-main branch exits
     # without work so contributors can't burn runner time on a feature branch.
@@ -74,7 +75,7 @@ jobs:
       # imports and runs the same production code + tests the unit tier does.
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           cache: pip
 
       - name: Install OCR runtime (tesseract binary)
@@ -107,32 +108,12 @@ jobs:
           echo "Resolved mutation diff base: ${base}"
           echo "base=${base}" >> "${GITHUB_OUTPUT}"
 
-      - name: Mutation parity (full-scope, ratcheted)
+      - name: Mutation parity (full-scope, any survivor fails)
         env:
           BASE: ${{ steps.base.outputs.base }}
         run: |
           set -euo pipefail
-          # --baseline: survivors already in the ratchet do NOT fail here
-          #   (they're pre-gate debt, tracked not blocking).
-          # --write-baseline: rewrite the ratchet to the current surviving
-          #   set; the runner REFUSES to grow the count (a wider survivor set
-          #   than the baseline fails the run and leaves the baseline intact).
-          python scripts/checks/mutation_parity.py \
-            --base "${BASE}" \
-            --baseline .architecture/baseline/mutation-survivors-files.txt \
-            --write-baseline
-
-      - name: Show ratcheted baseline diff
-        if: always()
-        run: |
-          set -euo pipefail
-          echo "=== mutation-survivors-files.txt after this run ==="
-          git --no-pager diff -- .architecture/baseline/mutation-survivors-files.txt || true  # diagnostic-only; never fail the run on a diff render
-
-      - name: Upload surviving-mutant baseline
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: mutation-survivors
-          path: .architecture/baseline/mutation-survivors-files.txt
-          retention-days: 30
+          # No survivor list, no ratchet: any surviving mutant on the
+          # since-last-release diff fails the run. Fix at source by
+          # strengthening the impacted test until the mutant is killed.
+          python scripts/checks/mutation_parity.py --base "${BASE}"

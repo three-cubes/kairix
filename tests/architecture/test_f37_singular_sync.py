@@ -42,7 +42,7 @@ def _write(path: Path, body: str = "") -> None:
 
 def test_real_repo_gate_is_green() -> None:
     """The real F37 detector run against the full repo emits no
-    net-new violations vs ``.architecture/baseline/f37-files.txt``.
+    violations (there is no grandfathering).
     Today (pre-Wave 1) the connector trees do not yet exist and no
     file imports a change-detection library, so the result is
     vacuous-green.

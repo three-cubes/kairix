@@ -227,8 +227,7 @@ Mechanical, blocking checks codify the separation:
 - **F26** — `kairix/core/**` may not import `kairix/providers/**` or
   `kairix/transport/**` (only types via `kairix/core/protocols.py`).
   Blocks the regression class where domain code accretes transport
-  knowledge. Pre-existing violations grandfathered in
-  `.architecture/baseline/F26-files.txt`.
+  knowledge. Checked over the full tree; there is no exemption list.
 
 - **F27** — `kairix/providers/<name>/**` may not import another
   provider (`kairix/providers/<other>/**`). Cross-provider work goes
@@ -245,7 +244,7 @@ Mechanical, blocking checks codify the separation:
   growing parallel benchmark harnesses.
 
 All four follow the existing F-rule template: action-marked failure
-messages (F21), per-rule baseline file under `.architecture/baseline/`,
+messages (F21), no baseline (every violation blocks),
 wired into pre-commit + `scripts/safe-commit.sh` + CI Stage 0.
 
 ## Resolved ambiguities

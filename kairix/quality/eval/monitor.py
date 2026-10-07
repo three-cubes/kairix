@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -163,6 +163,45 @@ def _rolling_average(entries: list[dict[str, Any]], window_days: int) -> float |
 # ---------------------------------------------------------------------------
 
 
+def _default_load_suite(suite_path: str) -> BenchmarkSuite:
+    """Production suite loader — :func:`kairix.quality.benchmark.suite.load_suite`.
+
+    Lazy import avoids a circular import
+    (runner → eval.constants → eval.__init__ → monitor → runner).
+    """
+    from kairix.quality.benchmark.suite import load_suite
+
+    return load_suite(suite_path)
+
+
+def _default_run_benchmark(*args: Any, **kwargs: Any) -> BenchmarkResult:
+    """Production benchmark runner — :func:`kairix.quality.benchmark.runner.run_benchmark`.
+
+    Lazy import for the same circular-import reason as :func:`_default_load_suite`.
+    """
+    from kairix.quality.benchmark.runner import run_benchmark
+
+    return run_benchmark(*args, **kwargs)
+
+
+@dataclass
+class MonitorDeps:
+    """Injectable collaborators for :func:`run_monitor`.
+
+    Canonical Deps shape (``kairix/worker.py::WorkerDeps``). Production
+    callers omit ``deps``; tests construct
+    ``MonitorDeps(load_suite=..., run_benchmark=...)``.
+
+    - ``load_suite``: ``(suite_path) -> BenchmarkSuite``. Defaults to
+      ``kairix.quality.benchmark.suite.load_suite``.
+    - ``run_benchmark``: ``(suite, system=, agent=) -> BenchmarkResult``.
+      Defaults to ``kairix.quality.benchmark.runner.run_benchmark``.
+    """
+
+    load_suite: SuiteLoader = field(default_factory=lambda: _default_load_suite)
+    run_benchmark: BenchmarkRunnerFn = field(default_factory=lambda: _default_run_benchmark)
+
+
 def run_monitor(
     suite_path: str,
     log_path: str | None = None,
@@ -170,8 +209,7 @@ def run_monitor(
     window_days: int = 7,
     agent: str = "shape",
     *,
-    suite_loader: SuiteLoader | None = None,
-    benchmark_runner: BenchmarkRunnerFn | None = None,
+    deps: MonitorDeps | None = None,
 ) -> MonitorResult:
     """
     Run the canary benchmark suite and check for retrieval regression.
@@ -183,28 +221,14 @@ def run_monitor(
         alert_threshold:  Relative NDCG drop that triggers regression flag (default: 0.05 = 5%).
         window_days:      Rolling window for baseline average in days (default: 7).
         agent:            Agent name for retrieval scoping.
-        suite_loader:     Injection seam for the suite-loading callable. ``None``
-                          (default) resolves lazily to
-                          ``kairix.quality.benchmark.suite.load_suite``. Tests pass
-                          a callable returning a ``BenchmarkSuite``.
-        benchmark_runner: Injection seam for the benchmark-running callable.
-                          ``None`` (default) resolves lazily to
-                          ``kairix.quality.benchmark.runner.run_benchmark``. Tests
-                          pass a callable returning a ``BenchmarkResult``.
+        deps:             :class:`MonitorDeps` carrying the suite loader and
+                          benchmark runner. ``None`` (default) binds the
+                          production ``load_suite`` / ``run_benchmark``.
 
     Returns:
         MonitorResult. Never raises.
     """
-    # Lazy production defaults — kept inside the function to avoid a circular
-    # import (runner → eval.constants → eval.__init__ → monitor → runner).
-    if suite_loader is None:  # pragma: no cover — production-only lazy default; tests inject a suite_loader callable
-        from kairix.quality.benchmark.suite import load_suite
-
-        suite_loader = load_suite
-    if benchmark_runner is None:  # pragma: no cover — prod-only lazy default; tests inject benchmark_runner
-        from kairix.quality.benchmark.runner import run_benchmark
-
-        benchmark_runner = run_benchmark
+    deps = deps if deps is not None else MonitorDeps()
 
     if log_path is None:
         log_path = str(_monitor_log_path())
@@ -224,14 +248,14 @@ def run_monitor(
     )
 
     try:
-        suite = suite_loader(suite_path)
+        suite = deps.load_suite(suite_path)
         n_cases = len(suite.cases)
 
         if n_cases == 0:
             logger.warning("monitor: suite %r has 0 cases", suite_path)
             return _empty
 
-        result = benchmark_runner(suite, system="hybrid", agent=agent)
+        result = deps.run_benchmark(suite, system="hybrid", agent=agent)
 
         ndcg_by_category = {
             cat: round(float(result.summary["category_scores"].get(cat, 0.0)), 4) for cat in CATEGORY_WEIGHTS

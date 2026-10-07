@@ -214,9 +214,7 @@ MaintenanceDiagnosticsProvider = Callable[[str | None], MaintenanceDiagnostics |
 
 def _default_maintenance_diagnostics(
     db_path: str | None,
-) -> (
-    MaintenanceDiagnostics | None
-):  # pragma: no cover — production boundary opens platform-default DB + reads worker-state JSON
+) -> MaintenanceDiagnostics | None:
     """Production seam — builds a maintenance diagnostics snapshot.
 
     Reads:
@@ -229,9 +227,8 @@ def _default_maintenance_diagnostics(
         :mod:`kairix.core.maintenance.scheduler`.
       * Configured interval via :func:`maintenance_interval_seconds`.
 
-    Marked no-cover because the production path opens
-    ``kairix.paths.db_path()`` + reads the platform-default worker-state
-    JSON, neither of which exist in unit-test sandboxes. Tests pass a
+    Executed by ``tests/unit/test_features_maintenance_default_seam.py``
+    (F86) against a tmp ``--db-path`` index; format-only tests pass a
     Fake provider through ``main()``'s ``read_maintenance`` kwarg.
     """
     try:

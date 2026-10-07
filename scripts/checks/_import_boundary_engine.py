@@ -58,8 +58,8 @@ class ImportBoundaryRule:
     """One import-boundary rule, expressed declaratively.
 
     Fields:
-        name: gate / baseline key (e.g. ``"f26"`` →
-            ``.architecture/baseline/f26-files.txt``).
+        name: gate name used in the verdict line (e.g. ``"f26"`` →
+            ``FAIL [arch:f26]``).
         roots: repo-relative directory prefixes to scan (from-globs). For
             ``sibling-plugin`` mode, ``roots[0]`` is the plugin-tree root used
             to infer the owning plugin.

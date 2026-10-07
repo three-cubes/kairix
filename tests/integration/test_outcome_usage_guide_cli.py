@@ -32,9 +32,9 @@ guide path instead of the tmp file, the topic-section extractor finds
 no match for the unique sentinel ``F30-OUTCOME-SENTINEL`` and the
 content assertion fails. Restored.
 
-Latency baseline (2024 M-series Mac): subprocess wall ~150-300ms (cold
-Python interpreter + import graph dominate). Test threshold: 5000ms
-(~15x headroom for CI variance + slower hardware).
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -79,7 +78,6 @@ def test_usage_guide_cli_subprocess_topic_envelope_outcome(tmp_path: Path) -> No
     """
     guide = _seed_guide(tmp_path)
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -95,7 +93,6 @@ def test_usage_guide_cli_subprocess_topic_envelope_outcome(tmp_path: Path) -> No
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"usage-guide exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -110,8 +107,6 @@ def test_usage_guide_cli_subprocess_topic_envelope_outcome(tmp_path: Path) -> No
         f"topic filter leaked the search section: {envelope.get('content', '')[:200]!r}"
     )
     assert envelope["error"] == "", f"unexpected error: {envelope.get('error')!r}"
-
-    assert elapsed_ms < 5000.0, f"usage-guide subprocess took {elapsed_ms:.1f}ms (baseline ~200ms, threshold 5000ms)"
 
 
 def test_usage_guide_cli_subprocess_bundled_default_returns_content() -> None:

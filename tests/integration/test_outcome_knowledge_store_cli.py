@@ -36,7 +36,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -64,7 +63,6 @@ def test_store_crawl_subprocess_dry_run_outcome(tmp_path: Path) -> None:
     """
     _seed_minimal_document_root(tmp_path)
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -80,7 +78,6 @@ def test_store_crawl_subprocess_dry_run_outcome(tmp_path: Path) -> None:
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"store crawl --dry-run exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -92,8 +89,6 @@ def test_store_crawl_subprocess_dry_run_outcome(tmp_path: Path) -> None:
     assert "Persons:" in proc.stdout
     assert "Outcomes:" in proc.stdout
     assert "Edges:" in proc.stdout
-
-    assert elapsed_ms < 10000.0, f"store crawl subprocess took {elapsed_ms:.1f}ms (threshold 10000ms)"
 
 
 def test_store_health_subprocess_degraded_envelope(tmp_path: Path) -> None:

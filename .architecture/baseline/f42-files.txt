@@ -1,4 +1,0 @@
-# F42: Protocol return-type discipline (frozen dataclasses / allowed shapes).
-# Empty baseline — connector-surface Protocols don't exist yet. When
-# Wave 1 adds SourceConnector / Extractor / BronzeStore / SilverProcessor /
-# EntityGraphSink, they must conform. Net-new violations block.

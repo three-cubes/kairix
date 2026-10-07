@@ -29,8 +29,8 @@ plugin. A bare ``.py`` file at either root (e.g. ``_base.py``,
 The detector lists plugins, then for each plugin checks both the
 per-plugin feature file existence and the Examples-row presence in
 ``e2e_connector_sync.feature``. Violations are reported as the synthetic
-path ``kairix/connectors/<name>`` or ``kairix/extractors/<name>``,
-grandfathered through ``.architecture/baseline/f36-files.txt``.
+path ``kairix/connectors/<name>`` or ``kairix/extractors/<name>``.
+There is no grandfathering: every violation fails the gate.
 
 If neither ``kairix/connectors/`` nor ``kairix/extractors/`` exists (and
 ``e2e_connector_sync.feature`` is also absent — Wave 0 state), the
@@ -251,7 +251,7 @@ def collect_violations(repo_root: Path = REPO_ROOT) -> set[Path]:
         lacks an Examples-table cell equal to ``<name>`` AND lacks the
         ``@<name>_no_sync`` opt-out tag.
 
-    The synthetic path is what the baseline tracks — one entry per
+    The synthetic path is what the gate reports — one entry per
     plugin missing coverage. Empty set if there are no plugins.
     """
     violations: set[Path] = set()

@@ -3,7 +3,7 @@
 > **Status**: Implemented. The connector + ingestion framework shipped across Waves 0–5 (see §10 wave plan) and is mechanically enforced by F34–F44 (catalogued in `scripts/checks/_rule_catalogue.py`, run per-commit via pre-commit + `scripts/safe-commit.sh` + CI Stage 0). The forward evolution of this framework — canonical-topology collapse and per-connector resilience hardening — is tracked in `connector-architecture-refactor.md`.
 > Names the connector + extractor + plugin architecture, defines the separation of concerns and Protocol seams between layers, and encodes the engineering patterns + fitness functions that close the gap between "Python by default" (the project's language strategy) and the strong-typing / encapsulation properties needed for a wide ingest surface that grows without refactoring.
 >
-> Companion to: `provider-plugin-architecture.md` (the precedent shape this document deliberately mirrors), `test-discipline-hardening.md` (the Wave 0 lock-in this implementation rides on — F45..F49 + `e2e_db` fixture + CI Stage 4.5), `feature-flag-architecture.md` (the cutover pattern that gated IM-6 and the flag-gated connectors), `streaming-bronze-plan.md` (the streaming-only bronze rollout that retired the filesystem blob store), `connector-architecture-refactor.md` (the canonical-topology + resilience-hardening evolution), `fact-layer.md`, and `ADR-018-dlt-connector-framework.md`.
+> Companion to: `provider-plugin-architecture.md` (the precedent shape this document deliberately mirrors), `test-discipline-hardening.md` (the Wave 0 lock-in this implementation rides on — F45..F48 + `e2e_db` fixture + CI Stage 4.5), `feature-flag-architecture.md` (the cutover pattern that gated IM-6 and the flag-gated connectors), `streaming-bronze-plan.md` (the streaming-only bronze rollout that retired the filesystem blob store), `connector-architecture-refactor.md` (the canonical-topology + resilience-hardening evolution), `fact-layer.md`, and `ADR-018-dlt-connector-framework.md`.
 
 ## 1. Context and forcing functions
 
@@ -244,7 +244,7 @@ This section is the heart of the document. It names each material Python weaknes
 **Defence (existing)**: mypy strict is on for the whole project.
 
 **Defence (new)**:
-- **F41** — every plugin under `kairix/connectors/<name>/` and `kairix/extractors/<name>/` carries `py.typed`, is mypy-strict-clean, and has zero `# type: ignore` without F3-rationale. Pre-existing violations grandfathered in `.architecture/baseline/F41-files.txt`; baseline shrinks only.
+- **F41** — every plugin under `kairix/connectors/<name>/` and `kairix/extractors/<name>/` carries `py.typed`, is mypy-strict-clean, and has zero `# type: ignore` without F3-rationale. Checked over the full tree with no exemption list.
 
 ### 5.4 Hidden coupling across modules
 
@@ -305,7 +305,7 @@ This section is the heart of the document. It names each material Python weaknes
 | **F43** | Every plugin has `tests/contracts/test_<plugin>_protocol.py` exercising canonical fake + real impl | F30 |
 | **F44** | Engagement-scope code cannot import firm-scope storage clients (`psycopg`, `asyncpg`, …) | (new — two-scope boundary, see `connector-scope-topology/ADR.md`) |
 
-All follow the F21 action-marked-failure template (`fix:` / `next:` / `run:`), have a per-rule baseline file in `.architecture/baseline/`, and wire into pre-commit + `scripts/safe-commit.sh` + CI Stage 0. Pre-existing violations are grandfathered; net-new violations block.
+All follow the F21 action-marked-failure template (`fix:` / `next:` / `run:`), run over the full tree with no baseline file, and wire into pre-commit + `scripts/safe-commit.sh` + CI Stage 0. Every violation blocks.
 
 **Wave 0 dependency (test discipline)**: F34–F44 land on top of the Wave 0 hardening pass (`test-discipline-hardening.md`). The connector framework inherits the discipline by construction:
 
@@ -313,9 +313,9 @@ All follow the F21 action-marked-failure template (`fix:` / `next:` / `run:`), h
 - **F46** BDD step impls must go through `factory.build_connector_pipeline` (Wave 1+ adds this factory function); direct `ConnectorPipeline(...)` construction is blocked.
 - **F47** integration tests use the factory; the `e2e_db` fixture in `tests/conftest.py` is the canonical setup.
 - **F48** every new top-level capability gets `tests/e2e/test_composed_<capability>_path.py` — for Wave 1+ that means `test_composed_connector_path.py`, etc.
-- **F49** F30, F46, F47 baselines shrink per release; net-new connector / extractor surfaces cannot grow these baselines.
+F30, F46 and F47 have zero violations and no baseline, so a new connector / extractor surface that breaks any of them blocks at commit time.
 
-The Wave 0 F30 baseline reached zero before Wave 1 dispatches; the connector framework starts on a clean composition-tested foundation.
+F30 reached zero violations before Wave 1 dispatched; the connector framework starts on a clean composition-tested foundation.
 
 ## 7. Schema additions (Wave 1 migration)
 
@@ -485,7 +485,7 @@ Mirrors the `provider-plugin-architecture.md` Wave 0/1/2/3 cadence; each wave a 
 
 | Wave | Items | Parallel? | Depends on |
 |---|---|---|---|
-| **0 (ADR + arming) — DONE 2026-05-22** | This document; F34–F44 check scripts with empty (or seeded) baselines; CLAUDE.md edits; fitness-functions.md canonical entries. Landed in commits `acf89f81..6f8359c2` plus this doc's earlier commits. F41 + F43 baselines seeded at 7 entries each (existing provider plugins); F49 will shrink them as plugins gain `py.typed` + contract tests. All other F34–F44 baselines empty (vacuous-green; armed for Wave 1 surfaces). | foreground | — |
+| **0 (ADR + arming) — DONE 2026-05-22** | This document; F34–F44 check scripts with empty (or seeded) baselines; CLAUDE.md edits; fitness-functions.md canonical entries. Landed in commits `acf89f81..6f8359c2` plus this doc's earlier commits. F41 + F43 baselines seeded at 7 entries each (existing provider plugins), later paid down; all baseline files were removed in PLA-472. All other F34–F44 baselines empty (vacuous-green; armed for Wave 1 surfaces). | foreground | — |
 | **1 (scaffold) — DONE 2026-05-23** | SC-1 `kairix/core/connectors/` skeleton + Protocols (commit `3e12f236`) · SC-2 `kairix/connectors/_base.py` + entry-points (`da625018`) · SC-3 `kairix/extractors/_base.py` + entry-points (`41b22646`) · SC-4 schema migration v1→v2 with 6 new tables + 5 new columns on `documents` (`27e4f73f`) · SC-5 BDD feature stubs (`8bcae8b5`) · SC-6 worker `_default_connector_sync` seam (`d8b775c3`) · placeholder→canonical swap (`9eda46fb`). Decision 1 ratified: EntityGraphSink stages to SQLite `entity_signals`; async Neo4j push in a separate worker job (out of Wave 2 scope). F34–F44 already armed in connector-Wave-0 (separate from this Wave 1). | yes | Wave 0 |
 | **2 (Obsidian end-to-end) — DONE 2026-05-24** | IM-1 CursorStore + DeadLetterStore impls with caller-owned-commit atomicity (`77667c06`) · IM-2 ConnectorPipeline.run_batch + bronze store + DefaultSilverProcessor + registry iter_* (`d954a053`; the original `FilesystemBronzeStore` shipped here was later replaced by `StreamingBronzeStore` — see `streaming-bronze-plan.md`) · IM-3 worker `_default_connector_sync` + `ConnectorSyncDeps` + `_SqliteChunkWriter`/`_SqliteEntityGraphSink` (`26ebc0c5`) · IM-4 passthrough + markitdown extractors + entry-points + BDD (`286ab5bb`) · IM-5 Obsidian connector with watchdog + reconciliation (`b6c23b58`). **IM-6** (DocumentScanner retirement via `obsidian_connector_primary`): cutover ran per `feature-flag-architecture.md` §4.2 (baseline → flip → 24h+ soak → post-flip gates); the Obsidian connector promoted to primary. | yes | Wave 1 |
 | **3 (PDF mixed-media) — DONE 2026-05-23** | MM-1 pdfplumber fallback extractor (`a0fd9147`); MM-2 OCR extractor with Tesseract + pre-processing chain (deskew/binarise/orientation/layout, `01dde3c2`); MM-3 per-page chunk citation threaded end-to-end through Silver → SQL → search projection → MCP envelope (`efc407d6`). Decision 4 ratified: pdfplumber (MIT) shipped; pymupdf (AGPL) explicitly NOT shipped. Decision 5 ratified: Tesseract default; PaddleOCR opt-in is a future plugin. Reference-library PDF eval (NIST/OpenStax/APRA) deferred to a follow-up commit. | yes | Wave 2 |

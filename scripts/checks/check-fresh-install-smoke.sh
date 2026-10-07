@@ -73,10 +73,10 @@ compose() {
 cleanup() {
     local rc=$?
     if [[ "$COMPOSE_STARTED" == "1" && -n "$WORKDIR" ]]; then
-        (cd "$WORKDIR" && compose down -v --remove-orphans) || true
+        (cd "$WORKDIR" && compose down -v --remove-orphans) || true  # teardown is best-effort; the EXIT trap must still exit with the stage rc
     fi
     if [[ -n "$WORKDIR" ]]; then
-        rm -rf "$WORKDIR" || true
+        rm -rf "$WORKDIR" || true  # temp-dir removal is best-effort; never mask the real rc
     fi
     exit "$rc"
 }
@@ -105,11 +105,11 @@ fail_stage() {
         (
             cd "$WORKDIR" || exit 0
             echo "----- docker compose ps -----"
-            compose ps || true
+            compose ps || true  # diagnostics only — the stage is already failing
             echo "----- kairix logs (last 100 lines) -----"
-            compose logs --tail 100 kairix || true
+            compose logs --tail 100 kairix || true  # diagnostics only — the stage is already failing
             echo "----- neo4j logs (last 30 lines) -----"
-            compose logs --tail 30 neo4j || true
+            compose logs --tail 30 neo4j || true  # diagnostics only — the stage is already failing
         )
     fi
     exit 1
@@ -132,7 +132,9 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 # ── stage 0b: assemble the stranger's fresh directory ────────────────────────
-WORKDIR="$(mktemp -d)"
+WORKDIR="$(mktemp -d)" || fail_stage "workdir" \
+    "mktemp -d failed — the runner has no writable temp dir for the fresh-install directory." \
+    "check TMPDIR / disk space on the runner, then re-run the smoke"
 echo "workdir: ${WORKDIR}"
 cp "${REPO_ROOT}/docker-compose.yml" "${WORKDIR}/docker-compose.yml"
 cp "${REPO_ROOT}/.env.example" "${WORKDIR}/.env"
@@ -173,7 +175,7 @@ echo -n "stage 1 container-healthy: waiting for ${BASE_URL}/healthz/ready "
 deadline=$((SECONDS + HEALTHY_WAIT_SECONDS))
 ready=0
 while [[ $SECONDS -lt $deadline ]]; do
-    code=$(curl -s -o /dev/null -w '%{http_code}' "${BASE_URL}/healthz/ready" || true)
+    code=$(curl -s -o /dev/null -w '%{http_code}' "${BASE_URL}/healthz/ready" || true)  # a refused connection while booting is expected; the code check below decides
     if [[ "$code" == "200" ]]; then
         ready=1
         break
@@ -214,8 +216,8 @@ print(len(obj["result"]["tools"]))
 }
 
 INIT_BODY='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"fresh-install-smoke","version":"0.0.0"}}}'
-INIT_RESP=$(mcp_post "$INIT_BODY" || true)
-if ! echo "$INIT_RESP" | grep -q '"serverInfo"'; then
+INIT_RESP=$(mcp_post "$INIT_BODY" || true)  # a failed POST leaves the body empty; the serverInfo/tool-count check below fails the stage
+if ! grep -q '"serverInfo"' <<< "$INIT_RESP"; then
     echo "initialize response: ${INIT_RESP}"
     fail_stage "mcp-handshake" \
         "POST /mcp initialize did not return a serverInfo result — the MCP transport is not serving on the published port." \
@@ -223,7 +225,7 @@ if ! echo "$INIT_RESP" | grep -q '"serverInfo"'; then
 fi
 
 LIST_BODY='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-LIST_RESP=$(mcp_post "$LIST_BODY" || true)
+LIST_RESP=$(mcp_post "$LIST_BODY" || true)  # a failed POST leaves the body empty; the serverInfo/tool-count check below fails the stage
 TOOL_COUNT=$(echo "$LIST_RESP" | extract_tool_count 2>/dev/null || echo "0")
 if [[ "$TOOL_COUNT" -lt 1 ]]; then
     echo "tools/list response: ${LIST_RESP}"
@@ -238,7 +240,7 @@ echo "stage 2 mcp-handshake: OK (${TOOL_COUNT} tools)"
 # loopback peers by design (host-side requests arrive from the docker
 # bridge gateway and would need the kairix-infra-operator-token secret).
 WIZARD_CODE=$(compose exec -T kairix curl -s -o /dev/null -w '%{http_code}' \
-    "http://127.0.0.1:8080/setup/" || true)
+    "http://127.0.0.1:8080/setup/" || true)  # curl failure leaves an empty code; the status assertion below fails the stage
 if [[ "$WIZARD_CODE" != "200" ]]; then
     fail_stage "setup-wizard" \
         "GET /setup/ returned ${WIZARD_CODE} (expected 200) on a default install (setup_wizard_web defaults ON) — the in-box wizard is not reachable out-of-the-box." \
@@ -258,8 +260,8 @@ echo "stage 3 setup-wizard: OK (200)"
 # or a raw 500.
 SCAN_BODY=$(compose exec -T kairix curl -s \
     -X POST "http://127.0.0.1:8080/setup/folder/scan" \
-    --data-urlencode "folder_path=/data/documents" || true)
-if ! echo "$SCAN_BODY" | grep -q 'kx-scan-result\|kx-validation-error'; then
+    --data-urlencode "folder_path=/data/documents" || true)  # curl failure leaves an empty body; the partial-markup assertion below fails the stage
+if ! grep -q 'kx-scan-result\|kx-validation-error' <<< "$SCAN_BODY"; then
     echo "scan partial body (head):"
     echo "$SCAN_BODY" | head -20
     fail_stage "wizard-choreography" \
@@ -279,7 +281,7 @@ KEY_POST=$(compose exec -T kairix curl -s -o /dev/null \
     -w '%{http_code} %{redirect_url}' \
     -X POST "http://127.0.0.1:8080/setup/key" \
     --data-urlencode "provider=anthropic" \
-    --data-urlencode "api_key=fresh-install-smoke-placeholder-key" || true)
+    --data-urlencode "api_key=fresh-install-smoke-placeholder-key" || true)  # curl failure leaves an empty code; the case below fails the stage
 KEY_CODE="${KEY_POST%% *}"
 KEY_REDIRECT="${KEY_POST#* }"
 case "$KEY_CODE" in
@@ -312,7 +314,7 @@ echo "stage 3b wizard-choreography: OK"
 #
 # Leg 1 — a bridge-IP request with NO token must be refused (proves the
 # guard is actually gating, not open to the bridge).
-NOTOKEN_CODE=$(curl -s -o /dev/null -w '%{http_code}' "${BASE_URL}/setup/provider" || true)
+NOTOKEN_CODE=$(curl -s -o /dev/null -w '%{http_code}' "${BASE_URL}/setup/provider" || true)  # curl failure leaves an empty code; the status assertion below fails the stage
 if [[ "$NOTOKEN_CODE" != "403" ]]; then
     fail_stage "wizard-remote-access" \
         "GET ${BASE_URL}/setup/provider from a non-loopback (bridge-IP) origin returned ${NOTOKEN_CODE} (expected 403) — the operator-token guard is not gating bridge traffic." \
@@ -322,7 +324,7 @@ fi
 # Leg 2 — opening the tokened URL must 303 and hand back a Set-Cookie.
 COOKIE_JAR="${WORKDIR}/wizard-cookies.txt"
 GRANT_CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_JAR" \
-    "${BASE_URL}/setup/?operator_token=${WIZARD_OPERATOR_TOKEN}" || true)
+    "${BASE_URL}/setup/?operator_token=${WIZARD_OPERATOR_TOKEN}" || true)  # curl failure leaves an empty code; the status assertion below fails the stage
 if [[ "$GRANT_CODE" != "303" ]]; then
     fail_stage "wizard-remote-access" \
         "GET the tokened URL (/setup/?operator_token=...) from a bridge-IP origin returned ${GRANT_CODE} (expected 303 + Set-Cookie) — the cookie grant is broken on real Docker bridge networking." \
@@ -330,7 +332,7 @@ if [[ "$GRANT_CODE" != "303" ]]; then
 fi
 if ! grep -q 'kairix_operator_grant' "$COOKIE_JAR"; then
     echo "cookie jar contents:"
-    cat "$COOKIE_JAR" || true
+    cat "$COOKIE_JAR" || true  # diagnostics only — the stage is already failing
     fail_stage "wizard-remote-access" \
         "the tokened-URL grant set no kairix_operator_grant cookie — a browser would have nothing to carry to the next screen." \
         "reproduce: curl -i -c cookies.txt '${BASE_URL}/setup/?operator_token=${WIZARD_OPERATOR_TOKEN}'"
@@ -338,7 +340,7 @@ fi
 
 # Leg 3 — the granted cookie must admit a later bridge-IP GET to a screen.
 WITHCOOKIE_CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
-    "${BASE_URL}/setup/provider" || true)
+    "${BASE_URL}/setup/provider" || true)  # curl failure leaves an empty code; the status assertion below fails the stage
 if [[ "$WITHCOOKIE_CODE" != "200" ]]; then
     fail_stage "wizard-remote-access" \
         "GET ${BASE_URL}/setup/provider with the grant cookie from a bridge-IP origin returned ${WITHCOOKIE_CODE} (expected 200) — the signed cookie did not admit the browser to the wizard." \
@@ -356,12 +358,12 @@ echo "stage 4 bm25-search: ingesting (embed leg expected to fail without provide
 # (first run died with "timeout: failed to run command 'compose'"), so the
 # bounded stages spell out the docker compose invocation.
 EMBED_OUT=$(run_bounded 600 docker compose --project-name "$COMPOSE_PROJECT" \
-    exec -T kairix kairix embed 2>&1 || true)
+    exec -T kairix kairix embed 2>&1 || true)  # embed leg is EXPECTED to fail without provider secrets; stage 4 asserts on search
 
 # --json keeps the assertion immune to rich's non-TTY line wrapping.
 SEARCH_OUT=$(run_bounded 300 docker compose --project-name "$COMPOSE_PROJECT" \
-    exec -T kairix kairix search "$PROBE_TERM" --no-entity-card --json 2>&1 || true)
-if ! echo "$SEARCH_OUT" | grep -q "$SAMPLE_DOC"; then
+    exec -T kairix kairix search "$PROBE_TERM" --no-entity-card --json 2>&1 || true)  # command failure leaves the output without the probe term; the assertion below fails the stage
+if ! grep -q "$SAMPLE_DOC" <<< "$SEARCH_OUT"; then
     echo "embed output (tail):"
     echo "$EMBED_OUT" | tail -20
     echo "search output:"
@@ -379,8 +381,8 @@ echo "stage 4 bm25-search: OK (${SAMPLE_DOC} found)"
 # immediately — the write path a stock deploy relies on, proven end to end.
 MEMORY_PROBE="wombat-beacon-cadence-memory"
 MEMORY_OUT=$(run_bounded 120 docker compose --project-name "$COMPOSE_PROJECT" \
-    exec -T kairix kairix remember builder "decision: adopt the ${MEMORY_PROBE} rollout" --kind decision --json 2>&1 || true)
-if ! echo "$MEMORY_OUT" | grep -q "$MEMORY_PROBE"; then
+    exec -T kairix kairix remember builder "decision: adopt the ${MEMORY_PROBE} rollout" --kind decision --json 2>&1 || true)  # command failure leaves the output without the probe term; the assertion below fails the stage
+if ! grep -q "$MEMORY_PROBE" <<< "$MEMORY_OUT"; then
     echo "remember output:"
     echo "$MEMORY_OUT" | tail -20
     fail_stage "memory-write" \
@@ -388,8 +390,8 @@ if ! echo "$MEMORY_OUT" | grep -q "$MEMORY_PROBE"; then
         "reproduce: docker compose exec kairix kairix remember builder 'decision: test' --kind decision --json"
 fi
 MEMORY_SEARCH=$(run_bounded 120 docker compose --project-name "$COMPOSE_PROJECT" \
-    exec -T kairix kairix search "$MEMORY_PROBE" --no-entity-card --json 2>&1 || true)
-if ! echo "$MEMORY_SEARCH" | grep -q "$MEMORY_PROBE"; then
+    exec -T kairix kairix search "$MEMORY_PROBE" --no-entity-card --json 2>&1 || true)  # command failure leaves the output without the probe term; the assertion below fails the stage
+if ! grep -q "$MEMORY_PROBE" <<< "$MEMORY_SEARCH"; then
     echo "memory search output:"
     echo "$MEMORY_SEARCH" | tail -20
     fail_stage "memory-write" \
@@ -400,8 +402,8 @@ fi
 # check. The human render lists every check by name (pass or fail); `--json`
 # lists only failures, so we grep the human output for the probe's presence.
 ONBOARD_OUT=$(run_bounded 120 docker compose --project-name "$COMPOSE_PROJECT" \
-    exec -T kairix kairix onboard check 2>&1 || true)
-if ! echo "$ONBOARD_OUT" | grep -q "agent_memory_writable"; then
+    exec -T kairix kairix onboard check 2>&1 || true)  # command failure leaves the output without the probe term; the assertion below fails the stage
+if ! grep -q "agent_memory_writable" <<< "$ONBOARD_OUT"; then
     echo "onboard check output:"
     echo "$ONBOARD_OUT" | tail -30
     fail_stage "memory-write" \

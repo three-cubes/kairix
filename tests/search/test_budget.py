@@ -17,6 +17,7 @@ from kairix.core.search.budget import (
     L1_SCORE_THRESHOLD,
     L2_BUDGET_MIN,
     L2_SCORE_THRESHOLD,
+    BudgetDeps,
     BudgetedResult,
     apply_budget,
     coerce_tier,
@@ -139,7 +140,7 @@ class TestApplyBudgetPhase1:
 
 @pytest.mark.unit
 class TestApplyBudgetPhase2Tiering:
-    """Tier selection driven through ``apply_budget(summary_loader=...)``."""
+    """Tier selection driven through ``apply_budget(deps=BudgetDeps(tier_summaries=...))``."""
 
     def test_high_score_high_budget_selects_l2_and_does_not_query_loader(self) -> None:
         """L2 path: score ≥ l2_threshold and remaining ≥ L2_BUDGET_MIN."""
@@ -147,7 +148,7 @@ class TestApplyBudgetPhase2Tiering:
         budgeted = apply_budget(
             [_fused(score=L2_SCORE_THRESHOLD + 0.1)],
             budget=L2_BUDGET_MIN,
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
         )
         assert budgeted[0].tier == "L2"
         # L2 returns the snippet directly — proves the loader was NOT consulted.
@@ -162,7 +163,7 @@ class TestApplyBudgetPhase2Tiering:
             [_fused(score=L1_SCORE_THRESHOLD + 0.01)],
             budget=L1_BUDGET_MIN,  # ≥ L1_BUDGET_MIN, < L2_BUDGET_MIN
             l2_threshold=L2_SCORE_THRESHOLD + 1.0,  # raise the L2 bar so we land in L1
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
         )
         assert budgeted[0].tier == "L1"
         assert budgeted[0].content == "l1 overview"
@@ -176,7 +177,7 @@ class TestApplyBudgetPhase2Tiering:
         budgeted = apply_budget(
             [_fused(score=0.0)],
             budget=L2_BUDGET_MIN,
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
         )
         assert budgeted[0].tier == "L0"
         assert budgeted[0].content == "l0 abstract"
@@ -189,7 +190,7 @@ class TestApplyBudgetPhase2Tiering:
         budgeted = apply_budget(
             [_fused(score=1.0, snippet="x" * 200)],
             budget=L1_BUDGET_MIN - 1,  # below L1_BUDGET_MIN
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
         )
         assert budgeted[0].tier == "L0"
         assert budgeted[0].content == "l0 abstract"
@@ -197,7 +198,7 @@ class TestApplyBudgetPhase2Tiering:
 
 @pytest.mark.unit
 class TestApplyBudgetPhase2Content:
-    """Content selection driven through ``apply_budget(summary_loader=...)``."""
+    """Content selection driven through ``apply_budget(deps=BudgetDeps(tier_summaries=...))``."""
 
     def test_l0_falls_back_to_snippet_when_loader_has_no_abstract(self) -> None:
         """L0 with no abstract → snippet (frontmatter-stripped)."""
@@ -205,7 +206,7 @@ class TestApplyBudgetPhase2Content:
         budgeted = apply_budget(
             [_fused(score=0.0, snippet="fallback snippet")],
             budget=L2_BUDGET_MIN,
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
         )
         assert budgeted[0].tier == "L0"
         assert budgeted[0].content == "fallback snippet"
@@ -220,7 +221,7 @@ class TestApplyBudgetPhase2Content:
             [_fused(score=L1_SCORE_THRESHOLD + 0.01)],
             budget=L1_BUDGET_MIN,
             l2_threshold=L2_SCORE_THRESHOLD + 1.0,
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
         )
         assert budgeted[0].tier == "L1"
         assert budgeted[0].content == "l0 abstract"
@@ -235,7 +236,7 @@ class TestApplyBudgetPhase2Content:
             [_fused(score=L1_SCORE_THRESHOLD + 0.01, snippet="from snippet")],
             budget=L1_BUDGET_MIN,
             l2_threshold=L2_SCORE_THRESHOLD + 1.0,
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
         )
         assert budgeted[0].tier == "L1"
         assert budgeted[0].content == "from snippet"
@@ -248,7 +249,7 @@ class TestApplyBudgetPhase2Content:
         budgeted = apply_budget(
             [_fused(score=0.0, snippet="safe fallback")],
             budget=L2_BUDGET_MIN,
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
         )
         assert budgeted[0].tier == "L0"
         assert budgeted[0].content == "safe fallback"
@@ -260,7 +261,7 @@ class TestApplyBudgetPhase2Content:
             [_fused(score=L1_SCORE_THRESHOLD + 0.01, snippet="safe fallback")],
             budget=L1_BUDGET_MIN,
             l2_threshold=L2_SCORE_THRESHOLD + 1.0,
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
         )
         assert budgeted[0].tier == "L1"
         assert budgeted[0].content == "safe fallback"
@@ -281,7 +282,7 @@ class TestApplyBudgetMaxTier:
         budgeted = apply_budget(
             [_fused(score=L2_SCORE_THRESHOLD + 0.5)],
             budget=L2_BUDGET_MIN,
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
             max_tier="L0",
         )
         assert budgeted[0].tier == "L0"
@@ -292,7 +293,7 @@ class TestApplyBudgetMaxTier:
         budgeted = apply_budget(
             [_fused(score=L2_SCORE_THRESHOLD + 0.5)],
             budget=L2_BUDGET_MIN,
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
             max_tier="L1",
         )
         assert budgeted[0].tier == "L1"
@@ -304,7 +305,7 @@ class TestApplyBudgetMaxTier:
         budgeted = apply_budget(
             [_fused(score=L2_SCORE_THRESHOLD + 0.5)],
             budget=L2_BUDGET_MIN,
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
         )
         assert budgeted[0].tier == "L2"
 
@@ -314,7 +315,7 @@ class TestApplyBudgetMaxTier:
         budgeted = apply_budget(
             [_fused(score=0.0)],
             budget=L2_BUDGET_MIN,
-            summary_loader=loader,
+            deps=BudgetDeps(tier_summaries=loader),
             max_tier="L2",
         )
         assert budgeted[0].tier == "L0"

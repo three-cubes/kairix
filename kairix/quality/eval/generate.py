@@ -411,7 +411,9 @@ def generate_queries(
             attempt,
         )
         if result is not None:
-            return result
+            # The prompt asks for exactly ``n`` but the LLM may over-return;
+            # honour the requested count (matches FakeQueryGenerator).
+            return result[:n]
 
     return []
 

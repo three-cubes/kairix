@@ -56,7 +56,7 @@ Pass example:
   )
 
 Forbidden example:
-  # kairix/worker.py (today; grandfathered baseline)
+  # a production module outside kairix/core/connectors/
   pipeline = ConnectorPipeline(
       ...,
       chunk_writer=_SqliteChunkWriter(db, collection=name),  # F61 fires

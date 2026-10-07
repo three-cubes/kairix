@@ -15,7 +15,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _default_chat(prompt: str, _api_key: str, _endpoint: str) -> str:  # pragma: no cover — prod provider wrapper
+def _default_chat(prompt: str, _api_key: str, _endpoint: str) -> str:
     """Production chat callable — wraps the configured provider plugin.
 
     Kept as a top-level function so ``OnboardingAgentDeps.chat`` has a
@@ -55,6 +55,20 @@ class OnboardingAgentDeps:
     chat: Callable[[str, str, str], str] = field(default_factory=lambda: _default_chat)
 
 
+def _boost_reasoning(date_file_pct: float, procedural_pct: float, entity_pct: float) -> list[str]:
+    """Plain-English reasons for each rule-based boost the profile enables."""
+    reasoning: list[str] = []
+    if date_file_pct > 0.15:
+        reasoning.append(f"{date_file_pct:.0%} of your files have dates in their names — temporal boost enabled.")
+    if procedural_pct > 0.05:
+        reasoning.append(
+            f"{procedural_pct:.0%} of your files are procedural (how-to, runbook) — procedural boost enabled."
+        )
+    if entity_pct > 0.03:
+        reasoning.append(f"{entity_pct:.0%} of your files are in entity folders — entity boost enabled.")
+    return reasoning
+
+
 def recommend_from_profile(
     total_docs: int,
     format_counts: dict[str, int],
@@ -80,19 +94,8 @@ def recommend_from_profile(
         "temporal_boost": date_file_pct > 0.15,
         "procedural_boost": procedural_pct > 0.05,
         "entity_boost": entity_pct > 0.03,
-        "reasoning": [],
+        "reasoning": _boost_reasoning(date_file_pct, procedural_pct, entity_pct),
     }
-
-    if date_file_pct > 0.15:
-        rec["reasoning"].append(
-            f"{date_file_pct:.0%} of your files have dates in their names — temporal boost enabled."
-        )
-    if procedural_pct > 0.05:
-        rec["reasoning"].append(
-            f"{procedural_pct:.0%} of your files are procedural (how-to, runbook) — procedural boost enabled."
-        )
-    if entity_pct > 0.03:
-        rec["reasoning"].append(f"{entity_pct:.0%} of your files are in entity folders — entity boost enabled.")
 
     pdf_pct = format_counts.get("pdf", 0) / max(total_docs, 1)
     if pdf_pct > 0.20:
@@ -106,7 +109,7 @@ def recommend_from_profile(
 
     # LLM enhancement (optional, additive)
     if api_key and endpoint:
-        if deps is None:  # pragma: no cover — production lazy default; tests pass deps=OnboardingAgentDeps(chat=fake)
+        if deps is None:
             deps = OnboardingAgentDeps()
         try:
             llm_advice = _call_llm(

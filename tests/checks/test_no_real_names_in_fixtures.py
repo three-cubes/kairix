@@ -31,6 +31,7 @@ _CHECKS_DIR = _REPO_ROOT / "scripts" / "checks"
 if str(_CHECKS_DIR) not in sys.path:
     sys.path.insert(0, str(_CHECKS_DIR))
 
+import check_no_real_names_in_fixtures as f32  # noqa: E402
 from check_no_real_names_in_fixtures import (  # noqa: E402
     EXEMPT_FILES,
     EXEMPT_PATH_PREFIXES,
@@ -181,3 +182,31 @@ def test_multiple_violations_in_one_file_all_get_reported(tmp_path: Path) -> Non
     assert "Dan McMahon" in violations[2]
     assert "leaky.py:5" in violations[3]
     assert "danielmcmahon" in violations[3]
+
+
+def _recreate_retired_baseline(root: Path, gate_file: str, entry: str) -> None:
+    """Write a file at the retired ``.architecture/baseline/`` location naming
+    ``entry`` — the shape that used to grandfather it. PLA-472: it must have
+    no effect on the verdict."""
+    baseline = root / ".architecture" / "baseline" / gate_file
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    baseline.write_text(f"{entry}\n", encoding="utf-8")
+
+
+def test_violation_fails_even_with_a_recreated_baseline_file(tmp_path: Path) -> None:
+    """PLA-472: no grandfathering. A fixture listed in a re-created
+    ``no-real-names-in-fixtures-files.txt`` is still reported.
+
+    Sabotage proof (executed): re-adding the ``if rel in baseline: continue``
+    skip to ``collect_violations`` drops the hit and this test goes red;
+    restored → green.
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_leak.py").write_text('NAME = "Caroline"\n', encoding="utf-8")
+    _recreate_retired_baseline(tmp_path, "no-real-names-in-fixtures-files.txt", "tests/test_leak.py")
+
+    violations = f32.collect_violations(tmp_path, ["tests/test_leak.py"])
+
+    assert len(violations) == 1
+    assert violations[0].startswith("tests/test_leak.py:1")
+    assert not hasattr(f32, "_load_baseline")

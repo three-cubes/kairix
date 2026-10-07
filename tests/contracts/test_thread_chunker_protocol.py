@@ -12,6 +12,12 @@ Pins:
   signature handles each of the empty / single-message / threaded /
   windowed envelope shapes without raising.
 
+F43 parity: the Protocol-level contracts run ONE body over the real
+:class:`ThreadChunker` AND the canonical :class:`tests.fakes.FakeChunker`.
+ThreadChunker's own Slack-envelope parsing rules (window guard, JSON
+scalar / mixed-list handling, ``ts`` fallback, empty-text skip) live in
+``tests/unit/test_thread_chunker_units.py``.
+
 Sabotage-proofs (mutate prod → confirm fail → restore):
 * Delete ``version: str = version`` from the class → asserts in
   ``test_chunker_declares_version`` fail.
@@ -25,12 +31,14 @@ Sabotage-proofs (mutate prod → confirm fail → restore):
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import pytest
 
 from kairix.chunkers.thread import ThreadChunker
 from kairix.chunkers.thread import version as thread_version
 from kairix.core.protocols import Chunk, Chunker
+from tests.fakes import FakeChunker
 
 pytestmark = [pytest.mark.contract]
 
@@ -53,28 +61,63 @@ def _msg(
     }
 
 
-def test_chunker_satisfies_protocol() -> None:
-    """The class is recognised as a runtime :class:`Chunker`."""
-    chunker = ThreadChunker()
+_ChunkerFactory = Callable[..., Chunker]
+
+#: (factory, the version every instance must carry). The real leg's
+#: expected version is the F55 module-level declaration.
+_IMPLS = [
+    pytest.param(ThreadChunker, thread_version, id="real"),
+    pytest.param(FakeChunker, FakeChunker.version, id="fake"),
+]
+
+
+@pytest.fixture(params=[ThreadChunker, FakeChunker], ids=["real", "fake"])
+def chunker(request: pytest.FixtureRequest) -> Chunker:
+    """A default-configured chunker — the real ThreadChunker and the canonical fake."""
+    factory: _ChunkerFactory = request.param
+    return factory()
+
+
+def test_chunker_satisfies_protocol(chunker: Chunker) -> None:
+    """The class is recognised as a runtime :class:`Chunker`.
+
+    Sabotage proof: rename ``ThreadChunker.chunk`` to ``chunk_x``; the
+    real leg's isinstance check fails. Restored.
+    """
     assert isinstance(chunker, Chunker)
 
 
-def test_chunker_declares_version() -> None:
-    """F55: module-level + class-level version is non-empty and consistent."""
-    assert isinstance(thread_version, str)
-    assert thread_version.strip() != ""
-    assert ThreadChunker.version == thread_version
-    assert ThreadChunker().version == thread_version
+@pytest.mark.parametrize(("factory", "expected_version"), _IMPLS)
+def test_chunker_declares_version(factory: _ChunkerFactory, expected_version: str) -> None:
+    """F55: the class-level version is non-empty and identical on instances
+    (for the real plugin: identical to the module-level declaration).
+
+    Sabotage proof: set ``ThreadChunker.version = "x"`` (class attr) while
+    the module ``version`` stays ``"0.1.0"``; the real leg fails. Restored.
+    """
+    assert isinstance(expected_version, str)
+    assert expected_version.strip() != ""
+    assert factory.version == expected_version  # type: ignore[attr-defined]  # Chunker factories are classes carrying the F55 class-level version
+    assert factory().version == expected_version
 
 
-def test_empty_input_yields_no_chunks() -> None:
-    chunker = ThreadChunker()
+def test_empty_input_yields_no_chunks(chunker: Chunker) -> None:
+    """Blank input → ``()``.
+
+    Sabotage proof: in ``_parse_messages`` make the blank-text branch
+    return ``[{"text": stripped}]`` instead of ``[]``; the real leg emits
+    one empty chunk and fails. Restored.
+    """
     assert chunker.chunk(text="", section_kind="text", source_uri="slack://ch-alpha") == ()
     assert chunker.chunk(text="   \n  ", section_kind="text", source_uri="slack://ch-alpha") == ()
 
 
-def test_single_message_yields_one_chunk() -> None:
-    chunker = ThreadChunker()
+def test_single_message_yields_one_chunk(chunker: Chunker) -> None:
+    """One message envelope → exactly one Chunk carrying the message text.
+
+    Sabotage proof: in ``_join_text`` return ``""``; the real leg's
+    ``"hello world" in text`` assertion fails. Restored.
+    """
     envelope = json.dumps(_msg(ts="100.0", user="agent-alpha", text="hello world"))
     chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="slack://ch-alpha/1")
     assert len(chunks) == 1
@@ -82,9 +125,13 @@ def test_single_message_yields_one_chunk() -> None:
     assert "hello world" in chunks[0].text
 
 
-def test_emitted_chunks_carry_chunker_version() -> None:
-    """F55: every Chunk threads ``chunker_version=self.version``."""
-    chunker = ThreadChunker()
+def test_emitted_chunks_carry_chunker_version(chunker: Chunker) -> None:
+    """F55: every Chunk threads ``chunker_version=self.version``.
+
+    Sabotage proof: drop ``chunker_version=self.version`` from the
+    ``_build_chunk`` call in ``_emit_chunks_for_group``; the real leg
+    fails. Restored.
+    """
     envelope = json.dumps(_msg(ts="100.0", user="agent-alpha", text="hello"))
     chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="slack://ch-alpha/1")
     assert chunks
@@ -92,9 +139,12 @@ def test_emitted_chunks_carry_chunker_version() -> None:
         assert chunk.chunker_version == chunker.version
 
 
-def test_emitted_chunks_carry_source_uri_per_f39() -> None:
-    """F39: ``source_uri`` propagated to every emitted Chunk."""
-    chunker = ThreadChunker()
+def test_emitted_chunks_carry_source_uri_per_f39(chunker: Chunker) -> None:
+    """F39: ``source_uri`` propagated to every emitted Chunk.
+
+    Sabotage proof: pass ``source_uri=""`` to ``_build_chunk`` in
+    ``_emit_chunks_for_group``; the real leg fails. Restored.
+    """
     envelope = json.dumps([_msg(ts="1.0", user="u1", text="a"), _msg(ts="2.0", user="u2", text="b")])
     chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="slack://ch-alpha/X")
     assert chunks
@@ -102,81 +152,31 @@ def test_emitted_chunks_carry_source_uri_per_f39() -> None:
         assert chunk.source_uri == "slack://ch-alpha/X"
 
 
-def test_constructor_rejects_non_positive_cap() -> None:
-    """F21-shaped error: fix: + next: markers in the message."""
+@pytest.mark.parametrize("factory", [ThreadChunker, FakeChunker], ids=["real", "fake"])
+def test_constructor_rejects_non_positive_cap(factory: _ChunkerFactory) -> None:
+    """A non-positive token cap is rejected at construction with an error
+    naming the parameter (F21-shaped: ``fix:`` marker).
+
+    Sabotage proof: replace the ``max_tokens_per_chunk <= 0`` guard's
+    ``raise ValueError`` with ``pass``; the real leg fails. Restored.
+    """
+    with pytest.raises(ValueError, match=r"max_tokens_per_chunk.*fix:"):
+        factory(max_tokens_per_chunk=0)
     with pytest.raises(ValueError, match="max_tokens_per_chunk"):
-        ThreadChunker(max_tokens_per_chunk=0)
-    with pytest.raises(ValueError, match="max_tokens_per_chunk"):
-        ThreadChunker(max_tokens_per_chunk=-5)
+        factory(max_tokens_per_chunk=-5)
 
 
-def test_constructor_rejects_non_positive_window() -> None:
-    with pytest.raises(ValueError, match="time_window_minutes"):
-        ThreadChunker(time_window_minutes=0)
-    with pytest.raises(ValueError, match="time_window_minutes"):
-        ThreadChunker(time_window_minutes=-1)
-
-
-def test_malformed_json_degrades_gracefully() -> None:
-    """Non-JSON input is treated as a one-message group, not a hard fail.
+def test_malformed_json_degrades_gracefully(chunker: Chunker) -> None:
+    """Non-JSON input is treated as plain text — one chunk, not a hard fail.
 
     The chunker is downstream of the connector + extractor — when
     upstream wiring is mis-shaped the chunker should degrade rather
     than crash the silver pipeline.
+
+    Sabotage proof: in ``_parse_messages`` replace the
+    ``except json.JSONDecodeError`` fallback's return with ``raise``;
+    the real leg fails. Restored.
     """
-    chunker = ThreadChunker()
     chunks = chunker.chunk(text="raw text not json", section_kind="text", source_uri="slack://x")
     assert len(chunks) == 1
     assert "raw text not json" in chunks[0].text
-
-
-def test_json_payload_neither_dict_nor_list_yields_no_chunks() -> None:
-    """A JSON scalar / number / bool decodes to neither dict nor list — drop it."""
-    chunker = ThreadChunker()
-    # A JSON number is valid JSON but isn't a message envelope.
-    assert chunker.chunk(text="42", section_kind="text", source_uri="slack://x") == ()
-    # A JSON string ditto.
-    assert chunker.chunk(text='"hi"', section_kind="text", source_uri="slack://x") == ()
-
-
-def test_list_payload_filters_non_dict_entries() -> None:
-    """A list with mixed dict / non-dict entries keeps only the dicts."""
-    chunker = ThreadChunker()
-    envelope = json.dumps(
-        [
-            _msg(ts="1.0", user="agent-alpha", text="kept"),
-            "not a dict",
-            42,
-            _msg(ts="2.0", user="agent-beta", text="also-kept"),
-        ]
-    )
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="slack://x")
-    # Two messages within 5 minutes of each other → one window-chunk.
-    assert len(chunks) == 1
-    assert "kept" in chunks[0].text
-    assert "also-kept" in chunks[0].text
-
-
-def test_ts_with_non_numeric_value_degrades_to_zero() -> None:
-    """A non-numeric ``ts`` value falls back to 0.0 without crashing."""
-    chunker = ThreadChunker()
-    envelope = json.dumps(_msg(ts="not-a-number", user="agent-alpha", text="hi"))
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="slack://x")
-    assert len(chunks) == 1
-    # time_range = "0.0..0.0" for the bad-ts single-message case.
-    assert chunks[0].metadata["time_range"] == "0.0..0.0"
-
-
-def test_empty_message_text_skips_silently() -> None:
-    """A message with empty text contributes no text but still counts as a member."""
-    chunker = ThreadChunker()
-    envelope = json.dumps(
-        [
-            _msg(ts="1.0", user="agent-alpha", text=""),
-            _msg(ts="2.0", user="agent-beta", text="real content"),
-        ]
-    )
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="slack://x")
-    assert len(chunks) == 1
-    # Only "real content" — the empty-text first message is skipped in join.
-    assert chunks[0].text == "real content"

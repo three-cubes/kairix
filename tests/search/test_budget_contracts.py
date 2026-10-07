@@ -20,7 +20,7 @@ Each test pins one documented claim from the module / function docstring:
 All tests drive apply_budget() through its public surface only (no
 private-function imports, no monkeypatching of kairix internals, no @patch).
 Phase-2 tests inject ``FakeSummaryLoader`` from ``tests/fakes.py`` via the
-``summary_loader=`` kwarg.
+``deps=BudgetDeps(tier_summaries=...)``.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from kairix.core.search.budget import (
     L1_SCORE_THRESHOLD,
     L2_BUDGET_MIN,
     L2_SCORE_THRESHOLD,
+    BudgetDeps,
     BudgetedResult,
     apply_budget,
 )
@@ -65,7 +66,7 @@ def _fr(
 
 
 # NOTE: a previous ``summaries_env`` fixture set KAIRIX_SUMMARIES_DB; the tests
-# below all call ``apply_budget(..., summary_loader=None)``, which never
+# below all call ``apply_budget(...)`` with no ``tier_summaries``, which never
 # consults that env var (Phase 1 always uses the snippet). The env mutation
 # was dormant. Phase-2 contract tests that exercise summary_loader should pass
 # a FakeSummaryLoader from tests/fakes.py directly.
@@ -191,7 +192,7 @@ def test_contract_summary_fallback_when_summaries_db_present() -> None:
     # High-score result, budget well above L2_BUDGET_MIN → L2 (snippet).
     fused = _fr("doc.md", snippet="full snippet body", score=0.9)
 
-    out = apply_budget([fused], budget=DEFAULT_BUDGET, summary_loader=loader)
+    out = apply_budget([fused], budget=DEFAULT_BUDGET, deps=BudgetDeps(tier_summaries=loader))
 
     assert len(out) == 1
     # L2 selected (high score + ample budget) — snippet is the L2 content.
@@ -222,7 +223,7 @@ def test_contract_l1_used_when_score_and_budget_in_l1_band() -> None:
     )
     fused = _fr("doc.md", snippet="snippet that won't be used", score=score_in_l1_band)
 
-    out = apply_budget([fused], budget=budget_in_l1_band, summary_loader=loader)
+    out = apply_budget([fused], budget=budget_in_l1_band, deps=BudgetDeps(tier_summaries=loader))
 
     assert len(out) == 1
     assert out[0].tier == "L1", (

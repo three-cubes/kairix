@@ -178,6 +178,31 @@ def test_query_generator_full_cycle_against_fake_chat_backend() -> None:
     assert "<title>docker-guide</title>" in prompt, f"Title not delimited as expected; got: {prompt[:300]}"
 
 
+def test_query_generator_honours_n_when_llm_over_returns() -> None:
+    """The real QueryGenerator caps its result at ``n`` like the fake does (PLA-472).
+
+    Regression: the LLM is asked for exactly ``n`` queries but routinely
+    returns more; FakeQueryGenerator sliced ``[:n]`` while the real
+    generator returned everything, so suites came out larger than asked.
+
+    Sabotage proof: dropping the ``[:n]`` cap in ``generate_queries``
+    returns all 5 parsed queries and this assertion fails.
+    """
+    over = [{"query": f"question number {i}?", "intent": "recall"} for i in range(5)]
+    gen = QueryGenerator(chat_backend=FakeChatBackend(responses=[json.dumps(over)]))
+
+    queries = gen.generate(
+        title="over-returning-doc",
+        body="Body text for the over-returning document. " * 20,
+        n=2,
+        categories=["recall"],
+        api_key="integration-key",  # pragma: allowlist secret
+        endpoint="https://integration-endpoint",
+    )
+
+    assert [q.query for q in queries] == ["question number 0?", "question number 1?"]
+
+
 @pytest.mark.integration
 def test_suite_generator_enrich_suite_full_cycle_against_real_yaml(tmp_path: Path) -> None:
     """SuiteGenerator.enrich_suite reads/writes real YAML and regrades cases via fakes."""

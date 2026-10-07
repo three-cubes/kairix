@@ -1,9 +1,0 @@
-# F58 baseline — sentinel paths reported when a HierarchyConnector class
-# exists in production code without a satisfying contract test under
-# tests/contracts/ (function name matching test_*hierarchy*parent_before_child*
-# AND referencing HierarchyConnector). Grandfathered offenders only;
-# baseline is shrink-only per F49.
-#
-# Today: empty — no HierarchyConnector implementations exist (Wave E
-# adds them). F58 is armed; the moment Wave E lands the Protocol/class,
-# the contract test must land in the same commit.

@@ -52,18 +52,43 @@ def _extractor(request: pytest.FixtureRequest) -> Extractor:
 
 
 @pytest.mark.contract
-def test_passthrough_extractor_satisfies_protocol() -> None:
-    """The real factory returns an instance that is a runtime ``Extractor``."""
-    real = make_real_extractor()
-    assert isinstance(real, Extractor)
-    assert isinstance(real, PassthroughExtractor)
+@pytest.mark.parametrize(
+    "factory,expected_cls",
+    [
+        pytest.param(make_real_extractor, PassthroughExtractor, id="real"),
+        pytest.param(FakePassthroughExtractor, FakePassthroughExtractor, id="fake"),
+    ],
+)
+def test_passthrough_extractor_satisfies_protocol(factory: _Factory, expected_cls: type) -> None:
+    """Each factory returns its concrete class, a runtime ``Extractor``
+    registered under the ``passthrough`` plugin name.
+
+    Sabotage proof: change ``PLUGIN_NAME`` in
+    kairix/extractors/passthrough/extractor.py to ``"passthru"`` — the
+    real leg's name assertion fails.
+    """
+    impl = factory()
+    assert isinstance(impl, Extractor)
+    assert isinstance(impl, expected_cls)
+    assert impl.name == "passthrough"
 
 
 @pytest.mark.contract
-def test_extractor_declares_version() -> None:
-    """F40 requirement — module-level ``version`` is non-empty."""
+@pytest.mark.parametrize(
+    "factory",
+    [pytest.param(make_real_extractor, id="real"), pytest.param(FakePassthroughExtractor, id="fake")],
+)
+def test_extractor_declares_version(factory: _Factory) -> None:
+    """F40 requirement — module-level ``version`` is non-empty and every
+    impl carries it (the fake mirrors the plugin's declared version).
+
+    Sabotage proof: make ``make_extractor`` in
+    kairix/extractors/passthrough/__init__.py pass ``version="0.0.0"`` —
+    the real leg's equality fails.
+    """
     assert isinstance(passthrough_version, str)
     assert passthrough_version.strip() != ""
+    assert factory().version == passthrough_version
 
 
 @pytest.mark.contract

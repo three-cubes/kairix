@@ -25,29 +25,20 @@ because they ARE the canonical Deps-constructor shape):
   constant. Plus the same shape on ``@dataclass`` field annotations
   (``AnnAssign`` inside a ``ClassDef`` body, target = ``None``).
 
-Severity layering:
+Severity:
 
-- **Public free function** — flagged unless the parameter is allow-listed
-  in ``.architecture/baseline/test-only-kwargs-allow-files.txt`` (one
-  entry per line, format ``module.path::function_name::param_name``).
-  The allow-list documents seams where a real production caller passes
-  a non-default value OR the seam is a documented composition root.
-- **Private free function (``_``-prefixed name)** — flagged unless the
-  parameter is allow-listed. Private allow-list entries are expected to
-  be RARE — they document a specific defensive-degradation pattern that
-  cannot reasonably move to a Deps class. Net-new private entries in
-  ``test-only-kwargs-allow-files.txt`` should be challenged at code-
-  review, and an immediately adjacent ``#`` comment in the allow-list
-  file is the convention for recording the rationale that survived
-  that challenge. The remediation text emphasises the higher bar by
-  listing "private-helper kwargs" as the worst shape of the smell.
+- **Free function (public or ``_``-prefixed private)** — every matching
+  parameter is flagged. There is no allow-list and no grandfathering
+  (PLA-472): a seam a real production caller needs moves onto a Deps
+  class; a seam only tests use is deleted.
+- **Dataclass field** — every ``ClassDef``-level ``AnnAssign`` with a
+  test-seam suffix and a ``None`` default is flagged (qualified
+  ``module.path::ClassName::field_name``); use
+  ``field(default_factory=...)`` instead.
 - **Methods on a ``ClassDef``** — NEVER flagged. Constructor / method
   injection on a class is the canonical Deps shape; if the smell is
   "test-only kwargs on a Deps class" the right gate is "is the class
   shape itself a Deps dataclass" — out of scope for F6.
-
-The allow-list also covers ``ClassDef``-level dataclass-field
-``AnnAssign``-with-None entries (qualified ``module.path::ClassName::field_name``).
 """
 
 from __future__ import annotations
@@ -91,9 +82,8 @@ The legitimate seam is **constructor injection on a Deps class**, NOT a
 per-helper ``_fn=None`` / ``_loader=None`` / ``_factory=None`` parameter
 on a free function. Tests pass an overridden Deps; production gets the
 default factory. Private (``_``-prefixed) free functions carry the worst
-shape of the smell — net-new private-helper kwargs should be refactored,
-not allow-listed; the allow-list mechanism exists for documented
-defensive-degradation seams that cannot reasonably move to a Deps class.
+shape of the smell. There is no allow-list: every flagged parameter is
+refactored at source.
 
 Pass example:
   # kairix/worker.py
@@ -122,15 +112,6 @@ refactor the test to drive through the public surface that constructs
 the right collaborator (or use ``pragma: no cover`` if the branch is
 genuinely defensive-and-unreachable, like a Cap-subpackage ImportError
 rewrap on a sibling-subpackage that ships with every kairix install)."""
-
-
-_ALLOW_FILE = REPO_ROOT / ".architecture" / "baseline" / "test-only-kwargs-allow-files.txt"
-
-
-def _read_allow_list() -> set[str]:
-    if not _ALLOW_FILE.exists():
-        return set()
-    return {line.strip() for line in _ALLOW_FILE.read_text().splitlines() if line.strip() and not line.startswith("#")}
 
 
 def _is_none_constant(node: ast.expr | None) -> bool:
@@ -168,36 +149,25 @@ def _has_test_seam_suffix(name: str) -> bool:
 def _free_function_violations(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     module_path: str,
-    allow: set[str],
 ) -> list[str]:
     """Return the list of qualified param names violating F6 on this free function.
 
-    Severity rule: flag matching params UNLESS allow-listed (matches the
-    historical behaviour for ``_fn`` — preserved across the broadened
-    suffix set). Private-host bars are documented via convention (allow-
-    list `#` comment with rationale + code-review pushback), not via a
-    mechanical "always flag" — that path is too disruptive for the
-    existing private-helper seams that already shipped on develop. Net-new
-    private-helper kwargs surface here and must be either refactored OR
-    documented in the allow-list with adjacent `#`-prefixed rationale.
+    Every matching param is flagged — public and private hosts alike; there
+    is no allow-list.
     """
     args = node.args
     positional = args.args
     defaults = args.defaults
     positional_with_default = list(zip(positional[len(positional) - len(defaults) :], defaults, strict=True))
     kw_only = list(zip(args.kwonlyargs, args.kw_defaults, strict=True))
-    violations: list[str] = []
-    for arg, default in positional_with_default + kw_only:
-        param_name = arg.arg
-        if not _has_test_seam_suffix(param_name) or not _is_none_constant(default):
-            continue
-        qualified = _qualified_param(module_path, node.name, param_name)
-        if qualified not in allow:
-            violations.append(qualified)
-    return violations
+    return [
+        _qualified_param(module_path, node.name, arg.arg)
+        for arg, default in positional_with_default + kw_only
+        if _has_test_seam_suffix(arg.arg) and _is_none_constant(default)
+    ]
 
 
-def _class_field_violations(node: ast.ClassDef, module_path: str, allow: set[str]) -> list[str]:
+def _class_field_violations(node: ast.ClassDef, module_path: str) -> list[str]:
     """Return the list of qualified field names violating F6 on this class.
 
     Targets the dataclass shape:
@@ -205,22 +175,15 @@ def _class_field_violations(node: ast.ClassDef, module_path: str, allow: set[str
     inside a class body. ``default_factory=...`` cases are safe because
     their value is a Call node, not the ``None`` constant. This is the
     canonical Deps shape and continues to pass.
-
-    Allow-list rescues both public and private class names — same rule as
-    free functions, same convention (`#`-prefixed rationale next to the
-    allow-list entry).
     """
-    violations: list[str] = []
-    for item in node.body:
-        if not isinstance(item, ast.AnnAssign) or not isinstance(item.target, ast.Name):
-            continue
-        field_name = item.target.id
-        if not _has_test_seam_suffix(field_name) or not _is_none_constant(item.value):
-            continue
-        qualified = _qualified_param(module_path, node.name, field_name)
-        if qualified not in allow:
-            violations.append(qualified)
-    return violations
+    return [
+        _qualified_param(module_path, node.name, item.target.id)
+        for item in node.body
+        if isinstance(item, ast.AnnAssign)
+        and isinstance(item.target, ast.Name)
+        and _has_test_seam_suffix(item.target.id)
+        and _is_none_constant(item.value)
+    ]
 
 
 def _iter_free_functions(
@@ -267,7 +230,7 @@ def _iter_classdefs(tree: ast.AST) -> list[ast.ClassDef]:
     return [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
 
 
-def file_violations(path: Path, allow: set[str]) -> list[str]:
+def file_violations(path: Path) -> list[str]:
     """Return every F6 violation in ``path`` as a list of qualified names.
 
     Walks two AST shapes:
@@ -284,12 +247,8 @@ def file_violations(path: Path, allow: set[str]) -> list[str]:
          value is a Call node, not None.
 
     Severity rule:
-      Free functions / class fields flag unless the qualified entry is
-      allow-listed in ``.architecture/baseline/test-only-kwargs-allow.txt``.
-      Private (``_``-prefixed) entries carry the higher review bar via
-      the convention of an adjacent ``#``-prefixed rationale comment in
-      the allow-list file; the mechanical detector itself does not vary
-      the rule between public and private hosts.
+      Every matching free-function param / class field is flagged. There
+      is no allow-list and no grandfathering.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -299,32 +258,30 @@ def file_violations(path: Path, allow: set[str]) -> list[str]:
     module_path = _module_path(path)
     violations: list[str] = []
     for fn in _iter_free_functions(tree):
-        violations.extend(_free_function_violations(fn, module_path, allow))
+        violations.extend(_free_function_violations(fn, module_path))
     for cls in _iter_classdefs(tree):
-        violations.extend(_class_field_violations(cls, module_path, allow))
+        violations.extend(_class_field_violations(cls, module_path))
     return violations
 
 
-def file_has_violation(path: Path, allow: set[str]) -> bool:
+def file_has_violation(path: Path) -> bool:
     """True iff ``path`` has at least one F6 violation. Kept as a thin
     boolean wrapper around :func:`file_violations` for callers that only
     need a yes/no answer; the detailed-list form drives the test suite
     and the per-param ``main()`` reporter.
     """
-    return bool(file_violations(path, allow))
+    return bool(file_violations(path))
 
 
 def main() -> int:
-    allow = _read_allow_list()
     violations_by_file: dict[Path, list[str]] = {}
     for p in python_files("kairix"):
-        v = file_violations(p, allow)
+        v = file_violations(p)
         if v:
             violations_by_file[repo_relative(p)] = v
 
-    # The gate() helper compares against a *file-level* baseline; we
-    # still emit the per-param detail before delegating so the operator
-    # reading the failure sees exactly which params triggered the gate.
+    # gate() reports per file; emit the per-param detail first so the
+    # operator reading the failure sees exactly which params triggered it.
     if violations_by_file:
         print("F6 — test-only kwargs detected (per-param detail):")
         for path in sorted(violations_by_file):

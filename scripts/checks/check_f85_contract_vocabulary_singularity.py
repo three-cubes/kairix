@@ -81,11 +81,8 @@ distrust is worse than no detector):
     exact member string as a Python ``ast.Constant`` or a template
     quoted literal, not a substring of running text).
 
-Baseline ``.architecture/baseline/f85-files.txt`` grandfathers the
-pre-existing re-declarations (the azure grouping mirrored into
-``wizard.py`` + ``backends.py`` before M11 reached them); net-new
-re-declarations of a registered vocabulary block at pre-commit /
-safe-commit / CI Stage 0.
+There is no grandfathering: every re-declaration of a registered
+vocabulary blocks at pre-commit / safe-commit / CI Stage 0.
 """
 
 from __future__ import annotations

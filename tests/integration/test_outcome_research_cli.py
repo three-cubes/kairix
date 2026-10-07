@@ -44,10 +44,9 @@ Sabotage-proof (both executed):
       to ``"MUTATED-SABOTAGE-DESCRIPTION"`` — the help test's
       ``"Iterative research" in proc.stdout`` assertion fails. Restored.
 
-Latency baseline (2024 M-series Mac): subprocess wall ~500-2000ms (the
-LangGraph + langchain import graph is heavy; the failure path is fast
-once the graph compiles). Test threshold: 30000ms (generous for the
-heaviest CLI import graph in this paydown group).
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
@@ -56,7 +55,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -86,7 +84,6 @@ def test_research_cli_subprocess_help_outcome() -> None:
     the operator-facing flag list reaches stdout. F30 contract:
     subprocess + stdout content assertion.
     """
-    t0 = time.monotonic()
     proc = subprocess.run(
         [sys.executable, "-m", "kairix.cli", "research", "--help"],
         capture_output=True,
@@ -94,7 +91,6 @@ def test_research_cli_subprocess_help_outcome() -> None:
         timeout=30,
         env=_subprocess_env_without_llm_keys(),
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"research --help exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -103,10 +99,6 @@ def test_research_cli_subprocess_help_outcome() -> None:
     assert "--max-turns" in proc.stdout, f"help text missing --max-turns: {proc.stdout!r}"
     assert "--json" in proc.stdout, f"help text missing --json: {proc.stdout!r}"
     assert "query" in proc.stdout, f"help text missing query positional: {proc.stdout!r}"
-
-    assert elapsed_ms < 30000.0, (
-        f"research --help subprocess took {elapsed_ms:.1f}ms (baseline ~500ms, threshold 30000ms)"
-    )
 
 
 def test_research_cli_subprocess_no_provider_json_envelope_outcome() -> None:
@@ -117,7 +109,6 @@ def test_research_cli_subprocess_no_provider_json_envelope_outcome() -> None:
     gaps / confidence / turns / error) — the contract the operator's
     tooling parses. NOT a returncode-only assertion.
     """
-    t0 = time.monotonic()
     proc = subprocess.run(
         [sys.executable, "-m", "kairix.cli", "research", "what is the F30 contract?", "--json"],
         capture_output=True,
@@ -125,7 +116,6 @@ def test_research_cli_subprocess_no_provider_json_envelope_outcome() -> None:
         timeout=60,
         env=_subprocess_env_without_llm_keys(),
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 1, (
         f"expected exit 1 (no-LLM error path), got {proc.returncode}.\n"
@@ -139,7 +129,3 @@ def test_research_cli_subprocess_no_provider_json_envelope_outcome() -> None:
     assert envelope["query"] == "what is the F30 contract?", f"query echoed wrong: {envelope}"
     assert envelope["error"], f"expected non-empty error on no-LLM path: {envelope}"
     assert envelope["synthesis"] == "", f"expected empty synthesis on error path: {envelope!r}"
-
-    assert elapsed_ms < 30000.0, (
-        f"research no-LLM subprocess took {elapsed_ms:.1f}ms (baseline ~1500ms, threshold 30000ms)"
-    )

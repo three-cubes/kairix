@@ -8,60 +8,73 @@ One method (``reindex``). Failure surface:
     re-processed when they weren't.
   * ``returns_empty`` — empty iterator when none of the failed item_ids
     are resolvable (every refetch returned tombstone / 404).
+
+F43: every test runs ONE assertion body over the real
+:class:`kairix.connectors.slack.SlackConnector` (whose ``reindex``
+genuinely refetches each failed id via ``conversations.history``,
+driven by the :class:`tests.fakes.FakeSlackWebApi` MockTransport stub)
+AND :class:`tests.fakes.FakeResolver`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable
 
 import pytest
 
-from kairix.core.protocols import ChangeEvent, Resolver
-from tests.fakes import FakeResolver
+from kairix.core.protocols import Resolver
+from tests.fakes import FakeResolver, FakeSlackWebApi
 
 pytestmark = pytest.mark.contract
 
+_FAILED_IDS = ("C0001:1715000000.000100", "C0001:1715000060.000200")
 
-class _FailingResolver:
-    """Inline :class:`Resolver` with raises-knob on ``reindex``."""
-
-    def __init__(self, *, raises: BaseException | None = None) -> None:
-        self._raises = raises
-
-    def reindex(
-        self,
-        failed_item_ids: tuple[str, ...],
-        *,
-        include_permissions: bool = False,
-    ) -> Iterator[ChangeEvent]:
-        del failed_item_ids, include_permissions
-        if self._raises is not None:
-            raise self._raises
-        return iter([])
+ResolverFactory = Callable[[BaseException | None], Resolver]
 
 
-def test_reindex_raises_propagates_typed_exception() -> None:
+def _real(raises: BaseException | None) -> Resolver:
+    """Real Slack resolver; a systemic failure is a non-ok ``conversations.history``."""
+    if raises is not None:
+        api = FakeSlackWebApi(responses={"conversations.history": {"ok": False, "error": "F68_resolver_raises"}})
+    else:
+        # Every failed message has since been deleted: history returns nothing.
+        api = FakeSlackWebApi(responses={"conversations.history": {"messages": []}})
+    connector: Resolver = api.build_connector()
+    return connector
+
+
+def _fake(raises: BaseException | None) -> Resolver:
+    return FakeResolver(raises=raises)
+
+
+_IMPLS = [_real, _fake]
+
+
+@pytest.mark.parametrize("factory", _IMPLS, ids=["real", "fake"])
+def test_reindex_raises_propagates_typed_exception(factory: ResolverFactory) -> None:
     """A systemic refetch failure surfaces — orchestrator must NOT mark
     the failed items as re-processed when refetch crashed.
 
-    Sabotage proof: change ``_FailingResolver.reindex`` to
-    ``return iter([])`` instead of raising. Re-run: pytest.raises sees
-    nothing. Restored.
+    Sabotage proof: in ``kairix.connectors.slack.connector.SlackConnector.reindex``
+    widen ``except ContainerAccessDeniedError:`` to ``except Exception:``.
+    Re-run: the real leg's pytest.raises sees nothing. Restored.
     """
-    res: Resolver = _FailingResolver(raises=RuntimeError("F68-resolver-raises"))
-    with pytest.raises(RuntimeError, match="F68-resolver-raises"):
-        list(res.reindex(("doc-1", "doc-2")))
+    res = factory(RuntimeError("slack: conversations.history returned ok=false: 'F68_resolver_raises'"))
+    with pytest.raises(RuntimeError, match="F68_resolver_raises"):
+        list(res.reindex(_FAILED_IDS))
 
 
-def test_reindex_returns_empty_when_all_failed_ids_now_tombstoned() -> None:
+@pytest.mark.parametrize("factory", _IMPLS, ids=["real", "fake"])
+def test_reindex_returns_empty_when_all_failed_ids_now_tombstoned(factory: ResolverFactory) -> None:
     """Empty iterator when every failed id has been tombstoned at the
     source — the orchestrator drops the dead-letter rows without
     re-processing.
 
-    Sabotage proof: change ``FakeResolver.reindex`` to
-    ``return iter([_phantom_event()])`` for empty events. Re-run: the
+    Sabotage proof: in ``SlackConnector.reindex`` yield a synthetic
+    ``ChangeEvent(op="deleted", item_id=item_id, ...)`` per failed id
+    before the ``conversations.history`` lookup. Re-run: the real leg's
     ``== []`` assertion fails. Restored.
     """
-    res: Resolver = FakeResolver()
-    out = list(res.reindex(("doc-1", "doc-2")))
+    res = factory(None)
+    out = list(res.reindex(_FAILED_IDS))
     assert out == [], f"all-tombstoned must yield []; got {out!r}"

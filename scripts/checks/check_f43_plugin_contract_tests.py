@@ -1,7 +1,7 @@
 """F43: behavioural parity — one parametrized contract-test body run over
 the real implementation AND the canonical fake (not separate assertions).
 
-F43 has two limbs, both gated on ``.architecture/baseline/f43-files.txt``:
+F43 has two limbs, both reported through the single ``f43`` gate:
 
 Limb 1 — plugin contract-test presence (original shape)
 -------------------------------------------------------
@@ -36,13 +36,11 @@ over ≥2 implementations through ONE shared body — detected as either:
     fake-only failure-injection knob with no real-side analogue).
 
 A file is a Limb-2 violation when ANY of its ``test_*`` functions fails
-all three. Pre-existing non-parametrized contract files are grandfathered
-in ``f43-files.txt`` so the strengthened rule is forward-only: net-new
-contract tests must use the parametrized real+fake body; existing ones
-are tracked for paydown.
+all three. There is no grandfathering: every contract file must use the
+parametrized real+fake body.
 
-Violations from both limbs are reported by repo-relative path and
-gated on the single ``f43`` baseline. If no plugin trees / contract
+Violations from both limbs are reported by repo-relative path through
+the single ``f43`` gate. If no plugin trees / contract
 files exist on disk, the check passes trivially.
 """
 
@@ -415,8 +413,8 @@ def _discover_contract_files(repo_root: Path) -> list[Path]:
 
 
 def collect_violations(repo_root: Path = REPO_ROOT) -> set[Path]:
-    """Both F43 limbs, as one repo-relative violation set gated on the
-    single ``f43`` baseline.
+    """Both F43 limbs, as one repo-relative violation set reported
+    through the single ``f43`` gate.
 
     Limb 1 — plugin dirs missing an F43-conformant contract test.
     Limb 2 — contract files proving a Protocol against a single impl

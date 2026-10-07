@@ -12,9 +12,7 @@ All retrieval, SQL, and YAML I/O is real.
 
 from __future__ import annotations
 
-import os
 import sqlite3
-from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -54,8 +52,8 @@ def _seed_db(db_path: Path, docs: list[tuple[str, str, str, str]]) -> None:
 
 
 @pytest.fixture
-def kairix_db(tmp_path: Path) -> Iterator[Path]:
-    """Production-schema SQLite at a stable path; KAIRIX_DB_PATH points here."""
+def kairix_db(tmp_path: Path) -> Path:
+    """Production-schema SQLite at a stable path, handed to ``GoldBuilder(db_path=...)``."""
     db_path = tmp_path / "kairix.sqlite"
     _seed_db(
         db_path,
@@ -80,19 +78,13 @@ def kairix_db(tmp_path: Path) -> Iterator[Path]:
             ),
         ],
     )
-    prev = os.environ.get("KAIRIX_DB_PATH")
-    os.environ["KAIRIX_DB_PATH"] = str(db_path)
-    yield db_path
-    if prev is None:
-        os.environ.pop("KAIRIX_DB_PATH", None)
-    else:
-        os.environ["KAIRIX_DB_PATH"] = prev
+    return db_path
 
 
 @pytest.mark.integration
 def test_bm25_pool_returns_seeded_doc_against_real_fts(kairix_db: Path) -> None:
     """``GoldBuilder.pool`` with a BM25 system must surface the seeded doc for 'docker deployment'."""
-    builder = GoldBuilder()
+    builder = GoldBuilder(db_path=kairix_db)
     candidates = builder.pool(
         "docker deployment",
         systems=["bm25-equal"],
@@ -129,7 +121,7 @@ def test_pool_combines_bm25_variants_with_vector_retrieval(kairix_db: Path) -> N
             )
         }
     )
-    builder = GoldBuilder(retriever=retriever)
+    builder = GoldBuilder(retriever=retriever, db_path=kairix_db)
     candidates = builder.pool(
         "docker",
         systems=["bm25-equal", "bm25-title", "vector"],
@@ -153,7 +145,7 @@ def test_pool_combines_bm25_variants_with_vector_retrieval(kairix_db: Path) -> N
 @pytest.mark.integration
 def test_pool_skips_unknown_system_with_warning(kairix_db: Path) -> None:
     """Unknown system names are skipped; pool result is identical to the known-system call."""
-    builder = GoldBuilder(retriever=FakeRetriever())
+    builder = GoldBuilder(retriever=FakeRetriever(), db_path=kairix_db)
     with_unknown = builder.pool(
         "docker",
         systems=["bm25-equal", "noooo-not-a-real-system"],
@@ -222,7 +214,7 @@ def test_build_independent_gold_end_to_end_writes_yaml(kairix_db: Path, tmp_path
         }
     )
 
-    builder = GoldBuilder(llm_judge=judge, retriever=retriever)
+    builder = GoldBuilder(llm_judge=judge, retriever=retriever, db_path=kairix_db)
     report = builder.build_independent_gold(
         suite_path=input_path,
         output_path=output_path,
@@ -272,7 +264,7 @@ def test_build_independent_gold_runs_calibration_when_enabled(kairix_db: Path, t
         }
     )
 
-    builder = GoldBuilder(llm_judge=judge, retriever=retriever)
+    builder = GoldBuilder(llm_judge=judge, retriever=retriever, db_path=kairix_db)
     builder.build_independent_gold(
         suite_path=input_path,
         output_path=output_path,

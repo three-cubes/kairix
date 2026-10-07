@@ -61,9 +61,6 @@ from tc_fitness.runner import (
     run,
 )
 from tc_fitness.runner import (
-    _dispatches_in_process as _pkg_dispatches_in_process,
-)
-from tc_fitness.runner import (
     _load_check_main as _pkg_load_check_main,
 )
 from tc_fitness.runner import (
@@ -73,10 +70,13 @@ from tc_fitness.runner import (
     _run_one_subprocess as _pkg_run_one_subprocess,
 )
 from tc_fitness.runner import (
-    _select_all as _pkg_select_all,
+    dispatches_in_process as _pkg_dispatches_in_process,
 )
 from tc_fitness.runner import (
-    _select_gate as _pkg_select_gate,
+    select_all as _pkg_select_all,
+)
+from tc_fitness.runner import (
+    select_gate as _pkg_select_gate,
 )
 from tc_fitness.staged import (
     StagedDecision,
@@ -290,8 +290,10 @@ def _dispatches_in_process(entry: RuleEntry) -> bool:
 
 
 def _load_check_main(script: str) -> Any:
-    """Import ``script``'s check module and return a zero-arg ``main`` invoker."""
-    return _pkg_load_check_main(script)
+    """Import ``script``'s check module and return a zero-arg ``main`` invoker.
+
+    The engine (v0.19+) takes the importable module name, so strip ``.py``."""
+    return _pkg_load_check_main(script.removesuffix(".py"))
 
 
 def _footer_config() -> RunnerConfig:

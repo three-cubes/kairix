@@ -15,16 +15,13 @@ directory.
 Allow-list (intentionally narrow):
 
   - ``.git``, ``.github``, ``.pytest_cache``, ``.ruff_cache``,
-    ``.architecture``, ``.claude``, ``.idea``, ``.vscode``,
+    ``.claude``, ``.idea``, ``.vscode``,
     ``.venv``, ``__pycache__``, ``htmlcov``, ``logs``,
     ``node_modules``, ``coverage``, ``dist``, ``build``
   - any directory whose name starts with ``.`` (dotfiles in general).
 
-Everything else needs a ``README.md``. Pre-existing bare directories
-are grandfathered in ``.architecture/baseline/readme-coverage-files.txt``
-(one ``<dir>/README.md`` path per line — i.e. the file that *should*
-exist) so the rule lands green; the baseline shrinks as READMEs get
-written.
+Everything else needs a ``README.md``. There is no grandfathering: every
+bare top-level directory fails the gate until its README is written.
 """
 
 from __future__ import annotations
@@ -39,14 +36,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Directories that don't need a README. Mostly machine-readable
 # caches, .git internals, build artefacts, and dotfile configuration
-# trees (.architecture holds baseline lists, not agent-readable docs).
+# trees.
 _README_EXEMPT: frozenset[str] = frozenset(
     {
         ".git",
         ".github",
         ".pytest_cache",
         ".ruff_cache",
-        ".architecture",
         ".claude",
         ".idea",
         ".vscode",
@@ -87,9 +83,8 @@ Forbidden example:
 Why: every directory mention in CLAUDE.md, docs/, or an error message
 becomes a click. Landing in a bare directory wastes the click; the
 resolver-README pattern (every top-level dir has one) means every
-path mention lands somewhere oriented. Net-new violations block;
-pre-existing bare directories are grandfathered in
-.architecture/baseline/readme-coverage-files.txt until written."""
+path mention lands somewhere oriented. Every violation blocks — there
+is no grandfathering; write the README at source."""
 
 
 def _is_exempt(name: str) -> bool:

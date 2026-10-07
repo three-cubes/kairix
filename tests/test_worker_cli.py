@@ -552,3 +552,156 @@ def test_status_default_config_resolution_does_not_crash(tmp_path: Path) -> None
 
     assert rc == 0
     assert "Phase: IDLE" in out.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# ``kairix worker preflight`` human renderer + ``maintenance`` FTS heal +
+# argv path-flag routing, driven in-process through ``main(argv, ...)``.
+# ---------------------------------------------------------------------------
+
+_PREFLIGHT_PASSED_CLEAN = "Preflight integrity check: PASSED (no gaps detected)"
+
+
+def _seed_documents_without_fts(tmp_path: Path) -> Path:
+    """Seed two active documents (content + vectors) and wipe every FTS row.
+
+    Reproduces the IM-6 failure mode: real documents with no matching
+    ``documents_fts`` rows, so BM25 silently degrades to vector-only.
+    """
+    import sqlite3
+
+    from kairix.core.db.schema import create_schema
+
+    db_path = tmp_path / "kairix.sqlite"
+    db = sqlite3.connect(str(db_path))
+    create_schema(db, dims=4)
+    now = "2026-05-25T09:00:00Z"
+    for doc_path, doc_hash, text in (("a.md", "hash-a", "alpha content"), ("b.md", "hash-b", "beta content")):
+        db.execute(
+            "INSERT INTO documents (collection, path, hash, created_at, modified_at, active) VALUES (?, ?, ?, ?, ?, 1)",
+            ("default", doc_path, doc_hash, now, now),
+        )
+        db.execute("INSERT INTO content (hash, doc, created_at) VALUES (?, ?, ?)", (doc_hash, text, now))
+        db.execute("INSERT INTO content_vectors (hash, seq, pos) VALUES (?, 0, 0)", (doc_hash,))
+    db.execute("DELETE FROM documents_fts")
+    db.commit()
+    db.close()
+    return db_path
+
+
+def _fts_row_count(db_path: Path) -> int:
+    import sqlite3
+
+    db = sqlite3.connect(str(db_path))
+    try:
+        return int(db.execute("SELECT COUNT(*) FROM documents_fts").fetchone()[0])
+    finally:
+        db.close()
+
+
+def test_format_status_renders_hours_for_ages_over_an_hour() -> None:
+    """Ages of an hour or more render as fractional hours.
+
+    Sabotage proof: change the ``< 3600`` threshold in ``_format_age`` to
+    ``< 36000`` — the 2-hour-old embed renders ``120 min ago`` and the
+    ``2.0 h ago`` assertion fails.
+    """
+    now = 100_000.0
+    state = WorkerState(current_phase=WorkerPhase.IDLE, last_embed_run_at=now - 7200, started_at=now - 5400)
+
+    rendered = format_status(state, now=now)
+
+    assert "Last embed: 2.0 h ago" in rendered
+    assert "Uptime: 1.5 h ago" in rendered
+
+
+def test_main_preflight_human_reports_clean_store_as_passed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A freshly-created schema audits clean: exit 0 + the no-gaps PASSED line.
+
+    Sabotage proof: drop the ``report.healthy and not report.gaps`` early
+    return in ``_render_preflight_human`` — the output becomes
+    ``PASSED (0 gap(s))`` and the assertion fails.
+    """
+    import sqlite3
+
+    from kairix.core.db.schema import create_schema
+
+    db_path = tmp_path / "kairix.sqlite"
+    db = sqlite3.connect(str(db_path))
+    create_schema(db, dims=4)
+    db.close()
+
+    rc = main(["preflight"], db_path=db_path)
+
+    assert rc == 0
+    assert _PREFLIGHT_PASSED_CLEAN in capsys.readouterr().out
+
+
+def test_main_preflight_human_lists_each_error_gap_and_exits_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Documents without FTS rows fail preflight with a per-gap operator line.
+
+    Sabotage proof: make ``_format_gap_line`` return ``gap.invariant`` only —
+    the ``[ERROR] documents-without-fts: count=2 sample=[`` assertion fails.
+    """
+    db_path = _seed_documents_without_fts(tmp_path)
+
+    rc = main(["preflight", "--db-path", str(db_path)])
+
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Preflight integrity check: FAILED (" in out
+    assert "[ERROR] documents-without-fts: count=2 sample=[" in out
+
+
+def test_main_preflight_auto_heal_human_output_rebuilds_fts(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """``--auto-heal`` rebuilds FTS for the gap, then the re-audit passes clean.
+
+    Sabotage proof: skip the ``rebuild_fts`` call in ``_auto_heal_gaps`` —
+    the re-audit still sees the gap, rc is 1 and the PASSED assertion fails.
+    """
+    db_path = _seed_documents_without_fts(tmp_path)
+
+    rc = main(["preflight", "--auto-heal"], db_path=db_path)
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "auto-heal: rebuild_fts indexed 2 documents" in out
+    # Post-heal re-audit passes; a warn-severity gap (e.g. no usearch
+    # index on disk) may remain listed but does not fail the audit.
+    assert "Preflight integrity check: PASSED (" in out
+    assert "documents-without-fts" not in out.split("Preflight integrity check:", 1)[1]
+    assert _fts_row_count(db_path) == 2
+
+
+def test_main_maintenance_heals_fts_drift_in_place(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The maintenance verb's FTS healer rebuilds a store whose FTS rows are missing.
+
+    Sabotage proof: make ``_maintenance_verb_fts_healer`` always ``return 0``
+    — no FTS rows are rebuilt and both assertions fail.
+    """
+    db_path = _seed_documents_without_fts(tmp_path)
+
+    rc = main(["maintenance", "--db-path", str(db_path)])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "fts_orphans_healed=2" in out
+    assert _fts_row_count(db_path) == 2
+
+
+def test_main_pause_and_resume_honour_flag_path_argv(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """``--flag-path`` on argv (the F30 subprocess seam) routes pause/resume.
+
+    Sabotage proof: make ``_resolve_flag_path_arg`` ignore ``arg`` (return
+    None) — pause touches the production default path instead, so the
+    ``flag.exists()`` assertion fails.
+    """
+    flag = tmp_path / "nested" / ".worker-paused"
+
+    assert main(["pause", "--flag-path", str(flag)]) == 0
+    assert flag.exists()
+    assert main(["resume", "--flag-path", str(flag)]) == 0
+    assert not flag.exists()
+    assert "Worker paused" in capsys.readouterr().out

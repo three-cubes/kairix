@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -48,10 +48,16 @@ def default_generate_summaries(**kw: Any) -> list[Any]:
     return generate_summaries(**kw)
 
 
-def default_document_root_path() -> Path:
+def default_document_root_path(*, env: Mapping[str, str] | None = None) -> Path:
+    """Production ``document_root_fn`` — resolves via :func:`kairix.paths.document_root`.
+
+    ``env`` is the F2-clean seam forwarded to ``document_root``: ``None``
+    (production) reads the live process env; tests pass a mapping instead
+    of mutating ``os.environ``.
+    """
     from kairix.paths import document_root
 
-    return document_root()
+    return document_root(env=env)
 
 
 def default_summaries_db_path_fn() -> Path:

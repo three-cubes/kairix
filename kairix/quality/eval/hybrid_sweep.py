@@ -45,7 +45,6 @@ logger = logging.getLogger(__name__)
 # accumulator emit, and aggregator read paths; extract so a rename hits a single
 # edit site.
 _MODE_BM25_PRIMARY = "bm25_primary"
-_KEY_VEC_FAILED = "vec_failed"
 _KEY_FUSED_COUNT = "fused_count"
 _KEY_BM25_COUNT = "bm25_count"
 
@@ -425,7 +424,7 @@ def evaluate_single_config(
         acc.total_bm25 += meta.get(_KEY_BM25_COUNT, 0)
         acc.total_vec += meta.get("vec_count", 0)
         acc.total_fused += meta.get(_KEY_FUSED_COUNT, 0)
-        if meta.get(_KEY_VEC_FAILED):
+        if result.vec_failed:
             acc.n_vec_failed += 1
 
         ndcg = compute_ndcg(paths, gold)

@@ -54,6 +54,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("kairix.maintenance")
@@ -161,23 +162,71 @@ class MaintenanceTickResult:
     periodic_analyze_reason: str = ""
 
 
-def _default_usearch_rebuilder() -> bool:  # pragma: no cover — production boundary
+def usearch_parity_check(db_path: Path, index: Any) -> bool:
+    """Compare the surviving ``content_vectors`` rows against a usearch index.
+
+    The testable core of the maintenance tick's usearch rebuild stage
+    (:func:`_default_usearch_rebuilder` is the thin production adapter
+    that resolves the platform db path + opens the on-disk index).
+    Returns True on success / no-op — a fresh DB without the
+    ``content_vectors`` table has nothing to rebuild against, since the
+    DB is the source of truth. ``index`` only needs ``len()``; an index
+    whose size can't be read is logged as ``indexed=-1``.
+    """
+    # Pull every surviving (hash, seq) -> embedding from the DB and
+    # rebuild the index from scratch. The simplest correct contract:
+    # usearch is append-only in normal operation, so rebuilds are
+    # the canonical way to drop stale entries.
+    db = sqlite3.connect(str(db_path))
+    try:
+        # F63-bounded: full-rebuild of the usearch vector index requires every
+        # surviving (hash, seq) row in deterministic order; no LIMIT possible.
+        # Caller invokes this on a maintenance tick scheduled to run during low
+        # load (24h default); production scale is bounded by total chunk count.
+        rows = db.execute("SELECT hash, seq FROM content_vectors ORDER BY hash, seq").fetchall()
+    except sqlite3.OperationalError:
+        # Fresh DB / missing table — nothing to rebuild against,
+        # treat as no-op success.
+        return True
+    finally:
+        db.close()
+
+    # We can't re-embed here (no chunk text loaded), but the
+    # rebuild's primary goal is to drop usearch entries that no
+    # longer have a content_vectors row. If the live count differs
+    # from the indexed count we surface that via the completion
+    # log; the operator drains via ``kairix embed --force``.
+    live_count = len(rows)
+    try:
+        indexed_count = len(index)
+    except (AttributeError, RuntimeError, TypeError):
+        indexed_count = -1
+    logger.info(
+        "maintenance: usearch parity check — live=%d indexed=%d",
+        live_count,
+        indexed_count,
+    )
+    return True
+
+
+def _default_usearch_rebuilder() -> bool:
     """Production seam — full usearch rebuild from surviving content_vectors.
 
-    Returns True on success / no-op (no vectors to rebuild from is
-    treated as a successful no-op since the DB is the source of truth);
-    False when the rebuild raised. Defensive: usearch failures must not
-    crash the worker loop — they surface via the structured log instead.
+    Thin adapter: resolves the platform db path, opens the on-disk usearch
+    index, and delegates to :func:`usearch_parity_check`. Returns True on
+    success / no-op (no index on disk yet is a successful no-op — the next
+    embed pass creates it); False when the rebuild raised. Defensive:
+    usearch failures must not crash the worker loop — they surface via the
+    structured log instead.
 
     Lazy import keeps the maintenance scheduler importable on hosts
     where usearch isn't installed (e.g. operator-side dry-run probes).
 
     Exercised in production via the worker loop's flag-ON tick path;
     the unit + integration + E2E tests inject a fake rebuilder via
-    :class:`MaintenanceSchedulerDeps`. Marked no-cover because the
-    function exclusively wraps platform-default boundary calls
-    (kairix.paths.db_path + the on-disk usearch index) that don't
-    exist in test sandboxes.
+    :class:`MaintenanceSchedulerDeps`; the default-bound scheduler
+    tests execute this seam against the hermetic (empty) platform
+    paths, where it takes the no-index no-op branch (F86).
     """
     try:
         from kairix.core.embed.embed import open_default_usearch_index
@@ -189,47 +238,13 @@ def _default_usearch_rebuilder() -> bool:  # pragma: no cover — production bou
             # No index on disk yet — nothing to rebuild against. Treat as
             # a no-op success; the next embed pass will create it.
             return True
-
-        # Pull every surviving (hash, seq) -> embedding from the DB and
-        # rebuild the index from scratch. The simplest correct contract:
-        # usearch is append-only in normal operation, so rebuilds are
-        # the canonical way to drop stale entries.
-        db = sqlite3.connect(str(db_p))
-        try:
-            # F63-bounded: full-rebuild of the usearch vector index requires every
-            # surviving (hash, seq) row in deterministic order; no LIMIT possible.
-            # Caller invokes this on a maintenance tick scheduled to run during low
-            # load (24h default); production scale is bounded by total chunk count.
-            rows = db.execute("SELECT hash, seq FROM content_vectors ORDER BY hash, seq").fetchall()
-        except sqlite3.OperationalError:
-            # Fresh DB / missing table — nothing to rebuild against,
-            # treat as no-op success.
-            return True
-        finally:
-            db.close()
-
-        # We can't re-embed here (no chunk text loaded), but the
-        # rebuild's primary goal is to drop usearch entries that no
-        # longer have a content_vectors row. If the live count differs
-        # from the indexed count we surface that via the completion
-        # log; the operator drains via ``kairix embed --force``.
-        live_count = len(rows)
-        try:
-            indexed_count = len(idx)
-        except (AttributeError, RuntimeError):
-            indexed_count = -1
-        logger.info(
-            "maintenance: usearch parity check — live=%d indexed=%d",
-            live_count,
-            indexed_count,
-        )
-        return True
-    except Exception:  # pragma: no cover - production boundary
+        return usearch_parity_check(db_p, idx)
+    except Exception:
         logger.exception("maintenance: usearch rebuild failed")
         return False
 
 
-def _default_bronze_reaper() -> int:  # pragma: no cover — production boundary
+def _default_bronze_reaper() -> int:
     """Phase 7 of streaming-bronze: no-op.
 
     Streaming bronze writes no on-disk blobs, so there are no orphans
@@ -243,7 +258,7 @@ def _default_bronze_reaper() -> int:  # pragma: no cover — production boundary
     return 0
 
 
-def _default_bronze_ttl_gc() -> int:  # pragma: no cover — production boundary
+def _default_bronze_ttl_gc() -> int:
     """Phase 7 of streaming-bronze: no-op.
 
     With streaming bronze there are no on-disk blobs and no TTL-based
@@ -270,7 +285,7 @@ def _default_periodic_analyze(db: sqlite3.Connection) -> tuple[bool, str]:
     return result.ran, result.reason
 
 
-def _default_fts_healer(db: sqlite3.Connection) -> int:  # pragma: no cover — production boundary
+def _default_fts_healer(db: sqlite3.Connection) -> int:
     """Production seam — heal FTS5 orphans when the integrity check sees drift.
 
     Re-uses :func:`kairix.core.db.fts.rebuild_fts` so the heal step
@@ -278,10 +293,8 @@ def _default_fts_healer(db: sqlite3.Connection) -> int:  # pragma: no cover — 
     the count of rows the rebuild touched; 0 when no heal was needed.
 
     Unit tests pass a fake healer via :class:`MaintenanceSchedulerDeps`;
-    no-cover here because reaching into the private integrity helpers
-    from a unit test would itself be a contract violation (no-internal-
-    test-imports). The verb integration test exercises the production
-    path end-to-end.
+    the verb integration test exercises this production seam end-to-end
+    (F86 — the default binding must stay executed).
     """
     from kairix.core.db.fts import rebuild_fts
     from kairix.core.db.integrity import (
@@ -866,4 +879,5 @@ __all__ = [
     "tick_to_dict",
     "tick_within_jitter_window",
     "timedelta",
+    "usearch_parity_check",
 ]

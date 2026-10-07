@@ -1,128 +1,102 @@
 """F68 (ADR-024 Bundle A) — failure-mode contract for :class:`EventConnector`.
 
-Four methods on the webhook-driven push surface. Each is exercised
-below for at least one named failure class:
+Four Protocol methods: ``subscribe`` / ``renew_subscription`` /
+``unsubscribe`` / ``handle_event``. Every body runs over BOTH a shipped
+event connector — the real :class:`kairix.connectors.slack.SlackConnector`
+in an Events-API deployment (no Socket Mode handler wired, so there is
+no push surface to subscribe to) — and the canonical
+:class:`tests.fakes.FakeEventConnector` configured the same way
+(``supported=False``) (F43 behavioural parity).
 
-  * ``subscribe`` — Protocol allows ``None`` return when the source
-    doesn't support push (the "returns_empty" shape).
-  * ``renew_subscription`` — raises on a backend failure (every renew
-    failure must surface so the framework can re-subscribe).
-  * ``unsubscribe`` — Protocol contract is "idempotent on unknown id"
-    — the empty-no-error shape.
-  * ``handle_event`` — empty-iterator return when the payload carries
-    no change events (the ``returns_empty`` shape callers iterate
-    without a null check).
+Parity note (PLA-472): the previous ``renew_subscription`` probe asserted
+a RAISE, proved only against an inline stub. No shipped EventConnector
+raises on renew — Slack Socket Mode and GitHub App subscriptions carry
+no TTL, so renew is a healthy no-op that returns the id. The contract
+now pins that real observable under the ``unavailable`` class (no TTL /
+no subscription surface to renew against).
 
-A small inline :class:`_FailingEventConnector` exposes the raises
-knob the canonical :class:`FakeEventConnector` doesn't.
+Each test carries a "Sabotage proof:" comment describing the mutation
+that proves the assertion has teeth.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Callable
 
 import pytest
 
-from kairix.core.protocols import ChangeEvent, EventConnector
+from kairix.connectors.slack import SlackConnector, SlackCredentials
+from kairix.core.protocols import EventConnector
 from tests.fakes import FakeEventConnector
 
 pytestmark = pytest.mark.contract
 
 
-class _FailingEventConnector:
-    """Inline :class:`EventConnector` with raises-knobs on every method.
+def _real_connector() -> EventConnector:
+    # Events-API deployment: no ``socket_mode_handler_factory`` wired.
+    return SlackConnector(credentials=SlackCredentials(bot_token="xoxb-test-fake-token-value"))
 
-    Constructor takes per-method exception sentinels — None means the
-    method returns its default shape. No internal-attribute access /
-    monkeypatching needed in the tests.
+
+def _fake_connector() -> EventConnector:
+    return FakeEventConnector(events=[], supported=False)
+
+
+_IMPLEMENTATIONS: list[tuple[str, Callable[[], EventConnector]]] = [
+    ("real", _real_connector),
+    ("fake", _fake_connector),
+]
+
+
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_subscribe_returns_empty_when_source_unsupported(name: str, factory: Callable[[], EventConnector]) -> None:
+    """Subscribe returns ``None`` to signal "no push surface for this
+    deployment" — the framework falls back to polling.
+
+    Sabotage proof (executed): in ``SlackConnector.subscribe`` change the
+    no-factory ``return None`` to ``return ""``. Re-run: the ``real``
+    case's ``is None`` assertion fails. Restored.
     """
-
-    def __init__(
-        self,
-        *,
-        raise_on_subscribe: BaseException | None = None,
-        raise_on_renew: BaseException | None = None,
-        raise_on_unsubscribe: BaseException | None = None,
-        raise_on_handle_event: BaseException | None = None,
-    ) -> None:
-        self._raise_on_subscribe = raise_on_subscribe
-        self._raise_on_renew = raise_on_renew
-        self._raise_on_unsubscribe = raise_on_unsubscribe
-        self._raise_on_handle_event = raise_on_handle_event
-
-    def subscribe(self, callback_url: str) -> str | None:
-        del callback_url
-        if self._raise_on_subscribe is not None:
-            raise self._raise_on_subscribe
-        return None  # "unsupported" path
-
-    def renew_subscription(self, subscription_id: str) -> str:
-        if self._raise_on_renew is not None:
-            raise self._raise_on_renew
-        return subscription_id
-
-    def unsubscribe(self, subscription_id: str) -> None:
-        del subscription_id
-        if self._raise_on_unsubscribe is not None:
-            raise self._raise_on_unsubscribe
-
-    def handle_event(self, event: Any) -> Iterator[ChangeEvent]:
-        del event
-        if self._raise_on_handle_event is not None:
-            raise self._raise_on_handle_event
-        return iter([])
+    assert factory().subscribe("https://example.invalid/webhook") is None, name
 
 
-def test_subscribe_returns_empty_when_source_unsupported() -> None:
-    """Subscribe MAY return ``None`` to signal "this connector kind
-    doesn't support webhooks" — the framework falls back to polling.
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_renew_subscription_unavailable_returns_same_id_when_no_ttl(
+    name: str, factory: Callable[[], EventConnector]
+) -> None:
+    """A subscription with no TTL to renew against reports healthy by
+    returning the SAME id — the framework keeps its subscription rather
+    than re-subscribing from scratch.
 
-    Sabotage proof: change ``_FailingEventConnector.subscribe`` to
-    return ``""`` (empty string) instead of ``None``. Re-ran: the
-    ``is None`` assertion fails. Restored.
+    Sabotage proof: in ``SlackConnector.renew_subscription`` return
+    ``""``. Re-run: the ``real`` case fails. Restored.
     """
-    conn: EventConnector = _FailingEventConnector()
-    assert conn.subscribe("https://example.invalid/webhook") is None
+    assert factory().renew_subscription("sub-1") == "sub-1", name
 
 
-def test_renew_subscription_raises_propagates_typed_exception() -> None:
-    """Renew failure surfaces — framework needs to know so it can
-    re-subscribe from scratch.
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_unsubscribe_returns_empty_when_subscription_id_unknown(
+    name: str, factory: Callable[[], EventConnector]
+) -> None:
+    """Unsubscribe is idempotent — an unknown id is a no-op returning
+    ``None``, not a raise — on a first call and on a repeat.
 
-    Sabotage proof: change ``_FailingEventConnector.renew_subscription``
-    to ``return ""`` instead of raising. Re-ran: ``pytest.raises`` sees
-    nothing. Restored.
+    Sabotage proof: in ``SlackConnector.unsubscribe`` raise ``KeyError``
+    when no handler is open. Re-run: the ``real`` case fails. Restored.
     """
-    conn: EventConnector = _FailingEventConnector(
-        raise_on_renew=RuntimeError("F68-renew-raises"),
-    )
-    with pytest.raises(RuntimeError, match="F68-renew-raises"):
-        conn.renew_subscription("sub-1")
+    conn = factory()
+    assert conn.unsubscribe("never-subscribed") is None, name
+    assert conn.unsubscribe("never-subscribed") is None, name
 
 
-def test_unsubscribe_returns_empty_when_subscription_id_unknown() -> None:
-    """Unsubscribe is idempotent — unknown id is a no-op, not a raise.
-    Pin via the canonical :class:`FakeEventConnector` which records the
-    attempted unsubscribe in ``unsubscribe_calls`` without raising.
-
-    Sabotage proof: change ``FakeEventConnector.unsubscribe`` to raise
-    on unknown ids. Re-ran: the call now raises and the test fails.
-    Restored.
-    """
-    conn = FakeEventConnector()
-    # No subscribe call beforehand — unsubscribe must absorb it.
-    conn.unsubscribe("never-subscribed")
-    assert conn.unsubscribe_calls == ["never-subscribed"]
-
-
-def test_handle_event_returns_empty_when_payload_carries_no_changes() -> None:
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_handle_event_returns_empty_when_payload_carries_no_changes(
+    name: str, factory: Callable[[], EventConnector]
+) -> None:
     """An inbound webhook that carries no relevant changes yields
     nothing — callers iterate without a null check.
 
-    Sabotage proof: change ``_FailingEventConnector.handle_event`` to
-    return ``iter([ChangeEvent(...)])`` for empty payloads. Re-ran:
-    the ``== []`` assertion fails. Restored.
+    Sabotage proof (executed): in ``SlackConnector.handle_event`` return
+    a one-element iterator when no translator matches. Re-run: the
+    ``real`` case's ``== []`` assertion fails. Restored.
     """
-    conn: EventConnector = _FailingEventConnector()
-    assert list(conn.handle_event({"noise": True})) == []
+    assert list(factory().handle_event({"type": "noise", "noise": True})) == [], name

@@ -6,6 +6,17 @@ least one test here that exercises a named failure class
 ``unauthorized`` / ``unavailable``) AND asserts a CONCRETE observable
 outcome.
 
+Every body runs over BOTH a shipped extractor and the canonical
+:class:`tests.fakes.FakeExtractor` (F43 behavioural parity). The shipped
+side is the :mod:`kairix.extractors.passthrough` plugin (the plain-text
+extractor the generic fake mirrors), except where the failure needs an
+extractor with a failing dependency: ``extract`` raising uses the real
+:class:`kairix.extractors.docx.DocxExtractor` with its
+``document_opener`` seam rejecting a corrupt container. No shipped
+extractor's ``metadata_for`` raises (all guard), so that probe runs the
+real passthrough with its ``metadata_for`` overridden to fail — a
+minimal probe of a buggy plugin, per the PLA-472 ruling.
+
 Composition follows F47 — pipelines are built via
 :func:`kairix.core.factory.build_connector_pipeline`.
 
@@ -16,16 +27,63 @@ that proves the assertion has teeth.
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
+import zipfile
+from collections.abc import Callable, Iterator
+from typing import Any, cast
 
 import pytest
 
 from kairix.core.db.schema import create_schema
 from kairix.core.factory import build_connector_pipeline
-from kairix.core.protocols import ChangeEvent
+from kairix.core.protocols import ChangeEvent, DocMetadata, ExtractedDocument, Extractor, SourceMetadata
+from kairix.extractors.docx import DocxExtractor
+from kairix.extractors.docx import version as docx_version
+from kairix.extractors.passthrough import PassthroughExtractor
+from kairix.extractors.passthrough import version as passthrough_version
 from tests.fakes import FakeChunkWriter, FakeEntityGraphSink, FakeExtractor, FakeSourceConnector
 
 pytestmark = pytest.mark.contract
+
+ExtractorFactory = Callable[[], Extractor]
+
+
+def _passthrough() -> Extractor:
+    return PassthroughExtractor(version=passthrough_version)
+
+
+def _fake_text_extractor() -> Extractor:
+    return FakeExtractor(claimed_mime_prefixes=("text/",))
+
+
+_TEXT_IMPLEMENTATIONS: list[tuple[str, ExtractorFactory]] = [
+    ("real", _passthrough),
+    ("fake", _fake_text_extractor),
+]
+
+
+def _corrupt_container_opener() -> Callable[[str], Any]:
+    def _open(path: str) -> Any:
+        raise zipfile.BadZipFile(f"File is not a zip file: {path}")
+
+    return _open
+
+
+class _MetadataBugProbe(PassthroughExtractor):
+    """The shipped passthrough plugin with a buggy ``metadata_for``."""
+
+    def metadata_for(self, raw: bytes, mime: str) -> SourceMetadata:
+        raise RuntimeError("F68-extractor-metadata-raises")
+
+
+_EXTRACT_RAISES: list[tuple[str, ExtractorFactory]] = [
+    ("real", lambda: DocxExtractor(version=docx_version, document_opener=_corrupt_container_opener)),
+    ("fake", lambda: FakeExtractor(raise_on_extract=zipfile.BadZipFile("File is not a zip file"))),
+]
+
+_METADATA_RAISES: list[tuple[str, ExtractorFactory]] = [
+    ("real", lambda: _MetadataBugProbe(version=passthrough_version)),
+    ("fake", lambda: FakeExtractor(raise_on_metadata_for=RuntimeError("F68-extractor-metadata-raises"))),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -33,23 +91,24 @@ pytestmark = pytest.mark.contract
 # ---------------------------------------------------------------------------
 
 
-def _build_pipeline(
-    db: sqlite3.Connection,
-    *,
-    chunk_writer: FakeChunkWriter | None = None,
-    entity_graph_sink: FakeEntityGraphSink | None = None,
-):
-    """F47-compliant: ConnectorPipeline composed via the factory entry point."""
-    return build_connector_pipeline(
-        db=db,
-        collection="default",
-        chunk_writer=chunk_writer if chunk_writer is not None else FakeChunkWriter(),
-        entity_graph_sink=entity_graph_sink if entity_graph_sink is not None else FakeEntityGraphSink(),
+@pytest.fixture
+def db() -> Iterator[sqlite3.Connection]:
+    conn = sqlite3.connect(":memory:")
+    create_schema(conn)
+    yield conn
+    conn.close()
+
+
+def _run(db: sqlite3.Connection, writer: FakeChunkWriter, source_name: str, extractor: Extractor) -> Any:
+    pipeline = build_connector_pipeline(
+        db=db, collection="default", chunk_writer=writer, entity_graph_sink=FakeEntityGraphSink()
     )
-
-
-def _make_event(item_id: str, modified_at: str = "2026-01-01T00:00:00Z") -> ChangeEvent:
-    return ChangeEvent(op="created", item_id=item_id, modified_at=modified_at)
+    source = FakeSourceConnector(
+        name=source_name,
+        events=[ChangeEvent(op="created", item_id="item-001", modified_at="2026-01-01T00:00:00Z")],
+        content={"item-001": b"some body content"},
+    )
+    return pipeline.run_batch(source, extractor)
 
 
 def _dead_letter_rows(db: sqlite3.Connection, source_name: str) -> list[tuple[str, str]]:
@@ -61,56 +120,50 @@ def _dead_letter_rows(db: sqlite3.Connection, source_name: str) -> list[tuple[st
     )
 
 
-# ---------------------------------------------------------------------------
-# Extractor.can_extract
-# ---------------------------------------------------------------------------
-
-
-def test_can_extract_raises_propagates_when_called_in_isolation() -> None:
-    """``can_extract`` is invoked by the extractor escalation chain
-    (markitdown → pdf_fallback → ocr → vision) — not by
-    ``ConnectorPipeline._process_item`` directly. The behavioural
-    proof is therefore at the Protocol-method boundary: a raising
-    ``can_extract`` propagates the exception cleanly.
-
-    Sabotage proof: in ``FakeExtractor.can_extract`` comment out the
-    ``if self._raise_on_can_extract is not None: raise ...`` block.
-    Re-run: the test fails because the call returns True instead of
-    raising. Restored.
-    """
-    extractor = FakeExtractor(raise_on_can_extract=RuntimeError("F68-can-extract-raises"))
-    with pytest.raises(RuntimeError, match="F68-can-extract-raises"):
-        extractor.can_extract("text/plain", b"\x00\x00")
-
-
-def test_can_extract_returns_empty_for_unsupported_mime() -> None:
-    """``returns_empty`` failure class — at the Protocol boundary the
-    "no extractor matches" path is represented by ``can_extract``
-    returning False (the escalation chain's terminal condition).
-    Exercised directly so the contract is explicit.
-
-    Sabotage proof: in the test below, change the assertion from
-    ``is False`` to ``is True``. Re-run: the test fails — proving the
-    knob actually drives the call's return value.
-    """
-    extractor = FakeExtractor()
-    # Quality_ok knob doubles as the "extractor disagrees" channel —
-    # exercise the False-return path via ``quality_ok_returns`` here
-    # to keep the assertion concrete.
-    extractor_false = FakeExtractor(quality_ok_returns=False)
-    from kairix.core.protocols import DocMetadata, ExtractedDocument
-
-    doc = ExtractedDocument(
-        markdown="some text",
+def _doc(markdown: str) -> ExtractedDocument:
+    return ExtractedDocument(
+        markdown=markdown,
         pages=(),
         images=(),
         metadata=DocMetadata(title=None, author=None, created_date=None, language=None, page_count=None),
         confidence=1.0,
     )
-    assert extractor_false.quality_ok(doc) is False
-    # Default ``can_extract`` returns True for any input — exercising
-    # the "empty-shape" contract is the boundary call itself.
-    assert extractor.can_extract("application/octet-stream", b"") is True
+
+
+# ---------------------------------------------------------------------------
+# Extractor.can_extract
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name,factory", _TEXT_IMPLEMENTATIONS)
+def test_can_extract_raises_propagates_when_called_in_isolation(name: str, factory: ExtractorFactory) -> None:
+    """``can_extract`` is invoked by the extractor escalation chain, not by
+    ``ConnectorPipeline._process_item`` directly, so the proof is at the
+    Protocol-method boundary: a malformed (non-``str``) mime hint raises
+    cleanly instead of being silently claimed.
+
+    Sabotage proof: in ``PassthroughExtractor.can_extract`` return
+    ``isinstance(mime, str) and mime.startswith(...)``. Re-run: the
+    ``real`` case fails because no exception fires. Restored.
+    """
+    malformed_mime = cast(str, cast(Any, None))
+    with pytest.raises(AttributeError):
+        factory().can_extract(malformed_mime, b"\x00\x00")
+
+
+@pytest.mark.parametrize("name,factory", _TEXT_IMPLEMENTATIONS)
+def test_can_extract_returns_empty_for_unsupported_mime(name: str, factory: ExtractorFactory) -> None:
+    """``returns_empty`` — the "no extractor matches" path is
+    ``can_extract`` returning False (the escalation chain's terminal
+    condition) for a mime outside the plugin's claim; its own mimes are
+    still claimed.
+
+    Sabotage proof (executed): in ``PassthroughExtractor.can_extract``
+    ``return True``. Re-run: the ``real`` case fails. Restored.
+    """
+    extractor = factory()
+    assert extractor.can_extract("application/octet-stream", b"") is False, name
+    assert extractor.can_extract("text/markdown", b"# hi") is True, name
 
 
 # ---------------------------------------------------------------------------
@@ -118,37 +171,29 @@ def test_can_extract_returns_empty_for_unsupported_mime() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_extract_raises_dead_letters_item_and_chunk_writer_not_called(tmp_path: Path) -> None:
-    """When ``extractor.extract`` raises, ``_process_item`` records the
-    item in the dead-letter table AND the chunk writer is NEVER
+@pytest.mark.parametrize("name,factory", _EXTRACT_RAISES)
+def test_extract_raises_dead_letters_item_and_chunk_writer_not_called(
+    name: str, factory: ExtractorFactory, db: sqlite3.Connection
+) -> None:
+    """When ``extractor.extract`` raises (a corrupt container), ``_process_item``
+    records the item in the dead-letter table AND the chunk writer is NEVER
     called for that item (the silver pass is skipped).
 
-    Sabotage proof: in ``FakeExtractor.extract`` comment out the
-    ``if self._raise_on_extract is not None: raise ...`` block.
-    Re-run: the test fails because writer.writes contains one entry
-    (the item succeeded). Restored.
+    Sabotage proof (executed): in ``DocxExtractor.extract`` catch the
+    opener's exception and render an empty document. Re-run: the ``real``
+    case fails because the item is processed instead of dead-lettered.
+    Restored.
     """
-    db = sqlite3.connect(":memory:")
-    create_schema(db)
     writer = FakeChunkWriter()
-    source = FakeSourceConnector(
-        name="extract-raises",
-        events=[_make_event("item-001")],
-        content={"item-001": b"some body"},
-    )
-    extractor = FakeExtractor(raise_on_extract=RuntimeError("F68-extract-raises"))
-    pipeline = _build_pipeline(db, chunk_writer=writer)
-    result = pipeline.run_batch(source, extractor)
+    result = _run(db, writer, "extract-raises", factory())
 
     rows = _dead_letter_rows(db, "extract-raises")
-    assert result.processed == 0
-    assert result.dead_lettered == 1
-    assert len(rows) == 1
-    assert rows[0][0] == "item-001"
-    assert "extract" in rows[0][1].lower()
+    assert result.processed == 0, name
+    assert result.dead_lettered == 1, name
+    assert [r[0] for r in rows] == ["item-001"], name
+    assert "zip" in rows[0][1].lower(), f"{name}: dead-letter must carry the extractor's error; got {rows[0][1]!r}"
     # Critical: writer NEVER called when extract raised.
-    assert writer.writes == [], f"chunk writer should not be called when extract raises; got {writer.writes!r}"
-    db.close()
+    assert writer.writes == [], f"{name}: chunk writer must not be called when extract raises; got {writer.writes!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -156,52 +201,33 @@ def test_extract_raises_dead_letters_item_and_chunk_writer_not_called(tmp_path: 
 # ---------------------------------------------------------------------------
 
 
-def test_quality_ok_returns_empty_signals_escalation_required() -> None:
+@pytest.mark.parametrize("name,factory", _TEXT_IMPLEMENTATIONS)
+def test_quality_ok_returns_empty_signals_escalation_required(name: str, factory: ExtractorFactory) -> None:
     """``quality_ok`` returning False is the escalation signal — the
-    extractor chain (markitdown → pdf_fallback → ocr → vision)
-    advances to the next tier. The Protocol boundary contract is
-    therefore: a False return is the canonical ``returns_empty``
-    failure class.
+    canonical ``returns_empty`` failure class. A whitespace-only body
+    carries no useful content; a real body passes.
 
-    Sabotage proof: in ``FakeExtractor.quality_ok``, change the
-    ``if self._quality_ok_returns is not None: return self._quality_ok_returns``
-    to ``return True``. Re-run: the test fails because the assertion
-    against False sees True. Restored.
+    Sabotage proof (executed): in ``PassthroughExtractor.quality_ok``
+    ``return True``. Re-run: the ``real`` case fails. Restored.
     """
-    from kairix.core.protocols import DocMetadata, ExtractedDocument
-
-    extractor = FakeExtractor(quality_ok_returns=False)
-    doc = ExtractedDocument(
-        markdown="adequate body",
-        pages=(),
-        images=(),
-        metadata=DocMetadata(title=None, author=None, created_date=None, language=None, page_count=None),
-        confidence=1.0,
-    )
-    assert extractor.quality_ok(doc) is False
+    extractor = factory()
+    assert extractor.quality_ok(_doc("   \n\t ")) is False, name
+    assert extractor.quality_ok(_doc("adequate body")) is True, name
 
 
-def test_quality_ok_raises_propagates_when_called_in_isolation() -> None:
-    """``raises`` failure class for ``quality_ok``. The pipeline does
-    not call ``quality_ok`` directly (the extractor chain owns that
-    decision) — the contract is therefore at the Protocol-method
-    boundary.
+@pytest.mark.parametrize("name,factory", _TEXT_IMPLEMENTATIONS)
+def test_quality_ok_raises_propagates_when_called_in_isolation(name: str, factory: ExtractorFactory) -> None:
+    """``raises`` failure class for ``quality_ok`` at the Protocol-method
+    boundary: handed no document (an upstream extract that produced
+    nothing), the gate raises rather than reporting a verdict.
 
-    Sabotage proof: comment out the raise in ``FakeExtractor.quality_ok``.
-    Re-run: the test fails because no exception fires. Restored.
+    Sabotage proof: in ``PassthroughExtractor.quality_ok`` return
+    ``bool(getattr(doc, "markdown", "").strip())``. Re-run: the ``real``
+    case fails because no exception fires. Restored.
     """
-    from kairix.core.protocols import DocMetadata, ExtractedDocument
-
-    extractor = FakeExtractor(raise_on_quality_ok=RuntimeError("F68-quality-ok-raises"))
-    doc = ExtractedDocument(
-        markdown="body",
-        pages=(),
-        images=(),
-        metadata=DocMetadata(title=None, author=None, created_date=None, language=None, page_count=None),
-        confidence=1.0,
-    )
-    with pytest.raises(RuntimeError, match="F68-quality-ok-raises"):
-        extractor.quality_ok(doc)
+    missing = cast(ExtractedDocument, cast(Any, None))
+    with pytest.raises(AttributeError):
+        factory().quality_ok(missing)
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +235,10 @@ def test_quality_ok_raises_propagates_when_called_in_isolation() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_metadata_for_raises_silver_falls_back_chunk_indexed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name,factory", _METADATA_RAISES)
+def test_metadata_for_raises_silver_falls_back_chunk_indexed(
+    name: str, factory: ExtractorFactory, db: sqlite3.Connection
+) -> None:
     """ADR-021 — ``extractor.metadata_for`` raising is NEVER fatal.
     :func:`_safe_extractor_metadata` absorbs the exception and silver
     proceeds with the connector-side metadata only. The chunk indexes.
@@ -217,43 +246,28 @@ def test_metadata_for_raises_silver_falls_back_chunk_indexed(tmp_path: Path) -> 
     Sabotage proof: in
     ``kairix/core/connectors/pipeline.py:_safe_extractor_metadata``,
     change ``except Exception: return SourceMetadata()`` to
-    ``except Exception: raise``. Re-run: the test fails because the
+    ``except Exception: raise``. Re-run: both cases fail because the
     pipeline now propagates the RuntimeError. Restored.
     """
-    db = sqlite3.connect(":memory:")
-    create_schema(db)
     writer = FakeChunkWriter()
-    source = FakeSourceConnector(
-        name="extractor-metadata-raises",
-        events=[_make_event("item-001")],
-        content={"item-001": b"body-content"},
-    )
-    extractor = FakeExtractor(raise_on_metadata_for=RuntimeError("F68-extractor-metadata-raises"))
-    pipeline = _build_pipeline(db, chunk_writer=writer)
-    result = pipeline.run_batch(source, extractor)
+    result = _run(db, writer, "extractor-metadata-raises", factory())
 
-    # Chunk written; metadata_for failure absorbed by the safe wrapper.
-    assert result.processed == 1
-    assert result.dead_lettered == 0
-    assert len(writer.writes) == 1, f"writer should have received exactly one chunk batch; got {writer.writes!r}"
-    assert _dead_letter_rows(db, "extractor-metadata-raises") == []
-    db.close()
+    assert result.processed == 1, name
+    assert result.dead_lettered == 0, name
+    assert len(writer.writes) == 1, f"{name}: writer must receive exactly one chunk batch; got {writer.writes!r}"
+    assert _dead_letter_rows(db, "extractor-metadata-raises") == [], name
 
 
-def test_metadata_for_returns_empty_when_no_override_configured() -> None:
-    """``returns_empty`` failure class — the canonical default for an
-    Extractor that has no body-derived metadata to surface (e.g. the
-    passthrough or plain-text extractors).
+@pytest.mark.parametrize("name,factory", _TEXT_IMPLEMENTATIONS)
+def test_metadata_for_returns_empty_when_no_override_configured(name: str, factory: ExtractorFactory) -> None:
+    """``returns_empty`` — plain text carries no body-derived metadata,
+    so the extractor returns an empty :class:`SourceMetadata` (never None).
 
-    Sabotage proof: in ``FakeExtractor.metadata_for``, change the
-    final ``return SourceMetadata()`` to ``return None``. Re-run: the
-    test fails on the ``isinstance(md, SourceMetadata)`` assertion.
-    Restored.
+    Sabotage proof: in ``PassthroughExtractor.metadata_for`` return
+    ``None`` when no frontmatter parses. Re-run: the ``real`` case fails
+    on the ``isinstance`` assertion. Restored.
     """
-    from kairix.core.protocols import SourceMetadata
-
-    extractor = FakeExtractor()  # no override → empty default
-    md = extractor.metadata_for(b"any bytes", "text/plain")
-    assert isinstance(md, SourceMetadata)
-    assert md.author is None
-    assert md.modified_at is None
+    md = factory().metadata_for(b"any bytes", "text/plain")
+    assert isinstance(md, SourceMetadata), name
+    assert md.author is None, name
+    assert md.modified_at is None, name

@@ -151,6 +151,16 @@ def test_skips_frontmatter() -> None:
 
 
 @pytest.mark.unit
+def test_unclosed_leading_dashes_are_body_text_not_frontmatter() -> None:
+    """A leading ``---`` with no closing ``---`` is not frontmatter, so a
+    mention after it is ordinary text and gets linked."""
+    content = "---\nAcme Corp signed the renewal."
+    modified, injected = inject_wikilinks(content, [ACME_CORP])
+    assert injected == ["Acme Corp"]
+    assert modified == "---\n[[Acme-Corp]] signed the renewal."
+
+
+@pytest.mark.unit
 def test_frontmatter_acme_not_linked_in_yaml() -> None:
     content = "---\nclient: Acme Corp\n---\n\nAcme Corp overview."
     modified, _ = inject_wikilinks(content, [ACME_CORP])

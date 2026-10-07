@@ -88,15 +88,16 @@ class Mode(str, Enum):
         return cls.system if os.geteuid() == 0 else cls.user
 
 
-def _xdg(env_name: str, fallback: str) -> Path:
+def _xdg(env_name: str, fallback: str, env: Mapping[str, str] | None = None) -> Path:
     """XDG base-dir helper.
 
     Returns ``$<env_name>`` when set + non-empty, else ``<fallback>`` —
     both expanded through ``Path.expanduser`` so ``~/...`` fallbacks
     resolve. The kairix project subdir is appended by the caller, not
-    here, so callers can compose deeper paths off the XDG root.
+    here, so callers can compose deeper paths off the XDG root. ``env``
+    defaults to the live ``os.environ``; a supplied mapping is honoured.
     """
-    raw = os.environ.get(env_name)
+    raw = (env if env is not None else os.environ).get(env_name)
     return Path(raw if raw else fallback).expanduser()
 
 
@@ -144,13 +145,14 @@ _FHS_DATA_DIR = "/var/lib/kairix"
 _FHS_CACHE_DIR = "/var/cache/kairix"
 
 
-def is_docker_runtime_check() -> bool:
-    """Detect if running inside a Docker container."""
-    return (
-        os.path.exists("/.dockerenv")
-        or os.environ.get("KAIRIX_DOCKER", "") == "1"
-        or os.environ.get("container", "") != ""
-    )
+def is_docker_runtime_check(*, env: Mapping[str, str] | None = None) -> bool:
+    """Detect if running inside a Docker container.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
+    """
+    e = env if env is not None else os.environ
+    return os.path.exists("/.dockerenv") or e.get("KAIRIX_DOCKER", "") == "1" or e.get("container", "") != ""
 
 
 def is_service_install() -> bool:
@@ -158,14 +160,18 @@ def is_service_install() -> bool:
     return Path("/opt/kairix/.venv").exists()
 
 
-def default_document_root() -> Path:
+def default_document_root(*, env: Mapping[str, str] | None = None) -> Path:
     """Platform-appropriate default document store location.
 
     Docker: /data/documents (bind mount from host)
     Server: /var/lib/kairix/documents (admin configures)
     User (all platforms): ~/Documents (most common document location)
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    if is_docker_runtime_check():
+    e = env if env is not None else os.environ
+    if is_docker_runtime_check(env=e):
         return Path(_CONTAINER_DOCUMENTS_MOUNT)
     if is_service_install():
         return Path("/var/lib/kairix/documents")
@@ -280,25 +286,37 @@ class KairixPaths:
     workspace_root: Path
 
     @classmethod
-    def resolve(cls) -> KairixPaths:
+    def resolve(cls, *, env: Mapping[str, str] | None = None) -> KairixPaths:
         """Resolve paths from environment variables, config file, or platform defaults.
 
         Call this once at startup. The result is cached per process.
+
+        ``env`` is the F2-clean test seam: when supplied, resolution reads
+        that mapping instead of ``os.environ`` and bypasses the process
+        cache (an explicit mapping is a one-off resolution, never the
+        process-wide answer). Production callers leave it ``None``.
         """
+        if env is not None:
+            return _resolve_from_env(env)
         return _resolve_cached()
 
 
 @lru_cache(maxsize=1)
 def _resolve_cached() -> KairixPaths:
     """Internal cached resolution — called by KairixPaths.resolve()."""
-    cache_dir = default_cache_dir()
-    data_dir_default = default_data_dir()
+    return _resolve_from_env(os.environ)
+
+
+def _resolve_from_env(env: Mapping[str, str]) -> KairixPaths:
+    """Resolve the four deployment paths against ``env`` (uncached)."""
+    cache_dir = default_cache_dir(env=env)
+    data_dir_default = default_data_dir(env=env)
 
     # Try loading paths from config file
-    config_paths = load_paths_from_config()
+    config_paths = load_paths_from_config(env=env)
 
     document_root = Path(
-        os.environ.get(_KAIRIX_DOCUMENT_ROOT_ENV) or config_paths.get("document_root") or str(default_document_root())
+        env.get(_KAIRIX_DOCUMENT_ROOT_ENV) or config_paths.get("document_root") or str(default_document_root(env=env))
     ).expanduser()
 
     # The primary SQLite index is the source of truth (FTS5 + content_vectors),
@@ -308,18 +326,15 @@ def _resolve_cached() -> KairixPaths:
     # cache dir let cache-eviction or a non-persistent cache mount silently
     # drop the index (#447 / PLA-276).
     db_path = Path(
-        os.environ.get("KAIRIX_DB_PATH") or config_paths.get("db_path") or str(data_dir_default / "index.sqlite")
+        env.get("KAIRIX_DB_PATH") or config_paths.get("db_path") or str(data_dir_default / "index.sqlite")
     ).expanduser()
 
     log_dir = Path(
-        os.environ.get("KAIRIX_LOG_DIR")
-        or os.environ.get("LOG_DIR")
-        or config_paths.get("log_dir")
-        or str(cache_dir / "logs")
+        env.get("KAIRIX_LOG_DIR") or env.get("LOG_DIR") or config_paths.get("log_dir") or str(cache_dir / "logs")
     ).expanduser()
 
     workspace_root = Path(
-        os.environ.get("KAIRIX_WORKSPACE_ROOT") or config_paths.get("workspace_root") or str(default_workspace_root())
+        env.get("KAIRIX_WORKSPACE_ROOT") or config_paths.get("workspace_root") or str(default_workspace_root(env=env))
     ).expanduser()
 
     return KairixPaths(
@@ -330,9 +345,13 @@ def _resolve_cached() -> KairixPaths:
     )
 
 
-def load_paths_from_config() -> dict[str, str]:
-    """Load the paths: section from kairix.config.yaml if it exists."""
-    data = load_top_level_config() or {}
+def load_paths_from_config(*, env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Load the paths: section from kairix.config.yaml if it exists.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
+    """
+    data = load_top_level_config(environ=env) or {}
     raw = data.get("paths", {})
     return raw if isinstance(raw, dict) else {}
 
@@ -375,7 +394,7 @@ def clear_cache() -> None:
 # Convenience functions — import these directly instead of calling KairixPaths.resolve()
 
 
-def document_root(mode: Mode | None = None) -> Path:
+def document_root(mode: Mode | None = None, *, env: Mapping[str, str] | None = None) -> Path:
     """Return the document store root path.
 
     When ``mode`` is supplied (the installer + contract-test surface),
@@ -391,6 +410,9 @@ def document_root(mode: Mode | None = None) -> Path:
     flow through :meth:`KairixPaths.resolve` so ``KAIRIX_DOCUMENT_ROOT``,
     ``kairix.config.yaml``'s ``paths.document_root``, and the legacy
     platform-aware defaults all keep working unchanged.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
     if mode is not None:
         if mode == Mode.system:
@@ -400,10 +422,10 @@ def document_root(mode: Mode | None = None) -> Path:
         # Mode.user — sit under the user-mode data dir so the document
         # tree co-locates with the SQLite index + vector index.
         return data_dir(Mode.user) / "documents"
-    return KairixPaths.resolve().document_root
+    return KairixPaths.resolve(env=env).document_root
 
 
-def reference_library_root() -> Path:
+def reference_library_root(*, env: Mapping[str, str] | None = None) -> Path:
     """Resolve the reference-library corpus root (NOT bundled in the wheel; #450).
 
     The corpus is ~50 MB of mixed-license documents, so unlike the
@@ -422,25 +444,32 @@ def reference_library_root() -> Path:
       3. ``/opt/kairix/reference-library`` — the canonical Docker path.
       4. ``<repo-root>/reference-library`` — source-checkout dev UX.
       5. ``reference-library`` — final CWD fallback (legacy behaviour).
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    cache_corpus = default_cache_dir() / _REFERENCE_LIBRARY_DIR
+    e = env if env is not None else os.environ
+    cache_corpus = default_cache_dir(env=e) / _REFERENCE_LIBRARY_DIR
     installed_corpus = Path("/opt/kairix") / _REFERENCE_LIBRARY_DIR
     repo_root_corpus = Path(__file__).resolve().parent.parent / _REFERENCE_LIBRARY_DIR
     return resolve_first_existing_dir(
-        override=os.environ.get("KAIRIX_REFLIB_ROOT"),
+        override=e.get("KAIRIX_REFLIB_ROOT"),
         candidates=[cache_corpus, installed_corpus, repo_root_corpus],
         fallback=Path(_REFERENCE_LIBRARY_DIR),
     )
 
 
-def reference_corpus_install_dir() -> Path:
+def reference_corpus_install_dir(*, env: Mapping[str, str] | None = None) -> Path:
     """Target dir for ``kairix benchmark install-corpus`` (#450).
 
     Equals the cache-dir candidate :func:`reference_library_root`
     resolves to after a successful install, so a fetch lands exactly
     where the next ``--suite reflib`` run will look for it.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    return default_cache_dir() / _REFERENCE_LIBRARY_DIR
+    return default_cache_dir(env=env) / _REFERENCE_LIBRARY_DIR
 
 
 def resolve_first_existing_dir(
@@ -471,14 +500,14 @@ def resolve_first_existing_dir(
     needed (F2-clean).
     """
     if override:
-        return Path(override)
+        return Path(override).expanduser()
     for candidate in candidates:
         if candidate.is_dir():
             return candidate
     return fallback
 
 
-def bundled_suites_root() -> Path:
+def bundled_suites_root(*, env: Mapping[str, str] | None = None) -> Path:
     """Resolve the bundled benchmark suites root.
 
     Resolution order (first existing path wins; the env-var override
@@ -502,12 +531,16 @@ def bundled_suites_root() -> Path:
          to where suites live, and the Dockerfile stages suites at
          ``/opt`` so a bare ``docker exec`` still resolves them.
       5. ``./suites/`` — final CWD fallback (legacy behaviour).
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
+    e = env if env is not None else os.environ
     in_package_suites = Path(__file__).resolve().parent / "data" / "suites"
     repo_root_suites = Path(__file__).resolve().parent.parent / "suites"
     installed_suites = Path("/opt/kairix/suites")
     return resolve_first_existing_dir(
-        override=os.environ.get("KAIRIX_SUITES_ROOT"),
+        override=e.get("KAIRIX_SUITES_ROOT"),
         candidates=[in_package_suites, repo_root_suites, installed_suites],
         fallback=Path("suites"),
     )
@@ -528,7 +561,7 @@ def worker_pause_flag_path() -> Path:
     return default_data_dir() / ".worker-paused"
 
 
-def maintenance_skip_noop_threshold() -> int:
+def maintenance_skip_noop_threshold(*, env: Mapping[str, str] | None = None) -> int:
     """#224 phase 2 — number of consecutive no-op embed cycles after which
     the worker also skips the three maintenance scans (entity_seed,
     health_check, wikilinks_inject).
@@ -538,8 +571,12 @@ def maintenance_skip_noop_threshold() -> int:
     drop to near-zero CPU/IO until the next document change. Reads
     ``KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD`` (int) — default 10. F4
     keeps the env read centralised here in paths.py.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get("KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD")
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_MAINTENANCE_SKIP_NOOP_THRESHOLD")
     if raw is None:
         return 10
     try:
@@ -584,7 +621,7 @@ def maintenance_retention_days() -> int:
     return parsed
 
 
-def bronze_ttl_days() -> int:
+def bronze_ttl_days(*, env: Mapping[str, str] | None = None) -> int:
     """#316 — TTL for bronze raw blobs when ``bronze_ttl_gc`` flag is ON.
 
     The :class:`kairix.core.connectors.bronze.FilesystemBronzeStore`
@@ -596,8 +633,12 @@ def bronze_ttl_days() -> int:
 
     Reads ``KAIRIX_BRONZE_TTL_DAYS`` (int) — default 7. F4 keeps the
     env read centralised here in paths.py.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get("KAIRIX_BRONZE_TTL_DAYS")
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_BRONZE_TTL_DAYS")
     if raw is None:
         return 7
     try:
@@ -648,7 +689,7 @@ def maintenance_interval_seconds() -> int:
     return parsed
 
 
-def rechunk_sweep_per_tick_cap() -> int:
+def rechunk_sweep_per_tick_cap(*, env: Mapping[str, str] | None = None) -> int:
     """ADR-028 Wave F.4 — max documents the re-chunk sweep scans per tick.
 
     Bounds the per-tick scan (F66); the sweep walks the rest of the corpus on
@@ -656,8 +697,12 @@ def rechunk_sweep_per_tick_cap() -> int:
 
     Reads ``KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP`` (positive int) — default 200.
     F4 keeps the env read centralised here in paths.py.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get("KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP")
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_RECHUNK_SWEEP_PER_TICK_CAP")
     if raw is None:
         return 200
     try:
@@ -671,33 +716,49 @@ def rechunk_sweep_per_tick_cap() -> int:
     return parsed
 
 
-def trace_enabled() -> bool:
+def trace_enabled(*, env: Mapping[str, str] | None = None) -> bool:
     """Return True when ``KAIRIX_TRACE=1`` opts into structured pipeline diagnostics.
 
     Off by default; production stays quiet. Operators investigating a
     retrieval-vs-synthesis regression set the env var, re-run, and read
     the per-stage counter logs. Centralised here per F4 so KAIRIX_*
     reads stay at the paths.py boundary.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    return os.environ.get("KAIRIX_TRACE") == "1"
+    e = env if env is not None else os.environ
+    return e.get("KAIRIX_TRACE") == "1"
 
 
-def db_path() -> Path:
-    """Get the database path."""
-    return KairixPaths.resolve().db_path
+def db_path(*, env: Mapping[str, str] | None = None) -> Path:
+    """Get the database path.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
+    """
+    return KairixPaths.resolve(env=env).db_path
 
 
-def log_dir() -> Path:
-    """Get the log directory path."""
-    return KairixPaths.resolve().log_dir
+def log_dir(*, env: Mapping[str, str] | None = None) -> Path:
+    """Get the log directory path.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
+    """
+    return KairixPaths.resolve(env=env).log_dir
 
 
-def workspace_root() -> Path:
-    """Get the workspace root path."""
-    return KairixPaths.resolve().workspace_root
+def workspace_root(*, env: Mapping[str, str] | None = None) -> Path:
+    """Get the workspace root path.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
+    """
+    return KairixPaths.resolve(env=env).workspace_root
 
 
-def embedding_cache_path(mode: Mode | None = None) -> Path:
+def embedding_cache_path(mode: Mode | None = None, *, env: Mapping[str, str] | None = None) -> Path:
     """Resolve the SQLite-backed persistent embedding cache path.
 
     When ``mode`` is supplied (the installer + contract-test surface),
@@ -720,6 +781,9 @@ def embedding_cache_path(mode: Mode | None = None) -> Path:
 
     See :mod:`kairix.core.embed.embedding_cache` for cache shape +
     invariants. F4-clean — env reads stay at the paths boundary.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
     if mode is not None:
         return data_dir(mode) / "cache" / "embedding_cache.sqlite"
@@ -728,7 +792,7 @@ def embedding_cache_path(mode: Mode | None = None) -> Path:
     # ~/.cache/kairix on user installs). cache_dir(mode) is the Plan 1
     # FHS-only resolver that ignores the env override, so we use
     # default_cache_dir here to keep operator overrides functional.
-    return default_cache_dir() / "embedding_cache.sqlite"
+    return default_cache_dir(env=env) / "embedding_cache.sqlite"
 
 
 def embed_cache_path() -> Path:
@@ -812,29 +876,35 @@ def prep_cache_path() -> Path:
     return data_dir() / "prep_cache.sqlite"
 
 
-def summaries_db_path() -> Path:
+def summaries_db_path(*, env: Mapping[str, str] | None = None) -> Path:
     """Get the summaries database path.
 
-    Configurable via KAIRIX_SUMMARIES_DB env var.
+    Configurable via KAIRIX_SUMMARIES_DB env var (``~`` is expanded).
     Default: ~/.cache/kairix/summaries.db
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    return Path(
-        os.environ.get(
-            "KAIRIX_SUMMARIES_DB",
-            str(Path.home() / _USER_CACHE_DIR / "kairix" / "summaries.db"),
-        )
-    )
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_SUMMARIES_DB")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / _USER_CACHE_DIR / "kairix" / "summaries.db"
 
 
-def read_int_env(name: str, *, default: int) -> int:
+def read_int_env(name: str, *, default: int, env: Mapping[str, str] | None = None) -> int:
     """Read an int from the named env var, falling back to ``default``.
 
     Centralised here so callers needing tunable int knobs do not scatter
     ``os.environ.get`` reads across production modules (F4). Malformed
     values log a warning and fall back to ``default`` — the same
     defensive policy used by the other typed env-var readers above.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get(name)
+    e = env if env is not None else os.environ
+    raw = e.get(name)
     if raw is None:
         return default
     try:
@@ -844,13 +914,17 @@ def read_int_env(name: str, *, default: int) -> int:
         return default
 
 
-def read_float_env(name: str, *, default: float) -> float:
+def read_float_env(name: str, *, default: float, env: Mapping[str, str] | None = None) -> float:
     """Read a float from the named env var, falling back to ``default``.
 
     Counterpart to :func:`read_int_env` for float-typed knobs (e.g.
     cache TTLs in seconds). F4-clean — env reads stay in this module.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get(name)
+    e = env if env is not None else os.environ
+    raw = e.get(name)
     if raw is None:
         return default
     try:
@@ -887,15 +961,19 @@ def gotenberg_extractor_config() -> Any:
     )
 
 
-def embed_vector_dims(default: int = 1536) -> int:
+def embed_vector_dims(default: int = 1536, *, env: Mapping[str, str] | None = None) -> int:
     """Embedding vector dimensions — configurable via ``KAIRIX_EMBED_DIMS``.
 
     Returns the int value of the env var, or ``default`` when unset.
     Reads at call time (not import time) so test fakes that mutate the
     environment win — but production code should treat the value as fixed
     for the lifetime of the process.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get("KAIRIX_EMBED_DIMS")
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_EMBED_DIMS")
     if raw is None:
         return default
     try:
@@ -1094,7 +1172,7 @@ def bedrock_chat_model(default: str = "anthropic.claude-3-5-sonnet-20241022-v2:0
     return os.environ.get("KAIRIX_BEDROCK_CHAT_MODEL", default)
 
 
-def embed_pool_size(default: int = 20) -> int:
+def embed_pool_size(default: int = 20, *, env: Mapping[str, str] | None = None) -> int:
     """Max concurrent HTTP connections to the embed provider.
 
     Configurable via ``KAIRIX_EMBED_POOL_SIZE``. Sized for kairix's teaming
@@ -1102,8 +1180,12 @@ def embed_pool_size(default: int = 20) -> int:
     values fall back to ``default`` with a logged warning so a bad operator
     secret can't crash the embed dispatch stage. Read at call time so the
     operator can rotate the value via Key Vault without restarting.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get("KAIRIX_EMBED_POOL_SIZE")
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_EMBED_POOL_SIZE")
     if raw is None:
         return default
     try:
@@ -1117,14 +1199,18 @@ def embed_pool_size(default: int = 20) -> int:
         return default
 
 
-def embed_pool_keepalive(default: int = 10) -> int:
+def embed_pool_keepalive(default: int = 10, *, env: Mapping[str, str] | None = None) -> int:
     """Max idle HTTP connections kept warm against the embed provider.
 
     Configurable via ``KAIRIX_EMBED_POOL_KEEPALIVE``. Balances connection
     reuse against socket churn under burst load. Invalid values fall back
     to ``default`` with a logged warning.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get("KAIRIX_EMBED_POOL_KEEPALIVE")
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_EMBED_POOL_KEEPALIVE")
     if raw is None:
         return default
     try:
@@ -1138,13 +1224,17 @@ def embed_pool_keepalive(default: int = 10) -> int:
         return default
 
 
-def embed_pool_expiry_s(default: float = 30.0) -> float:
+def embed_pool_expiry_s(default: float = 30.0, *, env: Mapping[str, str] | None = None) -> float:
     """Idle-connection expiry (seconds) for the embed-provider pool.
 
     Configurable via ``KAIRIX_EMBED_POOL_EXPIRY_S``. Invalid values fall
     back to ``default`` with a logged warning.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get("KAIRIX_EMBED_POOL_EXPIRY_S")
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_EMBED_POOL_EXPIRY_S")
     if raw is None:
         return default
     try:
@@ -1158,7 +1248,7 @@ def embed_pool_expiry_s(default: float = 30.0) -> float:
         return default
 
 
-def embed_coalesce_window_ms(default: int = 50) -> int:
+def embed_coalesce_window_ms(default: int = 50, *, env: Mapping[str, str] | None = None) -> int:
     """Coalesce window (ms) for the embed request coalescer (#288).
 
     Configurable via ``KAIRIX_EMBED_COALESCE_WINDOW_MS``. Range 0-500;
@@ -1166,8 +1256,12 @@ def embed_coalesce_window_ms(default: int = 50) -> int:
     coalescer entirely — useful for low-concurrency deployments and
     debugging. Invalid (non-int) values fall back to ``default`` with
     a logged warning so a typo can't crash the embed dispatch stage.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get("KAIRIX_EMBED_COALESCE_WINDOW_MS")
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_EMBED_COALESCE_WINDOW_MS")
     if raw is None:
         return default
     try:
@@ -1182,13 +1276,17 @@ def embed_coalesce_window_ms(default: int = 50) -> int:
     return max(0, min(500, value))
 
 
-def embed_coalesce_max_batch(default: int = 16) -> int:
+def embed_coalesce_max_batch(default: int = 16, *, env: Mapping[str, str] | None = None) -> int:
     """Max batch size for the embed request coalescer (#288).
 
     Configurable via ``KAIRIX_EMBED_COALESCE_MAX_BATCH``. Range 1-64.
     Invalid values fall back to ``default`` with a logged warning.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get("KAIRIX_EMBED_COALESCE_MAX_BATCH")
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_EMBED_COALESCE_MAX_BATCH")
     if raw is None:
         return default
     try:
@@ -1222,14 +1320,20 @@ def mcp_port(default: int = 8080) -> int:
         return default
 
 
-def mcp_port_raw() -> str | None:
+def mcp_port_raw(*, environ: Mapping[str, str] | None = None) -> str | None:
     """Raw ``KAIRIX_MCP_PORT`` env-var value, or ``None`` when unset.
 
     Use this when callers need to distinguish "operator set the env var"
     from "fell back to the default" — e.g. argparse-driven flag-vs-env
     precedence in ``kairix mcp serve``.
+
+    ``environ`` is the test seam — mirrors :func:`mcp_bind_host`: production
+    leaves it None and the function reads ``os.environ``; callers holding a
+    resolved env mapping (``McpCliDeps.serve_env``) pass it so tests never
+    mutate process env (F2).
     """
-    raw = os.environ.get("KAIRIX_MCP_PORT")
+    env = environ if environ is not None else os.environ
+    raw = env.get("KAIRIX_MCP_PORT")
     return raw if raw else None
 
 
@@ -1367,7 +1471,7 @@ def document_root_override(environ: Mapping[str, str] | None = None) -> str | No
     return value if value else None
 
 
-def data_dir(mode: Mode | None = None) -> Path:
+def data_dir(mode: Mode | None = None, *, env: Mapping[str, str] | None = None) -> Path:
     """Public accessor for the kairix data dir, per-mode aware.
 
     When ``mode`` is supplied explicitly (the installer + contract-test
@@ -1385,16 +1489,24 @@ def data_dir(mode: Mode | None = None) -> Path:
     Mode-explicit calls intentionally do NOT consult the env override so
     the contract test in ``tests/contracts/test_path_resolvers_dispatch_per_mode.py``
     can assert per-mode distinctness without any test-env pollution.
+
+    The override is ``~``-expanded, matching :func:`default_data_dir` —
+    ``KAIRIX_DATA_DIR=~/kairix-data`` must not resolve to a literal ``~``
+    directory under the CWD.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
     if mode is not None:
         if mode == Mode.user:
-            return _xdg("XDG_DATA_HOME", "~/.local/share") / "kairix"
+            return _xdg("XDG_DATA_HOME", "~/.local/share", env) / "kairix"
         # system + container share /var/lib/kairix
         return Path(_FHS_DATA_DIR)
-    raw = os.environ.get("KAIRIX_DATA_DIR")
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_DATA_DIR")
     if raw:
-        return Path(raw)
-    return data_dir(Mode.detect())
+        return Path(raw).expanduser()
+    return data_dir(Mode.detect(e), env=e)
 
 
 def config_dir(mode: Mode | None = None) -> Path:
@@ -1557,7 +1669,7 @@ def env_file_override() -> str | None:
     return value if value else None
 
 
-def warm_flag_path(mode: Mode | None = None) -> Path:
+def warm_flag_path(mode: Mode | None = None, *, env: Mapping[str, str] | None = None) -> Path:
     """Path to the cross-process warm-state flag — single env-read boundary
     for ``KAIRIX_WARM_FLAG_PATH``.
 
@@ -1587,12 +1699,16 @@ def warm_flag_path(mode: Mode | None = None) -> Path:
     surface), bypass the env override and return
     ``<data_dir(mode)>/warm.flag`` directly. The env override only
     affects the no-arg form, preserving F2 (no env coupling) for the
-    explicit-mode call sites.
+    explicit-mode call sites. ``~`` in the override is expanded.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
     if mode is not None:
         return data_dir(mode) / "warm.flag"
-    override = os.environ.get("KAIRIX_WARM_FLAG_PATH", "").strip()
-    return Path(override) if override else data_dir() / "warm.flag"
+    e = env if env is not None else os.environ
+    override = e.get("KAIRIX_WARM_FLAG_PATH", "").strip()
+    return Path(override).expanduser() if override else data_dir(env=e) / "warm.flag"
 
 
 def connector_sync_disabled() -> bool:
@@ -1643,7 +1759,7 @@ def connect_browser_disabled(env: Mapping[str, str] | None = None) -> bool:
     return e.get("KAIRIX_CONNECT_DISABLE_BROWSER", "").strip().lower() in {"1", "true", "yes"}
 
 
-def worker_writes_vec_index() -> bool:
+def worker_writes_vec_index(*, env: Mapping[str, str] | None = None) -> bool:
     """Return True when the embed-loop worker should write to the usearch ANN index.
 
     Default is **False** because the in-process usearch writer rebuilds the
@@ -1660,8 +1776,12 @@ def worker_writes_vec_index() -> bool:
     against ``content_vectors``.
 
     Accepted truthy values: ``1``, ``true``, ``yes`` (case-insensitive).
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    return os.environ.get("KAIRIX_WORKER_WRITES_VEC_INDEX", "").strip().lower() in {"1", "true", "yes"}
+    e = env if env is not None else os.environ
+    return e.get("KAIRIX_WORKER_WRITES_VEC_INDEX", "").strip().lower() in {"1", "true", "yes"}
 
 
 def noninteractive_mode() -> bool:
@@ -1699,7 +1819,7 @@ def preflight_strict() -> bool:
     return raw in {"1", "true", "yes"}
 
 
-def entity_overrides_path(*, document_root_arg: str | Path | None = None) -> Path:
+def entity_overrides_path(*, document_root_arg: str | Path | None = None, env: Mapping[str, str] | None = None) -> Path:
     """Path to the operator-edited entity overrides file.
 
     Default: ``{document_root}/04-Agent-Knowledge/_entity-overrides.md``.
@@ -1716,15 +1836,19 @@ def entity_overrides_path(*, document_root_arg: str | Path | None = None) -> Pat
     against a per-invocation document root that does not necessarily
     match the cached default. When supplied, the env-var override still
     wins so operators retain the documented escape hatch.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    raw = os.environ.get("KAIRIX_ENTITY_OVERRIDES_PATH")
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_ENTITY_OVERRIDES_PATH")
     if raw:
         return Path(raw).expanduser()
-    base = Path(document_root_arg) if document_root_arg is not None else document_root()
+    base = Path(document_root_arg) if document_root_arg is not None else document_root(env=env)
     return base / _AGENT_KNOWLEDGE_DIR / "_entity-overrides.md"
 
 
-def feature_flag_override(name: str) -> bool | None:
+def feature_flag_override(name: str, *, env: Mapping[str, str] | None = None) -> bool | None:
     """Read the ``KAIRIX_FEATURE_<UPPERCASE>`` env-var override for a flag.
 
     Returns ``True`` / ``False`` when the env var is set to a recognised
@@ -1739,9 +1863,13 @@ def feature_flag_override(name: str) -> bool | None:
     Lives in :mod:`kairix.paths` per F4 — every ``KAIRIX_*`` env read
     stays at the paths boundary. See
     ``docs/architecture/feature-flag-architecture.md`` §3.4.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
+    e = env if env is not None else os.environ
     env_name = f"KAIRIX_FEATURE_{name.upper()}"
-    raw = os.environ.get(env_name)
+    raw = e.get(env_name)
     if raw is None:
         return None
     normalised = raw.strip().lower()

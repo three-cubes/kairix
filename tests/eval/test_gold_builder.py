@@ -8,9 +8,7 @@ end-to-end against a real SQLite database in tests/integration/test_eval_gold_pi
 
 from __future__ import annotations
 
-import os
 import sqlite3
-from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -591,7 +589,7 @@ def test_pool_with_bm25_system_filters_candidates_by_collection(kairix_db_path: 
     filter matches it AND when no filter is set, but is filtered out when the
     only requested collection is unrelated.
     """
-    builder = GoldBuilder()
+    builder = GoldBuilder(db_path=kairix_db_path)
 
     pooled_with_match = builder.pool(
         "docker",
@@ -622,8 +620,8 @@ def test_pool_with_bm25_system_filters_candidates_by_collection(kairix_db_path: 
 
 
 @pytest.fixture
-def kairix_db_path(tmp_path: Path) -> Iterator[Path]:
-    """Production-schema SQLite with FTS5 populated; KAIRIX_DB_PATH overridden."""
+def kairix_db_path(tmp_path: Path) -> Path:
+    """Production-schema SQLite with FTS5 populated (handed to ``GoldBuilder(db_path=...)``)."""
     from kairix.core.db.fts import rebuild_fts
 
     db_path = tmp_path / "kairix.sqlite"
@@ -639,10 +637,4 @@ def kairix_db_path(tmp_path: Path) -> Iterator[Path]:
     db.commit()
     rebuild_fts(db)
     db.close()
-    prev = os.environ.get("KAIRIX_DB_PATH")
-    os.environ["KAIRIX_DB_PATH"] = str(db_path)
-    yield db_path
-    if prev is None:
-        os.environ.pop("KAIRIX_DB_PATH", None)
-    else:
-        os.environ["KAIRIX_DB_PATH"] = prev
+    return db_path

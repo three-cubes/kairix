@@ -32,12 +32,11 @@ Mechanical detection per subcommand/tool:
 
 Violations are recorded by the CANONICAL file path of the subcommand
 implementation (derived from the COMMANDS dict's module path) or by the
-MCP server file for MCP tools — keeps the baseline format file-based and
+MCP server file for MCP tools — keeps violation reporting file-based and
 consistent with all other F-rules.
 
-The baseline grandfathers pre-existing subcommands/tools without
-outcome tests. Net-new entries hard-fail. To remove an entry from the
-baseline, add a qualifying outcome test in the same commit.
+There is no grandfathering: every subcommand/tool without an outcome
+test fails the gate. Fix by adding a qualifying outcome test.
 """
 
 from __future__ import annotations
@@ -341,8 +340,8 @@ def main() -> int:
 
     # For MCP tools without coverage, anchor the violation at server.py
     # (we want one entry per missing tool — encode the name in the anchor
-    # by using a synthetic Path that includes the tool name, so baseline
-    # entries are distinguishable per tool).
+    # by using a synthetic Path that includes the tool name, so reported
+    # violations are distinguishable per tool).
     for tool_name in sorted(mcp_tools - tools_covered):
         synthetic = Path("kairix/agents/mcp/server.py") / f"@tool:{tool_name}"
         violations.add(synthetic)

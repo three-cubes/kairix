@@ -268,3 +268,30 @@ def test_run_default_drain_tick_skips_client_build_when_no_pending_rows(tmp_path
     assert result.pushed == 0
     assert result.failed == 0
     assert result.skipped_relationships == 0
+
+
+def test_run_default_drain_tick_default_repo_marks_rejected_merge_failed() -> None:
+    """The worker tick's production repo factory raises on a rejected MERGE,
+    so the signal is marked failed instead of acknowledged as pushed
+    (PLA-472 data-loss regression).
+
+    Sabotage proof (executed): return ``Neo4jGraphRepository(client)``
+    (read path, swallows errors) from ``drain._default_make_repo`` →
+    ``pushed == 1`` and this test fails. Restored.
+    """
+    from kairix.core.curator.drain import Neo4jDrainTickDeps, run_default_drain_tick
+    from kairix.knowledge.graph.client import Neo4jClient
+    from tests.fakes import FakeNeo4jDriverClass
+
+    db = _open()
+    _insert(db, kind="person", value="agent-alpha")
+    client = Neo4jClient(
+        uri="bolt://graph.invalid:7687",
+        user="neo4j",
+        password="unit-fixture",  # pragma: allowlist secret — test fixture
+        driver_cls=FakeNeo4jDriverClass(run_raises=RuntimeError("constraint violation")),
+    )
+
+    result = run_default_drain_tick(Neo4jDrainTickDeps(client_factory=lambda: client, db_factory=lambda: db))
+
+    assert (result.pushed, result.failed) == (0, 1)

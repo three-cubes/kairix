@@ -58,9 +58,12 @@ _QUOTED_LINE_RE = re.compile(r"^\s*>+")
 #: synthesise above quoted-reply blocks. Matching forms a hard cut —
 #: everything below is treated as the previous message and dropped
 #: from the current chunk (it'll re-surface as its own chunk when
-#: the parent message is emitted).
+#: the parent message is emitted). Single ``\s`` delimiters around
+#: the ``.+`` keep the pattern linear-time (no two adjacent quantifiers
+#: share a character class); on a single line it accepts exactly the
+#: same strings as the original ``^On\s+.+\s+wrote:\s*$``.
 _REPLY_PREAMBLE_RE = re.compile(
-    r"^On\s+.+\s+wrote:\s*$",
+    r"^On\s.+\swrote:\s*$",
     re.IGNORECASE,
 )
 
@@ -149,7 +152,7 @@ def _parse_message(raw: str) -> _ParsedMessage:
         if not line.strip():
             body_start = index + 1
             break
-        match = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+        match = re.match(r"^([A-Za-z0-9_-]+):(.*)$", line)
         if match is None:
             body_start = index
             break

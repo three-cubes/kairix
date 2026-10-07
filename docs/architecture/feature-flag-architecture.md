@@ -5,7 +5,7 @@
 > **Shipped surface (this spec is the canonical reference for it):**
 > - `kairix/core/features/` — `registry.py` (the populated `REGISTRY` + `FeatureFlag` value object), `resolver.py` (env → config → default resolution), `observability.py` (first-activation logging), `cli.py` (`kairix features status`), `__init__.py` (the `flag(name)` surface). Plus `capability.py` and `topology_status.py` for the diagnostics variants.
 > - `tool_features_status` MCP tool in `kairix/agents/mcp/server.py`.
-> - Fitness functions **F51** (retirement deadline), **F52** (call-site reference integrity), **F53** (operator surface required), and **F54** (both-branch tested) are all live in `scripts/checks/` and enforced per-commit + in CI Stage 0; baselines at `.architecture/baseline/f51-files.txt` / `f52-files.txt` / `f54-files.txt` (F53 is a presence check with no per-file baseline).
+> - Fitness functions **F51** (retirement deadline), **F52** (call-site reference integrity), **F53** (operator surface required), and **F54** (both-branch tested) are all live in `scripts/checks/` and enforced per-commit + in CI Stage 0 over the full tree, with no baseline files.
 > - Cutover tooling: `scripts/cutover/capture_baseline.py` + `scripts/cutover/diff_baseline.py`.
 >
 > Companion to: `connector-ingestion-architecture.md` (the connector waves use this pattern), `test-discipline-hardening.md` (the both-branch-tested requirement extends the F46/F47/F48 principles).
@@ -73,12 +73,6 @@ scripts/checks/
   check_f52_flag_call_sites.py
   check_f53_features_status_surface.py
   check_f54_flag_both_branch_tested.py
-
-.architecture/baseline/
-  f51-files.txt
-  f52-files.txt
-  f53-files.txt
-  f54-files.txt
 ```
 
 ### 3.2 The `FeatureFlag` value object
@@ -301,7 +295,7 @@ def test_obsidian_connector_primary_on_full_pipeline(tmp_path):
 
 Action-marked failure per F21: `fix: add tests/bdd/features/feature_flag_<name>.feature with OFF + ON scenarios; add tests/integration/test_feature_flag_<name>.py exercising both branches. next: see docs/architecture/feature-flag-architecture.md §5.`
 
-Baseline at `.architecture/baseline/f54-files.txt`. The rule landed forward-only with an empty baseline, and every flag added since satisfies both-branch coverage at landing.
+There is no baseline: every flag in the registry must satisfy both-branch coverage.
 
 ## 6. The other fitness functions (F51 / F52 / F53)
 
@@ -434,7 +428,7 @@ The pattern shipped in the sequence below; all steps are on `main`:
 
 1. **This spec** — the canonical reference for the surface.
 2. **`kairix/core/features/` implementation** — registry, resolver, `flag()` surface, observability hook, MCP tool, CLI subcommand, plus the fake resolver in `tests/fakes.py`. Landed with an empty registry; the connector / search-pipeline / onboarding flags were added by their own waves.
-3. **F51 + F52 + F53 + F54 fitness functions** — the four check scripts under `scripts/checks/`, with baselines (`f51-files.txt` / `f52-files.txt` / `f54-files.txt`) and unit tests. They landed forward-only with empty baselines.
+3. **F51 + F52 + F53 + F54 fitness functions** — the four check scripts under `scripts/checks/`, with unit tests. They landed with zero violations and stay there.
 4. **Cutover tooling** — `scripts/cutover/capture_baseline.py` + `scripts/cutover/diff_baseline.py` + the report shape per §4.2.
 5. **CLAUDE.md edits** (§8) — the Cutover patterns section, the F51–F54 canon rows, and the docs-resolver row.
 6. **IM-6 cutover** — the `obsidian_connector_primary` flag ran the full introduce → cutover → retire arc (§7) and is now retired.
@@ -443,7 +437,7 @@ The pattern shipped in the sequence below; all steps are on `main`:
 ## 10. References
 
 - `docs/architecture/connector-ingestion-architecture.md` — wave plan that consumes this pattern
-- `docs/architecture/test-discipline-hardening.md` — F45–F50 + the composition / real-path / new-capability principles that F54 extends
+- `docs/architecture/test-discipline-hardening.md` — F45–F48 + the composition / real-path / new-capability principles that F54 extends
 - `docs/architecture/fitness-functions.md` — F-rule canon; F51–F54 are catalogued here
 - Two-scope architecture: per-container scope means one flag set per container; LaunchDarkly-style multi-tenant rollout doesn't apply
 - `feedback_deployed_config_path` memory — config-layering pattern this resolver reuses

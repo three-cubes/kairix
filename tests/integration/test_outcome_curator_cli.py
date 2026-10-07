@@ -44,8 +44,9 @@ Sabotage-proof (both executed):
       against an unrecognised format, which falls through to the
       default text branch and exits 0). Restored.
 
-Latency baseline (2024 M-series Mac): subprocess wall ~200-400ms.
-Test threshold: 10000ms.
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
@@ -53,7 +54,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -69,14 +69,12 @@ def test_curator_cli_subprocess_health_json_envelope_outcome() -> None:
     check). NOT a returncode-only assertion. The envelope shape is
     what cron + agents parse — this is the F30 outcome contract.
     """
-    t0 = time.monotonic()
     proc = subprocess.run(
         [sys.executable, "-m", "kairix.cli", "curator", "health", "--format", "json"],
         capture_output=True,
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"curator health exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -104,8 +102,6 @@ def test_curator_cli_subprocess_health_json_envelope_outcome() -> None:
     assert envelope["total_entities"] == 0, f"expected zero entities when neo4j offline: {envelope}"
     assert envelope["ok"] is True, f"expected ok=True when there are no issues to report: {envelope}"
     assert envelope["issue_count"] == 0, f"expected issue_count=0: {envelope}"
-
-    assert elapsed_ms < 10000.0, f"curator subprocess took {elapsed_ms:.1f}ms (baseline ~300ms, threshold 10000ms)"
 
 
 def test_curator_cli_subprocess_invalid_format_exits_two() -> None:

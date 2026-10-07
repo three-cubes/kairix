@@ -4,7 +4,7 @@ How to stand up the kairix quality harness on a new repo (e.g. a sibling infrast
 
 Everything in this document is the lived experience of getting the harness green on kairix — every gotcha section corresponds to a real failure that bit us during the rollout.
 
-> **Post-EPIC #499 — the runner machinery is now a shared package, not files you copy.** The "clone `scripts/checks/`" path below is the *original* (pre-#499) setup story. As of [EPIC #499](https://github.com/three-cubes/kairix/issues/499) (common-process convergence), the dispatch runner, ratchet, parse-once `CheckContext`, staged-selection, and the `RuleEntry` schema all live in the installed [`three-cubes-fitness`](https://github.com/three-cubes/tc-fitness) package (`tc_fitness`, pinned in `pyproject.toml`). A new repo now **depends on `tc_fitness`** and supplies only its own *domain*: catalogue rows (`_rule_catalogue.py`, id-agnostic — F-numbers or descriptive names), `check_*` implementations, and `.architecture/baseline/` files, plus the thin `run_checks.py` consumer shim (`from tc_fitness.runner import main_cli` + any repo-specific injection seams). The CI plumbing is likewise shared via `three-cubes/tc-pipelines` (the `setup-uv-cached` composite + `python-quality-gate.yml` reusable workflow). kairix and a sibling repo both run on this shared engine. The **gotchas below remain accurate** — they cover Codecov / SonarCloud / coverage-XML / workflow wiring, which each consuming repo still configures locally. The canonical *what* and *why* lives in [`fitness-functions.md`](./fitness-functions.md#harness-architecture) ("Shared engine — kairix consumes `tc_fitness`").
+> **Post-EPIC #499 — the runner machinery is now a shared package, not files you copy.** The "clone `scripts/checks/`" path below is the *original* (pre-#499) setup story. As of [EPIC #499](https://github.com/three-cubes/kairix/issues/499) (common-process convergence), the dispatch runner, parse-once `CheckContext`, staged-selection, and the `RuleEntry` schema all live in the installed [`three-cubes-fitness`](https://github.com/three-cubes/tc-fitness) package (`tc_fitness`, pinned in `pyproject.toml`). A new repo now **depends on `tc_fitness`** and supplies only its own *domain*: catalogue rows (`_rule_catalogue.py`, id-agnostic — F-numbers or descriptive names), and `check_*` implementations (no baseline files — every check runs over the full tree), plus the thin `run_checks.py` consumer shim (`from tc_fitness.runner import main_cli` + any repo-specific injection seams). The CI plumbing is likewise shared via `three-cubes/tc-pipelines` (the `setup-uv-cached` composite + `python-quality-gate.yml` reusable workflow). kairix and a sibling repo both run on this shared engine. The **gotchas below remain accurate** — they cover Codecov / SonarCloud / coverage-XML / workflow wiring, which each consuming repo still configures locally. The canonical *what* and *why* lives in [`fitness-functions.md`](./fitness-functions.md#harness-architecture) ("Shared engine — kairix consumes `tc_fitness`").
 
 ## Contents
 
@@ -21,7 +21,7 @@ Everything in this document is the lived experience of getting the harness green
 
 The harness is **F1–F13** plus four supporting cross-cuts:
 
-- **Mechanical fitness functions** — file-level ratcheting baselines for forbidden patterns: monkeypatching internals (F1), env-var monkeypatching (F2), un-rationaled suppressions (F3 — covers `# noqa`/`# NOSONAR`/`# pragma: no cover`/`# type: ignore`/`# nosec`), env-var smuggling (F4), private-name imports in tests (F5), `*_fn=None` test-only kwargs (F6), unmarked tests (F8), un-rationaled CI silencers (F10), un-rationaled test skips (F11), BDD features without happy paths (F12), BDD scenarios that leak implementation symbols (F13).
+- **Mechanical fitness functions** — blocking checks over the full tree (no baseline files) for forbidden patterns: monkeypatching internals (F1), env-var monkeypatching (F2), un-rationaled suppressions (F3 — covers `# noqa`/`# NOSONAR`/`# pragma: no cover`/`# type: ignore`/`# nosec`), env-var smuggling (F4), private-name imports in tests (F5), `*_fn=None` test-only kwargs (F6), unmarked tests (F8), un-rationaled CI silencers (F10), un-rationaled test skips (F11), BDD features without happy paths (F12), BDD scenarios that leak implementation symbols (F13).
 - **Holistic coverage gates** — F7 enforces 90% per-file on unit coverage; F9 enforces the same on the unit∪integration union.
 - **Codecov** — coverage flags (unit + integration with carryforward), test analytics (flaky/slow tracking), components for per-area dashboards.
 - **SonarCloud** — separate quality gate; reads the same `coverage.xml`.
@@ -47,8 +47,9 @@ dependencies = [
 Then add the thin consumer shim `scripts/checks/run_checks.py`
 (`from tc_fitness.runner import main_cli`, declare your catalogue rows as
 `RULES`, wire any repo-specific injection seams) and bring your *domain* —
-the `check_*` implementations + `_rule_catalogue.py` rows + `.architecture/baseline/`
-files. The `gate()` / `python_files()` / `repo_relative()` primitives and the
+the `check_*` implementations + `_rule_catalogue.py` rows. There are no
+baseline files — tc-fitness v0.17+ evaluates every check over the full
+current tree. The `gate()` / `python_files()` / `repo_relative()` primitives and the
 `RuleEntry` schema are imported from `tc_fitness` — there is no local `_arch_lib.py`.
 A `FitnessRule` ABC over `tc_fitness.gate` (kairix's `_fitness_rule.py`) lets each
 check be a ~3-line subclass. The catalogue is **id-agnostic**: kairix uses
@@ -78,33 +79,17 @@ scripts/checks/
 
 Adapt the package-name guards: F1, F2, F4, F5 reference `kairix.` and `KAIRIX_*` literals. Search-and-replace to your project's namespace (`tc_agent_zone.` and `TC_AGENT_ZONE_*` or whatever you settle on).
 
-### 2. Create empty baselines
+Then run each check and fix every violation before you wire the gate — there is no baseline to park them in. **Sabotage-prove every check before shipping** — see the discipline section in `fitness-functions.md`.
 
-```bash
-mkdir -p .architecture/baseline
-touch .architecture/baseline/no-internal-patches-files.txt
-touch .architecture/baseline/no-env-monkeypatch-files.txt
-touch .architecture/baseline/suppressions-have-rationale-files.txt
-touch .architecture/baseline/env-reads-in-paths-files.txt
-touch .architecture/baseline/no-internal-test-imports-files.txt
-touch .architecture/baseline/no-test-only-kwargs-files.txt
-touch .architecture/baseline/per-file-coverage-floor-files.txt
-touch .architecture/baseline/per-file-coverage-floor-union-files.txt
-touch .architecture/baseline/bdd-no-implementation-leaks-files.txt
-touch .architecture/baseline/test-only-kwargs-allow.txt   # F6 allow-list
-```
-
-Then run each check, capture violations, and seed the corresponding baseline. **Sabotage-prove every check before shipping** — see the discipline section in `fitness-functions.md`.
-
-### 3. Wire pre-commit
+### 2. Wire pre-commit
 
 Copy `.pre-commit-config.yaml`'s "Architecture fitness functions" block from kairix. The hooks are `language: system`, so they invoke the local scripts directly — no plugin to install.
 
-### 4. Wire `safe-commit.sh`
+### 3. Wire `safe-commit.sh`
 
 Copy `scripts/safe-commit.sh`. It runs ruff/format/mypy/pytest then calls `bash scripts/checks/run-all.sh --skip-coverage`. The `--skip-coverage` flag skips F7/F9 since they need test runtime — those run only in CI.
 
-### 5. Wire CI
+### 4. Wire CI
 
 Copy `.github/workflows/ci.yml`'s job structure. The pipeline runs these stages:
 
@@ -121,11 +106,11 @@ Copy `.github/workflows/ci.yml`'s job structure. The pipeline runs these stages:
 
 SonarCloud runs as its own `sonarcloud` job (advisory, not a required context), consuming the Stage 2b `coverage.xml`. A `check` fan-in job (`CI gate`) gates branch protection on every required job's result.
 
-### 6. Wire Codecov
+### 5. Wire Codecov
 
 Copy `codecov.yml`. Add the `CODECOV_TOKEN` secret in repo settings.
 
-### 7. Workflow naming convention
+### 6. Workflow naming convention
 
 Use `1 → 2 → 3` for primary pipeline workflows; `1a → 1b` for conditional loops within a stage:
 
@@ -304,9 +289,9 @@ curl -sSL -X POST --data-binary "@codecov.yml" https://codecov.io/validate
 
 **Symptom:** Codecov `patch` check fails on PRs that touch already-low-coverage files. PR's patch coverage measures e.g. 81% — perfectly reasonable, but below an arbitrary 85% target.
 
-**Cause:** Codecov has no equivalent of F7's grandfathered baseline. A fixed `patch.target` either rejects in-trajectory PRs or becomes obsolete once project coverage clears it.
+**Cause:** A fixed `patch.target` either rejects in-trajectory PRs or becomes obsolete once project coverage clears it.
 
-**Fix:** Set `patch.target: auto` in `codecov.yml`. `auto` couples the patch gate to the project's actual trajectory: patch must be ≥ current project base coverage. As files leave `.architecture/baseline/per-file-coverage-floor-files.txt`, the project average rises, and the patch bar rises with it automatically.
+**Fix:** Set `patch.target: auto` in `codecov.yml`. `auto` couples the patch gate to the project's actual trajectory: patch must be ≥ current project base coverage. As the project average rises, the patch bar rises with it automatically.
 
 The mechanical 90% floor stays as F7 / F9 (per-file, on coverage XML). Codecov patch is the no-regression guard, not a parallel mechanical gate.
 

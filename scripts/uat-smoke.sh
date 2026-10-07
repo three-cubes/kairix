@@ -179,7 +179,7 @@ check_search() {
     # Accept either JSON output with a non-empty results list OR a
     # human-readable banner with at least one result.
     local hits
-    hits=$(echo "$out" | grep -cE '^\s*[0-9]+\.\s|"score"' || true)
+    hits=$(echo "$out" | grep -cE '^\s*[0-9]+\.\s|"score"' || true)  # grep -c exits 1 on zero matches; the hits count (0) is still printed and judged below
     if [[ "${hits:-0}" -gt 0 ]]; then
         pass "search-smoke" "${hits} hit(s) for \"${SMOKE_QUERY}\""
     else

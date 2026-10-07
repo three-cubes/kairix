@@ -89,26 +89,50 @@ def _extractor(request: pytest.FixtureRequest) -> Extractor:
 
 
 @pytest.mark.contract
-def test_markitdown_extractor_satisfies_protocol() -> None:
-    """The real factory returns an instance that is a runtime ``Extractor``."""
-    real = _make_real_with_stub()
-    assert isinstance(real, Extractor)
-    assert isinstance(real, MarkitdownExtractor)
+def test_markitdown_extractor_satisfies_protocol(_extractor: Extractor) -> None:
+    """Both fake and real are runtime ``Extractor`` instances named ``markitdown``.
+
+    Sabotage proof: renamed ``MarkitdownExtractor.quality_ok`` to
+    ``_quality_ok`` → the real leg's isinstance(Extractor) failed. Restored.
+    """
+    assert isinstance(_extractor, Extractor)
+    assert _extractor.name == "markitdown"
 
 
 @pytest.mark.contract
-def test_extractor_declares_version() -> None:
-    """F40 requirement — module-level ``version`` is non-empty."""
+def test_extractor_declares_version(_extractor: Extractor) -> None:
+    """F40 requirement — module-level ``version`` is non-empty and both
+    impls carry it (the fake pins the same lockfile version).
+
+    Sabotage proof: in ``MarkitdownExtractor.__init__`` changed
+    ``self.version = version`` to ``self.version = version + "-x"`` → the
+    real leg failed the version-equality assertion. Restored.
+    """
     assert isinstance(markitdown_version, str)
     assert markitdown_version.strip() != ""
+    assert _extractor.version == markitdown_version
 
 
 @pytest.mark.contract
-def test_real_factory_returns_markitdown_instance() -> None:
-    """``make_extractor`` returns a real :class:`MarkitdownExtractor`."""
-    real = make_real_extractor()
-    assert isinstance(real, MarkitdownExtractor)
-    assert real.name == "markitdown"
+@pytest.mark.parametrize(
+    ("factory", "expected_cls"),
+    [
+        (make_real_extractor, MarkitdownExtractor),
+        (FakeMarkitdownExtractor, FakeMarkitdownExtractor),
+    ],
+    ids=["real", "fake"],
+)
+def test_real_factory_returns_markitdown_instance(factory: _Factory, expected_cls: type) -> None:
+    """The factory returns its concrete markitdown extractor.
+
+    Sabotage proof: changed ``MarkitdownExtractor.__init__`` to set
+    ``self.name = "markitdown-x"`` → the real leg's name assertion failed.
+    Restored.
+    """
+    extractor = factory()
+    assert isinstance(extractor, expected_cls)
+    assert isinstance(extractor, Extractor)
+    assert extractor.name == "markitdown"
 
 
 @pytest.mark.contract
@@ -124,10 +148,13 @@ def test_can_extract_claims_pdf_by_magic_bytes(_extractor: Extractor) -> None:
 
 
 @pytest.mark.contract
-def test_real_rejects_plain_text() -> None:
-    """The real impl refuses ``text/plain`` — that's passthrough's job."""
-    real = _make_real_with_stub()
-    assert real.can_extract("text/plain", b"hello") is False
+def test_real_rejects_plain_text(_extractor: Extractor) -> None:
+    """Both impls refuse ``text/plain`` — that's passthrough's job.
+
+    Sabotage proof: added ``"text/plain"`` to ``_MARKITDOWN_MIMES`` → the
+    real leg's ``is False`` assertion failed. Restored.
+    """
+    assert _extractor.can_extract("text/plain", b"hello") is False
 
 
 @pytest.mark.contract
@@ -146,8 +173,20 @@ def test_quality_ok_true_on_substantive_output(_extractor: Extractor) -> None:
 
 
 @pytest.mark.contract
-def test_quality_ok_false_on_short_output() -> None:
-    """Quality gate fails when markitdown returns near-empty markdown."""
-    extractor = _make_real_with_stub(markdown="x")
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: _make_real_with_stub(markdown="x"),
+        lambda: FakeMarkitdownExtractor(scripted_markdown="x"),
+    ],
+    ids=["real", "fake"],
+)
+def test_quality_ok_false_on_short_output(factory: _Factory) -> None:
+    """Quality gate fails when markitdown returns near-empty markdown.
+
+    Sabotage proof: set ``_QUALITY_MIN_CHARS`` to ``0`` → the real leg's
+    ``is False`` assertion failed. Restored.
+    """
+    extractor = factory()
     doc = extractor.extract(b"%PDF-1.4\n" + b"y" * 4096, "application/pdf")
     assert extractor.quality_ok(doc) is False

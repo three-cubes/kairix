@@ -27,10 +27,9 @@ Sabotage-proofs (both executed locally — see commit message):
     ``if iterations < 0``. ``--perf 0`` then runs zero iterations and
     exits 0 → ``rc == 2`` assertion fails. Restored.
 
-Latency baseline (2024 M-series Mac): subprocess wall ~700ms for the
-happy path (cold Python startup dominates; the perf sweep itself is
-sub-50ms with every op skipped). Threshold: 10000ms (~14x headroom
-for CI variance + slower hardware).
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
@@ -38,7 +37,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -75,7 +73,6 @@ def test_probe_config_cli_subprocess_perf_envelope_outcome(tmp_path: Path) -> No
     """
     budgets_path = _write_budgets(tmp_path)
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -92,7 +89,6 @@ def test_probe_config_cli_subprocess_perf_envelope_outcome(tmp_path: Path) -> No
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"probe-config --perf exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -110,8 +106,6 @@ def test_probe_config_cli_subprocess_perf_envelope_outcome(tmp_path: Path) -> No
     op_names = {r["operation"] for r in envelope["results"]}
     assert "fact_find_conflicts" in op_names, f"missing fact_find_conflicts in {op_names}"
     assert "kairix_prep_vault_only" in op_names, f"missing kairix_prep_vault_only in {op_names}"
-
-    assert elapsed_ms < 10000.0, f"probe-config subprocess took {elapsed_ms:.1f}ms (threshold 10000ms)"
 
 
 def test_probe_config_cli_subprocess_rejects_zero_iterations(tmp_path: Path) -> None:

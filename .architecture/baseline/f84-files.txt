@@ -1,7 +1,0 @@
-# F84 grandfathered files — production config-write sites without a
-# composed write→read round-trip test (EPIC #499 Phase 1; the #492
-# overlay split-brain class). Empty at landing: the #492 fix's exemplar
-# test (tests/integration/test_wizard_config_overlay_split_brain.py)
-# already round-trips every harvested writer through the canonical
-# layered reader. Keep it empty — a new entry here means a new config
-# writer shipped without proof that any production reader sees it.

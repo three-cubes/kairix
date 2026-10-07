@@ -29,10 +29,9 @@ makes the envelope's ``active_goals`` field land empty AND the use
 case sets ``error`` non-empty → CLI exits 1 → test fails on the
 ``returncode == 0`` assertion. Tested locally.
 
-Latency baseline: subprocess.run with cold Python startup measured
-~800ms wall on a 2024 M-series Mac (interpreter + import graph
-dominate; the actual bootstrap work is sub-50ms). The 5s threshold
-gives ~6x headroom for CI variance and slower hardware.
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
@@ -40,7 +39,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -71,7 +69,6 @@ def test_bootstrap_cli_subprocess_envelope_outcome(tmp_path: Path) -> None:
     """
     _seed_minimal_vault(tmp_path, "agent-alpha")
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -89,7 +86,6 @@ def test_bootstrap_cli_subprocess_envelope_outcome(tmp_path: Path) -> None:
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"bootstrap exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -101,8 +97,6 @@ def test_bootstrap_cli_subprocess_envelope_outcome(tmp_path: Path) -> None:
     assert envelope["active_goals"], f"active_goals empty: {envelope.get('active_goals')!r}"
     assert envelope["recent_memory"], f"recent_memory empty: {envelope.get('recent_memory')!r}"
     assert "health" in envelope, f"health missing: {sorted(envelope.keys())}"
-
-    assert elapsed_ms < 5000.0, f"bootstrap subprocess took {elapsed_ms:.1f}ms (baseline ~800ms, threshold 5000ms)"
 
 
 def test_bootstrap_cli_subprocess_exits_non_zero_on_missing_vault(tmp_path: Path) -> None:

@@ -8,8 +8,14 @@ returning ``[]`` is equivalent. Both are observable as
 collections to filter on).
 
 A separate ``raises`` probe covers the case where the resolver fails
-mid-resolution (e.g. corrupt cache) — silent fallback to ``None``
-would silently widen scope to every collection.
+mid-resolution (e.g. the scope-profile store is unreadable) — silent
+fallback to ``None`` would silently widen scope to every collection.
+
+Every body runs over BOTH the production
+:class:`TopologyCollectionResolver` (its scope-profile lookup injected
+through the ``scope_profile_resolver`` seam with
+:class:`tests.fakes.FakeScopeProfileResolver`) and the canonical
+:class:`tests.fakes.FakeCollectionResolver` (F43 behavioural parity).
 
 Each test carries a "Sabotage proof:" comment describing the mutation
 that proves the assertion has teeth.
@@ -17,47 +23,82 @@ that proves the assertion has teeth.
 
 from __future__ import annotations
 
-from typing import Any
+import sqlite3
+from collections.abc import Callable, Iterator
 
 import pytest
 
-from tests.fakes import FakeCollectionResolver
+from kairix.core.protocols import CollectionResolver
+from kairix.core.search.topology_resolver import TopologyCollectionResolver
+from tests.fakes import FakeCollectionResolver, FakeScopeProfileResolver
 
 pytestmark = pytest.mark.contract
 
+_SCOPE = "shared+agent"
 
-def test_resolve_returns_empty_when_scope_unknown() -> None:
+# A factory takes ``(connections, error)`` — the error the scope lookup
+# raises (``None`` = healthy, with agent-alpha granted ``alpha-mem``).
+ResolverFactory = Callable[[list[sqlite3.Connection], Exception | None], CollectionResolver]
+
+
+def _real_resolver(connections: list[sqlite3.Connection], error: Exception | None) -> CollectionResolver:
+    db = sqlite3.connect(":memory:")
+    connections.append(db)
+    profiles = FakeScopeProfileResolver().with_actor("agent-alpha", entries=[("alpha-mem", "read", "internal")])
+    if error is not None:
+        profiles = profiles.with_raises(error)
+    return TopologyCollectionResolver(db=db, scope_profile_resolver=profiles)
+
+
+def _fake_resolver(_connections: list[sqlite3.Connection], error: Exception | None) -> CollectionResolver:
+    return FakeCollectionResolver(by_key={("agent-alpha", _SCOPE): ["alpha-mem"]}, raises=error)
+
+
+_IMPLEMENTATIONS: list[tuple[str, ResolverFactory]] = [
+    ("real", _real_resolver),
+    ("fake", _fake_resolver),
+]
+
+
+@pytest.fixture
+def connections() -> Iterator[list[sqlite3.Connection]]:
+    opened: list[sqlite3.Connection] = []
+    yield opened
+    for db in opened:
+        db.close()
+
+
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_resolve_returns_empty_when_scope_unknown(
+    name: str, factory: ResolverFactory, connections: list[sqlite3.Connection]
+) -> None:
     """A resolver with no mapping for the requested ``(agent, scope)``
     returns ``None`` — the documented "no filter" sentinel.
 
-    Sabotage proof: in :meth:`FakeCollectionResolver.resolve` change
-    ``return self._by_key.get(...)`` to ``return ["leaked-collection"]``.
-    Re-run: the test fails because the resolver returns a list instead
-    of ``None``. Restored.
-    """
-    resolver = FakeCollectionResolver(by_key={("agent-alpha", "memory"): ["alpha-mem"]})
-    assert resolver.resolve(agent="unknown", scope="memory") is None
-
-
-def test_resolve_raises_when_underlying_implementation_fails() -> None:
-    """A resolver whose ``resolve`` raises must surface the exception
-    — silent fallback to ``None`` would widen scope to every
-    collection (a security-relevant regression).
-
-    Sabotage proof: in ``_RaisingResolver.resolve`` change
-    ``raise self._exc`` to ``return None``. Re-run: the test fails
-    because no exception fires and the call returns ``None``.
+    Sabotage proof (executed): in :meth:`TopologyCollectionResolver.resolve`
+    change the final ``return names or None`` to
+    ``return names or ["leaked-collection"]``. Re-run: the ``real`` case
+    fails because the resolver returns a list instead of ``None``.
     Restored.
     """
+    resolver = factory(connections, None)
+    assert resolver.resolve(agent="unknown", scope=_SCOPE) is None, name
+    # Positive control: the granted agent resolves to its collection.
+    assert resolver.resolve(agent="agent-alpha", scope=_SCOPE) == ["alpha-mem"], name
 
-    class _RaisingResolver:
-        def __init__(self, exc: Exception) -> None:
-            self._exc = exc
 
-        def resolve(self, agent: str | None, scope: Any) -> list[str] | None:
-            del agent, scope
-            raise self._exc
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_resolve_raises_when_underlying_implementation_fails(
+    name: str, factory: ResolverFactory, connections: list[sqlite3.Connection]
+) -> None:
+    """A resolver whose lookup fails must surface the exception — silent
+    fallback to ``None`` would widen scope to every collection (a
+    security-relevant regression).
 
-    resolver = _RaisingResolver(RuntimeError("F68-resolver-corrupt-cache"))
+    Sabotage proof: in :meth:`TopologyCollectionResolver.resolve` wrap
+    ``self._resolver.resolve(...)`` in ``try/except Exception: return None``.
+    Re-run: the ``real`` case fails because no exception fires. Restored.
+    """
+    resolver = factory(connections, RuntimeError("F68-resolver-corrupt-cache"))
     with pytest.raises(RuntimeError, match="F68-resolver-corrupt-cache"):
-        resolver.resolve(agent="agent-alpha", scope="memory")
+        resolver.resolve(agent="agent-alpha", scope=_SCOPE)

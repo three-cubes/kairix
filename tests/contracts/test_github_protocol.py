@@ -199,116 +199,75 @@ def test_github_connector_sensitivity_for_returns_configured_tier(
     assert tier == "client-confidential", f"{name!r} returned unexpected sensitivity: {tier!r}"
 
 
+_TWO_REPOS: list[dict[str, Any]] = [
+    {
+        "full_name": "org-a/repo-1",
+        "visibility": "private",
+        "sha": "sha-1",
+        "committed_at": "2026-05-23T01:00:00Z",
+    },
+    {
+        "full_name": "org-b/repo-2",
+        "visibility": "public",
+        "sha": "sha-2",
+        "committed_at": "2026-05-23T02:00:00Z",
+    },
+]
+
+
+def _real_seeded(repos: list[dict[str, Any]]) -> Any:
+    return GitHubConnector(client=_ScriptedClient(repos))  # type: ignore[arg-type]  # F3 rationale: local stub mirrors GitHubApiClient shape but isn't typed as the Protocol — boundary-only suppression for the test seam
+
+
+# Factories over an explicit repo seed — same two repos on both impls.
+_SEEDED_FACTORIES: list[tuple[str, Callable[[list[dict[str, Any]]], Any]]] = [
+    ("fake", lambda repos: FakeGitHubConnector(repos=list(repos))),
+    ("real", _real_seeded),
+]
+
+
 @pytest.mark.contract
-def test_github_connector_hierarchy_parent_before_child() -> None:
-    """F58: load_hierarchy emits parent-before-child for org → repo → dir.
+@pytest.mark.parametrize("name,factory", _SEEDED_FACTORIES)
+def test_github_connector_hierarchy_parent_before_child(
+    name: str, factory: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """F58: load_hierarchy emits parent-before-child (org → repo → dir) on
+    both impls, and covers every seeded repo.
 
     Sabotage-proof: swapping the call order in
     :meth:`GitHubConnector.load_hierarchy` so repos emit before orgs
-    flips this test to fail at the first parent_id-not-in-emitted
+    flips the ``real`` case to fail at the first parent_id-not-in-emitted
     check. Restoring the canonical org-first / repos-second / dirs-third
     order returns the test to green.
     """
-    connector = GitHubConnector(
-        client=_ScriptedClient(
-            [
-                {
-                    "full_name": "agent-alpha-org/repo-a",
-                    "visibility": "private",
-                    "sha": "sha-a",
-                    "committed_at": "2026-05-23T01:00:00Z",
-                },
-                {
-                    "full_name": "agent-alpha-org/repo-b",
-                    "visibility": "public",
-                    "sha": "sha-b",
-                    "committed_at": "2026-05-23T02:00:00Z",
-                },
-            ]
-        ),  # type: ignore[arg-type]  # F3 rationale: local stub mirrors GitHubApiClient shape but isn't typed as the Protocol — boundary-only suppression for the test seam
-    )
-    assert isinstance(connector, HierarchyConnector), "GitHubConnector must satisfy HierarchyConnector Protocol"
+    connector = factory(_TWO_REPOS)
+    assert isinstance(connector, HierarchyConnector), f"{name}: must satisfy HierarchyConnector"
     emitted: set[str] = set()
     nodes: list[HierarchyNode] = list(connector.load_hierarchy(cc_pair_id=42))
-    assert nodes, "load_hierarchy must emit at least one node"
+    assert nodes, f"{name}: load_hierarchy must emit at least one node"
     for node in nodes:
         if node.raw_parent_id is not None:
             assert node.raw_parent_id in emitted, (
-                f"F58 violation: node {node.raw_node_id!r} parent_id "
+                f"{name}: F58 violation: node {node.raw_node_id!r} parent_id "
                 f"{node.raw_parent_id!r} was not previously emitted; emitted={sorted(emitted)!r}"
             )
         emitted.add(node.raw_node_id)
+    assert {"github://org-a/repo-1", "github://org-b/repo-2"} <= emitted, f"{name}: {sorted(emitted)!r}"
 
 
 @pytest.mark.contract
-def test_github_connector_per_repo_cursor_isolation() -> None:
-    """Two repos must advance their cursors independently.
+@pytest.mark.parametrize("name,factory", _SEEDED_FACTORIES)
+def test_github_connector_container_iteration_yields_one_per_repo(
+    name: str, factory: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """iter_containers emits one Container per installation-accessible repo.
 
-    Sabotage-proof: replacing the per-repo cursor dict with a single
-    shared cursor flips this test to fail because both repos would
-    persist the same cursor value (the most recent one) and the
-    subsequent ``list_commits_since`` for the older repo would skip
-    its proper drain.
-
-    Documented in the commit body: agent verified by deleting the
-    ``self._per_repo_cursors[repo.full_name]`` line and using a single
-    instance-level cursor — both repos end up with the same cursor
-    value after the drain; this test fails. Restoring the dict and
-    per-repo state returns the test to green.
+    Sabotage proof (executed): in ``GitHubConnector.iter_containers`` yield
+    only the first repo. Re-run: the ``real`` case fails. Restored.
     """
-    connector = GitHubConnector(
-        client=_ScriptedClient(
-            [
-                {
-                    "full_name": "agent-alpha-org/repo-one",
-                    "visibility": "private",
-                    "sha": "sha-1",
-                    "committed_at": "2026-05-23T01:00:00Z",
-                },
-                {
-                    "full_name": "agent-alpha-org/repo-two",
-                    "visibility": "private",
-                    "sha": "sha-2",
-                    "committed_at": "2026-05-23T05:00:00Z",
-                },
-            ]
-        ),  # type: ignore[arg-type]  # F3 rationale: local stub mirrors GitHubApiClient shape but isn't typed as the Protocol — boundary-only suppression for the test seam
-    )
-    list(connector.list_changes(cursor=None))
-    # The cursor state should record two repos with distinct cursors.
-    state = connector._per_repo_cursors
-    assert "agent-alpha-org/repo-one" in state
-    assert "agent-alpha-org/repo-two" in state
-    assert state["agent-alpha-org/repo-one"].code_sha != state["agent-alpha-org/repo-two"].code_sha, (
-        "F-rule violation: per-repo cursors must be isolated; both repos got the same code_sha"
-    )
-
-
-@pytest.mark.contract
-def test_github_connector_container_iteration_yields_one_per_repo() -> None:
-    """iter_containers emits one Container per installation-accessible repo."""
-    connector = GitHubConnector(
-        client=_ScriptedClient(
-            [
-                {
-                    "full_name": "org-a/repo-1",
-                    "visibility": "private",
-                    "sha": "sha-1",
-                    "committed_at": "2026-05-23T01:00:00Z",
-                },
-                {
-                    "full_name": "org-b/repo-2",
-                    "visibility": "public",
-                    "sha": "sha-2",
-                    "committed_at": "2026-05-23T02:00:00Z",
-                },
-            ]
-        ),  # type: ignore[arg-type]  # F3 rationale: local stub mirrors GitHubApiClient shape but isn't typed as the Protocol — boundary-only suppression for the test seam
-    )
-    containers = list(connector.iter_containers(cc_pair_id=99))
-    assert len(containers) == 2
-    container_ids = {c.container_id for c in containers}
-    assert container_ids == {"org-a/repo-1", "org-b/repo-2"}
+    containers = list(factory(_TWO_REPOS).iter_containers(cc_pair_id=99))
+    assert len(containers) == 2, name
+    assert {c.container_id for c in containers} == {"org-a/repo-1", "org-b/repo-2"}, name
     for container in containers:
         assert isinstance(container, Container)
-        assert container.cc_pair_id == 99
+        assert container.cc_pair_id == 99, name

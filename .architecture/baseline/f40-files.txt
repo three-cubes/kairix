@@ -1,7 +1,0 @@
-# F40 baseline — extractor plugin __init__.py files that lack a
-# version: str declaration or a make_extractor factory.
-# Grandfathered offenders only; baseline is shrink-only per F49.
-#
-# Today: empty — kairix/extractors/ does not yet exist (Wave 1 scaffold
-# lands the layer). The detector becomes active the moment the first
-# plugin directory appears.

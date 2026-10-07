@@ -25,6 +25,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import cast
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,23 @@ class WorkerPhase(str, Enum):
     MAINTENANCE = "maintenance"
     PAUSED = "paused"
     REPAIR = "repair"
+
+
+def _coerce_to_field_type(field_type: object, value: object) -> object:
+    """Coerce a JSON value to a ``WorkerState`` field's declared scalar type.
+
+    Enforces the declared type — JSON's permissive scalars otherwise let
+    "not-an-int" slip into an int field. The cast() appeases mypy without
+    changing runtime behaviour: int()/float() raise on invalid input, which
+    read_state catches. Non-scalar field types pass the value through.
+    """
+    if field_type is int or field_type == "int":
+        return int(cast(str, value))
+    if field_type is float or field_type == "float":
+        return float(cast(str, value))
+    if field_type is bool or field_type == "bool":
+        return bool(value)
+    return value
 
 
 @dataclass
@@ -118,21 +136,7 @@ class WorkerState:
             if k == "current_phase":
                 filtered[k] = WorkerPhase(v)
                 continue
-            # Enforce the field's declared type — JSON's permissive scalars
-            # otherwise let "not-an-int" slip into an int field. The cast()
-            # appeases mypy without changing runtime behaviour: int()/float()
-            # raise on invalid input which read_state catches.
-            from typing import cast
-
-            field_type = fields[k].type
-            if field_type is int or field_type == "int":
-                filtered[k] = int(cast(str, v))
-            elif field_type is float or field_type == "float":
-                filtered[k] = float(cast(str, v))
-            elif field_type is bool or field_type == "bool":
-                filtered[k] = bool(v)
-            else:
-                filtered[k] = v
+            filtered[k] = _coerce_to_field_type(fields[k].type, v)
         # mypy can't see that ``filtered`` was type-coerced above; cast tells
         # it the kwargs are the right shape per the dataclass field types.
         return cls(**filtered)  # type: ignore[arg-type]  # type-coerced in the loop above

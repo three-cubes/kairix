@@ -349,3 +349,46 @@ def test_drain_cli_runs_against_real_db_path_without_drain_repo_kwarg(tmp_path: 
     finally:
         conn.close()
     assert unpushed == 1, f"row should stay un-pushed when Neo4j unavailable; got {unpushed} un-pushed"
+
+
+def _rejecting_neo4j_client() -> Any:
+    """A real Neo4jClient whose (fake) driver rejects every query."""
+    from kairix.knowledge.graph.client import Neo4jClient
+    from tests.fakes import FakeNeo4jDriverClass
+
+    return Neo4jClient(
+        uri="bolt://graph.invalid:7687",
+        user="neo4j",
+        password="unit-fixture",  # pragma: allowlist secret — test fixture
+        driver_cls=FakeNeo4jDriverClass(run_raises=RuntimeError("constraint violation")),
+    )
+
+
+@pytest.mark.unit
+def test_drain_default_repo_marks_rejected_merge_failed_not_pushed(tmp_path: Path) -> None:
+    """With no injected repo, the CLI wraps the client in the production
+    drain repository — a MERGE Neo4j rejects is reported failed and the
+    signal stays un-acked (PLA-472 data-loss regression).
+
+    Sabotage proof (executed): return ``Neo4jGraphRepository(client)``
+    (read path, swallows errors) from ``_default_drain_repo_factory`` →
+    ``pushed == 1`` / ``failed == 0`` and this test fails. Restored.
+    """
+    import json as _json
+    import sqlite3
+
+    db_path = _seed_drain_db(tmp_path, count=1)
+
+    stdout, _stderr, code = _drive(
+        ["drain", "--db-path", str(db_path), "--format", "json"],
+        neo4j_client=_rejecting_neo4j_client(),
+    )
+
+    assert code == 0
+    envelope = _json.loads(stdout)
+    assert (envelope["pushed"], envelope["failed"]) == (0, 1)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        assert conn.execute("SELECT pushed_to_neo4j FROM entity_signals").fetchone()[0] == -1
+    finally:
+        conn.close()

@@ -14,6 +14,7 @@ Embed credentials fall back to LLM credentials when not set separately.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -91,6 +92,8 @@ def _resolve_pool_config(
     pool_max_connections: int | None = None,
     pool_max_keepalive: int | None = None,
     pool_expiry_s: float | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[int, int, float]:
     """Resolve the pool-size triple, preferring explicit kwargs over env reads.
 
@@ -101,12 +104,13 @@ def _resolve_pool_config(
 
     Invalid env values fall back to the module-level defaults with a
     logged warning rather than crashing the embed dispatch stage; that
-    fallback behaviour is unit-tested in tests/test_paths.py.
+    fallback behaviour is unit-tested in tests/test_paths.py. ``env`` is
+    threaded to the kairix.paths readers (``None`` = live ``os.environ``).
     """
     return (
-        _embed_pool_size(EMBED_POOL_MAX_CONNECTIONS) if pool_max_connections is None else pool_max_connections,
-        _embed_pool_keepalive(EMBED_POOL_MAX_KEEPALIVE) if pool_max_keepalive is None else pool_max_keepalive,
-        _embed_pool_expiry_s(EMBED_POOL_KEEPALIVE_EXPIRY_S) if pool_expiry_s is None else pool_expiry_s,
+        _embed_pool_size(EMBED_POOL_MAX_CONNECTIONS, env=env) if pool_max_connections is None else pool_max_connections,
+        _embed_pool_keepalive(EMBED_POOL_MAX_KEEPALIVE, env=env) if pool_max_keepalive is None else pool_max_keepalive,
+        _embed_pool_expiry_s(EMBED_POOL_KEEPALIVE_EXPIRY_S, env=env) if pool_expiry_s is None else pool_expiry_s,
     )
 
 
@@ -181,6 +185,7 @@ def make_openai_client(
     pool_max_connections: int | None = None,
     pool_max_keepalive: int | None = None,
     pool_expiry_s: float | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> Any:
     """Create an OpenAI-compatible client for any of the three endpoint shapes.
 
@@ -193,8 +198,14 @@ def make_openai_client(
     ``pool_expiry_s``) — when None (production default), reads from
     ``kairix.paths`` env helpers. Tests pass explicit values directly to
     avoid ``monkeypatch.setenv`` (F2).
+
+    ``env`` is the env mapping the pool readers consult when a pool kwarg
+    is ``None`` — ``None`` (production) is the live ``os.environ``; tests
+    pass a dict to drive the ``KAIRIX_EMBED_POOL_*`` resolution (F2-clean).
     """
-    max_conns, max_keepalive, expiry_s = _resolve_pool_config(pool_max_connections, pool_max_keepalive, pool_expiry_s)
+    max_conns, max_keepalive, expiry_s = _resolve_pool_config(
+        pool_max_connections, pool_max_keepalive, pool_expiry_s, env=env
+    )
     http_client = _build_http_client(max_conns, max_keepalive, expiry_s, timeout)
 
     if _is_foundry_endpoint(endpoint):

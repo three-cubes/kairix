@@ -39,11 +39,8 @@ def _write(path: Path, body: str = "") -> None:
 
 
 def test_real_repo_gate_is_green() -> None:
-    """The real F61 detector on the full repo emits no net-new violations.
-
-    ``kairix/worker.py`` is grandfathered in
-    ``.architecture/baseline/f61-files.txt``; Wave C rewires it through
-    CollectionRouter. Sabotage proof: introduce a brand-new file outside
+    """The real F61 detector on the full repo emits no violations (there
+    is no grandfathering). Sabotage proof: introduce a brand-new file outside
     the framework that constructs ``_SqliteChunkWriter`` — the gate fires.
     """
     detector = _load_detector()

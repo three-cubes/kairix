@@ -36,7 +36,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -51,7 +50,6 @@ def test_classify_cli_subprocess_emits_json_envelope_for_rule_hit() -> None:
     high confidence. The CLI emits the JSON envelope downstream
     consumers parse — agents, MCP bridges, shell pipelines.
     """
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -67,7 +65,6 @@ def test_classify_cli_subprocess_emits_json_envelope_for_rule_hit() -> None:
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"classify exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -78,8 +75,6 @@ def test_classify_cli_subprocess_emits_json_envelope_for_rule_hit() -> None:
     assert "target_path" in envelope, f"target_path missing: {envelope}"
     assert envelope["confidence"] >= 0.5, f"low-confidence rule hit: {envelope}"
     assert "reason" in envelope, f"reason missing: {envelope}"
-
-    assert elapsed_ms < 5000.0, f"classify subprocess took {elapsed_ms:.1f}ms (threshold 5000ms)"
 
 
 def test_classify_cli_subprocess_rejects_unknown_agent() -> None:

@@ -23,14 +23,14 @@ _F69_DEDUP_DOCS = 10_000
 
 
 @pytest.mark.integration
-def test_scanner_indexes_documents(real_db, real_document_root):
+def test_scanner_indexes_documents(real_db):
     """Scanner finds and indexes documents from the fixture."""
     count = real_db.execute("SELECT count(*) FROM documents WHERE active=1").fetchone()[0]
     assert count > 30  # At least the 31 reflib fixture docs
 
 
 @pytest.mark.integration
-def test_scanner_no_duplicate_content(real_db, real_document_root):
+def test_scanner_no_duplicate_content(real_db):
     # F69-small-scale-only: pins the dedup CONTRACT on the canonical
     # reflib fixture (31 docs, all with distinct hashes). The structural
     # GROUP BY hash + HAVING n > 1 assertion fires on row 1 — N doesn't

@@ -77,11 +77,17 @@ class Provider(Protocol):
     - ``name`` (``str``): short stable name ("azure_foundry" | "openai" |
       "bedrock" | ...). Matches the entry-point key under
       ``[project.entry-points."kairix.providers"]``.
-    - ``embed_batch(texts)``: batch embed N texts in one HTTP call. Never
-      raises; returns ``[]`` entries for failures so callers can
-      short-circuit per-text rather than abort the batch.
-    - ``chat(messages, *, max_tokens=800)``: single chat completion.
-      Never raises; returns ``""`` on failure.
+    - ``embed_batch(texts)``: batch embed N texts in one HTTP call. On
+      failure raises a typed :class:`~kairix.providers._errors.ProviderError`
+      (``ProviderUnreachable``, ``AuthError``, ``RateLimited``, …) mapped from the
+      transport error, so callers can tell "endpoint down" from "bad key".
+    - ``chat(messages, *, max_tokens=800)``: single chat completion. Raises a
+      typed ``ProviderError`` on failure, like ``embed_batch``.
+
+    The never-raise degrade-to-empty behaviour lives one layer up, in the
+    transport wrappers (``kairix.transport.embed_service.ProviderEmbeddingService``
+    and ``ProviderChatBackend``), which catch ``ProviderError`` and return
+    ``[]`` / ``""``. Providers themselves surface the typed failure.
     - ``dimension()``: embedding vector dimension; constant per deployed
       model.
     - ``healthcheck()``: synchronous probe — does the configured endpoint
@@ -92,10 +98,10 @@ class Provider(Protocol):
     name: str
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Batch embed; never raises; returns ``[]`` per text on failure."""
+        """Batch embed; raises a typed ``ProviderError`` on failure."""
 
     def chat(self, messages: list[dict[str, Any]], *, max_tokens: int = 800) -> str:
-        """Single chat completion; never raises; returns ``""`` on failure."""
+        """Single chat completion; raises a typed ``ProviderError`` on failure."""
 
     def dimension(self) -> int:
         """Embedding vector dimension; constant per deployed model."""
