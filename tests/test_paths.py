@@ -449,6 +449,20 @@ class TestDataDirOverride:
         assert getattr(paths, resolver)(env={var: "~/kairix-root"}) == Path.home() / "kairix-root"
 
     @pytest.mark.unit
+    def test_user_mode_data_dir_honours_supplied_xdg_data_home(self) -> None:
+        """Regression: the ``env=`` seam reaches the user-mode XDG branch —
+        pre-fix ``data_dir(env=...)`` dispatched on the supplied mapping's mode
+        but then read ``XDG_DATA_HOME`` from the live process env. Sabotage:
+        drop ``env=e`` from the recursive ``data_dir`` call → fails.
+        """
+        from kairix.paths import Mode, data_dir
+
+        env = {"XDG_DATA_HOME": "/injected-xdg-data"}
+        assert data_dir(Mode.user, env=env) == Path("/injected-xdg-data/kairix")
+        if Mode.detect(env) == Mode.user:
+            assert data_dir(env=env) == Path("/injected-xdg-data/kairix")
+
+    @pytest.mark.unit
     def test_warm_flag_override_expands_user(self) -> None:
         """Regression: ``KAIRIX_WARM_FLAG_PATH=~/warm.flag`` resolves under the
         home directory, not a literal ``~`` dir. Sabotage: drop

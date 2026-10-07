@@ -88,15 +88,16 @@ class Mode(str, Enum):
         return cls.system if os.geteuid() == 0 else cls.user
 
 
-def _xdg(env_name: str, fallback: str) -> Path:
+def _xdg(env_name: str, fallback: str, env: Mapping[str, str] | None = None) -> Path:
     """XDG base-dir helper.
 
     Returns ``$<env_name>`` when set + non-empty, else ``<fallback>`` —
     both expanded through ``Path.expanduser`` so ``~/...`` fallbacks
     resolve. The kairix project subdir is appended by the caller, not
-    here, so callers can compose deeper paths off the XDG root.
+    here, so callers can compose deeper paths off the XDG root. ``env``
+    defaults to the live ``os.environ``; a supplied mapping is honoured.
     """
-    raw = os.environ.get(env_name)
+    raw = (env if env is not None else os.environ).get(env_name)
     return Path(raw if raw else fallback).expanduser()
 
 
@@ -1498,14 +1499,14 @@ def data_dir(mode: Mode | None = None, *, env: Mapping[str, str] | None = None) 
     """
     if mode is not None:
         if mode == Mode.user:
-            return _xdg("XDG_DATA_HOME", "~/.local/share") / "kairix"
+            return _xdg("XDG_DATA_HOME", "~/.local/share", env) / "kairix"
         # system + container share /var/lib/kairix
         return Path(_FHS_DATA_DIR)
     e = env if env is not None else os.environ
     raw = e.get("KAIRIX_DATA_DIR")
     if raw:
         return Path(raw).expanduser()
-    return data_dir(Mode.detect(e))
+    return data_dir(Mode.detect(e), env=e)
 
 
 def config_dir(mode: Mode | None = None) -> Path:
