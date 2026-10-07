@@ -32,6 +32,7 @@ from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.fusion import RRFFusion
 from kairix.core.search.intent import QueryIntent
 from kairix.quality.probe import SearchClient, run_probe_search
+from kairix.quality.probe.runner import ProbeDeps
 from tests.fakes import (
     FakeClassifier,
     FakeCollectionResolver,
@@ -118,8 +119,7 @@ def test_search_returns_empty_when_backends_down_probe_records_queries_not_error
     result = run_probe_search(
         suite="f68",
         queries=6,
-        suite_loader=_suite_loader,
-        searcher=client.search,
+        deps=ProbeDeps(load_suite=_suite_loader, search=client.search),
         warmup=False,
     )
 
