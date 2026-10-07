@@ -11,9 +11,10 @@ The runner is the seam: it knows how to load a suite, how to build a search
 function from the production factory, and how to aggregate everything into
 a single ProbeResult envelope suitable for CLI / MCP / JSON output.
 
-Test seam: ``suite_loader`` and ``searcher`` are injectable so tests can run
-fully hermetically with fakes from tests/fakes.py. Production callers leave
-them None and get the bundled suite resolution + ``build_search_pipeline``.
+Test seam: :class:`ProbeDeps` (``load_suite`` + ``search``) is injectable so
+tests can run fully hermetically with fakes from tests/fakes.py. Production
+callers omit ``deps`` and get the bundled suite resolution +
+``build_search_pipeline``.
 """
 
 from __future__ import annotations
@@ -160,11 +161,32 @@ def _default_search_fn(q: SampledQuery) -> Any:
     Thin shim over :class:`InProcessSearchClient` so existing callers keep
     working. The Protocol-shaped client is the documented seam (see
     :mod:`kairix.quality.probe.clients`); future MCPHttpSearchClient drops
-    in by passing ``mcp_client.search`` to the ``searcher`` kwarg.
+    in by passing ``ProbeDeps(search=mcp_client.search)``.
     """
     from kairix.quality.probe.clients import InProcessSearchClient
 
     return InProcessSearchClient().search(q)
+
+
+@dataclass
+class ProbeDeps:
+    """Injectable collaborators for :func:`run_probe_search` and
+    :func:`kairix.quality.probe.burst.run_probe_burst`.
+
+    Canonical Deps shape (``kairix/worker.py::WorkerDeps``). Production
+    callers omit ``deps`` and get the bundled suite resolution + the
+    in-process search pipeline; tests construct
+    ``ProbeDeps(load_suite=..., search=...)`` with fakes.
+
+    - ``load_suite``: ``(suite) -> list[BenchmarkCase]`` for a suite name or
+      explicit path.
+    - ``search``: runs one :class:`SampledQuery` through a search pipeline.
+      Any ``Callable[[SampledQuery], Any]`` — e.g. a future
+      ``MCPHttpSearchClient().search`` (see :mod:`kairix.quality.probe.clients`).
+    """
+
+    load_suite: Callable[[str], list[Any]] = field(default_factory=lambda: _default_suite_loader)
+    search: Callable[[SampledQuery], Any] = field(default_factory=lambda: _default_search_fn)
 
 
 def _build_sampled_queries(cases: list[Any], queries: int, seed: int) -> list[SampledQuery]:
@@ -282,8 +304,7 @@ def run_probe_search(
     seed: int = 0,
     p95_threshold_ms: float = DEFAULT_P95_THRESHOLD_MS,
     *,
-    suite_loader: Callable[[str], list[Any]] | None = None,
-    searcher: Callable[[SampledQuery], Any] | None = None,
+    deps: ProbeDeps | None = None,
     warmup: bool = True,
 ) -> ProbeResult:
     """Run a weighted sample of suite queries at the requested concurrency.
@@ -296,8 +317,8 @@ def run_probe_search(
         p95_threshold_ms: gate target for the overall p95 (default 500 ms,
             matching the architectural target in
             docs/architecture/teaming-concurrency-strategy.md).
-        suite_loader: test seam — returns list[BenchmarkCase] for a suite name.
-        searcher: test seam — runs one SampledQuery through a search pipeline.
+        deps: :class:`ProbeDeps` carrying the suite loader + per-query
+            search callable. ``None`` (production) binds the defaults.
         warmup: when True (default) run one extra warm-up query BEFORE the
             measured sample to absorb the one-time factory build + model
             load, recording its latency separately in
@@ -320,10 +341,10 @@ def run_probe_search(
     if concurrency < 1:
         raise ValueError(f"concurrency must be >= 1; got {concurrency}")
 
-    loader = suite_loader or _default_suite_loader
-    fn = searcher or _default_search_fn
+    deps = deps if deps is not None else ProbeDeps()
+    fn = deps.search
 
-    cases = loader(suite)
+    cases = deps.load_suite(suite)
     sampled = _build_sampled_queries(cases, queries, seed)
 
     # Cold-build warm-up (PLA-273): one query before the measured sample so

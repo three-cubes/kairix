@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 _DEFAULT_DEPLOYMENT = "gpt-4o-mini"
 _DEFAULT_AGENT = "shape"
@@ -50,18 +53,140 @@ def _resolve_db_path(explicit: str | None) -> str:
 _STORE_TRUE = "store_true"
 
 
-def _cmd_generate(args: argparse.Namespace) -> int:
+# ---------------------------------------------------------------------------
+# Production collaborators — lazily imported so ``kairix eval --help`` (and
+# every subcommand that doesn't need them) never pays for the heavy eval
+# modules. Bound onto :class:`EvalCliDeps` via ``default_factory``.
+# ---------------------------------------------------------------------------
+
+
+def _default_suite_generator() -> Any:
+    """SuiteGenerator with its default protocol implementations."""
     from kairix.quality.eval.generate import SuiteGenerator
 
+    return SuiteGenerator()
+
+
+def _default_gold_builder() -> Any:
+    """GoldBuilder with its default protocol implementations."""
+    from kairix.quality.eval.gold_builder import GoldBuilder
+
+    return GoldBuilder()
+
+
+def _default_run_monitor(**kwargs: Any) -> Any:
+    from kairix.quality.eval.monitor import run_monitor
+
+    return run_monitor(**kwargs)
+
+
+def _default_generate_report(**kwargs: Any) -> str:
+    from kairix.quality.eval.monitor import generate_report
+
+    return generate_report(**kwargs)
+
+
+def _default_hybrid_configs() -> list[Any]:
+    from kairix.quality.eval.hybrid_sweep import build_default_configs
+
+    return list(build_default_configs())
+
+
+def _default_sweep_hybrid(**kwargs: Any) -> Any:
+    from kairix.quality.eval.hybrid_sweep import sweep_hybrid_params
+
+    return sweep_hybrid_params(**kwargs)
+
+
+def _default_sweep_bm25(**kwargs: Any) -> Any:
+    from kairix.quality.eval.sweep import sweep_bm25_params
+
+    return sweep_bm25_params(**kwargs)
+
+
+def _default_index_db_path() -> Any:
+    from kairix.core.db import get_db_path
+
+    return get_db_path()
+
+
+def _default_open_db(path: Path) -> Any:
+    from kairix.core.db import open_db
+
+    return open_db(path)
+
+
+def _default_analyse_corpus(db: Any) -> Any:
+    from kairix.quality.eval.auto_gold import analyse_corpus
+
+    return analyse_corpus(db)
+
+
+def _default_template_queries(profile: Any, n: int) -> list[dict[str, Any]]:
+    from kairix.quality.eval.auto_gold import generate_template_queries
+
+    return list(generate_template_queries(profile, n=n))
+
+
+def _default_build_suite(queries: list[dict[str, Any]], path: str) -> None:
+    from kairix.quality.eval.auto_gold import build_suite
+
+    build_suite(queries, path)
+
+
+def _default_run_gate(scores: dict[str, float], **kwargs: Any) -> Any:
+    from kairix.quality.eval.gate import run_gate
+
+    return run_gate(scores, **kwargs)
+
+
+@dataclass
+class EvalCliDeps:
+    """Injectable collaborators for the ``kairix eval`` subcommands.
+
+    Canonical Deps shape (``kairix/worker.py::WorkerDeps``): production calls
+    :func:`main` without ``deps`` and every field's ``default_factory`` binds
+    the real (lazily imported) implementation. Tests construct
+    ``EvalCliDeps(new_suite_generator=lambda: fake, ...)`` to drive each
+    subcommand's parsing + result-mapping logic without Azure, hybrid search
+    or the real index.
+
+    - ``new_suite_generator`` / ``new_gold_builder``: zero-arg constructors.
+    - ``run_monitor`` / ``generate_report``: the monitor module entry points.
+    - ``hybrid_configs`` / ``sweep_hybrid`` / ``sweep_bm25``: the sweep engines.
+    - ``index_db_path`` / ``open_db``: the deployment index (auto-gold, tune,
+      gate corpus hints).
+    - ``analyse_corpus`` / ``template_queries`` / ``build_suite``: the
+      auto-gold corpus pipeline.
+    - ``run_gate``: the KFEAT-013 quality gate.
+    """
+
+    new_suite_generator: Callable[[], Any] = field(default_factory=lambda: _default_suite_generator)
+    new_gold_builder: Callable[[], Any] = field(default_factory=lambda: _default_gold_builder)
+    run_monitor: Callable[..., Any] = field(default_factory=lambda: _default_run_monitor)
+    generate_report: Callable[..., str] = field(default_factory=lambda: _default_generate_report)
+    hybrid_configs: Callable[[], list[Any]] = field(default_factory=lambda: _default_hybrid_configs)
+    sweep_hybrid: Callable[..., Any] = field(default_factory=lambda: _default_sweep_hybrid)
+    sweep_bm25: Callable[..., Any] = field(default_factory=lambda: _default_sweep_bm25)
+    index_db_path: Callable[[], Any] = field(default_factory=lambda: _default_index_db_path)
+    open_db: Callable[[Path], Any] = field(default_factory=lambda: _default_open_db)
+    analyse_corpus: Callable[[Any], Any] = field(default_factory=lambda: _default_analyse_corpus)
+    template_queries: Callable[[Any, int], list[dict[str, Any]]] = field(
+        default_factory=lambda: _default_template_queries
+    )
+    build_suite: Callable[[list[dict[str, Any]], str], None] = field(default_factory=lambda: _default_build_suite)
+    run_gate: Callable[..., Any] = field(default_factory=lambda: _default_run_gate)
+
+
+def _cmd_generate(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     print(f"Generating {args.count} benchmark cases → {args.output}")
     if not args.no_calibrate:
         print("Running calibration anchors...")
 
-    # Construct SuiteGenerator with default protocol implementations
+    # Production: SuiteGenerator with default protocol implementations
     # (LLMJudge wrapping ProviderEvalChatBackend; default Retriever;
-    # default QueryGenerator). Tests construct SuiteGenerator with
-    # FakeXxx fakes.
-    suite_gen = SuiteGenerator()
+    # default QueryGenerator). Tests inject a fake via EvalCliDeps.
+    suite_gen = deps.new_suite_generator()
     result = suite_gen.generate_suite(
         db_path=_resolve_db_path(args.db),
         output_path=args.output,
@@ -96,13 +221,11 @@ def _cmd_generate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_enrich(args: argparse.Namespace) -> int:
-    from kairix.quality.eval.generate import SuiteGenerator
-
+def _cmd_enrich(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     print(f"Enriching {args.suite} → {args.output}")
     print("Running hybrid search + LLM judge for each case...")
 
-    suite_gen = SuiteGenerator()
+    suite_gen = deps.new_suite_generator()
     result = suite_gen.enrich_suite(
         suite_path=args.suite,
         output_path=args.output,
@@ -126,12 +249,10 @@ def _cmd_enrich(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_monitor(args: argparse.Namespace) -> int:
-    from kairix.quality.eval.monitor import run_monitor
-
+def _cmd_monitor(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     print(f"Running canary monitor on {args.suite}...")
 
-    result = run_monitor(
+    result = deps.run_monitor(
         suite_path=args.suite,
         log_path=args.log,
         alert_threshold=args.alert_threshold,
@@ -157,10 +278,8 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_report(args: argparse.Namespace) -> int:
-    from kairix.quality.eval.monitor import generate_report
-
-    report = generate_report(log_path=args.log, days=args.days)
+def _cmd_report(args: argparse.Namespace, deps: EvalCliDeps) -> int:
+    report = deps.generate_report(log_path=args.log, days=args.days)
 
     if args.output:
         from pathlib import Path
@@ -186,21 +305,17 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_build_gold(args: argparse.Namespace) -> int:
-    from pathlib import Path
-
-    from kairix.quality.eval.gold_builder import GoldBuilder
-
+def _cmd_build_gold(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     systems = [s.strip() for s in args.systems.split(",")]
     print(f"Building independent gold suite: {args.suite} → {args.output}")
     print(f"Systems: {systems}")
     print(f"Judge runs: {args.judge_runs}")
 
-    # Construct GoldBuilder with default protocol implementations
+    # Production: GoldBuilder with default protocol implementations
     # (LLMJudge wrapping ProviderEvalChatBackend; default Retriever
-    # wrapping the production hybrid-search pipeline). Tests construct
-    # GoldBuilder with FakeLLMJudge / FakeRetriever for isolation.
-    gold_builder = GoldBuilder()
+    # wrapping the production hybrid-search pipeline). Tests inject a
+    # fake via EvalCliDeps.
+    gold_builder = deps.new_gold_builder()
     report = gold_builder.build_independent_gold(
         suite_path=Path(args.suite),
         output_path=Path(args.output),
@@ -222,18 +337,12 @@ def _cmd_build_gold(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_hybrid_sweep(args: argparse.Namespace) -> int:
+def _cmd_hybrid_sweep(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     import logging
-    from pathlib import Path
-
-    from kairix.quality.eval.hybrid_sweep import (
-        build_default_configs,
-        sweep_hybrid_params,
-    )
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    configs = build_default_configs()
+    configs = deps.hybrid_configs()
     if args.quick:
         # Quick mode: baselines + key hybrid variants + bm25_primary
         configs = [
@@ -257,7 +366,7 @@ def _cmd_hybrid_sweep(args: argparse.Namespace) -> int:
     collection = getattr(args, "collection", None)
     collections_override = [collection] if collection else None
 
-    report = sweep_hybrid_params(
+    report = deps.sweep_hybrid(
         suite_path=Path(args.suite),
         output_path=Path(args.output) if args.output else None,
         configs=configs,
@@ -298,24 +407,15 @@ def _cmd_hybrid_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_auto_gold(args: argparse.Namespace) -> int:
-    from pathlib import Path
-
-    from kairix.core.db import get_db_path, open_db
-    from kairix.quality.eval.auto_gold import (
-        analyse_corpus,
-        build_suite,
-        generate_template_queries,
-    )
-
+def _cmd_auto_gold(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     try:
-        db_path = get_db_path()
+        db_path = deps.index_db_path()
     except FileNotFoundError:  # pragma: no cover — defensive; ``get_db_path`` does not raise FileNotFoundError under any production configuration (it always returns a Path, existing or not)
         print("ERROR: kairix index not found. Run 'kairix embed' first.", file=sys.stderr)
         return 1
 
-    db = open_db(Path(db_path))
-    profile = analyse_corpus(db)
+    db = deps.open_db(Path(db_path))
+    profile = deps.analyse_corpus(db)
     db.close()
 
     print(f"Corpus: {profile.total_docs} documents across {len(profile.collections)} collections")
@@ -323,7 +423,7 @@ def _cmd_auto_gold(args: argparse.Namespace) -> int:
         f"  Procedural: {profile.procedural_count}  Date files: {profile.date_filename_count}  Entity: {profile.entity_doc_count}"
     )
 
-    queries = generate_template_queries(profile, n=args.count)
+    queries = deps.template_queries(profile, args.count)
     print(f"\nGenerated {len(queries)} evaluation queries")
 
     # Show category distribution
@@ -335,15 +435,35 @@ def _cmd_auto_gold(args: argparse.Namespace) -> int:
 
     output = args.output or "suites/auto-gold.yaml"
     Path(output).parent.mkdir(parents=True, exist_ok=True)
-    build_suite(queries, output)
+    deps.build_suite(queries, output)
     print(f"\nSuite written to: {output}")
     print(f"Next: kairix eval build-gold --suite {output} --output {output.replace('.yaml', '-graded.yaml')}")
     return 0
 
 
-def _cmd_tune(args: argparse.Namespace) -> int:
+def _corpus_hints(deps: EvalCliDeps) -> Any:
+    """Best-effort :class:`CorpusHints` from the deployment index, or ``None``.
+
+    Shared by ``tune`` and ``gate``; any failure to open / analyse the index
+    yields ``None`` so the caller falls back to generic hints.
+    """
+    from kairix.quality.eval.tune import CorpusHints
+
+    try:
+        db = deps.open_db(Path(deps.index_db_path()))
+        profile = deps.analyse_corpus(db)
+        db.close()
+    except Exception:
+        return None
+    return CorpusHints(
+        has_date_files=profile.date_filename_count > 0,
+        has_procedural_docs=profile.procedural_count > 0,
+        has_entity_folders=profile.entity_doc_count > 0,
+    )
+
+
+def _cmd_tune(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     import json
-    from pathlib import Path
 
     from kairix.quality.eval.tune import CorpusHints, analyse_results, recommend
 
@@ -374,22 +494,10 @@ def _cmd_tune(args: argparse.Namespace) -> int:
     print(f"\nWeak categories: {', '.join(analysis.weak_categories)}")
 
     # Build corpus hints from the index if available
-    hints = CorpusHints()
-    try:
-        from kairix.core.db import get_db_path, open_db
-        from kairix.quality.eval.auto_gold import analyse_corpus
-
-        db_path = get_db_path()
-        db = open_db(Path(db_path))
-        profile = analyse_corpus(db)
-        db.close()
-        hints = CorpusHints(
-            has_date_files=profile.date_filename_count > 0,
-            has_procedural_docs=profile.procedural_count > 0,
-            has_entity_folders=profile.entity_doc_count > 0,
-        )
-    except Exception:
+    hints = _corpus_hints(deps)
+    if hints is None:
         print("  (index not available — using generic recommendations)")
+        hints = CorpusHints()
 
     recs = recommend(analysis.weak_categories, hints)
     if recs:
@@ -404,16 +512,14 @@ def _cmd_tune(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_gate(args: argparse.Namespace) -> int:
+def _cmd_gate(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     """Stage 5 of KFEAT-013 onboarding: read a benchmark result and apply
     the quality gate. Exits 0 on PASS, 2 on HOLD (so wrappers can chain on
     success). Argument schema mirrors ``eval tune`` deliberately: same
     --result, same --floor.
     """
     import json
-    from pathlib import Path
 
-    from kairix.quality.eval.gate import run_gate
     from kairix.quality.eval.tune import CorpusHints
 
     try:
@@ -431,31 +537,16 @@ def _cmd_gate(args: argparse.Namespace) -> int:
         return 1
 
     # Best-effort corpus hints from the local index — same approach as tune.
-    hints = CorpusHints()
-    try:
-        from kairix.core.db import get_db_path, open_db
-        from kairix.quality.eval.auto_gold import analyse_corpus
+    # No index available → no hints; recommendations stay generic.
+    hints = _corpus_hints(deps) or CorpusHints()
 
-        db_path = get_db_path()
-        db = open_db(Path(db_path))
-        profile = analyse_corpus(db)
-        db.close()
-        hints = CorpusHints(
-            has_date_files=profile.date_filename_count > 0,
-            has_procedural_docs=profile.procedural_count > 0,
-            has_entity_folders=profile.entity_doc_count > 0,
-        )
-    except Exception:
-        # No index available — fall back to no hints. Recommendations stay generic.
-        pass
-
-    result = run_gate(scores, weighted_total=weighted_total, hints=hints, floor=args.floor)
+    result = deps.run_gate(scores, weighted_total=weighted_total, hints=hints, floor=args.floor)
     print(result.format())
 
     return 0 if result.passed else 2
 
 
-def _cmd_chunk_stats(args: argparse.Namespace) -> int:
+def _cmd_chunk_stats(args: argparse.Namespace, _deps: EvalCliDeps) -> int:
     """ADR-028 §"Quality evaluation" #4 — emit per-source-type chunk-size stats.
 
     Reads ``content_vectors`` joined against ``documents`` / ``content``
@@ -469,14 +560,10 @@ def _cmd_chunk_stats(args: argparse.Namespace) -> int:
     return emit_chunk_stats(db_path, sys.stdout)
 
 
-def _cmd_sweep(args: argparse.Namespace) -> int:
-    from pathlib import Path
-
-    from kairix.quality.eval.sweep import sweep_bm25_params
-
+def _cmd_sweep(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     print(f"Sweeping BM25 parameters against: {args.suite}")
 
-    report = sweep_bm25_params(
+    report = deps.sweep_bm25(
         suite_path=Path(args.suite),
         output_path=Path(args.output) if args.output else None,
     )
@@ -507,7 +594,12 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, *, deps: EvalCliDeps | None = None) -> None:
+    """Parse ``argv`` and dispatch the ``kairix eval`` subcommand.
+
+    ``deps`` (:class:`EvalCliDeps`) carries the subcommands' collaborators;
+    production omits it and the real implementations are bound.
+    """
     parser = argparse.ArgumentParser(
         prog="kairix eval",
         description="Automated evaluation suite generation and monitoring",
@@ -682,4 +774,4 @@ def main(argv: list[str] | None = None) -> None:
     }
 
     fn = dispatch[args.subcommand]
-    sys.exit(fn(args))
+    sys.exit(fn(args, deps if deps is not None else EvalCliDeps()))

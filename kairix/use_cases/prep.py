@@ -181,29 +181,56 @@ def default_search_callable(
     return pipeline.search(**kwargs)
 
 
+def _default_chat_backend(provider: Any) -> Any:
+    """Production chat backend — wrap ``provider`` in :class:`ProviderChatBackend`."""
+    from kairix.transport.embed_service import ProviderChatBackend
+
+    return ProviderChatBackend(provider)
+
+
+@dataclass
+class ChatAdapterDeps:
+    """Injectable collaborators for :func:`default_chat_callable`.
+
+    Canonical Deps shape (``kairix/worker.py::WorkerDeps``). Production
+    omits ``deps`` and resolves the configured plugin; tests construct
+    ``ChatAdapterDeps(provider_name=..., resolve_provider=..., make_backend=...)``.
+
+    - ``provider_name``: returns the configured ``provider:`` name (or
+      ``None`` when unset). Default reads ``kairix.paths.provider_name``.
+    - ``resolve_provider``: ``(name) -> Provider`` plugin lookup. Default
+      ``kairix.providers.get_provider``.
+    - ``make_backend``: ``(provider) -> backend`` with a ``.chat(**kwargs)``
+      method. Default wraps in :class:`ProviderChatBackend`.
+    """
+
+    provider_name: Callable[[], str | None] = field(default_factory=lambda: _resolve_production_provider_name)
+    resolve_provider: Callable[[str], Any] = field(default_factory=lambda: _resolve_production_provider)
+    make_backend: Callable[[Any], Any] = field(default_factory=lambda: _default_chat_backend)
+
+
 def default_chat_callable(
     *,
-    provider_name_fn: Callable[[], str | None] = _resolve_production_provider_name,
-    provider_resolver: Callable[[str], Any] = _resolve_production_provider,
-    chat_backend_factory: Callable[[Any], Any] | None = None,
+    deps: ChatAdapterDeps | None = None,
     **kwargs: Any,
 ) -> str:
     """Production chat adapter used by ``PrepDeps`` when no override is passed.
 
-    Resolves the configured plugin via ``provider_name_fn`` + ``provider_resolver``,
-    wraps it in :class:`ProviderChatBackend` (override via ``chat_backend_factory``
-    for tests), and forwards ``**kwargs`` to ``backend.chat``. Raises ``ValueError``
-    when no provider is configured — surfacing a config error at the boundary
-    rather than letting the call vanish into a generic plugin failure.
+    Resolves the configured plugin via ``deps.provider_name`` +
+    ``deps.resolve_provider``, wraps it via ``deps.make_backend`` (default
+    :class:`ProviderChatBackend`), and forwards ``**kwargs`` to
+    ``backend.chat``. Raises ``ValueError`` when no provider is configured —
+    surfacing a config error at the boundary rather than letting the call
+    vanish into a generic plugin failure.
     """
-    from kairix.transport.embed_service import ProviderChatBackend
-
-    name = provider_name_fn()
+    deps = deps if deps is not None else ChatAdapterDeps()
+    name = deps.provider_name()
     if name is None:
         raise ValueError("kairix.config.yaml is missing the required 'provider:' field")
-    provider = provider_resolver(name)
-    backend = (chat_backend_factory or ProviderChatBackend)(provider)
-    return backend.chat(**kwargs)
+    provider = deps.resolve_provider(name)
+    backend = deps.make_backend(provider)
+    reply: str = backend.chat(**kwargs)
+    return reply
 
 
 @dataclass(frozen=True)

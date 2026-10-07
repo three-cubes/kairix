@@ -132,11 +132,10 @@ def test_default_status_seams_reflect_the_platform(isolated_platform: Path) -> N
     status = service.status()
 
     assert status.provider_done is llm_credentials_available()
-    # The session-wide hermetic KAIRIX_DOCUMENT_ROOT is an explicit
-    # override, so the default document-root seam reports it.
-    expected_root = Path(os.environ["KAIRIX_DOCUMENT_ROOT"]).expanduser()
-    assert SetupServiceDeps().configured_document_root_fn() == expected_root
-    assert status.source_done is expected_root.is_dir()
+    # The isolated platform has no document-root override and no config, so
+    # the production seam reports "not configured" and the source step is open.
+    assert SetupServiceDeps().configured_document_root_fn() is None
+    assert status.source_done is False
     assert status.index_done is False
 
 

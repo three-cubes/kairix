@@ -553,6 +553,14 @@ class FactoryDeps:
     # composed L0/L1 tiering + ``max_tier`` ceiling through the factory;
     # production stays None until summaries are generated + activated.
     summary_loader_override: Any = None  # SummaryLoader | None
+    # ADR-020 — connector tick budget + disk-watermark gate. ``None`` keeps
+    # the ConnectorPipeline production default (queries ``/data``; falls
+    # back to ``sys.maxsize`` when ``/data`` isn't mounted). Operators on
+    # non-/data layouts and integration / BDD tests pass a
+    # ``Callable[[], int]`` free-bytes probe through
+    # :func:`build_connector_pipeline`. Connector-pipeline only — does not
+    # affect the search-pipeline cache key.
+    disk_free_override: Any = None  # Callable[[], int] | None
 
 
 class _QueryCacheDisabledSentinel:
@@ -1402,7 +1410,6 @@ def build_connector_pipeline(
     silver: Any = None,
     chunk_writer: Any = None,
     entity_graph_sink: Any = None,
-    disk_free_resolver: Any = None,
     deps: FactoryDeps | None = None,
 ) -> Any:
     """Construct a production-shape ConnectorPipeline against ``db``.
@@ -1421,11 +1428,11 @@ def build_connector_pipeline(
     Optional ``silver`` / ``chunk_writer`` / ``entity_graph_sink``
     overrides let integration tests inject scripted-failure stand-ins.
 
-    ``disk_free_resolver`` injects a deterministic free-bytes resolver
-    so integration / BDD tests can exercise the ADR-020 watermark gate
-    without touching the host filesystem. Default ``None`` keeps the
-    pipeline's production default (queries ``/data``; falls back to
-    ``sys.maxsize`` when ``/data`` isn't mounted).
+    ``deps.disk_free_override`` injects a deterministic free-bytes
+    resolver so integration / BDD tests can exercise the ADR-020
+    watermark gate without touching the host filesystem. Default ``None``
+    keeps the pipeline's production default (queries ``/data``; falls
+    back to ``sys.maxsize`` when ``/data`` isn't mounted).
     """
     # Auto-hydrate secrets at the factory boundary so Python-API consumers
     # (eval harnesses, integration tests outside the worker, ad-hoc scripts)
@@ -1475,7 +1482,7 @@ def build_connector_pipeline(
         entity_graph_sink=entity_graph_sink if entity_graph_sink is not None else _SqliteEntityGraphSink(db),
         cursor_store=CursorStore(db),
         dead_letter=DeadLetterStore(db),
-        disk_free_resolver=disk_free_resolver,
+        disk_free_resolver=deps.disk_free_override,
     )
 
 

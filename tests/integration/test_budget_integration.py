@@ -6,7 +6,7 @@ These tests wire ``apply_budget`` after a real ``SearchPipeline`` produces
 count. The pipeline is built from ``tests.fakes`` (no @patch, no monkeypatch
 on kairix code) and the Phase-2 summary path is exercised by injecting
 ``FakeSummaryLoader`` from ``tests.fakes`` via ``apply_budget``'s
-``summary_loader=`` kwarg.
+``deps=BudgetDeps(tier_summaries=...)``.
 
 Coverage:
 
@@ -25,6 +25,7 @@ from kairix.core.search.budget import (
     DEFAULT_BUDGET,
     L1_BUDGET_MIN,
     L2_BUDGET_MIN,
+    BudgetDeps,
     apply_budget,
 )
 from kairix.core.search.config import RetrievalConfig
@@ -295,7 +296,7 @@ def test_integration_budget_uses_l0_l1_summaries_when_available() -> None:
         budget=budget_in_l1_band,
         l1_threshold=0.001,
         l2_threshold=1.0,
-        summary_loader=loader,
+        deps=BudgetDeps(tier_summaries=loader),
     )
     assert len(out) >= 1
 

@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, MutableMapping
 from functools import lru_cache
 from pathlib import Path
 
@@ -86,7 +86,7 @@ _SECRET_ENV_MAP = {
 }
 
 
-def load_secrets(path: str | Path | None = None) -> int:
+def load_secrets(path: str | Path | None = None, *, env: MutableMapping[str, str] | None = None) -> int:
     """
     Load KEY=VALUE pairs from the secrets file into os.environ.
 
@@ -97,6 +97,11 @@ def load_secrets(path: str | Path | None = None) -> int:
               (container), else ~/.config/kairix/secrets/kairix.env
               (pip install) — the same location ``kairix secrets set``
               writes to, so persisted secrets hydrate at the next boot.
+        env:  The env mapping to resolve ``KAIRIX_SECRETS_FILE`` from AND
+              to load the pairs into. ``None`` (production) is the live
+              ``os.environ``; tests pass a dict so the default-path
+              resolution + load are observable without mutating the
+              process environment (F2-clean).
 
     Returns:
         Number of environment variables loaded (0 if file absent or empty).
@@ -107,7 +112,8 @@ def load_secrets(path: str | Path | None = None) -> int:
         # resolution rule, lazy import to avoid a module cycle.
         from kairix.secrets.store import resolve_bundle_path
 
-        path = resolve_bundle_path()
+        path = resolve_bundle_path(env=env)
+    target: MutableMapping[str, str] = env if env is not None else os.environ
     secrets_path = Path(path)
 
     if not secrets_path.exists():
@@ -121,7 +127,7 @@ def load_secrets(path: str | Path | None = None) -> int:
 
     count = 0
     for lineno, line in enumerate(split_bundle_lines(text), 1):
-        if _apply_secret_line(line, lineno):
+        if _apply_secret_line(line, lineno, target):
             count += 1
 
     if count:
@@ -129,8 +135,8 @@ def load_secrets(path: str | Path | None = None) -> int:
     return count
 
 
-def _apply_secret_line(line: str, lineno: int) -> bool:
-    """Parse one ``KEY=VALUE`` line and set ``os.environ[KEY]`` if applicable.
+def _apply_secret_line(line: str, lineno: int, target: MutableMapping[str, str]) -> bool:
+    """Parse one ``KEY=VALUE`` line and set ``target[KEY]`` if applicable.
 
     Returns True when an env var was set, False when the line was skipped
     (blank/comment/malformed/key already in environ). Extracted from
@@ -146,10 +152,10 @@ def _apply_secret_line(line: str, lineno: int) -> bool:
         return False
     key, _, value = stripped.partition("=")
     key = key.strip()
-    if not key or key in os.environ:
+    if not key or key in target:
         # Existing env var takes priority — sidecar secrets are fallback
         return False
-    os.environ[key] = decode_bundle_value(value)
+    target[key] = decode_bundle_value(value)
     return True
 
 
@@ -173,14 +179,14 @@ def load_secrets_file(path: Path) -> dict[str, str]:
     return result
 
 
-def _read_secret_file(name: str) -> str | None:
+def _read_secret_file(name: str, env: Mapping[str, str]) -> str | None:
     """Read a single secret from a per-file secret (Docker secrets pattern).
 
     Looks for a file named ``name`` in the secrets directory
     (``/run/secrets/`` for Docker, ``~/.config/kairix/secrets/`` for pip).
     Returns the file content stripped of whitespace, or None.
     """
-    for secrets_dir in _secret_file_dirs():
+    for secrets_dir in _secret_file_dirs(env):
         secret_path = Path(secrets_dir) / name
         if secret_path.is_file():
             try:
@@ -192,43 +198,46 @@ def _read_secret_file(name: str) -> str | None:
     return None
 
 
-def _secret_file_dirs() -> list[str]:
+def _secret_file_dirs(env: Mapping[str, str]) -> list[str]:
     """Return directories to scan for per-file secrets, in priority order."""
     dirs = []
     # Explicit override
-    override = os.environ.get("KAIRIX_SECRETS_DIR")
+    override = env.get("KAIRIX_SECRETS_DIR")
     if override:
         dirs.append(override)
     # Docker secrets (tmpfs)
     dirs.append(_DEFAULT_SECRETS_DIR)
     # pip install path (XDG)
-    xdg = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    # An empty XDG_CONFIG_HOME means "unset" (XDG Base Directory spec) —
+    # falling back only on a missing key would scan a CWD-relative
+    # ``kairix/secrets`` directory instead.
+    xdg = env.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     dirs.append(str(Path(xdg) / "kairix" / "secrets"))
     return dirs
 
 
-def _read_secret_from_env(env_var: str | None) -> str | None:
+def _read_secret_from_env(env_var: str | None, env: Mapping[str, str]) -> str | None:
     """Step 1 resolver: direct environment variable lookup."""
     if not env_var:
         return None
-    value = os.environ.get(env_var)
+    value = env.get(env_var)
     return value or None
 
 
-def _read_secret_from_bundle(env_var: str | None) -> str | None:
+def _read_secret_from_bundle(env_var: str | None, env: Mapping[str, str]) -> str | None:
     """Step 3 resolver: legacy bundle file (vault-agent sidecar pattern)."""
     if not env_var:
         return None
-    secrets_dir = os.environ.get("KAIRIX_SECRETS_DIR", _DEFAULT_SECRETS_DIR)
+    secrets_dir = env.get("KAIRIX_SECRETS_DIR", _DEFAULT_SECRETS_DIR)
     secrets_file = Path(secrets_dir) / "kairix.env"
     if not secrets_file.exists():
         return None
     return load_secrets_file(secrets_file).get(env_var) or None
 
 
-def _read_secret_from_keyvault(name: str) -> str | None:
+def _read_secret_from_keyvault(name: str, env: Mapping[str, str]) -> str | None:
     """Step 4 resolver: Azure Key Vault CLI fallback (requires KAIRIX_KV_NAME)."""
-    kv_name = os.environ.get("KAIRIX_KV_NAME", "")
+    kv_name = env.get("KAIRIX_KV_NAME", "")
     if not kv_name:
         return None
     try:
@@ -260,7 +269,7 @@ def _read_secret_from_keyvault(name: str) -> str | None:
     return None
 
 
-def get_secret(name: str, required: bool = True) -> str | None:
+def get_secret(name: str, required: bool = True, *, env: Mapping[str, str] | None = None) -> str | None:
     """
     Resolve a secret by name. Returns value or None (raises if required).
 
@@ -273,6 +282,10 @@ def get_secret(name: str, required: bool = True) -> str | None:
     Args:
         name:     Secret name (e.g. "kairix-llm-api-key").
         required: If True and no value found, raises OSError. Default True.
+        env:      The env mapping every resolution step reads (the mapped
+                  env var, ``KAIRIX_SECRETS_DIR``, ``KAIRIX_KV_NAME``,
+                  ``XDG_CONFIG_HOME``). ``None`` (production) is the live
+                  ``os.environ``; tests pass a dict (F2-clean).
 
     Returns:
         Secret value string, or None if not found and required=False.
@@ -281,12 +294,13 @@ def get_secret(name: str, required: bool = True) -> str | None:
         OSError: When required=True and the secret cannot be resolved.
     """
     env_var = _SECRET_ENV_MAP.get(name)
+    e: Mapping[str, str] = env if env is not None else os.environ
 
     resolvers: tuple[Callable[[], str | None], ...] = (
-        lambda: _read_secret_from_env(env_var),
-        lambda: _read_secret_file(name),
-        lambda: _read_secret_from_bundle(env_var),
-        lambda: _read_secret_from_keyvault(name),
+        lambda: _read_secret_from_env(env_var, e),
+        lambda: _read_secret_file(name, e),
+        lambda: _read_secret_from_bundle(env_var, e),
+        lambda: _read_secret_from_keyvault(name, e),
     )
     for resolver in resolvers:
         value = resolver()

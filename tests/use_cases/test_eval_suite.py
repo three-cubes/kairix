@@ -394,7 +394,7 @@ def test_resolve_production_fact_extractor_falls_back_on_import_error() -> None:
     ``resolve_production_fact_extractor`` returns a Null fallback AND
     writes an F21-shaped warning to ``err_sink``.
 
-    Drives the ImportError branch by injecting a ``factory_loader`` that
+    Drives the ImportError branch by injecting an ``import_extractor_factory`` that
     raises — the documented composition seam, NOT internal-substitution
     patching. The helper's contract guarantees that ANY ImportError
     inside the loader degrades cleanly with operator-visible warning.
@@ -412,7 +412,7 @@ def test_resolve_production_fact_extractor_falls_back_on_import_error() -> None:
     extractor = _use_case.resolve_production_fact_extractor(
         fake_llm,
         err_sink=err,
-        factory_loader=_broken_loader,  # type: ignore[arg-type] — stub deliberately violates loader Protocol to exercise failure path
+        deps=_use_case.EvalWiringDeps(import_extractor_factory=_broken_loader),  # type: ignore[arg-type] — stub deliberately violates loader Protocol to exercise failure path
     )
 
     # Fallback: Null extractor returns [] regardless of input.
@@ -581,7 +581,7 @@ def test_resolve_search_pipeline_default_invokes_builder() -> None:
     """In default mode (``via_prep=True``, no override), the helper invokes
     the resolved builder and returns its pipeline.
 
-    Drives the production-default branch via a builder_loader that
+    Drives the production-default branch via an import_pipeline_builder that
     returns a callable producing a sentinel pipeline. Pins that the
     helper invokes the builder rather than returning the loader's
     function reference uncalled.
@@ -605,7 +605,7 @@ def test_resolve_search_pipeline_default_invokes_builder() -> None:
         override=None,
         via_prep=True,
         err_sink=err,
-        builder_loader=_loader,  # type: ignore[arg-type] — test stub mimics builder Protocol surface without full type compatibility
+        deps=_use_case.EvalWiringDeps(import_pipeline_builder=_loader),  # type: ignore[arg-type] — test stub mimics builder Protocol surface without full type compatibility
     )
     assert result is sentinel
     assert err.getvalue() == ""
@@ -664,7 +664,7 @@ def test_resolve_search_pipeline_falls_back_on_import_error() -> None:
         override=None,
         via_prep=True,
         err_sink=err,
-        builder_loader=_broken_loader,  # type: ignore[arg-type] — stub deliberately violates builder Protocol to exercise failure path
+        deps=_use_case.EvalWiringDeps(import_pipeline_builder=_broken_loader),  # type: ignore[arg-type] — stub deliberately violates builder Protocol to exercise failure path
     )
     assert result == 2
     warning = err.getvalue()
@@ -683,8 +683,8 @@ def test_main_propagates_search_pipeline_exit_code(tmp_path: Path) -> None:
     branch in ``main`` and this fails because the use case proceeds
     to call SuiteRunner against an int "deps" and crashes.
 
-    We force a builder_loader to raise by going through the public
-    main() — main() doesn't expose the builder_loader kwarg, so this
+    We force import_pipeline_builder to raise by going through the public
+    main() — main() doesn't expose EvalWiringDeps, so this
     test instead exercises ``resolve_deps`` directly to pin the
     propagation behaviour.
     """
@@ -708,7 +708,7 @@ def test_main_propagates_search_pipeline_exit_code(tmp_path: Path) -> None:
         override=None,
         via_prep=True,
         err_sink=err,
-        builder_loader=_broken_loader,  # type: ignore[arg-type] — stub deliberately violates builder Protocol to exercise failure path
+        deps=_use_case.EvalWiringDeps(import_pipeline_builder=_broken_loader),  # type: ignore[arg-type] — stub deliberately violates builder Protocol to exercise failure path
     )
     assert result_pipeline == 2
 
@@ -869,7 +869,7 @@ def test_resolve_production_fact_extractor_falls_back_on_factory_construction_er
     extractor = _use_case.resolve_production_fact_extractor(
         fake_llm,
         err_sink=err,
-        factory_loader=_loader_returning_raising_factory,  # type: ignore[arg-type] — stub returns a factory that raises; exercises factory-runtime-failure branch
+        deps=_use_case.EvalWiringDeps(import_extractor_factory=_loader_returning_raising_factory),  # type: ignore[arg-type] — stub returns a factory that raises; exercises factory-runtime-failure branch
     )
 
     # Fallback: Null extractor returns [] regardless of input.

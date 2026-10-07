@@ -109,6 +109,23 @@ class SummaryLoader(Protocol):
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class BudgetDeps:
+    """Injectable collaborators for :func:`apply_budget`.
+
+    Canonical Deps shape (``kairix/worker.py::WorkerDeps``) for the
+    Phase 1 → Phase 2 summary switch:
+
+    - ``tier_summaries``: the L0 / L1 :class:`SummaryLoader`. ``None`` (the
+      default) keeps Phase 1 behaviour — every kept result is served as the
+      full ``L2`` snippet. ``SearchPipeline`` passes its configured
+      ``tier_summaries`` loader in production once summaries are activated;
+      tests pass ``FakeSummaryLoader`` from ``tests/fakes.py``.
+    """
+
+    tier_summaries: SummaryLoader | None = None
+
+
 @dataclass
 class BudgetedResult:
     """A FusedResult annotated with its tier and token count."""
@@ -130,16 +147,16 @@ def apply_budget(
     l1_threshold: float = L1_SCORE_THRESHOLD,
     l2_threshold: float = L2_SCORE_THRESHOLD,
     *,
-    summary_loader: SummaryLoader | None = None,
+    deps: BudgetDeps | None = None,
     max_tier: Tier = DEFAULT_MAX_TIER,
 ) -> list[BudgetedResult]:
     """
     Apply token budget to fused results, assigning each a tier and truncating at cap.
 
-    Phase 1 (``summary_loader=None``): all results get tier ``L2`` and the
-    snippet (frontmatter-stripped) is returned as content.
+    Phase 1 (``deps.tier_summaries is None``): all results get tier ``L2``
+    and the snippet (frontmatter-stripped) is returned as content.
 
-    Phase 2+ (``summary_loader=<SummaryLoader>``): tier is selected per
+    Phase 2+ (``deps=BudgetDeps(tier_summaries=<SummaryLoader>)``): tier is selected per
     score/budget; ``L0`` returns the abstract via ``loader.get_l0``, ``L1``
     returns the overview via ``loader.get_l1`` (falling back to ``L0``),
     ``L2`` returns the snippet. The snippet is the fallback whenever the
@@ -150,14 +167,16 @@ def apply_budget(
         budget:         Hard token cap. Default DEFAULT_BUDGET.
         l1_threshold:   Score threshold for L1 promotion (Phase 2+).
         l2_threshold:   Score threshold for L2 promotion (Phase 2+).
-        summary_loader: Phase 2 loader. ``None`` (default) keeps Phase 1
-                        behaviour. Tests pass ``FakeSummaryLoader``.
+        deps:           :class:`BudgetDeps`. ``None`` (default) — or a Deps
+                        whose ``tier_summaries`` is ``None`` — keeps Phase 1
+                        behaviour. Tests pass
+                        ``BudgetDeps(tier_summaries=FakeSummaryLoader(...))``.
         max_tier:       PLA-270 ceiling — the richest tier the caller will
                         accept. The score/budget selection is clamped DOWN to
                         this so an agent can request the cheapest sufficient
                         representation (``"L0"`` abstracts, ``"L1"`` overviews,
                         ``"L2"`` full snippets — the default, no clamp). Only
-                        meaningful with a ``summary_loader``; Phase 1 has no
+                        meaningful with ``tier_summaries``; Phase 1 has no
                         summaries to serve so every row stays ``L2``.
 
     Returns:
@@ -168,6 +187,7 @@ def apply_budget(
     if not results or budget <= 0:
         return []
 
+    summary_loader = (deps if deps is not None else BudgetDeps()).tier_summaries
     try:
         return _apply_budget_impl(results, budget, l1_threshold, l2_threshold, summary_loader, max_tier)
     except Exception as e:
@@ -319,7 +339,7 @@ def _get_content_for_tier(
 # ---------------------------------------------------------------------------
 # Phase 2 production loader — pragma'd until summary generation is enabled.
 # Tests inject FakeSummaryLoader from tests/fakes.py through ``apply_budget``'s
-# ``summary_loader=`` kwarg, exercising every Phase-2 branch through the public
+# ``deps=BudgetDeps(tier_summaries=...)``, exercising every Phase-2 branch through the public
 # surface. The default loader is constructed only by callers that opt in to
 # Phase 2 once it ships.
 # ---------------------------------------------------------------------------

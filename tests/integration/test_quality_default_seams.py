@@ -1,8 +1,8 @@
 """F86: the probe / soak / eval production DI-default seams actually execute.
 
 ``run_probe_search`` / ``run_probe_burst`` bind ``_default_suite_loader``
-and ``_default_search_fn`` when no ``suite_loader`` / ``searcher`` is
-injected; ``run_soak`` binds ``_default_workload_runner``;
+and ``_default_search_fn`` when ``ProbeDeps`` leaves ``load_suite`` / ``search`` unset;
+``run_soak`` binds ``_default_workload_runner``;
 ``LLMJudgeScorer`` binds ``_default_chat_backend``. Every other test of
 those surfaces injects a fake, so before F86 none of the production
 defaults ever ran (the escape-4 shape).
@@ -50,7 +50,7 @@ from kairix.core.search.config_loader import reset_config_cache
 from kairix.paths import clear_cache
 from kairix.quality.eval.scorers import LLMJudgeScorer
 from kairix.quality.probe.burst import run_probe_burst
-from kairix.quality.probe.runner import SampledQuery, run_probe_search
+from kairix.quality.probe.runner import ProbeDeps, SampledQuery, run_probe_search
 from kairix.quality.soak.runner import run_soak
 
 pytestmark = pytest.mark.integration
@@ -136,7 +136,9 @@ def _one_case_loader(_suite: str) -> list[_Case]:
 def test_probe_search_default_suite_loader_reads_the_suite_file(tmp_path: Path) -> None:
     seen: list[str] = []
 
-    result = run_probe_search(str(_suite_file(tmp_path)), queries=4, searcher=_recording_searcher(seen), warmup=False)
+    result = run_probe_search(
+        str(_suite_file(tmp_path)), queries=4, deps=ProbeDeps(search=_recording_searcher(seen)), warmup=False
+    )
 
     assert result.queries == 4
     assert result.errors == 0
@@ -146,7 +148,9 @@ def test_probe_search_default_suite_loader_reads_the_suite_file(tmp_path: Path) 
 def test_probe_burst_default_suite_loader_reads_the_suite_file(tmp_path: Path) -> None:
     seen: list[str] = []
 
-    result = run_probe_burst(str(_suite_file(tmp_path)), total_queries=3, searcher=_recording_searcher(seen))
+    result = run_probe_burst(
+        str(_suite_file(tmp_path)), total_queries=3, deps=ProbeDeps(search=_recording_searcher(seen))
+    )
 
     assert result.total_queries == 3
     assert result.errors == 0
@@ -158,7 +162,7 @@ def test_probe_burst_default_suite_loader_reads_the_suite_file(tmp_path: Path) -
 
 @pytest.mark.usefixtures("unconfigured_platform")
 def test_probe_search_default_search_fn_drives_the_real_pipeline() -> None:
-    result = run_probe_search("ignored", queries=2, suite_loader=_one_case_loader, warmup=False)
+    result = run_probe_search("ignored", queries=2, deps=ProbeDeps(load_suite=_one_case_loader), warmup=False)
 
     # No provider configured → the real factory refuses to build; the
     # executor records each query as an error instead of raising.
@@ -169,7 +173,7 @@ def test_probe_search_default_search_fn_drives_the_real_pipeline() -> None:
 
 @pytest.mark.usefixtures("unconfigured_platform")
 def test_probe_burst_default_search_fn_drives_the_real_pipeline() -> None:
-    result = run_probe_burst("ignored", total_queries=2, suite_loader=_one_case_loader)
+    result = run_probe_burst("ignored", total_queries=2, deps=ProbeDeps(load_suite=_one_case_loader))
 
     assert result.total_queries == 2
     assert result.errors == 2

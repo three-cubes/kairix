@@ -38,11 +38,15 @@ def default_get_azure_config() -> tuple[str, str, str]:
     return get_azure_config_from_credentials()
 
 
-def default_preflight_check(api_key: str, endpoint: str, deployment: str) -> int:
-    """Production default for ``EmbedDependencies.preflight_check``."""
+def default_preflight_check(api_key: str, endpoint: str, deployment: str, **kwargs: Any) -> int:
+    """Production default for ``EmbedDependencies.preflight_check``.
+
+    ``**kwargs`` pass through to :func:`kairix.core.embed.embed.preflight_check`
+    (e.g. its ``client=`` seam), mirroring :func:`default_embed_batch`.
+    """
     from kairix.core.embed.embed import preflight_check
 
-    return preflight_check(api_key, endpoint, deployment)
+    return preflight_check(api_key, endpoint, deployment, **kwargs)
 
 
 def default_embed_batch(

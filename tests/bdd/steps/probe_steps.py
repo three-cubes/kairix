@@ -3,7 +3,7 @@
 Drives ``run_probe_search`` and ``run_probe_burst`` through injected
 SearchClient-shaped fakes (Protocol from
 :mod:`kairix.quality.probe.clients`). Tests construct a fixed list of
-benchmark-shaped cases via ``suite_loader``, so no real benchmark suite
+benchmark-shaped cases via ``ProbeDeps.load_suite``, so no real benchmark suite
 is loaded and no real search pipeline is built.
 
 Reference pattern: ``tests/quality/probe/test_runner.py::FakeFastSearchClient``.
@@ -20,6 +20,7 @@ from pytest_bdd import given, parsers, then, when
 
 from kairix.quality.probe.burst import BurstResult, run_probe_burst
 from kairix.quality.probe.runner import (
+    ProbeDeps,
     ProbeResult,
     SampledQuery,
     run_probe_search,
@@ -130,8 +131,7 @@ def _when_run_probe_search(_probe_state: dict[str, Any], n: int, c: int) -> None
         suite="fake",
         queries=n,
         concurrency=c,
-        suite_loader=_suite_loader,
-        searcher=_probe_state["searcher"],
+        deps=ProbeDeps(load_suite=_suite_loader, search=_probe_state["searcher"]),
     )
 
 
@@ -154,16 +154,14 @@ def _when_capture_case_ids(_probe_state: dict[str, Any]) -> None:
         queries=20,
         concurrency=1,
         seed=_FIXED_SEED,
-        suite_loader=_suite_loader,
-        searcher=_collect_a,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_collect_a),
     )
     run_probe_search(
         suite="fake",
         queries=20,
         concurrency=1,
         seed=_FIXED_SEED,
-        suite_loader=_suite_loader,
-        searcher=_collect_b,
+        deps=ProbeDeps(load_suite=_suite_loader, search=_collect_b),
     )
     _probe_state["case_ids_a"] = seen_a
     _probe_state["case_ids_b"] = seen_b
@@ -176,8 +174,7 @@ def _when_run_probe_burst(_probe_state: dict[str, Any], n: int, c: int) -> None:
         total_queries=n,
         peak_concurrency=c,
         bucket_ms=100,  # tight bucket so a fast workload still produces buckets
-        suite_loader=_suite_loader,
-        searcher=_probe_state["searcher"],
+        deps=ProbeDeps(load_suite=_suite_loader, search=_probe_state["searcher"]),
     )
 
 

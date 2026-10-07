@@ -11,7 +11,7 @@ so the subprocess test can drive the warm-up against a tmp sandbox
 without setting any ``KAIRIX_*`` env vars (F2-clean by construction).
 The CLI threads both args into a :class:`kairix.paths.KairixPaths`
 overlay and passes that to ``build_search_pipeline(paths=...)`` via
-the existing ``pipeline_builder`` seam on ``run_warm``.
+the ``WarmDeps.build_pipeline`` seam on ``run_warm``.
 
 Boundary chain exercised:
 
@@ -21,7 +21,7 @@ Boundary chain exercised:
     → kairix/cli.py dispatch
     → kairix/platform/warm/cli.py:main
     → _build_pipeline_builder_for_paths → KairixPaths overlay
-    → run_warm(pipeline_builder=<lambda using overlay>)
+    → run_warm(deps=WarmDeps(build_pipeline=<lambda using overlay>))
     → JSON envelope to stdout
 
 Outcome assertion: the warm envelope is well-formed JSON with the

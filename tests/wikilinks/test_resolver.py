@@ -4,7 +4,7 @@ Tests for kairix.knowledge.wikilinks.resolver
 Covers:
 - load_entities_from_bootstrap(): parses a synthetic index file (tmp_path fixture)
 - load_entities_from_neo4j(): loads from a mock Neo4j client
-- get_entities(): Neo4j-prefer / fallback logic via monkeypatch
+- get_entities(): Neo4j-prefer / fallback logic via an injected ResolverDeps
 
 All tests are fully self-contained — no real document store or Neo4j required.
 """
@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from kairix.knowledge.wikilinks.resolver import (
+    ResolverDeps,
     WikiEntity,
     get_entities,
     load_entities_from_bootstrap,
@@ -268,8 +269,8 @@ def test_neo4j_load_returns_empty_on_cypher_error() -> None:
 def test_get_entities_uses_neo4j_when_sufficient(bootstrap_file: str) -> None:
     """get_entities() uses Neo4j when it returns >= 5 entities with vault_path.
 
-    Drives the public ``neo4j_loader`` / ``bootstrap_loader`` kwarg seams
-    on :func:`get_entities` — F1-clean (no resolver-module monkey-patch).
+    Drives the public :class:`ResolverDeps` seam on :func:`get_entities`
+    — F1-clean (no resolver-module monkey-patch).
     """
     neo4j_entities = [
         WikiEntity(
@@ -282,8 +283,10 @@ def test_get_entities_uses_neo4j_when_sufficient(bootstrap_file: str) -> None:
         for r in _NEO4J_ROWS
     ]
     entities = get_entities(
-        neo4j_loader=lambda client=None: neo4j_entities,
-        bootstrap_loader=lambda: load_entities_from_bootstrap(bootstrap_file),
+        deps=ResolverDeps(
+            load_neo4j=lambda client=None: neo4j_entities,
+            load_bootstrap=lambda: load_entities_from_bootstrap(bootstrap_file),
+        ),
     )
     names = [e.name for e in entities]
     assert "Acme Corp" in names
@@ -311,8 +314,10 @@ def test_get_entities_falls_back_to_bootstrap_when_neo4j_sparse(bootstrap_file: 
         ),
     ]
     entities = get_entities(
-        neo4j_loader=lambda client=None: sparse_rows,
-        bootstrap_loader=lambda: load_entities_from_bootstrap(bootstrap_file),
+        deps=ResolverDeps(
+            load_neo4j=lambda client=None: sparse_rows,
+            load_bootstrap=lambda: load_entities_from_bootstrap(bootstrap_file),
+        ),
     )
     # Should have fallen back to bootstrap (12 entries)
     assert len(entities) >= 10, f"Expected fallback to bootstrap, got {len(entities)} entities"
@@ -322,8 +327,10 @@ def test_get_entities_falls_back_to_bootstrap_when_neo4j_sparse(bootstrap_file: 
 def test_get_entities_falls_back_to_bootstrap_when_neo4j_unavailable(bootstrap_file: str) -> None:
     """get_entities() falls back to bootstrap when Neo4j is completely unavailable."""
     entities = get_entities(
-        neo4j_loader=lambda client=None: [],
-        bootstrap_loader=lambda: load_entities_from_bootstrap(bootstrap_file),
+        deps=ResolverDeps(
+            load_neo4j=lambda client=None: [],
+            load_bootstrap=lambda: load_entities_from_bootstrap(bootstrap_file),
+        ),
     )
     assert len(entities) >= 10
     names = [e.name for e in entities]

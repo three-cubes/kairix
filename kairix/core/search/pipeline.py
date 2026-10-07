@@ -35,7 +35,7 @@ from kairix.core.protocols import (
     SearchLogger,
 )
 from kairix.core.search.backends import BM25SearchBackend, VectorSearchBackend
-from kairix.core.search.budget import SummaryLoader, apply_budget, coerce_tier
+from kairix.core.search.budget import BudgetDeps, SummaryLoader, apply_budget, coerce_tier
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.intent import QueryIntent
 from kairix.core.search.query_cache import QueryResultCache, make_cache_key
@@ -484,7 +484,7 @@ class SearchPipeline:
         budgeted = apply_budget(
             fused,
             budget=budget,
-            summary_loader=self.tier_summaries,
+            deps=BudgetDeps(tier_summaries=self.tier_summaries),
             max_tier=coerce_tier(max_tier),
         )
         _stage("budget", t)
