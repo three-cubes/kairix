@@ -10,12 +10,15 @@ kairix carries zero open Sonar findings, so every finding is in scope.
 "Still present in the working copy"
 -----------------------------------
 SonarCloud analyses ``main``, so an issue you just fixed locally stays open
-there until the change merges and main re-scans. Each issue carries Sonar's
-line hash (MD5 of the flagged line with all whitespace removed). An issue
-counts as RESOLVED LOCALLY when no line of the local file has that hash any
-more (or the file is gone) — the flagged code was changed. A hotspot carries
-no hash, so it counts as resolved only when its file is gone; hotspots must be
-reviewed in SonarCloud.
+there until the change merges and main re-scans. Each issue carries the lines
+it is anchored to (its text range plus any same-file flow locations). An issue
+counts as RESOLVED LOCALLY once any of those lines, padded by a few lines of
+context, no longer appears unchanged in the working copy (compared against the
+file at ``origin/main``) — the flagged code was changed — or once the file is
+gone. Without the analysed revision it falls back to Sonar's line hash (MD5 of
+the flagged line with all whitespace removed). A hotspot is resolved only when
+its code changes or its file is gone; hotspots must be reviewed in SonarCloud.
+CI's SonarCloud analysis stays authoritative; this is the local signal.
 
 Behaviour
 ---------
@@ -55,6 +58,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from os import environ
 from pathlib import Path
@@ -134,6 +138,24 @@ class Finding:
     message: str
     kind: str  # "issue" | "hotspot"
     line_hash: str | None = None
+    #: 1-based lines (as analysed on the branch) the finding is anchored to:
+    #: its primary text range plus any same-file flow (secondary) locations.
+    lines: tuple[int, ...] = ()
+
+
+def _location_lines(issue: dict, path: str) -> tuple[int, ...]:
+    """Primary text-range lines plus same-file flow-location lines of an issue."""
+    ranges = [issue.get("textRange") or {}]
+    for flow in issue.get("flows") or []:
+        for loc in flow.get("locations") or []:
+            if _component_to_path(loc.get("component", "")) == path:
+                ranges.append(loc.get("textRange") or {})
+    lines: set[int] = set()
+    for rng in ranges:
+        start, end = rng.get("startLine"), rng.get("endLine")
+        if isinstance(start, int):
+            lines.update(range(start, (end if isinstance(end, int) else start) + 1))
+    return tuple(sorted(lines))
 
 
 def _paginate(url_base: str, params: dict[str, str], items_key: str, total_of) -> list[dict]:
@@ -171,12 +193,13 @@ def fetch_findings(project_key: str, branch: str, api_base: str) -> list[Finding
     )
     findings = [
         Finding(
-            path=_component_to_path(i.get("component", "?")),
+            path=(path := _component_to_path(i.get("component", "?"))),
             line=i.get("line"),
             rule=str(i.get("rule", "?")),
             message=str(i.get("message", "")),
             kind="issue",
             line_hash=i.get("hash"),
+            lines=_location_lines(i, path),
         )
         for i in issues
     ]
@@ -187,6 +210,7 @@ def fetch_findings(project_key: str, branch: str, api_base: str) -> list[Finding
             rule=str(h.get("ruleKey", h.get("securityCategory", "hotspot"))),
             message=str(h.get("message", "")),
             kind="hotspot",
+            lines=(h["line"],) if isinstance(h.get("line"), int) else (),
         )
         for h in hotspots
     ]
@@ -201,31 +225,82 @@ def sonar_line_hash(line: str) -> str:
     return hashlib.md5(_WS.sub("", line).encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
-def present_locally(finding: Finding, repo_root: Path) -> bool:
-    """True while the finding's flagged code still exists in the working copy."""
+#: Lines of context around a finding's locations that count as "its code" — a
+#: fix often lands a line or two from where Sonar anchors the issue (the regex
+#: body under ``re.compile(``, the text inside an ``<a>`` tag).
+CONTEXT_LINES = 3
+
+
+def present_locally(finding: Finding, repo_root: Path, base_text: str | None = None) -> bool:
+    """True while the finding's code is still unchanged in the working copy.
+
+    ``base_text`` is the file as SonarCloud analysed it (the branch revision).
+    The finding counts as resolved locally once ANY line in its locations
+    (primary range + same-file flows, padded by :data:`CONTEXT_LINES`) no
+    longer appears in the working copy. Without ``base_text`` (or without
+    location lines) fall back to the primary line hash: resolved once no
+    working-copy line carries it. A hotspot with neither stays present while
+    its file exists — review it in SonarCloud.
+    """
     path = repo_root / finding.path
     if not path.is_file():
         return False
-    if finding.line_hash is None:
-        return True
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        current = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
         return True
-    return any(sonar_line_hash(line) == finding.line_hash for line in lines)
+    current_hashes = {sonar_line_hash(line) for line in current}
+    if base_text is not None and finding.lines:
+        base = base_text.splitlines()
+        region = {
+            n
+            for line in finding.lines
+            for n in range(line - CONTEXT_LINES, line + CONTEXT_LINES + 1)
+            if 1 <= n <= len(base)
+        }
+        return all(sonar_line_hash(base[n - 1]) in current_hashes for n in region)
+    if finding.line_hash is None:
+        return True
+    return finding.line_hash in current_hashes
 
 
-def evaluate(findings: list[Finding], files_in_scope: set[str] | None, repo_root: Path) -> list[Finding]:
+def evaluate(
+    findings: list[Finding],
+    files_in_scope: set[str] | None,
+    repo_root: Path,
+    base_text_of: Callable[[str], str | None] = lambda _path: None,
+) -> list[Finding]:
     """Pure verdict core: the in-scope findings still present locally.
 
     ``files_in_scope`` limits the gate to the working set; ``None`` is the
-    full-repo (``--all``) view. Split so tests can inject fake findings and a
-    tmp repo root without touching the network.
+    full-repo (``--all``) view. ``base_text_of(path)`` returns the file as
+    SonarCloud analysed it (``None`` when unknown). Split so tests can inject
+    fake findings, a tmp repo root and base texts without touching the network.
     """
     remaining = [
-        f for f in findings if (files_in_scope is None or f.path in files_in_scope) and present_locally(f, repo_root)
+        f
+        for f in findings
+        if (files_in_scope is None or f.path in files_in_scope) and present_locally(f, repo_root, base_text_of(f.path))
     ]
     return sorted(remaining, key=lambda f: (f.path, f.line or 0, f.rule))
+
+
+def analysed_text(path: str, branch: str) -> str | None:
+    """The file at the analysed branch tip (``origin/<branch>``, else ``<branch>``)."""
+    for ref in (f"origin/{branch}", branch):
+        try:
+            out = subprocess.run(
+                ["git", "show", f"{ref}:{path}"],
+                cwd=_REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        if out.returncode == 0:
+            return out.stdout
+    return None
 
 
 def _git_lines(args: list[str]) -> list[str]:
@@ -305,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     files_in_scope = None if args.all else working_set_files()
-    remaining = evaluate(findings, files_in_scope, _REPO_ROOT)
+    remaining = evaluate(findings, files_in_scope, _REPO_ROOT, lambda p: analysed_text(p, args.branch))
 
     if args.json:
         json.dump(

@@ -27,6 +27,15 @@ Sabotage proofs (executed against scripts/checks/check_sonar_new_code.py):
   - test_working_set_scope_excludes_unchanged_files: ignore ``files_in_scope``
     in ``evaluate`` -> the out-of-scope finding is reported and this test goes
     red. Restored.
+  - test_fix_next_to_the_anchor_line_resolves_the_issue: set ``CONTEXT_LINES``
+    to 0 -> the edit two lines below the anchor no longer counts and this test
+    goes red. Restored.
+  - test_untouched_region_stays_present_even_when_file_changed_elsewhere:
+    return False once the file differs at all from ``base_text`` -> the far
+    edit wrongly resolves the issue and this test goes red. Restored.
+  - test_flow_location_change_resolves_the_issue: drop the flow locations in
+    ``_location_lines`` -> the fixed taint source no longer counts and this
+    test goes red. Restored.
 """
 
 from __future__ import annotations
@@ -44,6 +53,7 @@ if str(_CHECKS_DIR) not in sys.path:
 
 from check_sonar_new_code import (  # noqa: E402
     Finding,
+    _location_lines,
     evaluate,
     present_locally,
     sonar_line_hash,
@@ -122,3 +132,61 @@ def test_working_set_scope_excludes_unchanged_files(tmp_path: Path) -> None:
     remaining = evaluate([in_scope, out_of_scope], files_in_scope={"kairix/x.py"}, repo_root=tmp_path)
 
     assert remaining == [in_scope]
+
+
+# ── region semantics (analysed revision available) ──────────────────────
+
+_BASE = "\n".join(f"line {n}" for n in range(1, 21)) + "\n"
+
+
+def _anchored(lines: tuple[int, ...]) -> Finding:
+    return Finding(
+        path="kairix/r.py",
+        line=lines[0],
+        rule="python:S8786",
+        message="m",
+        kind="issue",
+        line_hash=sonar_line_hash(f"line {lines[0]}"),
+        lines=lines,
+    )
+
+
+def test_fix_next_to_the_anchor_line_resolves_the_issue(tmp_path: Path) -> None:
+    """Sonar anchors on ``re.compile(`` while the regex body sits below it;
+    editing a line within the context window resolves the finding locally."""
+    _write(tmp_path, "kairix/r.py", _BASE.replace("line 12\n", "line 12 (linear)\n"))
+
+    assert evaluate([_anchored((10,))], None, tmp_path, lambda _p: _BASE) == []
+
+
+def test_untouched_region_stays_present_even_when_file_changed_elsewhere(tmp_path: Path) -> None:
+    """An unrelated edit far from the finding does not resolve it."""
+    _write(tmp_path, "kairix/r.py", _BASE.replace("line 19\n", "line 19 (edited)\n"))
+    finding = _anchored((5,))
+
+    assert evaluate([finding], None, tmp_path, lambda _p: _BASE) == [finding]
+
+
+def test_flow_location_change_resolves_the_issue(tmp_path: Path) -> None:
+    """A taint-flow finding is resolved by changing a secondary (flow) location
+    far from its primary line, e.g. where the untrusted value enters."""
+    _write(tmp_path, "kairix/r.py", _BASE.replace("line 18\n", "line 18 (validated)\n"))
+    issue = {
+        "textRange": {"startLine": 4, "endLine": 4},
+        "flows": [{"locations": [{"component": "three-cubes_kairix:kairix/r.py", "textRange": {"startLine": 18}}]}],
+    }
+
+    lines = _location_lines(issue, "kairix/r.py")
+
+    assert lines == (4, 18)
+    assert present_locally(_anchored(lines), tmp_path, _BASE) is False
+
+
+def test_location_lines_ignore_other_files_flows() -> None:
+    """Flow locations in another file don't widen this file's region."""
+    issue = {
+        "textRange": {"startLine": 68, "endLine": 70},
+        "flows": [{"locations": [{"component": "three-cubes_kairix:kairix/other.py", "textRange": {"startLine": 3}}]}],
+    }
+
+    assert _location_lines(issue, "kairix/r.py") == (68, 69, 70)
