@@ -13,14 +13,15 @@ that touch lint / type / Sonar / coverage gates.
    ```bash
    python3 scripts/checks/check_sonar_new_code.py --all
    ```
-   Prints every file whose current Sonar open-issue (or hotspot) count
-   exceeds its committed baseline. Use the JSON output (`--all --json`)
+   Prints every open SonarCloud issue (or hotspot) whose flagged code is
+   still in your working copy. kairix carries zero open Sonar findings, so
+   any row is a failure. Use the JSON output (`--all --json`)
    to feed an agent batch. Drop `--all` to scope the check to the files
    changed in this change (the default safe-commit behaviour).
 
    > **No `SONAR_TOKEN` is required.** The `three-cubes_kairix` project is
-   > public, so this script — and `--capture`, which regenerates the
-   > baselines — queries SonarCloud's public API **anonymously** (`urllib`,
+   > public, so this script queries SonarCloud's public API
+   > **anonymously** (`urllib`,
    > no auth header). Do **not** gate on a `$SONAR_TOKEN` env check: it will
    > read "unset" and is the wrong signal. To *see* a finding, just run
    > `--all`. (The `sonar` CLI auth, when needed, lives in the OS keychain —
@@ -33,8 +34,8 @@ that touch lint / type / Sonar / coverage gates.
    rule map in this doc in the same commit.
 
 3. **Fix the batch in one local pass.** Run `bash scripts/safe-commit.sh
-   "<message>"`; the step `sonar per-file ratchet` re-runs the script and
-   blocks on any file over its committed baseline.
+   "<message>"`; its Sonar step re-runs the script and blocks on any open
+   finding still present in the changed files.
 
 4. **Push once.** The next CI run is *confirming* a green local state,
    not *teaching* you about issues.
@@ -63,7 +64,7 @@ Canonical examples reference real code in this repo where available.
               continue
           ...
   ```
-- Note: the F16 baseline allow-list grandfathers existing offenders. Sonar gates *increases* in baselined files; the local script now flags those too.
+- Note: kairix has zero functions over 15, and F16 (tc-fitness v0.19) is a no-regression gate against the merge base with no allow-list — any function that crosses 15 fails locally before Sonar sees it.
 
 ### `pythonsecurity:S2083` path constructed from user-controlled data
 - Local detector: none (taint analysis is server-side only) — this is why the parity check exists.
@@ -77,12 +78,12 @@ Canonical examples reference real code in this repo where available.
               return resolved
       raise ValueError(f"Refusing to write to {resolved} — outside allowed roots. fix: ...")
   ```
-- Note: the gate reads the project's *current* per-file open-issue counts and compares them to the committed baseline. A main-branch BLOCKER on an existing file only fails the ratchet if it pushes that file *above* its grandfathered baseline count; once the fix lands and SonarCloud re-scans, regenerate the baseline with `--capture` so the lowered count becomes the new floor. There is no skip flag — the ratchet is deterministic. CI's quality gate remains the authoritative confirmation.
+- Note: the gate fails on any open finding whose flagged line is still in the working copy — there is no per-file allowance. Once your fix changes that line, the finding counts as fixed locally, even before SonarCloud re-scans `main`. There is no skip flag. CI's quality gate remains the authoritative confirmation.
 
 ### `pythonsecurity:S8707` agentic path injection (and `S8705` shell / `S8706` DB siblings)
-- Local detector: none (taint analysis is server-side only) — the per-file ratchet is the local parity check.
+- Local detector: none (taint analysis is server-side only) — `check_sonar_new_code.py` is the local parity check.
 - Recipe: same shape as `S2083` above, but the source is an LLM-driven CLI/use-case path argument rather than a generic user input. Route the path through the canonical allow-list sanitiser `kairix.paths.confine_to_roots(candidate, agent_cli_roots())` (resolve + collapse `..` + verify under cwd/home/tempdir, raise `PathTraversalError` before any `open()`); for a path with a single natural base use `confine_to(root, candidate)`. When the agent-controlled component is already validated upstream (e.g. `kairix remember`'s `agent` against the `valid_agents` allowlist) the finding is a genuine false positive — document that instead. Then add a `sonar.issue.ignore.multicriteria` entry per file with an F14 rationale, because Sonar's taint engine does not recognise the allow-list sanitiser. Canonical examples: `confine_to_roots` / `agent_cli_roots` in `kairix/paths.py` and the `s8707-*` exclusions in `sonar-project.properties`, sabotage-proven by `tests/test_s8707_confinement.py`.
-- Note: S8707 rolled out AFTER the ratchet baseline, so a drifted file fails `check_sonar_new_code.py` locally even though the finding is pre-existing — `--capture` re-floors it; the orchestrator re-captures to 0 after the confinement lands and main is re-scanned.
+- Note: a newly rolled-out rule like S8707 can open findings on existing code. They fail `check_sonar_new_code.py` like any other finding — fix the code (or add the rationale-tagged exclusion above); there is no baseline to absorb them.
 
 ### `python:S5886` / `python:S5890` DataclassInstance return / assign
 - Local detector: mypy strict + this script
@@ -177,8 +178,8 @@ Canonical examples reference real code in this repo where available.
    && rm -rf /var/lib/apt/lists/*
   ```
 
-When a new Sonar rule appears, add a section here AND a row in
-`scripts/checks/check_sonar_new_code.py:FIX_HINTS` in the same commit.
+When a new Sonar rule appears, add a section here in the same commit
+that fixes it — the gate's failure text points readers to this rule map.
 
 ## Why — the loop economics
 
@@ -194,43 +195,31 @@ When a new Sonar rule appears, add a section here AND a row in
 
 ## What the gate enforces
 
-`scripts/safe-commit.sh` step `sonar per-file ratchet` runs
-`check_sonar_new_code.py`. The script reads SonarCloud's anonymous API
-(no token; the project is publicly analyzable) for the project's
-**current** per-file open-issue counts, then compares them to a
-**committed baseline** and exits 1 for any file whose count exceeds its
-baseline.
+`scripts/safe-commit.sh` runs `check_sonar_new_code.py` as its Sonar
+step. The script reads SonarCloud's anonymous API (no token; the project
+is publicly analyzable) for the project's **current** open issues (smells,
+bugs, vulnerabilities) and TO_REVIEW security hotspots on `main`, and
+exits 1 if **any** of them is still present in the working copy.
 
-Two committed baselines, two policies:
+**Zero open findings, no baseline.** Since PLA-472 kairix carries zero
+open Sonar findings, so there is no committed per-file allowance and no
+"pre-existing" exemption. Every finding is in scope.
 
-- `.architecture/baseline/sonar-per-file.json` — code smells / bugs /
-  vulnerabilities, keyed by repo-relative path → open-issue count.
-  Grandfathers main's existing debt.
-- `.architecture/baseline/sonar-per-file-hotspots.json` — security
-  hotspots, split out so they ratchet **independently** (a smell
-  regression must never mask a hotspot regression).
+"Still present" is decided locally, so you don't have to wait for `main`
+to re-scan:
 
-A file absent from a baseline defaults to `0`, so any open issue or
-hotspot on a net-new (or previously-clean) file fails the gate.
-
-Why a committed ratchet instead of the live "leak period": main's
-new-code leak period **mutates** as commits land, so the old gate was
-non-deterministic — which made a routine skip flag attractive. The
-committed baseline makes the verdict depend on a stable snapshot, not a
-moving target.
+- An **issue** carries Sonar's line hash (MD5 of the flagged line with all
+  whitespace removed). It counts as fixed locally once no line in the file
+  has that hash any more, or the file is gone.
+- A **hotspot** carries no hash, so it counts as fixed only when its file
+  is gone. Otherwise review it in SonarCloud.
 
 Scope: the default run focuses on the **working set** (files changed in
 this change, mirroring `safe-commit.sh`). Pass `--all` for the full-repo
 view, `--json` for an agent batch.
 
-Regenerating the baseline: after a fix lands on main and SonarCloud
-re-scans, run `python3 scripts/checks/check_sonar_new_code.py --capture`
-to re-grandfather the current (lowered) per-file counts into both JSON
-files.
-
-No skip flag: the ratchet is deterministic, so there is nothing flaky to
-skip — the `KAIRIX_SKIP_SONAR_PARITY` escape hatch was retired in #499
-Phase 2. The only non-failure path is "SonarCloud unreachable → warn +
+No skip flag: the `KAIRIX_SKIP_SONAR_PARITY` escape hatch was retired in
+#499 Phase 2. The only non-failure path is "SonarCloud unreachable → warn +
 exit 0", which fires only when SonarCloud is genuinely down (offline
 pre-commit), never as a routine bypass. CI's quality gate remains
 authoritative.

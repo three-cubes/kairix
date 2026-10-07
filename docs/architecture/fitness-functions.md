@@ -6,7 +6,8 @@ Point agents and contributors at this file.
 
 This document describes kairix's mechanical, blocking architecture
 enforcement. Each rule is implemented as a standalone check, gated at
-every layer of the SDLC, and ratcheted via a baseline file. The
+every layer of the SDLC, and evaluated over the full current tree —
+there are no baseline files and nothing is exempt. The
 **implementation is the source of truth**: when this document and the
 scripts under `scripts/checks/` disagree, the scripts win and this
 document needs an update.
@@ -16,7 +17,7 @@ document needs an update.
 ## Table of contents
 
 1. [Intent](#intent)
-2. [Compliance-as-code: the ratcheting baseline pattern](#compliance-as-code-the-ratcheting-baseline-pattern)
+2. [Compliance-as-code: the zero-violation pattern](#compliance-as-code-the-zero-violation-pattern)
 3. [Rules at a glance](#rules-at-a-glance)
 4. [The rules in detail](#the-rules-in-detail)
    - [F1 — No `@patch` on kairix internal code](#f1--no-patch-on-kairix-internal-code)
@@ -54,10 +55,10 @@ them from lint rules:
   are architectural — violating one is a regression on a deliberate
   design choice.
 - **They block, they don't warn.** A warn-only check is decorative. The
-  rule is `exit 1` on net-new violations.
-- **They ratchet.** Pre-existing violations are grandfathered in a
-  baseline file; new violations fail the build. The baseline shrinks
-  over time, never grows.
+  rule is `exit 1` on any violation.
+- **They hold at zero.** Every check runs over the whole current tree.
+  Any violation — old or new — fails the build. There is no baseline
+  file to park debt in.
 
 The motivation is empirical. During development of kairix the following
 patterns were repeatedly introduced, reviewed, and then reverted as
@@ -76,7 +77,7 @@ makes the rejection automatic and the rationale persistent.
 
 ---
 
-## Compliance-as-code: the ratcheting baseline pattern
+## Compliance-as-code: the zero-violation pattern
 
 ### The mechanism
 
@@ -84,99 +85,63 @@ Each fitness function has:
 
 1. **A check script** under `scripts/checks/` that scans the repo and
    emits a list of files with the violation.
-2. **A baseline file** at
-   `.architecture/baseline/<rule-name>-files.txt` listing files
-   currently containing the violation. One file path per line.
-3. **A gate** that fails the build if any file with the violation is
-   *not* in the baseline (= net-new violation introduced).
+2. **A gate** (the shared `tc_fitness` engine, pinned `@v0.19.0`) that
+   fails the build if that list is not empty.
 
 ```
-current_violations - baseline_violations = net_new
-if net_new not empty: exit 1
+if current_violations not empty: exit 1
 ```
 
-Pre-existing violations stay green until cleaned. New violations fail
-the build immediately. The baseline shrinks file-by-file as cleanup
-happens; when it reaches zero, the baseline file is deleted and the
-rule is fully enforced.
+Since tc-fitness v0.17 every check is evaluated over the **full current
+tree**, not just the files a change touches. kairix removed its
+`.architecture/baseline/` directory in PLA-472, so no file carries a
+free pass. A violation anywhere blocks pre-commit, `safe-commit.sh`,
+and CI.
 
-### Why file-level granularity
+### When a check fires
 
-The baseline tracks **files**, not lines. A file in the baseline gets
-a free pass for every existing violation it contains, but the
-expectation is the file is on the cleanup list — not that more
-violations of the same type can be added inside it freely.
+1. Read the `fix:` / `next:` / `run:` lines in the failure output.
+2. Fix the code. Re-run the check locally — it should pass.
+3. Commit.
 
-This is a deliberate trade-off:
-- File-level baselines are stable across refactors (line numbers shift
-  on every edit).
-- The downside (a baselined file could grow more violations) is
-  acceptable in practice because the file is already flagged for
-  cleanup; net-new violations are caught the moment the file is
-  removed from the baseline.
-
-If a rule needs per-instance precision later, the shared helper library
-(`tc_fitness`, which kairix consumes — see "Shared engine" under Harness
-architecture) can be extended without changing the gate semantics.
-
-### Adding to a baseline
-
-Adding a file to a baseline is **rare** and requires:
-
-1. PR-description rationale documenting why the violation is
-   genuinely the right answer for this case.
-2. Reviewer approval of the rationale.
-3. A linked follow-up issue or task to revisit and remove the entry
-   when the underlying constraint is resolved.
-
-The check's failure message reminds operators that "adding to the
-baseline is rare." Treat this as the same friction as adding a
-`# pragma: no cover` — possible, documented, and reviewed.
-
-### Removing from a baseline
-
-The intended workflow:
-
-1. Make the code change that fixes the violation.
-2. Re-run the relevant check locally — it should pass.
-3. Delete the file's line from the baseline file.
-4. Commit both changes together.
-5. The check now enforces the rule fully on that file going forward.
-
-When all entries are gone, delete the baseline file. The rule is now
-fully enforced; new violations anywhere in the codebase block.
+If you believe the rule is wrong for this case, use the rule's own
+documented escape (for example an F3-style rationale comment, or a
+`# <rule>-allowed: <why>` marker where the rule supports one) and
+explain why in the commit body. Treat this with the same friction as
+adding a `# pragma: no cover` — possible, documented, and reviewed.
+Do not add a baseline file; there is no mechanism to read one.
 
 ---
 
 ## Rules at a glance
 
-| ID | Rule | Detection | Tool | SDLC layer | Baseline file |
-|----|------|-----------|------|------------|---------------|
-| F1 | No `@patch` on kairix internal code | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | `no-internal-patches-files.txt` |
-| F2 | No `monkeypatch.setenv("KAIRIX_*")` in tests | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | `no-env-monkeypatch-files.txt` |
-| F3 | Suppressions require inline rationale | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | `suppressions-have-rationale-files.txt` |
-| F4 | No `os.environ.get("KAIRIX_*")` outside `paths.py`/`secrets.py` | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | `env-reads-in-paths-files.txt` |
-| F5 | No internal-name imports in tests | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-internal-test-imports-files.txt` |
-| F6 | No `*_fn=None` test-only kwargs in production | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-test-only-kwargs-files.txt` |
-| F7 | Per-file coverage floor at 90% (unit) | coverage report | Python + Cobertura XML | CI unit-and-type | `per-file-coverage-floor-files.txt` |
-| F8 | Every `test_*` function carries a category marker | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
-| F9 | Per-file 90% floor on union (unit ∪ integration) coverage | coverage report | Python + `coverage combine` + Cobertura XML | CI Stage 5 (after unit + integration) | `per-file-coverage-floor-union-files.txt` |
-| F10 | CI workflow silencers require rationale | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
-| F11 | Test skip mechanisms require rationale | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
-| F12 | Every BDD feature has at least one happy-path scenario | structural | Python (Gherkin parser) | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
-| F13 | BDD scenarios reject implementation symbols | line pattern | Python (regex) | pre-commit, safe-commit, CI Stage 0 | `bdd-no-implementation-leaks-files.txt` |
-| F14 | `sonar.issue.ignore` entries in `sonar-project.properties` require rationale comment | line pattern | Python (regex) | pre-commit, safe-commit, CI Stage 0 | (none — clean baseline) |
-| F15 | No logging of secret-named variables in plaintext | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-logging-secrets-files.txt` (empty — clean) |
-| F16 | Cognitive complexity ≤ 15 per function | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `cognitive-complexity-files.txt` |
-| F17 | No string literal ≥10 chars duplicated ≥3 times in a module | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-duplicate-string-files.txt` |
-| F18 | No commented-out code | line pattern + Python parse | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-commented-out-code-files.txt` (empty — clean) |
-| F19 | Unused function parameters must be `_`-prefixed | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `unused-params-named-files.txt` |
-| F20 | Empty function bodies require docstring or intent comment | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `empty-body-intent-files.txt` |
-| F21 | Check-script failure output must carry an action marker (`fix:`, `next:`, `run:`) | structural | Python AST + shell regex | pre-commit, safe-commit, CI Stage 0 | `actionable-feedback-files.txt` |
-| F22 | Repo paths follow per-tree naming conventions | structural | Python (regex per tree) | pre-commit, safe-commit, CI Stage 0 | `path-naming-files.txt` (empty — clean) |
-| F23 | Every top-level directory has a `README.md` | structural | Python (filesystem walk) | pre-commit, safe-commit, CI Stage 0 | `readme-coverage-files.txt` |
-| F24 | No `from tests.*` / `import tests` imports in `kairix/**/*.py` | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `no-test-imports-in-prod-files.txt` (empty — clean) |
-| F25 | Every CLI subcommand has an MCP affordance — real `tool_<command>` binding OR `OperatorOnlyCapability` escalation stub | structural | Python AST | pre-commit, safe-commit, CI Stage 0 | `capability-affordance-files.txt` (empty — clean) |
+| ID | Rule | Detection | Tool | SDLC layer |
+|----|------|-----------|------|------------|
+| F1 | No `@patch` on kairix internal code | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 |
+| F2 | No `monkeypatch.setenv("KAIRIX_*")` in tests | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 |
+| F3 | Suppressions require inline rationale | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 |
+| F4 | No `os.environ.get("KAIRIX_*")` outside `paths.py`/`secrets.py` | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 |
+| F5 | No internal-name imports in tests | structural | Python AST | pre-commit, safe-commit, CI Stage 0 |
+| F6 | No `*_fn=None` test-only kwargs in production | structural | Python AST | pre-commit, safe-commit, CI Stage 0 |
+| F7 | Per-file coverage floor at 90% (unit) | coverage report | Python + Cobertura XML | CI unit-and-type |
+| F8 | Every `test_*` function carries a category marker | structural | Python AST | pre-commit, safe-commit, CI Stage 0 |
+| F9 | Per-file 90% floor on union (unit ∪ integration) coverage | coverage report | Python + `coverage combine` + Cobertura XML | CI Stage 5 (after unit + integration) |
+| F10 | CI workflow silencers require rationale | line pattern | shell + grep | pre-commit, safe-commit, CI Stage 0 |
+| F11 | Test skip mechanisms require rationale | structural | Python AST | pre-commit, safe-commit, CI Stage 0 |
+| F12 | Every BDD feature has at least one happy-path scenario | structural | Python (Gherkin parser) | pre-commit, safe-commit, CI Stage 0 |
+| F13 | BDD scenarios reject implementation symbols | line pattern | Python (regex) | pre-commit, safe-commit, CI Stage 0 |
+| F14 | `sonar.issue.ignore` entries in `sonar-project.properties` require rationale comment | line pattern | Python (regex) | pre-commit, safe-commit, CI Stage 0 |
+| F15 | No logging of secret-named variables in plaintext | structural | Python AST | pre-commit, safe-commit, CI Stage 0 |
+| F16 | Cognitive complexity ≤ 15 per function | structural | Python AST | pre-commit, safe-commit, CI Stage 0 |
+| F17 | No string literal ≥10 chars duplicated ≥3 times in a module | structural | Python AST | pre-commit, safe-commit, CI Stage 0 |
+| F18 | No commented-out code | line pattern + Python parse | Python AST | pre-commit, safe-commit, CI Stage 0 |
+| F19 | Unused function parameters must be `_`-prefixed | structural | Python AST | pre-commit, safe-commit, CI Stage 0 |
+| F20 | Empty function bodies require docstring or intent comment | structural | Python AST | pre-commit, safe-commit, CI Stage 0 |
+| F21 | Check-script failure output must carry an action marker (`fix:`, `next:`, `run:`) | structural | Python AST + shell regex | pre-commit, safe-commit, CI Stage 0 |
+| F22 | Repo paths follow per-tree naming conventions | structural | Python (regex per tree) | pre-commit, safe-commit, CI Stage 0 |
+| F23 | Every top-level directory has a `README.md` | structural | Python (filesystem walk) | pre-commit, safe-commit, CI Stage 0 |
+| F24 | No `from tests.*` / `import tests` imports in `kairix/**/*.py` | structural | Python AST | pre-commit, safe-commit, CI Stage 0 |
+| F25 | Every CLI subcommand has an MCP affordance — real `tool_<command>` binding OR `OperatorOnlyCapability` escalation stub | structural | Python AST | pre-commit, safe-commit, CI Stage 0 |
 
 ### Go-side rules (G1–G10)
 
@@ -185,18 +150,18 @@ Active when `services/<name>/go.mod` exists. Full text and rationale in
 fitness — extending F1-F24 to Go". The Go gate (`Go quality` workflow)
 enforces these in parallel with the Python pipeline.
 
-| ID | Rule | Detection | Tool | SDLC layer | Baseline file |
-|----|------|-----------|------|------------|---------------|
-| G1 | Every `cmd/<name>/main.go` exposes `--version` | structural | golangci-lint custom rule (planned) | Go-quality workflow | `go-version-flag-files.txt` (empty — clean) |
-| G2 | Errors wrap with `%w` (`fmt.Errorf("...: %w", err)`) | structural | `errorlint` (golangci-lint) | Go-quality workflow | (none — clean baseline) |
-| G3 | No `interface{}` / `any` in exported signatures | structural | revive `exported` + custom | Go-quality workflow | `go-any-in-exported-files.txt` (planned) |
-| G4 | `context.Context` as first arg on exported I/O functions | structural | revive `context-as-argument` | Go-quality workflow | `go-context-propagation-files.txt` (planned) |
-| G5 | Every Go package has a doc comment | structural | revive `package-comments` | Go-quality workflow | (none — clean baseline) |
-| G6 | No `panic` in non-`main` packages | structural | gocritic + custom | Go-quality workflow | (none — clean baseline) |
-| G7 | Tests follow Go conventions (`*_test.go`, `TestXxx(t *testing.T)`) | structural | `go test` discovery + custom | Go-quality workflow | (none — clean baseline) |
-| G8 | Logging via `log/slog` only (no `fmt.Println` / `log.Printf` in prod) | structural | custom Python check | Go-quality workflow | `go-logging-discipline-files.txt` (planned) |
-| G9 | Every `services/<name>/` has a `README.md` | structural | Python filesystem walk (`check_go_readme_coverage.py`) | safe-commit + Go-quality workflow | `go-readme-coverage-files.txt` (empty — clean) |
-| G10 | Third-party deps require a rationale entry in `services/<name>/DEPENDENCIES.md` | structural | custom Python check | Go-quality workflow | `go-dependency-rationale-files.txt` (planned) |
+| ID | Rule | Detection | Tool | SDLC layer |
+|----|------|-----------|------|------------|
+| G1 | Every `cmd/<name>/main.go` exposes `--version` | structural | golangci-lint custom rule (planned) | Go-quality workflow |
+| G2 | Errors wrap with `%w` (`fmt.Errorf("...: %w", err)`) | structural | `errorlint` (golangci-lint) | Go-quality workflow |
+| G3 | No `interface{}` / `any` in exported signatures | structural | revive `exported` + custom | Go-quality workflow |
+| G4 | `context.Context` as first arg on exported I/O functions | structural | revive `context-as-argument` | Go-quality workflow |
+| G5 | Every Go package has a doc comment | structural | revive `package-comments` | Go-quality workflow |
+| G6 | No `panic` in non-`main` packages | structural | gocritic + custom | Go-quality workflow |
+| G7 | Tests follow Go conventions (`*_test.go`, `TestXxx(t *testing.T)`) | structural | `go test` discovery + custom | Go-quality workflow |
+| G8 | Logging via `log/slog` only (no `fmt.Println` / `log.Printf` in prod) | structural | custom Python check | Go-quality workflow |
+| G9 | Every `services/<name>/` has a `README.md` | structural | Python filesystem walk (`check_go_readme_coverage.py`) | safe-commit + Go-quality workflow |
+| G10 | Third-party deps require a rationale entry in `services/<name>/DEPENDENCIES.md` | structural | custom Python check | Go-quality workflow |
 
 G1 / G3 / G4 / G8 / G10 are **planned** — their detector scripts land
 when the first real Go service does (alpha-deploy webhook for
@@ -206,7 +171,7 @@ plan-of-record reserves the rule ID so it survives reviewers asking
 "shouldn't we enforce this?" — yes, we do.
 
 G9 is **active now** because it depends only on filesystem-walk, not on
-any Go source. Empty baseline; will trip if any future
+any Go source. It has zero violations and will trip if any future
 `services/<name>/` lands without a README.
 
 ### Catalogue index (generated)
@@ -705,8 +670,7 @@ If the public surface doesn't expose the branch you're trying to test:
 #### Statement
 
 Production functions in `kairix/*` MUST NOT take parameters whose name
-ends in `_fn` and whose default is `None`, unless the parameter is
-listed in the documented allow-list.
+ends in `_fn` and whose default is `None`.
 
 #### Why
 
@@ -727,19 +691,13 @@ inspects `FunctionDef.args` for parameters whose `arg` ends in `_fn`
 with a default `Constant(value=None)`. Both positional-with-default
 and keyword-only args are checked.
 
-#### Allow-list
+#### No allow-list
 
-`.architecture/baseline/test-only-kwargs-allow.txt`:
-
-```
-# Format: module.path::function_name::param_name
-# Each entry must have a real production caller passing a non-default
-# value, OR be a Protocol/Adapter wiring point at a true boundary.
-kairix.agents.mcp.server::tool_search::search_fn
-```
-
-The allow-list is a **separate** file from the baseline — entries are
-permanent (or explicitly justified), not "to be cleaned up."
+There is no allow-list. The old
+`.architecture/baseline/test-only-kwargs-allow.txt` file was removed in
+PLA-472, so every free function (public or `_`-private) with a
+`*_fn=None` parameter is flagged. Methods on a class are never flagged —
+move the seam to a constructor or a Deps dataclass.
 
 #### Examples
 
@@ -800,8 +758,8 @@ Files at 84.99% fail.
 `scripts/checks/check_per_file_coverage.py`. Reads
 `coverage.xml` (Cobertura format, emitted by `pytest --cov-report=xml`).
 Iterates every `<class>` element matching `kairix/*`, extracts
-`line-rate`, fails if any file is below the floor and not in the
-baseline.
+`line-rate`, fails if any file is below the floor. There is no
+baseline — every file is held to the floor.
 
 #### Where it runs
 
@@ -1060,10 +1018,8 @@ the decorator. (Canonical tiering spec: ADR-024.)
 
 #### Allowed exceptions
 
-None by default — F8 ships with a clean (zero-file) baseline. If a
-genuinely uncategorisable test exists, append the file to
-`.architecture/baseline/test-markers-files.txt` with a PR-description
-rationale. Expect pushback at review.
+None. There is no baseline file; every `test_*` function must carry a
+category marker.
 
 ---
 
@@ -1082,11 +1038,9 @@ cover this code."
 
 F7 alone gates the unit run. Files exercised only at integration
 scope — `factory.py`, `mcp/server.py`, `db/repository.py`, certain
-adapter modules — measure as 0% in the unit run and end up
-grandfathered in the F7 baseline forever, even though they're well
-exercised by integration tests. F9 closes that loop: an integration
-test that drives a previously-uncovered production-wiring file gets
-credit, and the file leaves the F9 baseline.
+adapter modules — measure low in the unit run even though they're
+well exercised by integration tests. F9 measures the system as a whole:
+it checks that the combined unit + integration run covers every file.
 
 This matches the canonical guidance from ThoughtWorks' *Building
 Evolutionary Architectures*: where atomic functions test one
@@ -1109,9 +1063,8 @@ Stage 5 of the CI pipeline:
      per-file-coverage-floor-union``.
 
 The per-file 85% floor is identical to F7's; only the source data
-differs. The baseline lives in
-`.architecture/baseline/per-file-coverage-floor-union-files.txt` and
-is independent of F7's baseline so they ratchet independently.
+differs. Neither F7 nor F9 has a baseline: since PLA-472 every file
+must clear the floor in both runs.
 
 #### Where it runs
 
@@ -1121,17 +1074,12 @@ suites on every commit is too slow.
 
 #### Fix pattern
 
-The same as F7, with the additional shortcut: a file that's
-production-wiring (e.g. `factory.py`) and exercised only via
-integration tests can leave the F9 baseline as soon as those
-integration tests are written, **without requiring unit-level
-coverage**. This is the legitimate use-case Ford et al. describe —
-some code's natural test scope is integration; F9 lets it earn
-its keep there.
+The same as F7. Add the missing tests at the scope that naturally
+exercises the code — integration tests for production wiring such as
+`factory.py`, unit tests for unit-testable logic.
 
-**Do not** use F9 as a way to avoid writing unit tests for code
-that has unit-testable logic. F7 is still in effect for every file
-F7 already grandfathers — F9 is a *complement* to F7, not a relaxation.
+**Do not** use F9 as a way to avoid writing unit tests. F7 still
+applies to every file — F9 is a *complement* to F7, not a relaxation.
 
 #### References
 
@@ -1698,7 +1646,7 @@ that contains at least one of the three lowercase action markers:
 - `run:` — an exact command to copy-paste.
 
 Allow-listed: `_lib.sh`, `run-all.sh`,
-`audit_baselines.py`, `merge_coverage_xml.py` — shared helpers and the
+`merge_coverage_xml.py` — shared helpers and the
 harness/orchestrator (no per-rule remediation of their own). The Python
 gating helpers now live in the installed `three-cubes-fitness` package
 (`tc_fitness`), outside the F21 scan tree.
@@ -1764,11 +1712,8 @@ the appended error string), and prepend `fix: <one-line action>` plus
 optionally `next: <follow-up>` and `run: <exact command>`. Re-run
 `python3 scripts/checks/check_actionable_feedback.py` to confirm.
 
-The pre-existing kairix check scripts use the "Refactor to … to pass."
-phrasing, which is descriptive but doesn't carry a literal marker —
-they are grandfathered in
-`.architecture/baseline/actionable-feedback-files.txt` until each one
-is rewritten in a baseline-burndown follow-up.
+Every check script must carry a marker — there is no baseline file
+that exempts older scripts.
 
 ### F22 — Repo paths follow per-tree naming conventions
 
@@ -1784,11 +1729,10 @@ wins):
 | `tests/bdd/features/` | `*.feature` | `snake_case.feature` |
 | `tests/bdd/steps/` | `*.py` | `__init__.py`, `conftest.py`, `fakes.py`, or `_?snake_case.py` |
 | `tests/` (excl. `tests/bdd/`) | `*.py` | `test_<thing>.py`, `conftest.py`, `fakes.py`, `__init__.py`, or `_?snake_case.py` helpers |
-| `scripts/checks/` | `*.py` | `check_<rule>.py`, `_fitness_rule.py`, `audit_baselines.py`, `merge_coverage_xml.py` |
+| `scripts/checks/` | `*.py` | `check_<rule>.py`, `_fitness_rule.py`, `merge_coverage_xml.py` |
 | `scripts/checks/` | `*.sh` | `check-<rule>.sh`, `check_<rule>.sh`, `_lib.sh`, `run-all.sh` |
 | `docs/operations/runbooks/` | `*.md` | `INDEX.md` or `kebab-case.md` |
 | `docs/runbooks/` | `*.md` | `INDEX.md` or `kebab-case.md` |
-| `.architecture/baseline/` | `*.txt` | `<rule-name>-files.txt` |
 
 Files outside every registered tree (top-level config, `.github/`,
 `docker/`, `reference-library/`, etc.) are not constrained by F22.
@@ -1833,7 +1777,6 @@ tests/search/test_pipeline.py
 tests/bdd/features/search_returns_hits.feature
 scripts/checks/check_path_naming.py
 docs/operations/runbooks/how-to-debug-search-ranking.md
-.architecture/baseline/path-naming-files.txt
 ```
 
 #### Fix pattern
@@ -1871,10 +1814,8 @@ canonical docs live.
 
 `scripts/checks/check_readme_coverage.py`. Walks `REPO_ROOT.iterdir()`
 for directories; subtracts the allow-list; flags any remaining
-directory whose `<dir>/README.md` is not a regular file. The baseline
-records the *missing* README paths (i.e. the files that should exist
-but don't), so a baseline burndown is "write the README and remove
-the line."
+directory whose `<dir>/README.md` is not a regular file. There is no
+baseline: any missing README fails the gate.
 
 #### Examples
 
@@ -1907,9 +1848,7 @@ Write a one-screen `<dir>/README.md` with three sections:
 2. **What does not belong here** — one or two anti-patterns.
 3. **Where the canonical docs live** — link to `docs/...`.
 
-Then delete the corresponding line from
-`.architecture/baseline/readme-coverage-files.txt`. The baseline is
-expected to shrink monotonically.
+Then re-run `python3 scripts/checks/check_readme_coverage.py` to confirm.
 
 ### F24 — No imports of `tests.*` in `kairix/` production code
 
@@ -1950,10 +1889,8 @@ already swallowed the noise.
   - `ast.Import` where any `alias.name` is `"tests"` or starts with
     `"tests."` → flagged.
 
-The baseline at
-`.architecture/baseline/no-test-imports-in-prod-files.txt` ships
-empty — the v2026.5.15.2 release cleaned out the only known
-violation. Net-new violations block at pre-commit, in
+The v2026.5.15.2 release cleaned out the only known violation, and
+there is no baseline. Any violation blocks at pre-commit, in
 `safe-commit.sh`, and in CI Stage 0.
 
 #### Examples
@@ -2014,8 +1951,7 @@ Allowed from core: sibling `kairix.core.*` modules, `kairix.core.protocols`
 `ImportFrom` whose module path equals or starts with
 `kairix.providers.` or `kairix.transport.`.
 
-Pre-existing violations are grandfathered in
-`.architecture/baseline/f26-files.txt`. The check is a no-op when
+There is no baseline — every violation blocks. The check is a no-op when
 `kairix/core/` does not yet exist (fresh checkout before the
 three-layer scaffold lands).
 
@@ -2082,8 +2018,7 @@ providers/), `kairix.core.*`, `kairix.transport.*`, and non-kairix
 imports. Rejected: any import whose first path segment under
 `kairix.providers.` names a different plugin.
 
-Pre-existing violations are grandfathered in
-`.architecture/baseline/f27-files.txt`. The check is a no-op when
+There is no baseline — every violation blocks. The check is a no-op when
 `kairix/providers/` doesn't exist or holds no plugin subdirectories.
 
 #### Why
@@ -2149,9 +2084,7 @@ Plugin discovery: every immediate non-`_`-prefixed subdirectory of
 `kairix/providers/` is a plugin. Bare files at the providers root
 (`__init__.py`, `_base.py`) are scaffolding, not plugins.
 
-Pre-existing violations are grandfathered in
-`.architecture/baseline/f28-files.txt` (one entry per plugin missing
-coverage; format `kairix/providers/<name>`). When `kairix/providers/`
+There is no baseline — every plugin missing coverage blocks. When `kairix/providers/`
 holds no plugins, the check is a no-op. When plugins exist but no
 `e2e_provider_*.feature` files exist yet (Wave 1 scaffold), only the
 per-plugin requirement fires.
@@ -2246,8 +2179,7 @@ perf-measurement pattern (`bench*.py`, `microbench*.py`, `*_bench.py`,
 drivers (`scripts/probe*.{py,sh}`) are exempt because they consume
 the probe, they don't reimplement it.
 
-Pre-existing violations are grandfathered in
-`.architecture/baseline/f29-files.txt`. The check is a no-op when
+There is no baseline — every violation blocks. The check is a no-op when
 `kairix/` is absent.
 
 #### Why
@@ -2307,11 +2239,9 @@ MUST have at least one test that:
 2. Asserts on captured stdout / stderr / returned envelope content —
    NOT on `returncode == 0` alone, NOT on internal call-counts of fakes.
 
-Pre-existing surfaces without outcome tests are grandfathered in
-`.architecture/baseline/f30-operator-outcome-tests-files.txt`. The
-baseline shrinks only — adding an outcome test removes the
-corresponding entry in the same commit. Net-new subcommands /
-net-new MCP tools without outcome tests hard-fail.
+There is no baseline (the original 35-entry list was paid down to
+zero, and PLA-472 removed baseline files). Any subcommand or MCP tool
+without an outcome test hard-fails.
 
 #### Why
 
@@ -2351,17 +2281,16 @@ end-to-end with realistic input + observable output assertions."
    - For each direct call to `tool_<name>(...)` (or `<obj>.tool_<name>(...)`), if the matching MCP tool exists AND the same file contains at least one `assert` operating on a `Subscript` or `Attribute` (envelope-content assertion), that MCP tool counts as covered.
 4. Subcommands NOT covered → anchor the violation at the canonical implementation file (resolved from `COMMANDS` module path).
 5. MCP tools NOT covered → anchor the violation at the synthetic path `kairix/agents/mcp/server.py/@tool:<name>` (one entry per uncovered tool).
-6. Gate via `tc_fitness.gate(...)` — net-new violations fail; baseline shrinks only.
+6. Gate via `tc_fitness.gate(...)` — any violation fails.
 
 #### Hard-fail mechanics
 
 Per the project directive *"hard fail for any changed code (so this is
 refactored upfront in any new features or defect remediation)"*:
 
-- **New subcommand or MCP tool** without a matching outcome test → hard-fail commit. Baseline cannot be expanded.
-- **Existing baselined subcommand whose outcome test exists** — removing or weakening the test → hard-fail commit.
-- **Existing baselined subcommand** — modifying the subcommand's primary implementation file is permitted, but PR review should expect the outcome test to land in the same PR. The "refactor upfront" mechanic relies on author + reviewer judgement here; F30's mechanical gate is on the existence of the outcome test, not on the diff scope.
-- **Baseline shrinks only.** Every commit that adds an outcome test removes the corresponding baseline entry. Net direction is monotonic.
+- **New subcommand or MCP tool** without a matching outcome test → hard-fail commit.
+- **Existing subcommand or MCP tool** — removing or weakening its outcome test → hard-fail commit.
+- **No baseline.** There is no list of exempt surfaces to add to; every surface needs an outcome test.
 
 #### Out of scope
 
@@ -2420,7 +2349,7 @@ Add `tests/integration/test_<subcommand>_outcome.py` with:
   outcome test fails → restore. Document the sabotage proof in a
   comment per existing project convention.
 
-Then remove the file's entry from `.architecture/baseline/f30-operator-outcome-tests-files.txt` in the same commit.
+Then re-run `python3 scripts/checks/check_f30_operator_outcome_tests.py` to confirm the surface is covered.
 
 #### Reference
 
@@ -2448,11 +2377,9 @@ cherry-pick time.
 
 `scripts/checks/check_no_hardcoded_user_paths.py` walks every tracked
 file (`git ls-files`) and scans for either pattern. Files in
-`.architecture/baseline/`, `reference-library/`, `benchmark-results/`,
-and any markdown documentation are exempt. The baseline at
-`.architecture/baseline/no-hardcoded-user-paths-files.txt`
-grandfathers pre-existing offenders (empty at landing — the repo is
-clean today). Net-new violations block at safe-commit and CI.
+`reference-library/`, `benchmark-results/`, and any markdown
+documentation are exempt. There is no baseline — any violation blocks
+at safe-commit and CI.
 
 #### Fix pattern
 
@@ -2505,10 +2432,7 @@ pass trivially):
 - Persons:   `agent-alpha`, `agent-beta`, `agent-gamma`, `agent-delta`, `agent-epsilon`, `Alice`, `Bob`, `Carol`
 - Orgs:      `Acme`, `Example Corp`, `your-team`, `your-org`
 
-The baseline at `.architecture/baseline/no-real-names-in-fixtures-files.txt`
-grandfathers pre-existing offenders so the rule lands without forcing a
-sweep. The baseline shrinks file-by-file as fixtures get migrated to
-generic placeholders; net-new violations block at safe-commit and CI.
+There is no baseline — any violation blocks at safe-commit and CI.
 
 #### Fix pattern
 
@@ -2517,10 +2441,6 @@ Replace the real identifier with a generic placeholder:
 - For person names: `agent-alpha` / `agent-beta` (kairix convention) or
   `Alice` / `Bob` / `Carol` (cryptography/CS canon).
 - For organisations: `Acme` / `Example Corp` / `your-team` / `your-org`.
-
-Then remove the file's entry from
-`.architecture/baseline/no-real-names-in-fixtures-files.txt` in the
-same commit.
 
 **Pass**:
 
@@ -2570,14 +2490,10 @@ of these holds:
 - The rationale uses one of the canonical marker prefixes: `fix:`,
   `next:`, `run:`, `why:`, `rationale:`, `reason:`, `because:`.
 
-Files in `.architecture/baseline/`, `reference-library/`, and
-`benchmark-results/` are exempt. The detector and its test self-exempt
-because their docstrings embed example disable lines. The baseline at
-`.architecture/baseline/shellcheck-disable-with-reason-files.txt`
-grandfathers pre-existing offenders (one file at landing:
-`scripts/install/permissions-preflight.sh` carries two undocumented
-`# shellcheck disable=SC1090` lines that pre-date the rule). Net-new
-violations block at safe-commit and CI.
+Files in `reference-library/` and `benchmark-results/` are exempt. The
+detector and its test self-exempt because their docstrings embed
+example disable lines. There is no baseline — any violation blocks at
+safe-commit and CI.
 
 #### Fix pattern
 
@@ -2643,7 +2559,7 @@ The check also accepts an explicit `# F45-feature: <path>` comment in the
 surface file pointing at a non-conventionally-named feature.
 
 Detector: `scripts/checks/check_f45_new_capability_bdd.py`.
-Baseline: `.architecture/baseline/f45-files.txt` (empty; forward-only).
+No baseline — every violation blocks.
 
 ---
 
@@ -2664,8 +2580,8 @@ Direct construction of `SearchPipeline(...)`, `EmbedPipeline(...)`,
 disallowed.
 
 Detector: `scripts/checks/check_f46_bdd_step_composition.py`.
-Baseline: `.architecture/baseline/f46-files.txt` (seeded at landing;
-shrinks via F49).
+No baseline — the violations seeded at landing were paid down to zero;
+every violation blocks.
 
 ---
 
@@ -2681,8 +2597,8 @@ classes is allowed only in:
 - `tests/integration/test_<x>_contract.py` — single-layer boundary proofs.
 
 Detector: `scripts/checks/check_f47_integration_factory.py`.
-Baseline: `.architecture/baseline/f47-integration-factory-files.txt`
-(seeded at landing; shrinks via F49).
+No baseline — the violations seeded at landing were paid down to zero;
+every violation blocks.
 
 ---
 
@@ -2703,22 +2619,14 @@ selector. No baseline — binary presence check.
 
 ---
 
-### F49 — test-discipline baselines shrink per release
+### F49 — test-discipline baselines shrink per release (retired)
 
-Wave 0 rule preventing test-debt accretion.
-Each release tag (matching `v[0-9]*.[0-9]*.[0-9]*`) must reduce each of:
+**Retired in PLA-472.** F49 made each release shrink the F30 / F46 / F47
+baseline files. All three reached zero and PLA-472 removed baseline
+files entirely, so there is nothing left to shrink — those rules now
+block every violation directly.
 
-- `.architecture/baseline/f30-operator-outcome-tests-files.txt`
-- `.architecture/baseline/f46-files.txt`
-- `.architecture/baseline/f47-integration-factory-files.txt`
-
-by ≥1 entry compared to the previous tagged release, OR keep all three
-at zero. F30 reached zero in Wave 0.
-
-Detector: `scripts/checks/check_baseline_shrinking.py`. Wired into
-`.github/workflows/release.yml` BEFORE tag creation. No per-commit gate.
-
-Canonical reference for F45–F49 mechanics + paydown patterns:
+Canonical reference for F45–F48 mechanics:
 [`test-discipline-hardening.md`](test-discipline-hardening.md).
 
 ---
@@ -2728,9 +2636,8 @@ Canonical reference for F45–F49 mechanics + paydown patterns:
 Landed in connector-framework Wave 0 (2026-05-22
 hardening + this repo's `docs/architecture/connector-ingestion-architecture.md`
 spec). Pre-arms the discipline before Wave 1 creates `kairix/connectors/`
-and `kairix/extractors/` surfaces — all eleven checks pass vacuously
-today (except F41 and F43 which carry seeded baselines on the existing
-provider plugins) and fire mechanically the moment Wave 1 lands a
+and `kairix/extractors/` surfaces. All eleven checks run over the full
+tree with no baseline, and fire mechanically the moment Wave 1 lands a
 non-conforming change.
 
 | Rule | Locks | Mirrors |
@@ -2776,71 +2683,29 @@ integration: [`feature-flag-architecture.md`](feature-flag-architecture.md).
 Landed in Wave A of the connector / collection / scope topology ADR
 (see [`connector-scope-topology/ADR.md`](connector-scope-topology/ADR.md))
 to arm the gate **before** Wave C runtime code grows into the gap. All
-four are vacuous-green or carry a single grandfathered entry today;
-Waves C–F shrink baselines to zero as the production code lands. Per
+four run over the full tree with no baseline (F55 and F58 are vacuous
+until their Protocol surfaces exist). Per
 the gap analysis Table B + `10-test-architecture.md` §"New F-rules
 required".
 
 | Rule | Locks | Mechanism |
 |---|---|---|
-| **F55** | Every `Chunker` plugin under `kairix/chunkers/<name>/` declares a module-level `version: str`; every `Chunk(...)` constructor call passes `chunker_version=` (mirrors F40 for extractors). Without the version surfaced at the write site, re-chunk sweeps become whole-corpus rebuilds. | `scripts/checks/check_f55_chunker_version.py`; AST walk over `kairix/**/*.py`. Baseline: `.architecture/baseline/f55-files.txt` (today: `kairix/core/connectors/silver.py` grandfathered until Wave C threads `ChunkerRegistry` through Silver) |
-| **F57** | Every SQL `UPDATE topology_cc_pairs ... SET status = ?` lives in a module that also declares a top-level `_ALLOWED_TRANSITIONS: dict[CCPairStatus, frozenset[CCPairStatus]]` dispatch dict. Ad-hoc updates bypass the state-machine; ADR v2 §3 defines the only legal transitions (`SCHEDULED → INITIAL_INDEXING → ACTIVE ↔ PAUSED / DELETING / INVALID`). | `scripts/checks/check_f57_ccpair_lifecycle_integrity.py`; string-literal scan + module-level AST attribute check. Baseline: `.architecture/baseline/f57-files.txt` (empty; vacuous-green pre-Wave-C) |
-| **F58** | When a `HierarchyConnector` class exists in production code, at least one test under `tests/contracts/` must have a function name matching `test_*hierarchy*parent_before_child*` AND reference `HierarchyConnector`. Every `HierarchyNode` emission must have `raw_parent_id` either None (root) or referencing a previously-emitted node within the same `iter_containers()` call. | `scripts/checks/check_f58_hierarchy_parent_before_child.py`; test-collecting gate (mandatory only once the Protocol exists). Baseline: `.architecture/baseline/f58-files.txt` (empty; vacuous-green pre-Wave-E) |
-| **F61** | Bare `_SqliteChunkWriter(db, collection=...)` construction lives only under `kairix/core/connectors/` (the framework owns the writer). Everywhere else flows through `CollectionRouter`. Extends F38 with the per-collection routing layer. | `scripts/checks/check_f61_collection_router_singleton.py`; AST scan. Baseline: `.architecture/baseline/f61-files.txt` (today: `kairix/worker.py` grandfathered until Wave C rewires `_run_one_connector_batch` through `CollectionRouter`) |
+| **F55** | Every `Chunker` plugin under `kairix/chunkers/<name>/` declares a module-level `version: str`; every `Chunk(...)` constructor call passes `chunker_version=` (mirrors F40 for extractors). Without the version surfaced at the write site, re-chunk sweeps become whole-corpus rebuilds. | `scripts/checks/check_f55_chunker_version.py`; AST walk over `kairix/**/*.py`. No baseline. |
+| **F57** | Every SQL `UPDATE topology_cc_pairs ... SET status = ?` lives in a module that also declares a top-level `_ALLOWED_TRANSITIONS: dict[CCPairStatus, frozenset[CCPairStatus]]` dispatch dict. Ad-hoc updates bypass the state-machine; ADR v2 §3 defines the only legal transitions (`SCHEDULED → INITIAL_INDEXING → ACTIVE ↔ PAUSED / DELETING / INVALID`). | `scripts/checks/check_f57_ccpair_lifecycle_integrity.py`; string-literal scan + module-level AST attribute check. No baseline. |
+| **F58** | When a `HierarchyConnector` class exists in production code, at least one test under `tests/contracts/` must have a function name matching `test_*hierarchy*parent_before_child*` AND reference `HierarchyConnector`. Every `HierarchyNode` emission must have `raw_parent_id` either None (root) or referencing a previously-emitted node within the same `iter_containers()` call. | `scripts/checks/check_f58_hierarchy_parent_before_child.py`; test-collecting gate (mandatory only once the Protocol exists). No baseline. |
+| **F61** | Bare `_SqliteChunkWriter(db, collection=...)` construction lives only under `kairix/core/connectors/` (the framework owns the writer). Everywhere else flows through `CollectionRouter`. Extends F38 with the per-collection routing layer. | `scripts/checks/check_f61_collection_router_singleton.py`; AST scan. No baseline. |
 
 Canonical reference for the wave plan + Protocol roster + capability
 mix-ins these rules protect: [`connector-scope-topology/ADR.md`](connector-scope-topology/ADR.md).
 
 ---
 
-### F50 — net-new files cannot accrete F-rule baseline debt
+### F50 — net-new files cannot accrete F-rule baseline debt (retired)
 
-Closes the per-file-shrink-only loophole identified by the 2026-05-22
-cross-repo audit. Every F-rule baseline under
-`.architecture/baseline/*-files.txt` is per-file shrink-only — pre-existing
-violators are grandfathered until F49 forces them out at release time.
-The loophole: a brand-new file under `kairix/**` (or `tests/**`) can
-land with arbitrary violations because the baseline doesn't yet know it
-exists, so the shrink-diff sees nothing.
-
-F50 closes that. Net-new files (added in the staged diff at commit-time,
-or added since the previous release tag at CI-time) may not appear in
-any per-file F-rule baseline. Pre-existing entries are unaffected —
-this rule only blocks fresh accretion.
-
-#### Mechanism
-
-`scripts/checks/check_f50_net_new_file_violations.py` runs in two modes:
-
-- **Staged mode** (default; pre-commit hook + `safe-commit.sh`):
-  `git diff --cached --name-only --diff-filter=A` returns the set of
-  files added in the current staged commit. The check asserts none
-  appear in any baseline.
-- **Full-tree mode** (CI Stage 0): `git diff --name-only --diff-filter=A
-  <prev-tag>..HEAD` returns every file added since the last release
-  tag. Catches the case where pre-commit was skipped locally and the
-  violation only surfaces in CI for a release PR.
-
-For every match, the failure text names the violating baseline file
-and the offending added paths, plus the F21 `fix:`/`next:`/`run:`
-trailer pointing at the canonical paydown patterns.
-
-#### Why it isn't redundant with F49
-
-F49 enforces *paydown rate* on the existing baselines (each release
-shrinks; never grows). It doesn't catch the case where a baseline
-grows because a fresh file was added to it. F50 covers exactly that
-case at commit time, before the baseline edit ever lands.
-
-A clean interpretation: F49 says "baselines shrink"; F50 says "baselines
-shrink, and they never grow by accretion via new files." Together they
-mean: the only legal motion is downward.
-
-#### Cross-repo provenance
-
-Imported from a sibling repo's `net_new_file_finding_cap.py` pattern
-(2026-05-22 audit). The original protected against SonarCloud findings
-on new files; this variant generalises to *any* per-file F-rule baseline.
+**Retired in PLA-472.** F50 stopped a brand-new file from being added
+to a per-file baseline. With no baseline files left, every check
+already blocks every violation in every file, so F50 has nothing to
+guard.
 
 ---
 
@@ -2857,16 +2722,10 @@ silent-gate-death class.
 | Rule | Locks | Mechanism |
 |---|---|---|
 | **F81** | A stranger's fresh install boots: clean temp dir → `docker compose up` from the shipped compose + `.env.example` → `/healthz/ready` 200 → MCP initialize + tools/list handshake → `GET /setup/` 200 with the wizard flag ON → BM25 search hit on a seeded sample doc. | The smoke itself is `scripts/checks/check-fresh-install-smoke.sh`, run by `.github/workflows/fresh-install-smoke.yml` (needs Docker + minutes — not per-commit). The per-commit leg `scripts/checks/check_f81_fresh_install_smoke.py` proves the smoke can't rot out of the pipeline: script exists, workflow exists, workflow invokes the script. No baseline. |
-| **F82** | No wall-clock ceiling assertions (`assert elapsed < 0.150`, `assert time.monotonic() - t0 <= 2`) in per-commit test tiers — timing measures host scheduling, not kairix behaviour (#493 family burned three gate cycles in one day). Tests carrying a `slow` / `soak` / `load` / `pvt` marker (F8's resolution mechanism) or a `# F82-allowed: <why>` line rationale are exempt. Floors (`assert elapsed >= window`) and variable budgets are deliberately not flagged — precision over recall. | `scripts/checks/check_f82_wall_clock_ceilings.py`; AST walk over `tests/**/*.py` tracking clock-call assignments + elapsed-named values. Baseline: `.architecture/baseline/f82-files.txt` (29 pre-existing files grandfathered). Pre-commit hook `arch-f82-wall-clock-ceilings`. |
-| **F83** | Shell gate scripts (`scripts/*.sh`, `scripts/checks/*.sh`) follow the post-#483 gate-runner contract: (a) no unguarded `VAR=$(...)` capture under `set -e` (the silent-death class — the script dies AT the assignment with no FAIL line); (b) `\|\| true` carries a trailing rationale comment; (c) shellcheck-clean at error severity; (d) `safe-commit.sh` stages announced with `echo -n "  <stage>... "` emit both `OK${NC}` and `FAIL${NC}`/`gate_died` verdicts, and every `run-all.sh` check invocation carries `\|\| overall=1`; (e) output probes under `pipefail` use `grep -q PATTERN <<< "$OUTPUT"`, avoiding false failures when an early-exiting quiet grep gives the producer SIGPIPE. | `scripts/checks/check_f83_gate_runner_contract.py`; logical-line shell scan + batched shellcheck. Baseline: `.architecture/baseline/f83-files.txt` (7 pre-existing scripts grandfathered; a listed file masks all sub-rules until paid down). Pre-commit hook `arch-f83-gate-runner-contract`. |
+| **F82** | No wall-clock ceiling assertions (`assert elapsed < 0.150`, `assert time.monotonic() - t0 <= 2`) in per-commit test tiers — timing measures host scheduling, not kairix behaviour (#493 family burned three gate cycles in one day). Tests carrying a `slow` / `soak` / `load` / `pvt` marker (F8's resolution mechanism) or a `# F82-allowed: <why>` line rationale are exempt. Floors (`assert elapsed >= window`) and variable budgets are deliberately not flagged — precision over recall. | `scripts/checks/check_f82_wall_clock_ceilings.py`; AST walk over `tests/**/*.py` tracking clock-call assignments + elapsed-named values. No baseline. Pre-commit hook `arch-f82-wall-clock-ceilings`. |
+| **F83** | Shell gate scripts (`scripts/*.sh`, `scripts/checks/*.sh`) follow the post-#483 gate-runner contract: (a) no unguarded `VAR=$(...)` capture under `set -e` (the silent-death class — the script dies AT the assignment with no FAIL line); (b) `\|\| true` carries a trailing rationale comment; (c) shellcheck-clean at error severity; (d) `safe-commit.sh` stages announced with `echo -n "  <stage>... "` emit both `OK${NC}` and `FAIL${NC}`/`gate_died` verdicts, and every `run-all.sh` check invocation carries `\|\| overall=1`; (e) output probes under `pipefail` use `grep -q PATTERN <<< "$OUTPUT"`, avoiding false failures when an early-exiting quiet grep gives the producer SIGPIPE. | `scripts/checks/check_f83_gate_runner_contract.py`; logical-line shell scan + batched shellcheck. No baseline. Pre-commit hook `arch-f83-gate-runner-contract`. |
 
-Note on F49 (same Phase 0): the shrink-gate's hand-listed baseline
-paths had drifted (`F46-files.txt` / `F47-files.txt` never matched the
-git-tracked `f46-files.txt` / `f47-integration-factory-files.txt`), so
-two of its three legs were vacuous on the Linux release runner.
-`check_baseline_shrinking.py` now derives the governed paths from the
-rule catalogue (`_rule_catalogue.py` gate names), making a future
-rename a loud `KeyError` instead of a silent always-pass.
+F49 was later retired in PLA-472, along with the baseline files it governed.
 
 ---
 
@@ -2883,7 +2742,7 @@ canonical layered reader would have failed immediately.
 
 | Rule | Locks | Mechanism |
 |---|---|---|
-| **F84** | Every production config-write site — a public `def` in `kairix/**` whose name compounds a write verb (`write`/`update`/`save`/`persist`) with `config` (`write_config_updates`, `update_config_file`, `write_config_yaml`), or any def with that naming convention containing a stream-form `yaml.dump`/`yaml.safe_dump` — has a composed write→read round-trip test. Coverage convention: a test module references BOTH the writer name AND a canonical-reader name (`load_merged_mapping` / `load_config` / `load_top_level_config` / `feature_flag_config_overlay`); OR carries a `# F84-round-trip: <writer>` registry tag (for tests driving the writer through a CLI/web surface); coverage propagates from a covered writer to the writers its body calls (one round-trip proves the delegation chain). `# F84-allowed: <why>` on the def line exempts writer-named functions that don't write operator config. Deliberately NOT caught (precision over recall): config writes in non-writer-named functions, arbitrary callers of the writer family, same-test-function pairing of write and read, non-YAML config writes. | `scripts/checks/check_f84_config_round_trip.py`; AST harvest of writer defs over `kairix/**` + referenced-name scan over `tests/**` + delegation fixed-point. Baseline: `.architecture/baseline/f84-files.txt` (empty at landing — the #492 fix's exemplar `tests/integration/test_wizard_config_overlay_split_brain.py` covers the whole tree). Pre-commit hook `arch-f84-config-round-trip`. |
+| **F84** | Every production config-write site — a public `def` in `kairix/**` whose name compounds a write verb (`write`/`update`/`save`/`persist`) with `config` (`write_config_updates`, `update_config_file`, `write_config_yaml`), or any def with that naming convention containing a stream-form `yaml.dump`/`yaml.safe_dump` — has a composed write→read round-trip test. Coverage convention: a test module references BOTH the writer name AND a canonical-reader name (`load_merged_mapping` / `load_config` / `load_top_level_config` / `feature_flag_config_overlay`); OR carries a `# F84-round-trip: <writer>` registry tag (for tests driving the writer through a CLI/web surface); coverage propagates from a covered writer to the writers its body calls (one round-trip proves the delegation chain). `# F84-allowed: <why>` on the def line exempts writer-named functions that don't write operator config. Deliberately NOT caught (precision over recall): config writes in non-writer-named functions, arbitrary callers of the writer family, same-test-function pairing of write and read, non-YAML config writes. | `scripts/checks/check_f84_config_round_trip.py`; AST harvest of writer defs over `kairix/**` + referenced-name scan over `tests/**` + delegation fixed-point. No baseline. Pre-commit hook `arch-f84-config-round-trip`. |
 
 ### F85 — cross-tier contract vocabularies single-sourced
 
@@ -2903,7 +2762,7 @@ regressing.
 
 | Rule | Locks | Mechanism |
 |---|---|---|
-| **F85** | Each registered cross-tier contract vocabulary has exactly one owning module; a member literal re-declared in another tier fails. The DECLARED registry lives inside the check — `VOCABULARIES = {name: (owning_module, (member, ...))}` — seeded with the source-auth `PHASE_*` strings and the azure provider-name set, both owned by `kairix/platform/setup/service.py`. A violation is a member appearing in a *vocabulary-definition shape* — a const-assignment RHS, or an element of a set/frozenset/tuple/list/dict-key literal — in a non-owning setup-tier module, OR a raw member string quoted in a setup-tier template (the contract is to branch on the `env.globals` symbol). Imports from the owning module are the desired pattern and never flagged; `# F85-allowed: <why>` exempts a line. Deliberately NOT caught (precision over recall): incidental uses that are not vocabulary definitions (an OAuth `prompt=consent` dict *value*, a `getattr(obj, "failed")` attribute name); members outside the setup tier (provider plugins legitimately own `PROVIDER_NAME = "azure_foundry"`; phase words appear as English prose repo-wide); auto-discovery of un-registered shared constants; substrings of running prose. | `scripts/checks/check_f85_contract_vocabulary_singularity.py`; AST walk over `kairix/platform/setup/**/*.py` (definition-shape constants) + raw-literal scan over `kairix/platform/setup/web/templates/**/*.html`. Baseline: `.architecture/baseline/f85-files.txt` (2 pre-existing files — `backends.py` + `wizard.py` mirror the azure grouping instead of importing `AZURE_PROVIDER_NAMES`; the phase vocabulary is already single-sourced). Dispatched by the catalogue-driven runner (`arch-fitness-catalogue` pre-commit hook). |
+| **F85** | Each registered cross-tier contract vocabulary has exactly one owning module; a member literal re-declared in another tier fails. The DECLARED registry lives inside the check — `VOCABULARIES = {name: (owning_module, (member, ...))}` — seeded with the source-auth `PHASE_*` strings and the azure provider-name set, both owned by `kairix/platform/setup/service.py`. A violation is a member appearing in a *vocabulary-definition shape* — a const-assignment RHS, or an element of a set/frozenset/tuple/list/dict-key literal — in a non-owning setup-tier module, OR a raw member string quoted in a setup-tier template (the contract is to branch on the `env.globals` symbol). Imports from the owning module are the desired pattern and never flagged; `# F85-allowed: <why>` exempts a line. Deliberately NOT caught (precision over recall): incidental uses that are not vocabulary definitions (an OAuth `prompt=consent` dict *value*, a `getattr(obj, "failed")` attribute name); members outside the setup tier (provider plugins legitimately own `PROVIDER_NAME = "azure_foundry"`; phase words appear as English prose repo-wide); auto-discovery of un-registered shared constants; substrings of running prose. | `scripts/checks/check_f85_contract_vocabulary_singularity.py`; AST walk over `kairix/platform/setup/**/*.py` (definition-shape constants) + raw-literal scan over `kairix/platform/setup/web/templates/**/*.html`. No baseline. Dispatched by the catalogue-driven runner (`arch-fitness-catalogue` pre-commit hook). |
 
 ---
 
@@ -2919,8 +2778,8 @@ machinery, per-repo domain**:
 
 | Concern | Lives where |
 |---|---|
-| In-process + subprocess dispatch, the named verdict ledger, the `--all` / `--gate` / `--staged` modes, parse-once `CheckContext`, staged-selection logic, the ratcheting `gate()` primitive, `python_files`/`repo_relative`, the `RuleEntry` schema | **shared** — the installed `tc_fitness` package |
-| The F-numbered catalogue rows, every `check_*.{py,sh}` implementation, the `.architecture/baseline/` files, and the domain config kairix feeds the engine's declarative factories | **kairix** — `scripts/checks/` + `.architecture/baseline/` |
+| In-process + subprocess dispatch, the named verdict ledger, the `--all` / `--gate` / `--staged` modes, parse-once `CheckContext`, staged-selection logic, the `gate()` primitive (full-tree, no baseline since v0.17), `python_files`/`repo_relative`, the `RuleEntry` schema | **shared** — the installed `tc_fitness` package |
+| The F-numbered catalogue rows, every `check_*.{py,sh}` implementation, and the domain config kairix feeds the engine's declarative factories | **kairix** — `scripts/checks/` |
 
 `scripts/checks/run_checks.py` is the consumer shim: it dispatches through
 `tc_fitness.runner` (the shared `run` / `main_cli` engine). From v0.4.x the
@@ -2943,7 +2802,7 @@ were **deleted** — their `CheckContext`, staged-selection, and `gate()` /
 `python_files()` / `repo_relative()` surfaces now come from `tc_fitness.context`
 / `tc_fitness.staged` / `tc_fitness`. The migration was verified byte-identical
 (same verdicts + ledger text). The runner evolves via shared learning across
-consuming repos — the shared layer is `tc_fitness` (lib + ratchet + catalogue
+consuming repos — the shared layer is `tc_fitness` (lib + gate + catalogue
 schema + context + staged + runner) plus `three-cubes/tc-pipelines` (the
 `setup-uv-cached` composite + `python-quality-gate.yml` reusable workflow). The
 EPIC #499 convergence narrative is captured inline in the F81–F85 rule sections
@@ -2977,19 +2836,6 @@ scripts/checks/
 ├── check_bdd_no_implementation_leaks.py               # F13 (regex)
 └── run-all.sh                                         # Orchestrator (safe-commit + CI Stage 0)
 
-.architecture/baseline/
-├── no-internal-patches-files.txt
-├── no-env-monkeypatch-files.txt
-├── suppressions-have-rationale-files.txt              # F3 (now includes # type: ignore + # nosec sites)
-├── env-reads-in-paths-files.txt                       # F4
-├── no-internal-test-imports-files.txt
-├── no-test-only-kwargs-files.txt
-├── per-file-coverage-floor-files.txt                  # F7 (unit only)
-├── per-file-coverage-floor-union-files.txt            # F9 (unit ∪ integration)
-├── bdd-no-implementation-leaks-files.txt              # F13
-└── test-only-kwargs-allow.txt                         # F6 allow-list (separate from baseline)
-# F8, F10, F11, F12 ship with no baseline — clean
-
 docs/architecture/
 └── fitness-functions.md                  # this document
 ```
@@ -2998,14 +2844,15 @@ docs/architecture/
 
 **`_lib.sh`** provides `arch_gate()` for shell-based checks. The check
 script pipes a list of violation files (one per line, sorted, uniq'd)
-into `arch_gate <name> <remediation>`. The helper handles baseline
-comparison, exit code, and message formatting.
+into `arch_gate <name> <remediation>`. The helper fails on any
+violation (there is no baseline to compare against) and handles the
+exit code and message formatting.
 
 **The Python helpers now come from the shared `tc_fitness` package** (the
 local `_arch_lib.py` was deleted in EPIC #499 — see "Shared engine" above).
 Python checks `from tc_fitness import gate, python_files, repo_relative`:
-- `gate(name, current_set, remediation_str) -> int` — same baseline-ratchet
-  semantics as the shell helper, for Python checks.
+- `gate(name, current_set, remediation_str) -> int` — same semantics as
+  the shell helper (any violation fails), for Python checks.
 - `python_files(*roots)` — yields all `.py` files under given roots,
   skipping `__pycache__`.
 - `repo_relative(path)` — converts an absolute path to repo-relative.
@@ -3013,7 +2860,7 @@ Python checks `from tc_fitness import gate, python_files, repo_relative`:
 `scripts/checks/_fitness_rule.py` is kairix's local convenience layer over
 those primitives: a `FitnessRule` ABC that lets a check declare itself as a
 ~3-line subclass (`name`, `remediation`, `roots`, `file_has_violation`) with
-baseline-load / enumerate / scope / gate inherited from `tc_fitness.gate`.
+enumerate / scope / gate inherited from `tc_fitness.gate`.
 
 ### Tooling choice rationale
 
@@ -3049,7 +2896,7 @@ I considered and rejected:
 Every check should be **sabotage-tested** before landing. The pattern:
 
 1. Plant a fake violation in a new file (or a new violation in an
-   existing baselined file).
+   existing file).
 2. Run the check and verify it fails with the expected message.
 3. Remove the fake violation.
 4. Run again and verify clean.
@@ -3108,7 +2955,7 @@ expected check output):
 | F13 | `tests/bdd/features/_sabotage_f13_ok.feature` with `kairix.config.yaml` (filename) reference | passed (no false positive) | File-extension allowlist works |
 
 After each plant, the file was removed and the check re-run to confirm
-the baseline state was preserved. The runner script lives at
+it was clean again. The runner script lives at
 `/tmp/sabotage_runner.sh` during development; it is not committed
 because it intentionally writes to the repo. New fitness functions
 must include a sabotage-test entry in this table at the time they
@@ -3206,23 +3053,20 @@ When a fitness function fails in CI, the GitHub Actions log shows:
 
 ```
 === Architecture fitness functions ===
-ok [arch:no-internal-patches] — 3 grandfathered file(s) still present in baseline.
-FAIL [arch:no-env-monkeypatch] — new violation(s) introduced:
+ok [arch:no-internal-patches]
+FAIL [arch:no-env-monkeypatch] — violation(s) found:
   tests/agents/research/test_new.py
 
 Refactor: pass paths as a constructor argument or use FakePaths
 from tests/fakes.py. The production code must not require process-env
 mutation to be testable — that's the test-shaped-API smell #139 reverted.
 
-If this is genuinely the only practical fix, document why in the
-PR description and append the file to .architecture/baseline/no-env-monkeypatch-files.txt
-(but expect pushback at review time — adding to the baseline is rare).
+next: re-run bash scripts/checks/check-no-env-monkeypatch.sh until clean.
 
 === Architecture fitness functions FAILED ===
 ```
 
-The message names the file, the rule, the remediation, and the
-escape hatch. PR comments from CI are not currently auto-generated;
+The message names the file, the rule, and the remediation. PR comments from CI are not currently auto-generated;
 operators read the job log directly via the failure URL.
 
 ---
@@ -3276,43 +3120,19 @@ bash scripts/safe-commit.sh "your commit message"
 1. **Read the failure message.** It names the file and the rule.
 2. **Read the rule's section in this document.** The "Fix pattern"
    subsection has the remediation.
-3. **Check the baseline file.** If your file is listed, you've made a
-   net-new violation in a previously-grandfathered file (still
-   blocked). If your file isn't listed, you've introduced the rule's
-   violation in a clean file.
-4. **Run the check in isolation.** `python3 scripts/checks/check_no_internal_imports.py`
-   prints all current violations not just net-new — useful for seeing
-   the full surface.
-5. **Fix the code and re-run.** Don't add to the baseline unless you
-   have rationale and reviewer approval.
+3. **Run the check in isolation.** `python3 scripts/checks/check_no_internal_imports.py`
+   prints every current violation in the tree — useful for seeing the
+   full surface.
+4. **Fix the code and re-run.** There is no baseline to add the file
+   to; the check must pass.
 
-### Shrinking a baseline
+### When a fix isn't possible
 
-```bash
-# 1. Make the code change. Run the check; it should pass.
-bash scripts/checks/check-no-env-monkeypatch.sh
-
-# 2. Remove the file's line from the baseline.
-sed -i '' '/^tests\/the_fixed_file\.py$/d' .architecture/baseline/no-env-monkeypatch-files.txt
-
-# 3. Re-run to confirm the file is now fully enforced.
-bash scripts/checks/check-no-env-monkeypatch.sh
-
-# 4. Commit code + baseline together.
-git add tests/the_fixed_file.py .architecture/baseline/no-env-monkeypatch-files.txt
-git commit -m "..."
-```
-
-### Adding a temporary exception (rare)
-
-If you've genuinely exhausted alternatives:
-
-1. Document in the PR description WHY the violation is correct for
-   this case (constraint that prevents the fix, alternative being
-   tracked, etc.).
-2. Append the file to the appropriate baseline.
-3. File a tracking issue or task to revisit.
-4. Expect reviewer pushback — this is the rare path, not the easy one.
+If you've genuinely exhausted alternatives, use the rule's own
+documented escape — an inline rationale comment where the rule accepts
+one (F3, F11, F14, F33), or a `# <rule>-allowed: <why>` marker where
+the rule supports it (for example F82). Explain why in the commit body
+and expect reviewer pushback. There is no baseline file to add to.
 
 ---
 
@@ -3330,8 +3150,8 @@ a parallel gate in the consumer. See
 [how-to-improve-a-fitness-gate-or-pipeline](../development/how-to-improve-a-fitness-gate-or-pipeline.md).
 
 For a kairix-domain rule the runner is catalogue-driven and shared (see "Shared
-engine" above): a new rule is **one `RuleEntry` row + one check + one
-baseline**, not five hand-edited files. The playbook:
+engine" above): a new rule is **one `RuleEntry` row + one check**, not
+five hand-edited files. The playbook:
 
 1. **Decide the rule shape.** Write a one-sentence statement
    ("MUST NOT…") and a one-paragraph "why."
@@ -3344,15 +3164,15 @@ baseline**, not five hand-edited files. The playbook:
    `_fitness_rule.py` for the 3-line shape. (`gate`/`python_files`/
    `repo_relative` come from the shared `tc_fitness` package now, not the
    deleted local `_arch_lib.py`.)
-4. **Seed the baseline.** Run the check; pipe its violation list
-   to `.architecture/baseline/<rule-name>-files.txt`. This makes the
-   current state pass.
+4. **Fix every existing violation.** Run the check over the full tree
+   and fix what it finds before the rule lands. There is no baseline
+   to seed — the rule must start at zero.
 5. **Sabotage-test.** Plant a fake violation in a new file; confirm
    the check fails with the expected message; remove and re-run for
    clean exit.
 6. **Add the catalogue row.** Append a `RuleEntry` to
    `scripts/checks/_rule_catalogue.py` (id, category, scope, status,
-   summary, check module, baseline). The catalogue is the single source
+   summary, check module). The catalogue is the single source
    of truth — the shared `run_checks.py` runner dispatches every row, and
    F92 fails the build if a `check_*` has no row (or a row no check).
 7. **Wire into pre-commit.** Add an entry to `.pre-commit-config.yaml`
@@ -3370,8 +3190,8 @@ baseline**, not five hand-edited files. The playbook:
    table — `python3 scripts/checks/generate_catalogue_docs.py` — never
    hand-edit the `<!-- F-CATALOGUE -->` regions; F92 fails on drift.
 10. **Sanity-check the gate.** `bash scripts/checks/run-all.sh`
-    should still pass against current state. If it fails, the
-    baseline is wrong or the check has a bug.
+    should still pass against current state. If it fails, a violation
+    was missed in step 4 or the check has a bug.
 
 ---
 
@@ -3444,72 +3264,64 @@ enforcement mechanism (review, runtime check, or human judgement):
 - **`docs/architecture/cli-mcp-feature-parity.md`** — issue #168, the
   CLI/MCP convergence initiative; its Phase 2 work will reduce CLI
   body coverage gaps that F7 currently flags.
-- **`scripts/checks/`** — implementation source-of-truth.
-- **`.architecture/baseline/`** — current grandfathered violations.
+- **`scripts/checks/`** — implementation source-of-truth. (There is no
+  `.architecture/baseline/` directory; it was removed in PLA-472.)
 
 ---
 
 ## For agents: machine-readable rule index
 
 When picking work, consult this section. Each entry: rule ID,
-script path, baseline path, pre-commit hook ID.
+script path, pre-commit hook ID. No rule has a baseline — every
+violation blocks.
 
 ```yaml
 fitness_functions:
   - id: F1
     name: no-internal-patches
     script: scripts/checks/check-no-internal-patches.sh
-    baseline: .architecture/baseline/no-internal-patches-files.txt
     precommit_hook: arch-no-internal-patches
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F2
     name: no-env-monkeypatch
     script: scripts/checks/check-no-env-monkeypatch.sh
-    baseline: .architecture/baseline/no-env-monkeypatch-files.txt
     precommit_hook: arch-no-env-monkeypatch
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F3
     name: suppressions-have-rationale
     script: scripts/checks/check-suppressions-have-rationale.sh
-    baseline: .architecture/baseline/suppressions-have-rationale-files.txt
     precommit_hook: arch-suppressions-have-rationale
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F4
     name: env-reads-in-paths
     script: scripts/checks/check-env-reads-stay-in-paths.sh
-    baseline: .architecture/baseline/env-reads-in-paths-files.txt
     precommit_hook: arch-env-reads-in-paths
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F5
     name: no-internal-test-imports
     script: scripts/checks/check_no_internal_imports.py
-    baseline: .architecture/baseline/no-internal-test-imports-files.txt
     precommit_hook: arch-no-internal-test-imports
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F6
     name: no-test-only-kwargs
     script: scripts/checks/check_no_test_only_kwargs.py
-    baseline: .architecture/baseline/no-test-only-kwargs-files.txt
-    allow_list: .architecture/baseline/test-only-kwargs-allow.txt
     precommit_hook: arch-no-test-only-kwargs
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F7
     name: per-file-coverage-floor
     script: scripts/checks/check_per_file_coverage.py
-    baseline: .architecture/baseline/per-file-coverage-floor-files.txt
     precommit_hook: null  # CI-only (needs coverage.xml)
     layer: [ci-unit-and-type]
 
   - id: F8
     name: test-markers
     script: scripts/checks/check_test_markers.py
-    baseline: null  # ships clean — no grandfathered files
     precommit_hook: arch-test-markers
     layer: [pre-commit, safe-commit, ci-stage0]
 
@@ -3517,42 +3329,36 @@ fitness_functions:
     name: per-file-coverage-floor-union
     script: scripts/checks/check_per_file_coverage.py
     invoke: python3 scripts/checks/check_per_file_coverage.py coverage-union.xml per-file-coverage-floor-union
-    baseline: .architecture/baseline/per-file-coverage-floor-union-files.txt
     precommit_hook: null  # CI-only (needs unit + integration coverage combined)
     layer: [ci-stage5]
 
   - id: F10
     name: workflow-silencers-have-rationale
     script: scripts/checks/check-workflow-silencers-have-rationale.sh
-    baseline: null  # ships clean — no grandfathered files
     precommit_hook: arch-workflow-silencers-have-rationale
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F11
     name: test-skip-rationale
     script: scripts/checks/check_test_skip_rationale.py
-    baseline: null  # ships clean — no grandfathered files
     precommit_hook: arch-test-skip-rationale
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F12
     name: bdd-happy-path
     script: scripts/checks/check_bdd_happy_path.py
-    baseline: null  # ships clean — no grandfathered files
     precommit_hook: arch-bdd-happy-path
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F13
     name: bdd-no-implementation-leaks
     script: scripts/checks/check_bdd_no_implementation_leaks.py
-    baseline: .architecture/baseline/bdd-no-implementation-leaks-files.txt
     precommit_hook: arch-bdd-no-implementation-leaks
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F24
     name: no-test-imports-in-prod
     script: scripts/checks/check_no_test_imports_in_prod.py
-    baseline: .architecture/baseline/no-test-imports-in-prod-files.txt
     precommit_hook: arch-no-test-imports-in-prod
     layer: [pre-commit, safe-commit, ci-stage0]
 ```

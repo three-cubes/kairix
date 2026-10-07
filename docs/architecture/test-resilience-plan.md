@@ -150,7 +150,7 @@ Five classes of failures that the dogfood evidence shows kairix encounters in pr
 
 ## 4. Test-construction discipline (mechanical)
 
-Each new test follows these mechanical rules (all enforced by F1-F50 + manual sabotage):
+Each new test follows these mechanical rules (all enforced by the F-rules + manual sabotage):
 
 1. **F1-clean**: no `@patch` on kairix internals, no `monkeypatch.setattr` on kairix modules. Stdlib monkeypatch (e.g. `tempfile`) allowed but discouraged — prefer constructor seams.
 2. **F46-clean (BDD)**: step impls invoke at call-graph depth ≤ 2 through factory or CLI.
@@ -191,7 +191,7 @@ Each commit follows safe-commit discipline. Sabotage proofs executed and recorde
 
 - **Unit test additions.** Unit layer is already at 196 marker-decorated tests; the gap is upstream of unit. Excluded.
 - **F30 outcome test paydown.** Real gap (only 1 file today) but separate paydown stream owned by Wave 0.
-- **Backfill F43 plugin contract tests** for plugins missing them. Tracked separately via the F43 baseline file.
+- **Backfill F43 plugin contract tests** for plugins missing them. Tracked separately (F43 now runs over the full tree with no baseline).
 - **Migrating `tests/test_*.py` (14 root-level files) into `tests/unit/`.** One-day cleanup that's orthogonal to coverage resilience.
 - **Mutation testing tooling** (e.g. mutmut, cosmic-ray). The sabotage discipline is the manual proxy; introducing automated mutation testing has its own cost/noise tradeoffs and is a separate decision.
 

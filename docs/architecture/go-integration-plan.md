@@ -74,7 +74,7 @@ Python F-rules don't translate verbatim. Go has different idioms; some Python ru
 | **G9** | Every `services/<name>/` has a `README.md` | Mirrors F23. Explains what+why+run+deploy. |
 | **G10** | No external dependencies without rationale | Each entry in `services/<name>/go.mod` requires a `// reason: ...` comment in a `services/<name>/DEPENDENCIES.md` registry. Matches our Python `pyproject.toml` rationale pattern. |
 
-Pre-existing violations grandfathered in `.architecture/baseline/go-<rule>-files.txt` (same pattern as F1-F24).
+No baseline files: each G-rule runs over the full `services/**` tree and every violation blocks (same as the F-rules).
 
 Detection scripts live in `scripts/checks/check_go_*.{py,sh}`. They walk `services/**` with `go/ast` (via shelling out to a small Go helper) or with `gofmt -d`-style probes. The Python F-rule pattern (`gate()` from the shared `tc_fitness` package) is reused for orchestration so failures still emit the universal affordance template.
 
@@ -125,7 +125,6 @@ Security:
 - [ ] `.github/workflows/go-quality.yml` — full pipeline.
 - [ ] `services/README.md` — explains the convention and the per-service-module layout.
 - [ ] First fitness function script: `scripts/checks/check_go_readme_coverage.py` (G9 — Python-side check that every `services/<name>/` has a README).
-- [ ] First baseline file: `.architecture/baseline/go-readme-coverage-files.txt` (empty).
 - [ ] Makefile additions: `go-fmt`, `go-vet`, `go-lint`, `go-test`, `go-build`.
 - [ ] CLAUDE.md update: Go section pointing at this plan.
 - [ ] ENGINEERING.md §11: cross-link to this plan + the language-choice decision matrix.
@@ -142,7 +141,7 @@ Security:
 
 **Phase 4 — additional fitness functions (rolled in as the Go surface grows)**
 - [ ] G1 (`--version` flag), G2 (error wrap), G6 (no `panic` outside main), G8 (`log/slog`), G10 (dependency rationale).
-- [ ] Each lands with a sabotage-proven test and a baseline file. Baselines stay empty by construction since we control every Go file from day one.
+- [ ] Each lands with a sabotage-proven test and zero violations — no baseline file, since we control every Go file from day one.
 
 ## What this plan does NOT commit to
 

@@ -41,7 +41,7 @@ is unguarded; if it is `EXEMPT:`, the rationale tells you why no test is owed.
 - New writer/reader round-trip pairs land with an integration test in the same commit
   and a row in this matrix. Phase 2's F63 detector blocks otherwise.
 - Per-release gate (Phase 2): the `MISSING:` cell count must monotonically decrease
-  per release tag, or stay at zero. Mirrors F49's per-file-baseline paydown shape.
+  per release tag, or stay at zero.
 
 **What this matrix prevents.** The IM-6 cutover (2026-05-23) shipped two regressions
 that line-coverage tools and existing fitness functions missed:
@@ -64,8 +64,7 @@ is the value — coverage of behaviours is the contract, not coverage of lines.
 > are a point-in-time capture generated against repo commit **`37964593`** on
 > **2026-05-23**. They predate the v2026.6.8, v2026.6.9, and v2026.6.18 releases
 > (v2026.6.18 is the latest stable), so the `MISSING:` count has almost certainly
-> moved (per the F49-style per-release paydown gate, it should only ever decrease or
-> hold). **Do not treat the numbers below as current.** Regenerate against today's
+> moved (it should only ever decrease or hold). **Do not treat the numbers below as current.** Regenerate against today's
 > HEAD before relying on the totals — see
 > [Regenerating this snapshot](#regenerating-this-snapshot) — then refresh the
 > `As of the … capture` line and the counts.
@@ -89,8 +88,7 @@ connector round-trips).
 ## Regenerating this snapshot
 
 This matrix is a per-release paydown artefact: the `MISSING:` cell count must
-monotonically decrease per release tag (or hold at zero), mirroring F49's
-per-file-baseline paydown shape. Regenerate it against current HEAD so the totals and
+monotonically decrease per release tag (or hold at zero). Regenerate it against current HEAD so the totals and
 per-cell pins reflect today's test surface, then update the `Generated against` line
 and the [Honest snapshot](#honest-snapshot) counts:
 

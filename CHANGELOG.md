@@ -15,6 +15,24 @@ Docker. This lets operators run native PPTX/XLSX/PDF extraction first, opt into
 DOCX-to-PDF conversion when page anchors matter, and keep MarkItDown as a
 fallback instead of losing page metadata for every indexed file.
 
+### Quality gates hold every file to the same bar (contributors)
+
+This changes how kairix is built and checked, not how it runs. Operators have
+nothing to do.
+
+- **No more grandfathered debt.** The `.architecture/baseline/` lists are gone.
+  The fitness checks now run on the whole codebase through the shared gate
+  engine (`three-cubes-fitness` v0.19.0), and any violation blocks a commit —
+  old code included.
+- **Python 3.13 runs the gate.** The checks run on Python 3.13. The kairix
+  package itself still supports Python 3.12 and newer.
+- **Retired rules.** F49 (baselines shrink each release), F50 (no new files in a
+  baseline) and the paydown-doc check are gone, since there are no baselines
+  left. The commit-identity check (SGO-158) now runs in the shared gate instead.
+- **Sonar: zero open findings.** `scripts/checks/check_sonar_new_code.py` fails
+  on any open SonarCloud issue or hotspot that is still in your working copy.
+  An issue counts as fixed as soon as you change the flagged line.
+
 ## [2026.7.4] - 2026-07-04
 
 ### Search keeps up when your whole team is querying at once

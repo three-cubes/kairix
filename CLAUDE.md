@@ -14,7 +14,7 @@ is missing or weak, propose the change *into* the canonical home — never fork 
 
 ## How to commit
 
-Use `bash scripts/safe-commit.sh "message"` for every commit. It runs lint, format, mypy, tests, security checks, and the Sonar per-file ratchet. Loop on failures until green. See [CONSTRAINTS.md](CONSTRAINTS.md) for what blocks a commit.
+Use `bash scripts/safe-commit.sh "message"` for every commit. It runs lint, format, mypy, tests, security checks, and the Sonar zero-open-findings gate. Loop on failures until green. See [CONSTRAINTS.md](CONSTRAINTS.md) for what blocks a commit.
 
 **Replay the EXACT CI gate locally before pushing (canonical [STANDARDS.md §5](https://github.com/three-cubes/tc-pipelines/blob/main/governance/STANDARDS.md)).** `uv sync --all-extras --all-groups`, then `uv run pre-commit run --all-files` and `uv run tc-fitness run`; never merge over a red gate; regenerate-and-stage generated artifacts. `safe-commit.sh` is the convenience wrapper; §5 is the rule of record.
 
@@ -66,7 +66,7 @@ Three principles, all mechanically enforced:
 
 **Inject the slow dependency through the existing seam — never a literal `time.sleep`, real network call, or live subprocess in a test.** If a component already takes a clock / sleeper / HTTP client / transport as a constructor or factory arg, pass a Fake from `tests/fakes.py`; a test that does a literal sleep or hits the network when a DI seam already exists is the single biggest avoidable cost in the suite. Corollary (bug-catching power): a high-cost test that still PASSES after you mutate the production code it claims to cover (sabotage-proof fails to fail) is not pulling its weight — it's a delete-as-redundant or mark-`@pytest.mark.soak` candidate, not a keep. See [ENGINEERING.md §3.7](docs/architecture/ENGINEERING.md) for the full pattern; F82 enforces that wall-clock-ceiling assertions carry a `slow`/`soak`/probe marker.
 
-**Tests write scratch/probe files under `tmp_path` only — never the live source tree.** Orphaned probe files left in the working tree get picked up by whole-tree detector scans (the fitness scanners, fresh-install smoke, F50/F22 path checks) and surface as phantom failures on the *next* unrelated run — the classic intermittent-flake root cause. Three rules: (1) every scratch/probe artefact goes under the `tmp_path` fixture; (2) any detector a test invokes is scoped to the staged set, not the whole tree; (3) a test that must touch real paths adds a teardown/sweep fixture that removes its debris even on failure.
+**Tests write scratch/probe files under `tmp_path` only — never the live source tree.** Orphaned probe files left in the working tree get picked up by whole-tree detector scans (the fitness scanners, fresh-install smoke, F22 path checks) and surface as phantom failures on the *next* unrelated run — the classic intermittent-flake root cause. Three rules: (1) every scratch/probe artefact goes under the `tmp_path` fixture; (2) any detector a test invokes is scoped to the staged set, not the whole tree; (3) a test that must touch real paths adds a teardown/sweep fixture that removes its debris even on failure.
 
 CLI outcome tests use `subprocess.run([sys.executable, "-m", "kairix.cli", "<sub>", ..., "--document-root", str(tmp_path)])` — no `KAIRIX_*` env vars in the subprocess invocation. MCP tools test by direct handler call with `deps=...` injected. See `tests/contracts/test_protocols.py` for protocol compliance patterns; `tests/integration/test_vec_index_lifecycle.py` for canonical factory shape; `tests/e2e/test_composed_production_path.py` for the E2E exemplar; `docs/architecture/test-discipline-hardening.md` for the full specification.
 
@@ -118,7 +118,7 @@ before any `pytest` or `safe-commit.sh` invocation. Dispatch briefs should inclu
 
 - ☐ **Scope** — diff matches the dispatched task; no scope creep (renames, refactors, doc edits the brief didn't authorise)
 - ☐ **Sabotage** — every new `test_*` has a sabotage-proof noted in the agent's report (mutate prod → confirm fail → restore); spot-check one
-- ☐ **Baselines** — no F-rule baseline grew unless the commit body explicitly explains why
+- ☐ **No escapes** — no new suppression / exemption / `# <rule>-allowed:` comment / pragma unless the commit body explains why
 - ☐ **Worktree** — `python3 scripts/checks/check_worktree_isolation.py` reports clean (no shadow copies in primary)
 - ☐ **Affordance** — any new pipeline-blocking message follows the "X found. Refactor to YYY to pass." template with Pass + Forbidden examples (F15 is the reference)
 
@@ -152,7 +152,7 @@ Re-tiering gotcha: a per-function `@pytest.mark.soak` does NOT replace a module-
 
 Mechanical, blocking checks encode rejected patterns into automation. F-numbers are permanent shipping IDs (never renumbered, never reused); the catalogue at [`scripts/checks/_rule_catalogue.py`](scripts/checks/_rule_catalogue.py) holds full metadata (category, scope, ADR origin, status) and is the canonical query surface. The groupings below match the catalogue's category dimension.
 
-The **runner is the shared `tc_fitness` engine** ([`three-cubes-fitness`](https://github.com/three-cubes/tc-fitness), pinned `@v0.6.1` in `pyproject.toml`) — EPIC #499 common-process convergence. kairix is a **pure consumer**: `scripts/checks/run_checks.py` dispatches through `tc_fitness.runner` (the shared `run`/`main_cli` engine), configuring the engine's declarative factories (`make_module_roots_resolver`, `make_binding_narrower`, `make_env_path_conditional_check`, `main_cli(extra_flags=, post_parse=)`) with kairix's own domain values, and `_rule_catalogue.py` imports `RuleEntry` from `tc_fitness.catalogue`. The model is **shared machinery, per-repo domain**: kairix keeps its own F-numbered catalogue rows + check implementations + baselines; the dispatch logic, `CheckContext` (parse-once), staged-selection, the ratchet, and the `RuleEntry` schema all live in the package. The schema is **id-agnostic** — kairix uses F-numbers, a sibling repo uses descriptive names; both run the same runner. (`_check_context.py` / `_staged_selection.py` were local once; they're now `tc_fitness.context` / `tc_fitness.staged`.)
+The **runner is the shared `tc_fitness` engine** ([`three-cubes-fitness`](https://github.com/three-cubes/tc-fitness), pinned `@v0.19.0` in `pyproject.toml`; since v0.17 it evaluates every check over the full current tree, on a Python 3.13 gate interpreter) — EPIC #499 common-process convergence. kairix is a **pure consumer**: `scripts/checks/run_checks.py` dispatches through `tc_fitness.runner` (the shared `run`/`main_cli` engine), configuring the engine's declarative factories (`make_module_roots_resolver`, `make_binding_narrower`, `make_env_path_conditional_check`, `main_cli(extra_flags=, post_parse=)`) with kairix's own domain values, and `_rule_catalogue.py` imports `RuleEntry` from `tc_fitness.catalogue`. The model is **shared machinery, per-repo domain**: kairix keeps its own F-numbered catalogue rows + check implementations; the dispatch logic, `CheckContext` (parse-once), staged-selection, and the `RuleEntry` schema all live in the package. The schema is **id-agnostic** — kairix uses F-numbers, a sibling repo uses descriptive names; both run the same runner. (`_check_context.py` / `_staged_selection.py` were local once; they're now `tc_fitness.context` / `tc_fitness.staged`.)
 
 <!-- BEGIN F-CATALOGUE (generated; edit _rule_catalogue.py) -->
 
@@ -194,7 +194,7 @@ The **runner is the shared `tc_fitness` engine** ([`three-cubes-fitness`](https:
 
 <!-- END F-CATALOGUE -->
 
-Pre-existing violations are grandfathered in `.architecture/baseline/`; net-new violations block at pre-commit, `safe-commit.sh`, and CI Stage 0 (or Stage 5 for F9). Full detail per rule: [`scripts/checks/_rule_catalogue.py`](scripts/checks/_rule_catalogue.py) (kairix's catalogue rows — schema imported from `tc_fitness.catalogue`) + [`docs/architecture/fitness-functions.md`](docs/architecture/fitness-functions.md) (canonical reference). Read these before adding any silencer, skip, suppression, internal import, or BDD scenario — the gate rejects lazy bypasses.
+Nothing is exempt: there are no baseline files, and every violation in the current tree blocks at pre-commit, `safe-commit.sh`, and CI Stage 0 (or Stage 5 for F9). Full detail per rule: [`scripts/checks/_rule_catalogue.py`](scripts/checks/_rule_catalogue.py) (kairix's catalogue rows — schema imported from `tc_fitness.catalogue`) + [`docs/architecture/fitness-functions.md`](docs/architecture/fitness-functions.md) (canonical reference). Read these before adding any silencer, skip, suppression, internal import, or BDD scenario — the gate rejects lazy bypasses.
 
 ## CI
 
@@ -239,9 +239,8 @@ is the source-of-truth; the others fill in detail.
 | To do this | Read / run |
 |---|---|
 | Write a test the right way (Protocol fakes, no monkey-patches) | **[`docs/architecture/ENGINEERING.md#testing`](docs/architecture/ENGINEERING.md)** + [`tests/fakes.py`](tests/fakes.py) + [`tests/contracts/test_protocols.py`](tests/contracts/test_protocols.py) |
-| Run the same gates CI runs, locally | `bash scripts/safe-commit.sh "<message>"` — lint, format, mypy, pytest+coverage, arch-fitness, secrets, confidential-pattern, sonar per-file ratchet |
+| Run the same gates CI runs, locally | `bash scripts/safe-commit.sh "<message>"` — lint, format, mypy, pytest+coverage, arch-fitness, secrets, confidential-pattern, Sonar zero-open-findings gate |
 | Reproduce a CI-flagged Sonar / lint / type / coverage issue locally in one shot | **[`docs/architecture/local-first-feedback-loops.md`](docs/architecture/local-first-feedback-loops.md)** — Sonar-rule → local-fix recipe map; `python3 scripts/checks/check_sonar_new_code.py --all` pulls the full failing set so you batch-fix once instead of push-per-fix |
-| Pay down a grandfathered baseline entry (resolve a `.architecture/baseline/<rule>-files.txt` line) | **[`docs/architecture/grandfathering-paydown.md`](docs/architecture/grandfathering-paydown.md)** — three resolution shapes (refactor / rule-exempt with rationale / structural change), per-baseline status + next-move, and the deprecation endgame |
 | Onboard as a new contributor | [`CONTRIBUTING.md`](CONTRIBUTING.md) + [`docs/getting-started/quick-start.md`](docs/getting-started/quick-start.md) |
 | Understand evaluation methodology + benchmark suites | [`docs/evaluation/EVALUATION.md`](docs/evaluation/EVALUATION.md) |
 | Run a benchmark / interpret scores | [`docs/operations/runbooks/how-to-run-benchmark.md`](docs/operations/runbooks/how-to-run-benchmark.md) |
@@ -252,7 +251,7 @@ is the source-of-truth; the others fill in detail.
 |---|---|
 | See what blocks a commit (the mechanical contract) | **[`CONSTRAINTS.md`](CONSTRAINTS.md)** — short list of hard blocks |
 | Understand the architecture fitness functions F1–F54 + G1–G10 | **[`docs/architecture/fitness-functions.md`](docs/architecture/fitness-functions.md)** — canonical reference; read before adding any silencer, skip, suppression, or internal import |
-| Land a new top-level capability with its discipline carrying | **[`docs/architecture/test-discipline-hardening.md`](docs/architecture/test-discipline-hardening.md)** — F45..F49, the three principles (composition / real-path / new-capability), canonical test shapes |
+| Land a new top-level capability with its discipline carrying | **[`docs/architecture/test-discipline-hardening.md`](docs/architecture/test-discipline-hardening.md)** — F45..F48, the three principles (composition / real-path / new-capability), canonical test shapes |
 | Cut over from old behaviour to new without breaking operators (connector swap, ranker swap, schema migration, etc.) | **[`docs/architecture/feature-flag-architecture.md`](docs/architecture/feature-flag-architecture.md)** — F51..F54, default-safe / both-branch-tested / mechanical-retirement principles, capture-flip-soak-gate cutover protocol |
 | Avoid known code-smell patterns | [`docs/architecture/ENGINEERING.md#code-smells`](docs/architecture/ENGINEERING.md) — inappropriate intimacy, feature envy, test-shaped APIs |
 | Understand security posture | [`SECURITY.md`](SECURITY.md) + F15 (no logging of secret-named variables in plaintext) |
