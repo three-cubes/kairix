@@ -17,7 +17,7 @@ clone_repo() {
     fi
     echo -n "  CLONE $dest ... "
     local tmp
-    tmp=$(mktemp -d)
+    tmp=$(mktemp -d) || { echo "FAIL (mktemp error)" >&2; return; }
     git clone --depth 1 --quiet "$url" "$tmp/repo" 2>/dev/null || {
         echo "FAIL (clone error)" >&2
         rm -rf "$tmp"
@@ -35,7 +35,7 @@ clone_repo() {
     done
     rm -rf "$tmp"
     local count
-    count=$(find "$target" \( -name "*.md" -o -name "*.mdx" -o -name "*.rst" \) 2>/dev/null | wc -l | tr -d ' ')
+    count=$(find "$target" \( -name "*.md" -o -name "*.mdx" -o -name "*.rst" \) 2>/dev/null | wc -l | tr -d ' ') || count="?"
     echo "OK ($count files)"
 }
 
@@ -94,5 +94,5 @@ clone_repo "economics-and-strategy/pymc-marketing" "https://github.com/pymc-labs
 
 echo ""
 echo "=== Additional sources complete ==="
-total=$(find "$BASE" -name "*.md" -o -name "*.mdx" -o -name "*.rst" 2>/dev/null | wc -l | tr -d ' ')
+total=$(find "$BASE" -name "*.md" -o -name "*.mdx" -o -name "*.rst" 2>/dev/null | wc -l | tr -d ' ') || total="?"
 echo "Total docs in reference library: $total"

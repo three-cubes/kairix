@@ -351,7 +351,7 @@ if [[ "$CHECK_MODE" == "1" ]]; then
         if [[ "${#CHECK_TEST_FILES[@]}" -eq 0 ]]; then
             echo -e "${GREEN}OK${NC} (no tests import the staged modules)"
         else
-            UNIQ_CHECK_TESTS=$(printf '%s\n' "${CHECK_TEST_FILES[@]}" | sort -u | head -50)
+            UNIQ_CHECK_TESTS=$(printf '%s\n' "${CHECK_TEST_FILES[@]}" | sort -u | head -50) || true  # head -50 can SIGPIPE sort under pipefail; the captured list is still the (capped) test set
             mapfile -t CHECK_TEST_ARGS <<< "$UNIQ_CHECK_TESTS"
             run_gate uv run python -m pytest "${CHECK_TEST_ARGS[@]}" -x --timeout=30 \
                 -m "unit or bdd or contract" --no-cov -q
@@ -460,7 +460,7 @@ if [[ "$FAST_MODE" == "1" ]]; then
     # --fast: run only tests that import any file in the staged diff.
     # Discovery is import-graph-based: grep imports of the staged source
     # modules across tests/ and run those test files.
-    STAGED_KAIRIX=$(git diff --cached --name-only --diff-filter=AM | grep -E "^kairix/.*\.py$" || true)
+    STAGED_KAIRIX=$(git diff --cached --name-only --diff-filter=AM | grep -E "^kairix/.*\.py$" || true)  # grep exits 1 when no kairix/*.py is staged — the empty case is handled just below
     if [[ -z "$STAGED_KAIRIX" ]]; then
         echo -e "${GREEN}OK${NC} (no staged kairix/*.py — skipping product tests)"
         TEST_OUT="--fast: no kairix source touched, no tests to run"
@@ -476,7 +476,7 @@ if [[ "$FAST_MODE" == "1" ]]; then
             done < <(grep -rl "$imp" tests/ --include='*.py' 2>/dev/null | sort -u)
         done
         # Dedup
-        UNIQ_TESTS=$(printf '%s\n' "${TEST_FILES[@]}" | sort -u | head -50)
+        UNIQ_TESTS=$(printf '%s\n' "${TEST_FILES[@]}" | sort -u | head -50) || true  # head -50 can SIGPIPE sort under pipefail; the captured list is still the (capped) test set
         if [[ -z "$UNIQ_TESTS" ]]; then
             echo -e "${GREEN}OK${NC} (no tests import the staged modules)"
             TEST_OUT="--fast: no tests import the staged modules"
@@ -535,7 +535,7 @@ if [[ "$FAST_MODE" == "1" ]]; then
 elif [[ "$COVERAGE_SKIPPED" == "1" ]]; then
     echo -e "${GREEN}OK${NC} ($PASSED, coverage skipped via KAIRIX_SKIP_COVERAGE=1)"
 else
-    TOTAL_COV=$(grep -m1 -oE 'Total coverage: [0-9.]+%' <<< "$TEST_OUT")
+    TOTAL_COV=$(grep -m1 -oE 'Total coverage: [0-9.]+%' <<< "$TEST_OUT") || TOTAL_COV="total coverage not reported"
     echo -e "${GREEN}OK${NC} ($PASSED, $TOTAL_COV)"
 fi
 
@@ -608,7 +608,7 @@ echo -e "${GREEN}OK${NC}"
 # 6. Secret detection — pre-commit hook mirrors CI; do not invoke `detect-secrets scan`
 # directly here (it overwrites the baseline and only scans the path you pass it).
 echo -n "  secrets... "
-SECRETS_OUT=$(pre-commit run detect-secrets --all-files 2>&1) || true
+SECRETS_OUT=$(pre-commit run detect-secrets --all-files 2>&1) || true  # the hook exits non-zero on findings; the "Failed" grep below emits the verdict
 if grep -q "Failed" <<< "$SECRETS_OUT"; then
     echo -e "${RED}FAIL${NC}"
     echo "$SECRETS_OUT" | tail -20

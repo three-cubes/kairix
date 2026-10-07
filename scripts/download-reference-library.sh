@@ -25,7 +25,7 @@ clone_repo() {
     fi
     echo "  CLONE $dest"
     local tmp
-    tmp=$(mktemp -d)
+    tmp=$(mktemp -d) || { echo "  FAIL $dest — mktemp failed"; return; }
     git clone --depth 1 --quiet "$url" "$tmp/repo" 2>/dev/null || {
         echo "  FAIL $dest — clone failed"
         rm -rf "$tmp"
@@ -52,7 +52,7 @@ clone_repo() {
     done
     rm -rf "$tmp"
     local count
-    count=$(find "$target" -name "*.md" | wc -l | tr -d ' ')
+    count=$(find "$target" -name "*.md" | wc -l | tr -d ' ') || count="?"
     echo "  OK   $dest — $count markdown files"
 }
 
@@ -138,7 +138,7 @@ if [[ "$PHASE" == "2" || "$PHASE" == "all" ]]; then
 
     echo ""
     echo "=== Phase 2 complete ==="
-    total=$(find "$BASE" -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    total=$(find "$BASE" -name "*.md" 2>/dev/null | wc -l | tr -d ' ') || total="?"
     echo "Total markdown files: $total"
 fi
 
@@ -183,7 +183,7 @@ if [[ "$PHASE" == "3" || "$PHASE" == "all" ]]; then
         if curl -sL "$url" -o "$target" 2>/dev/null; then
             # Add frontmatter
             title=$(head -20 "$target" | grep -m1 "Title:" | sed 's/Title: //' || basename "$dest" .md)
-            tmpf=$(mktemp)
+            tmpf=$(mktemp) || { echo "  FAIL $dest — mktemp failed"; continue; }
             echo "---" > "$tmpf"
             echo "title: \"$title\"" >> "$tmpf"
             echo "source: Project Gutenberg" >> "$tmpf"
@@ -201,7 +201,7 @@ if [[ "$PHASE" == "3" || "$PHASE" == "all" ]]; then
 
     echo ""
     echo "=== Phase 3 complete ==="
-    total=$(find "$BASE" -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    total=$(find "$BASE" -name "*.md" 2>/dev/null | wc -l | tr -d ' ') || total="?"
     echo "Total markdown files: $total"
 fi
 
