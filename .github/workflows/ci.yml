@@ -61,6 +61,10 @@ jobs:
               - 'kairix/**/*.py'
               - 'tests/**/*.py'
               - 'pyproject.toml'
+              # The resolved dependency set: a lockfile-only bump (e.g. a
+              # Dependabot uv group update) changes what the tests run against,
+              # so it must run the Python stages, not skip them.
+              - 'uv.lock'
               # The fitness machinery itself: a change to the CHECK SCRIPTS,
               # the safe-commit driver, or the rule catalogue must always run Stage 0 arch-fitness (+
               # pre-commit + contracts, which share this filter). Without
