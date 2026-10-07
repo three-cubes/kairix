@@ -22,11 +22,9 @@ flags a step file when:
      module top level), AND
   2. the file constructs a ``*Pipeline`` class directly somewhere.
 
-Pre-existing violations are grandfathered in
-``.architecture/baseline/f46-files.txt``. F49 forces this baseline to
-shrink each release; new files cannot be added to the list.
+There is no grandfathering: every violation fails the gate.
 
-``main()`` gates the violation set against the baseline via
+``main()`` gates the violation set via
 :func:`tc_fitness.gate` and returns the exit code. The catalogue-driven
 runner dispatches it in-process (#499 Phase 2 stage 4a); the former
 ``check-f46-bdd-step-composition.sh`` delegator wrapper was retired then.

@@ -23,8 +23,8 @@ permanent ship tag, the category is mutable metadata.
 
 Status vocabulary
 -----------------
-* ``shipped`` — fully enforced; baseline grandfathers existing
-  offenders; net-new violations block at pre-commit / CI.
+* ``shipped`` — fully enforced over the full tree; any violation
+  blocks at pre-commit / CI (there is no baseline / grandfathering).
 * ``vacuous`` — shipped detector but no current violations because
   the relevant tree doesn't exist yet (e.g. ``kairix/chunkers/``).
   Fires the moment Wave N lands the tree.
@@ -99,9 +99,9 @@ Status = Literal[
 #   F26 / F8 / F76 / …). A staged change can only NEWLY violate the rule if a
 #   staged file is in the rule's path-scope, AND only the staged files need
 #   re-checking — the non-staged files were clean at the previous commit and
-#   their content is unchanged, so the baseline-diff verdict for them is
-#   unchanged. Deleting a file can only REMOVE a file-local violation, never
-#   add one. → run over ``staged ∩ scope``; skip when that intersection is
+#   their content is unchanged, so the verdict for them is unchanged.
+#   Deleting a file can only REMOVE a file-local violation, never add one.
+#   → run over ``staged ∩ scope``; skip when that intersection is
 #   empty. This is the default residue.
 #
 # * ``"relational"`` — a violation depends on cross-file state: a code
@@ -113,8 +113,8 @@ Status = Literal[
 #   isn't itself staged. → if any staged path is within the rule's scope,
 #   run the rule over its FULL scope (not just the staged files).
 #
-# * ``"always-run"`` — the trigger is "any change at all": net-new-file
-#   detection (F50), catalogue currency (F92), README / path-naming
+# * ``"always-run"`` — the trigger is "any change at all": catalogue
+#   currency (F92), README / path-naming
 #   invariants that fire on any new tracked path. → always run.
 #
 # ``StagedClass`` is now imported from ``tc_fitness.catalogue`` (above) — the
@@ -1585,7 +1585,7 @@ _ENTRIES: tuple[RuleEntry, ...] = (
 
 
 CATALOGUE: dict[str, RuleEntry] = {entry.gate: entry for entry in _ENTRIES}
-"""Indexed by gate name — the stable baseline-filename identifier.
+"""Indexed by gate name — the stable gate identifier.
 
 Note: a few catalogue entries share the same ``gate`` deliberately
 (e.g. F12 + F13 both surface through ``bdd-no-implementation-leaks``).

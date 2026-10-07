@@ -17,16 +17,16 @@ declare itself as a 3-line subclass:
         raise SystemExit(F44().run())
 
 The body of every concrete check stays focused on ``file_has_violation``
-— the only thing that genuinely varies per rule. Loading the baseline,
-enumerating files, applying scope predicates, gating on net-new
-violations, and writing the F21 remediation are inherited from the
-base class via :func:`tc_fitness.gate`.
+— the only thing that genuinely varies per rule. Enumerating files,
+applying scope predicates, failing on any violation (there is no
+baseline / grandfathering), and writing the F21 remediation are
+inherited from the base class via :func:`tc_fitness.gate`.
 
 Existing functional helpers (:func:`tc_fitness.gate`,
 :func:`tc_fitness.main_entry`, :func:`tc_fitness.python_files`) remain
 the canonical low-level API. The ABC does not replace them — it
 collapses the boilerplate around them. Checks that need custom
-enumeration, two-pass scans, multi-baseline diff, or external input
+enumeration, two-pass scans, or external input
 sources stay as plain functions calling the helpers directly.
 """
 
@@ -44,13 +44,14 @@ class FitnessRule(ABC):
     """Concrete subclasses declare class attributes + one detection method.
 
     Class attributes (required):
-        name: gate name → baseline filename (``.architecture/baseline/<name>-files.txt``)
+        name: gate name used in the ``ok`` / ``FAIL [arch:<name>]`` verdict
         remediation: F21-compliant ``fix:`` / ``next:`` / ``run:`` + Pass / Forbidden examples
 
     Class attributes (optional, with defaults):
         roots: tuple of repo-relative directories to scan (default: ``("kairix",)``)
         extensions: filename extensions to include (default: ``(".py",)``)
-        exempt_files: repo-relative paths to skip (default: empty)
+
+    There is no per-file exemption list: every in-scope file is checked.
 
     Concrete method (required):
         :meth:`file_has_violation`: return truthy when the file violates the rule
@@ -64,7 +65,6 @@ class FitnessRule(ABC):
     remediation: ClassVar[str]
     roots: ClassVar[tuple[str, ...]] = ("kairix",)
     extensions: ClassVar[tuple[str, ...]] = (".py",)
-    exempt_files: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(self, repo_root: Path | None = None) -> None:
         """``repo_root`` overrides the default :data:`REPO_ROOT`. Tests pass
@@ -116,7 +116,7 @@ class FitnessRule(ABC):
 
     def collect_violations(self, repo_root: Path | None = None) -> set[Path]:
         """Walk in-scope files; return the set of repo-relative paths that
-        :meth:`file_has_violation` flags. Exempt files are skipped.
+        :meth:`file_has_violation` flags. No file is exempt.
 
         ``repo_root`` override exists for back-compat with existing tests
         that pass ``tmp_path`` for isolation. New code constructs the
@@ -128,8 +128,6 @@ class FitnessRule(ABC):
         for path in self.enumerate_files():
             rel_path = self._repo_relative(path)
             rel = str(rel_path)
-            if rel in self.exempt_files:
-                continue
             if not self.is_in_scope(rel):
                 continue
             if self.file_has_violation(path):
@@ -137,5 +135,5 @@ class FitnessRule(ABC):
         return out
 
     def run(self) -> int:
-        """Gate the violation set against the baseline. Return the exit code."""
+        """Fail on any violation (no baseline). Return the exit code."""
         return gate(self.name, self.collect_violations(), self.remediation)

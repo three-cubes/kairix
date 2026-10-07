@@ -93,10 +93,8 @@ Intentionally NOT caught (precision over recall)
     docstring→handler direction only (a documented promise unkept), not
     the handler→docstring direction (an undocumented raise).
 
-Baseline ``.architecture/baseline/f88-files.txt`` grandfathers
-pre-existing gaps (empty at landing — the session-escape-5 fix already
-made ``routes.py`` catch ``ValueError``); net-new unhandled, untested
-documented Raises block at pre-commit / safe-commit / CI Stage 0. The
+There is no grandfathering: every unhandled, untested documented Raises
+blocks at pre-commit / safe-commit / CI Stage 0. The
 violating file reported is the SERVICE module that carries the
 unfulfilled docstring promise.
 """

@@ -26,6 +26,7 @@ _CHECKS_DIR = _REPO_ROOT / "scripts" / "checks"
 if str(_CHECKS_DIR) not in sys.path:
     sys.path.insert(0, str(_CHECKS_DIR))
 
+import check_f94_no_system_path_writes as f94  # noqa: E402
 from check_f94_no_system_path_writes import _is_exempt_path, _scan_file  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -103,3 +104,30 @@ def test_install_tree_is_exempt_runtime_is_not(tmp_path: Path) -> None:
     assert _is_exempt_path("kairix/worker.py") is False
     assert _is_exempt_path("scripts/deploy.py") is True
     assert _is_exempt_path("kairix/core/factory.py") is False
+
+
+def _recreate_retired_baseline(root: Path, gate_file: str, entry: str) -> None:
+    """Write a file at the retired ``.architecture/baseline/`` location naming
+    ``entry`` — the shape that used to grandfather it. PLA-472: it must have
+    no effect on the verdict."""
+    baseline = root / ".architecture" / "baseline" / gate_file
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    baseline.write_text(f"{entry}\n", encoding="utf-8")
+
+
+def test_violation_fails_even_with_a_recreated_baseline_file(tmp_path: Path) -> None:
+    """PLA-472: no grandfathering. A system-path write in a file listed in a
+    re-created ``f94-files.txt`` is still reported.
+
+    Sabotage proof (executed): re-adding the ``if rel in baseline`` partition
+    to ``collect_violations`` drops the hit and this test goes red; restored →
+    green.
+    """
+    (tmp_path / "kairix").mkdir()
+    (tmp_path / "kairix" / "writer.py").write_text('open("/etc/kairix/x.yaml", "w")\n', encoding="utf-8")
+    _recreate_retired_baseline(tmp_path, "f94-files.txt", "kairix/writer.py")
+
+    violations = f94.collect_violations(tmp_path, ["kairix/writer.py"])
+
+    assert violations == ["kairix/writer.py:1: write to system path '/etc/kairix/x.yaml'"]
+    assert not hasattr(f94, "_load_baseline")

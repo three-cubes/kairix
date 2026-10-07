@@ -20,7 +20,7 @@ For each flag in ``kairix.core.features.registry.REGISTRY``:
 
 Violations are emitted as
 ``tests/bdd/features/feature_flag_<name>.feature:flag=<name>:<reason>``
-so each missing artefact appears as a distinct baseline line.
+so each missing artefact appears as a distinct violation line.
 
 Defensive: vacuous-green when ``kairix.core.features`` is not
 importable (PR-2 may not be landed yet) or REGISTRY is empty.

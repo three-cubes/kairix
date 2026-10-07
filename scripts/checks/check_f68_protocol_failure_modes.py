@@ -41,8 +41,8 @@ Detection
    21 methods, zero failure-injection coverage, ``set_secret``'s
    multi-line rejection shipped unseen) was invisible to F68. The
    detector now discovers Protocols repo-wide; the Protocols it newly
-   surfaced enter the existing baseline as grandfathered entries
-   (paydown via F49). Method-level exclusions are unchanged: only
+   surfaced fail the gate like any other (there is no grandfathering).
+   Method-level exclusions are unchanged: only
    public (non-underscore-prefixed) methods are governed.
 2. For each Protocol class, enumerate every public method (no
    underscore prefix; ``FunctionDef`` or ``AsyncFunctionDef`` in the
@@ -53,11 +53,9 @@ Detection
    require it to contain at least one ``def test_<method>_(raises|...)_<rest>``
    declaration.
 4. Combinations that fail the requirement are reported as
-   ``<ProtocolName>.<method>``. The baseline file
-   ``.architecture/baseline/f68-protocol-failure-modes-files.txt``
-   grandfathers existing combinations so the rule lands green; net-new
-   Protocol methods (or net-new Protocol classes) require a matching
-   failure-mode test in the same commit.
+   ``<ProtocolName>.<method>``. Every Protocol method (existing or
+   net-new) requires a matching failure-mode test; there is no
+   grandfathering.
 
 The detection deliberately enforces the function-name pattern (not just
 "some test exists") so the test author has to name the failure class
@@ -295,9 +293,9 @@ def _method_is_covered(method: str, test_function_names: list[str]) -> bool:
 def collect_violations(repo_root: Path = REPO_ROOT) -> set[Path]:
     """Return repo-relative ``Path`` entries for every uncovered combination.
 
-    The synthetic path encodes ``<ProtocolName>.<method>`` so the baseline
-    file is human-readable. Operators remediate by adding the failure-mode
-    test (NOT by editing the baseline).
+    The synthetic path encodes ``<ProtocolName>.<method>`` so the failure
+    output is human-readable. Operators remediate by adding the
+    failure-mode test.
     """
     protocols = _harvest_protocols(repo_root)
     violations: set[Path] = set()

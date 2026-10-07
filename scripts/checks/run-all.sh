@@ -6,11 +6,11 @@
 # script no longer enumerates individual checks; it delegates to
 # scripts/checks/run_checks.py, which reads the catalogue and dispatches
 # every ACTIVE rule (python check_<x>.py or shell check-<x>.sh). Adding a
-# fitness rule is now ONE RuleEntry row + the check script + its baseline
-# — run-all, pre-commit, and the docs all derive from the catalogue.
+# fitness rule is now ONE RuleEntry row + the check script — run-all,
+# pre-commit, and the docs all derive from the catalogue.
 #
-# Each check fails on net-new violations vs its baseline; pre-existing
-# violations are grandfathered. The aggregate exit code is non-zero if
+# Each check fails on any violation in the full tree; there is no
+# baseline / grandfathering. The aggregate exit code is non-zero if
 # any individual check fails (one failing check never aborts the
 # ledger — run_checks.py guards every subprocess).
 #

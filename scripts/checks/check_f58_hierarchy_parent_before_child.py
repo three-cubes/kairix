@@ -27,7 +27,7 @@ then the gate is green.
 Phase B (Wave E onwards): the moment a class named ``HierarchyConnector``
 appears in production code, F58 requires the contract test to exist.
 
-Empty baseline ``.architecture/baseline/f58-files.txt``.
+There is no grandfathering: every violation fails the gate.
 
 Per F21, ``REMEDIATION`` carries ``fix:`` / ``next:`` / ``run:`` markers.
 """

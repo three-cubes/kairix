@@ -59,9 +59,8 @@ distrust is worse than no detector):
     deterministic, but the detector cannot see that — use
     ``# F82-allowed: fake clock, deterministic`` on the assert line.
 
-Baseline ``.architecture/baseline/f82-files.txt`` grandfathers
-pre-existing offenders (the #493 family); net-new wall-clock ceilings
-block at pre-commit / safe-commit / CI Stage 0.
+There is no grandfathering: every unmarked wall-clock ceiling blocks at
+pre-commit / safe-commit / CI Stage 0.
 """
 
 from __future__ import annotations

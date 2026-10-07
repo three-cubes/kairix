@@ -11,10 +11,12 @@ is enabled. F53 enforces:
      function is named ``features_status`` and delegates to the
      module-level ``tool_features_status`` adapter; the bare
      ``tool_<name>`` form is also accepted for forward-compat.
-  3. Neither surface appears in F30's grandfather list as missing an
-     outcome test (i.e. both have outcome tests).
+The outcome-test requirement for both surfaces is enforced directly by
+F30 (``check_f30_operator_outcome_tests.py``), which has no grandfather
+list since PLA-472 — a missing outcome test fails F30 outright, so F53
+no longer reads any baseline file.
 
-Binary presence check, no per-file baseline. Vacuous-green when
+Binary presence check. Vacuous-green when
 ``kairix/core/features`` is not importable (PR-2 may not have landed).
 
 Per F21, REMEDIATION carries ``fix:`` / ``next:`` / ``run:`` markers.
@@ -33,7 +35,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 CLI_REL_PATH = Path("kairix/cli.py")
 MCP_REL_PATH = Path("kairix/agents/mcp/server.py")
-F30_BASELINE_REL = Path(".architecture/baseline/f30-operator-outcome-tests-files.txt")
 
 REMEDIATION = """F53: operator surface missing for feature flags.
 fix: ensure kairix/cli.py:COMMANDS includes a 'features' entry (CLI
@@ -41,8 +42,7 @@ fix: ensure kairix/cli.py:COMMANDS includes a 'features' entry (CLI
      'features_status' MCP tool — an @server.tool() function named
      'features_status' (codebase convention; delegates to the
      module-level tool_features_status adapter). Both must also have
-     F30-compliant outcome tests (NOT appear in the F30 baseline as
-     missing an outcome test).
+     F30-compliant outcome tests (F30 enforces that directly).
 next: see docs/architecture/feature-flag-architecture.md §3.5 (operator
       surface) + §6 (F53 mechanics).
 run: python3 scripts/checks/check_f53_features_status_surface.py
@@ -124,37 +124,6 @@ def _mcp_registers_features_status(mcp_path: Path) -> bool:
     return _FEATURES_TOOL_NAME in registered_mcp_tool_names(mcp_path)
 
 
-def _f30_baseline_entries() -> set[str]:
-    """Return the set of file/path entries in the F30 baseline."""
-    path = REPO_ROOT / F30_BASELINE_REL
-    if not path.exists():
-        return set()
-    entries: set[str] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        entries.add(stripped)
-    return entries
-
-
-def _features_surfaces_have_outcome_tests() -> bool:
-    """Return True if neither the CLI 'features' subcommand nor the MCP
-    'features_status' tool appears in the F30 baseline as missing an
-    outcome test.
-
-    F30 anchors CLI-subcommand violations at the implementation file and
-    MCP-tool violations at ``kairix/agents/mcp/server.py/@tool:<name>``.
-    """
-    baseline = _f30_baseline_entries()
-    # CLI features subcommand — most-likely module path under kairix/core/features/cli.py
-    forbidden_substrings = (
-        "kairix/core/features/cli.py",
-        "kairix/agents/mcp/server.py/@tool:features_status",
-    )
-    return not any(any(sub in entry for sub in forbidden_substrings) for entry in baseline)
-
-
 def _features_module_available() -> bool:
     """Return True if kairix.core.features is importable (PR-2 has landed).
 
@@ -185,11 +154,6 @@ def main() -> int:
         findings.append("kairix/cli.py:COMMANDS missing 'features' entry")
     if not _mcp_registers_features_status(mcp_path):
         findings.append("kairix/agents/mcp/server.py missing @server.tool() features_status")
-    if not _features_surfaces_have_outcome_tests():
-        findings.append(
-            "F30 baseline lists 'features' CLI or 'features_status' MCP tool as "
-            "missing an outcome test — add the outcome test and remove the baseline entry"
-        )
 
     if not findings:
         print("ok [arch:f53-features-status-surface] — clean.")

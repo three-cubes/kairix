@@ -46,7 +46,7 @@ def _write(path: Path, body: str = "") -> None:
 
 def test_real_repo_gate_is_green() -> None:
     """The real F38 detector run against the full repo emits no
-    net-new violations vs ``.architecture/baseline/f38-files.txt``.
+    violations (there is no grandfathering).
     Today (pre-Wave 1) every existing chunker sits in an allow-listed
     tree, so the result is vacuous-green.
     """

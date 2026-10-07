@@ -27,8 +27,8 @@ Scope: ``kairix/**/*.py``, ``scripts/**/*.{py,sh}``,
 ``tests/**/*.{py,feature}``, ``docs/**/*.md``, ``CLAUDE.md``,
 ``README.md``, ``CONTRIBUTING.md``.
 
-Baseline at ``.architecture/baseline/no-private-infra-refs-files.txt``.
-F50 blocks net-new files from accreting violations.
+There is no grandfathering: every in-scope match fails the gate. Replace
+the matched string with a generic placeholder at source.
 """
 
 from __future__ import annotations
@@ -40,7 +40,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BASELINE_FILE = ROOT / ".architecture" / "baseline" / "no-private-infra-refs-files.txt"
 PATTERNS_FILE = ROOT / ".private-infra-patterns"
 PATTERNS_ENV_VAR = "PRIVATE_INFRA_PATTERNS"
 
@@ -119,16 +118,6 @@ def _load_patterns() -> list[tuple[str, re.Pattern[str]]]:
     return _compile_patterns(_read_patterns_source())
 
 
-def _load_baseline() -> set[str]:
-    if not BASELINE_FILE.exists():
-        return set()
-    return {
-        line.strip()
-        for line in BASELINE_FILE.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-
-
 def _is_in_scope(rel: str) -> bool:
     if rel in _TOP_LEVEL_FILES:
         return True
@@ -153,6 +142,23 @@ def _scan_file(
     return hits
 
 
+def collect_violations(
+    root: Path,
+    files: list[str],
+    patterns: list[tuple[str, re.Pattern[str]]],
+) -> list[str]:
+    """Scan every in-scope tracked path in ``files`` (repo-relative, under ``root``).
+
+    Returns every hit in every non-exempt file — there is no grandfathering.
+    """
+    return [
+        hit
+        for rel in files
+        if rel not in EXEMPT_FILES and _is_in_scope(rel) and (root / rel).is_file()
+        for hit in _scan_file(root / rel, rel, patterns)
+    ]
+
+
 def main() -> int:
     patterns = _load_patterns()
     if not patterns:
@@ -170,50 +176,16 @@ def main() -> int:
         print("FAIL no_private_infra_refs: could not enumerate tracked files", file=sys.stderr)
         return 1
 
-    baseline = _load_baseline()
-    net_new: list[str] = []
-    matched_baseline_files: set[str] = set()
-
-    for rel in files:
-        if rel in EXEMPT_FILES:
-            continue
-        if not _is_in_scope(rel):
-            continue
-        path = ROOT / rel
-        if not path.is_file():
-            continue
-        hits = _scan_file(path, rel, patterns)
-        if not hits:
-            continue
-        if rel in baseline:
-            matched_baseline_files.add(rel)
-            continue
-        net_new.extend(hits)
-
-    stale = baseline - matched_baseline_files
-    exit_code = 0
-    if net_new:
-        print("FAIL [arch:no-private-infra-refs] — net-new violations:", file=sys.stderr)
-        for hit in net_new:
+    violations = collect_violations(ROOT, files, patterns)
+    if violations:
+        print("FAIL [arch:no-private-infra-refs] — violations found:", file=sys.stderr)
+        for hit in violations:
             print(f"  {hit}", file=sys.stderr)
         print(file=sys.stderr)
         print(REMEDIATION, file=sys.stderr)
-        exit_code = 1
-    if stale:
-        print(
-            f"FAIL [arch:no-private-infra-refs] — {len(stale)} baseline entries "
-            "no longer hold violations; remove from baseline:",
-            file=sys.stderr,
-        )
-        for rel in sorted(stale):
-            print(f"  {rel}", file=sys.stderr)
-        exit_code = 1
-    if exit_code == 0:
-        if baseline:
-            print(f"ok [arch:no-private-infra-refs] — {len(baseline)} grandfathered file(s) still present in baseline.")
-        else:
-            print(f"ok [arch:no-private-infra-refs] — {len(patterns)} pattern(s) loaded.")
-    return exit_code
+        return 1
+    print(f"ok [arch:no-private-infra-refs] — clean ({len(patterns)} pattern(s) loaded).")
+    return 0
 
 
 if __name__ == "__main__":

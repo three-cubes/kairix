@@ -23,9 +23,8 @@ Two-part detection:
 
 Phase A (today / Wave A): vacuous — ``kairix/chunkers/`` does not exist
 and the only existing ``Chunk(...)`` callsites are in
-``kairix/core/connectors/silver.py``, grandfathered in
-``.architecture/baseline/f55-files.txt`` until Wave C threads
-``chunker_version`` through Silver.
+``kairix/core/connectors/silver.py``, outside the Phase A scope until
+Wave C threads ``chunker_version`` through Silver.
 
 Phase B (Wave F): every chunker plugin declares ``version: str`` AND
 every ``Chunk(...)`` call in ``kairix/chunkers/<name>/__init__.py`` (or

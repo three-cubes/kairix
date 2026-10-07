@@ -139,7 +139,7 @@ def test_empty_providers_directory_passes(tmp_path: Path) -> None:
 
 def test_real_repo_gate_is_green() -> None:
     """The real F27 detector run against the full repo emits no
-    net-new violations vs ``.architecture/baseline/F27-files.txt``.
+    violations (there is no grandfathering).
     """
     detector = _load_detector()
     assert detector.main() == 0

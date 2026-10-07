@@ -42,10 +42,10 @@ so the violation set is empty. The gate fires when Wave 1 adds the
 Protocols (``DocumentRepository``, ``GraphRepository``, etc.) are
 NOT scanned — the typed-boundary discipline is brand-new for the
 connector surface and would generate enormous false-positive noise
-against the existing dict-shaped repositories. The baseline file
-exists as a placeholder; if/when retroactive typing of older
-Protocols is in scope, the rule scope widens and the baseline
-seeds the legacy entries.
+against the existing dict-shaped repositories. If/when retroactive
+typing of older Protocols is in scope, the rule scope widens and the
+legacy Protocols are retyped in the same change (there is no
+grandfathering).
 
 If ``kairix/core/protocols.py`` does not exist, the check passes.
 """
@@ -225,7 +225,7 @@ def collect_violations(repo_root: Path = REPO_ROOT) -> set[Path]:
     F42 allow-list.
 
     The reported path is a synthetic ``kairix/core/protocols.py::<Class>.<method>``
-    so each method violation is independently grandfatherable.
+    so each method violation is reported independently.
     Empty set if ``protocols.py`` doesn't exist or holds no surface
     Protocols.
     """

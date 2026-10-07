@@ -9,7 +9,8 @@ F53 enforces that the operator surface for feature flags exists:
      reads ``registered_mcp_tool_names`` off the ``_cap(...)`` rows — a row
      whose ``mcp_tool`` (agent-callable) OR ``escalate_via`` (operator-stub
      adapter) resolves to ``features_status`` IS the registered tool.
-  3. Neither appears in the F30 baseline as missing an outcome test.
+The outcome-test requirement for both surfaces is F30's job (no
+grandfather list since PLA-472), so F53 reads no baseline file.
 
 These tests exercise the AST-presence helpers against synthetic source
 files. Vacuous-green when ``kairix.core.features`` is not importable.

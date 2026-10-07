@@ -244,10 +244,9 @@ def collect_violations(repo_root: Path = REPO_ROOT) -> set[Path]:
         for sink in sinks:
             if not _scan_for_drain_update(repo_root, table, sink):
                 # Report keyed by a synthetic path that encodes the
-                # table+sink so the baseline file lists "what's
-                # known-broken" in human-readable form. Operators
-                # remediate by adding a drain UPDATE, not by editing
-                # the baseline.
+                # table+sink so the failure output lists "what's
+                # broken" in human-readable form. Operators remediate
+                # by adding a drain UPDATE.
                 violations.add(Path(f"kairix/core/db/schema.py::{table}::pushed_to_{sink}"))
     return violations
 

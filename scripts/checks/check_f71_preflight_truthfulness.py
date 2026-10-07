@@ -42,8 +42,8 @@ Detection
    a function named ``test_<check_function_name>_count_equals_ground_truth``.
 
 Violations are reported with a synthetic path key
-``kairix/core/db/integrity.py::<check_function_name>`` so the baseline
-file lists "what's known-broken" in human-readable form.
+``kairix/core/db/integrity.py::<check_function_name>`` so the failure
+output lists "what's broken" in human-readable form.
 """
 
 from __future__ import annotations

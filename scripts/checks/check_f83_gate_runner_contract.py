@@ -60,10 +60,8 @@ Intentionally NOT caught (precision over recall):
     is genuinely safe) and ``||`` embedded in program text (a sed
     script like ``s|x$||`` slips through) — accepted under-catch.
 
-The per-file baseline ``.architecture/baseline/f83-files.txt``
-grandfathers pre-existing offenders. NOTE: the baseline masks ALL F83
-sub-rules for a listed file — paying a file down means satisfying every
-sub-rule (refinement to per-finding granularity is #499 Phase 2).
+There is no grandfathering: every file breaking any F83 sub-rule fails
+the gate until it satisfies every sub-rule.
 """
 
 from __future__ import annotations

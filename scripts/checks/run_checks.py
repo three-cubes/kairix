@@ -290,8 +290,10 @@ def _dispatches_in_process(entry: RuleEntry) -> bool:
 
 
 def _load_check_main(script: str) -> Any:
-    """Import ``script``'s check module and return a zero-arg ``main`` invoker."""
-    return _pkg_load_check_main(script)
+    """Import ``script``'s check module and return a zero-arg ``main`` invoker.
+
+    The engine (v0.19+) takes the importable module name, so strip ``.py``."""
+    return _pkg_load_check_main(script.removesuffix(".py"))
 
 
 def _footer_config() -> RunnerConfig:

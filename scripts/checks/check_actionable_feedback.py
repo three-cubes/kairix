@@ -31,20 +31,13 @@ Detection (per scan target):
         the file body must contain at least one marker.
 
 A file violates F21 if it has at least one remediation-shaped string
-that lacks all three markers AND the file is not in the allow-list:
+that lacks all three markers. Only ``check_*.py`` / ``check-*.sh`` /
+``check_*.sh`` files are scanned — harness and tooling files
+(``run-all.sh``, ``_lib.sh``, ``merge_coverage_xml.py``) are not
+fitness checks and never match those globs.
 
-  * ``scripts/checks/run-all.sh`` — orchestrator/harness; emits
-    aggregate pass/fail messages, not per-rule remediation.
-  * ``scripts/checks/_lib.sh`` — shared shell helpers; the remediation
-    text they print is supplied by callers, not owned here.
-  * ``scripts/checks/audit_baselines.py`` — auditor over the baselines;
-    not a fitness check itself.
-  * ``scripts/checks/merge_coverage_xml.py`` — tool, not a check.
-
-Baseline at ``.architecture/baseline/actionable-feedback-files.txt``
-grandfathers existing offenders so the rule lands green; the baseline
-is expected to shrink as remediation strings get rewritten to satisfy
-the convention.
+There is no grandfathering: every offending check script fails the
+gate until its remediation text is rewritten at source.
 
 Dogfood: this file's own ``REMEDIATION`` MUST contain at least one of
 ``fix:``/``next:``/``run:``. If you sabotage it by removing them, F21
@@ -75,17 +68,6 @@ ACTION_MARKERS: tuple[str, ...] = ("fix:", "next:", "run:")
 # canonical shape of the cure AND the anti-pattern to avoid. F66 /
 # F67 / F68 already follow this convention.
 EXAMPLE_MARKERS: tuple[str, ...] = ("Pass example:", "Forbidden example:")
-
-# Files inside scripts/checks/ that are NOT individual fitness checks
-# and so are exempt from F21 — they don't own per-rule remediation.
-_ALLOW_FILES: frozenset[str] = frozenset(
-    {
-        "_lib.sh",
-        "run-all.sh",
-        "audit_baselines.py",
-        "merge_coverage_xml.py",
-    }
-)
 
 # Module-level string-constant names that, by convention, hold a
 # failure-output / remediation message. Treated as remediation text and
@@ -355,20 +337,16 @@ def _collect_violations() -> set[Path]:
     F21 deliberately scans itself: dogfood means the detector's own
     REMEDIATION must satisfy the rule. Sabotaging this file (removing
     the three markers from its REMEDIATION) must cause F21 to flag
-    itself as a net-new violation.
+    itself as a violation.
     """
     violations: set[Path] = set()
 
     for path in sorted(CHECKS_DIR.glob("check_*.py")):
-        if path.name in _ALLOW_FILES:
-            continue
         if _python_file_violates(path):
             violations.add(repo_relative(path))
 
     for pattern in ("check-*.sh", "check_*.sh"):
         for path in sorted(CHECKS_DIR.glob(pattern)):
-            if path.name in _ALLOW_FILES:
-                continue
             if _shell_file_violates(path):
                 violations.add(repo_relative(path))
 

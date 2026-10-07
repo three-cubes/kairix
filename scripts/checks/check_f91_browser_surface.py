@@ -72,11 +72,9 @@ distrust is worse than no detector)
     surface kairix ships; a future second HTML surface extends
     ``TEMPLATE_ROOTS`` deliberately.
 
-Baseline ``.architecture/baseline/f91-files.txt`` grandfathers the two
-pre-existing inline scripts (key.html / folder.html — near-duplicate
-afterSwap reveal listeners predating this rule); net-new ungoverned
-inline scripts and any regression of the header set block at pre-commit
-/ safe-commit / CI Stage 0.
+There is no grandfathering: every ungoverned inline script and any
+regression of the header set blocks at pre-commit / safe-commit / CI
+Stage 0.
 """
 
 from __future__ import annotations

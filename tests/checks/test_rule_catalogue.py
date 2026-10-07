@@ -9,8 +9,9 @@ Bidirectional consistency:
 2. **Every check has at least one entry.** Every
    ``scripts/checks/check_*.py`` file must be referenced by at least
    one entry — no orphan checks.
-3. **Every shipped/vacuous/proxy entry references a real baseline OR
-   is a cross-cutting check with no per-file grandfathering.**
+3. **Vocabularies are closed.** Categories and statuses come from the
+   well-known sets. (There is no per-file baseline to reference — every
+   rule evaluates the full tree, PLA-472.)
 
 The catalogue is the canonical source of truth; CLAUDE.md and
 future tooling consume it. These tests prove the catalogue tracks

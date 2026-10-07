@@ -232,8 +232,8 @@ def collect_violations(repo_root: Path = REPO_ROOT) -> set[Path]:
 
     Returns repo-relative synthetic paths of the form
     ``kairix/core/db/schema.py::<table>`` so each violation appears as
-    a distinct baseline entry. Operators remediate by adding an INSERT
-    or a ``# table-is-derived:`` comment, not by editing the baseline.
+    a distinct violation. Operators remediate by adding an INSERT
+    or a ``# table-is-derived:`` comment.
     """
     source = _read_schema_source(repo_root)
     if not source:

@@ -20,11 +20,8 @@ Mechanical detection (AST):
   3. Flag the file when an ``ast.Call`` invokes a class name from step
      2 directly (call expression of the class name).
 
-Per-file granularity — keeps the baseline format file-based, consistent
-with every other F-rule baseline. The baseline grandfathers
-pre-existing direct-construction integration tests (substantial — only
-one integration test today uses the factory). Net-new violations
-hard-fail. F49 enforces ongoing baseline paydown.
+Per-file granularity — keeps violation reporting file-based, consistent
+with every other F-rule. There is no grandfathering: every violation fails the gate.
 
 Spec: ``docs/architecture/test-discipline-hardening.md`` §3 (F47).
 """

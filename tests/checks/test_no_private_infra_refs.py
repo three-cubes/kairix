@@ -22,6 +22,7 @@ if str(_CHECKS_DIR) not in sys.path:
 
 # Import depends on the sys.path mutation above — the detector lives
 # outside the kairix package (repo-fitness script, not app code).
+import check_no_private_infra_refs as infra  # noqa: E402
 from check_no_private_infra_refs import (  # noqa: E402
     PATTERNS_ENV_VAR,
     _compile_patterns,
@@ -122,3 +123,31 @@ def test_in_scope_excludes_vendored_and_unrelated_trees() -> None:
     assert not _is_in_scope("reference-library/some/citation.md")
     assert not _is_in_scope("benchmark-results/history/run-001.json")
     assert not _is_in_scope("kairix.egg-info/PKG-INFO")
+
+
+def _recreate_retired_baseline(root: Path, gate_file: str, entry: str) -> None:
+    """Write a file at the retired ``.architecture/baseline/`` location naming
+    ``entry`` — the shape that used to grandfather it. PLA-472: it must have
+    no effect on the verdict."""
+    baseline = root / ".architecture" / "baseline" / gate_file
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    baseline.write_text(f"{entry}\n", encoding="utf-8")
+
+
+def test_violation_fails_even_with_a_recreated_baseline_file(tmp_path: Path) -> None:
+    """PLA-472: no grandfathering. A match in a file listed in a re-created
+    ``no-private-infra-refs-files.txt`` is still reported.
+
+    Sabotage proof (executed): re-adding the ``if rel in baseline: continue``
+    skip to ``collect_violations`` drops the hit and this test goes red;
+    restored → green.
+    """
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_text("Use synthetic-test-vm-123 here.\n", encoding="utf-8")
+    _recreate_retired_baseline(tmp_path, "no-private-infra-refs-files.txt", "docs/guide.md")
+
+    violations = infra.collect_violations(tmp_path, ["docs/guide.md"], _compile_patterns(_SYNTHETIC_PATTERN_SOURCE))
+
+    assert len(violations) == 1
+    assert violations[0].startswith("docs/guide.md:1")
+    assert not hasattr(infra, "_load_baseline")

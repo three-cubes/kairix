@@ -85,10 +85,8 @@ distrust is worse than no detector):
     registered pair — the registry keys on pair_name, and the marker
     names the pair, so a same-named symbol elsewhere is not conflated.
 
-Baseline ``.architecture/baseline/f87-files.txt`` grandfathers
-registered pairs whose corpus does not yet exist (the config writers and
-EmbeddingCache pairs at landing); a net-new registered pair without a
-corpus blocks at pre-commit / safe-commit / CI Stage 0.
+There is no grandfathering: every registered pair without a corpus
+blocks at pre-commit / safe-commit / CI Stage 0.
 """
 
 from __future__ import annotations
@@ -107,16 +105,15 @@ class PersistLoadPair:
     """One registered persist/load pair.
 
     ``write_symbol`` / ``read_symbol`` are the public write + read
-    function (or class) names the corpus must reference. ``baseline_path``
-    is the repo-relative pseudo-path used to gate an uncovered pair: F87
+    function (or class) names the corpus must reference. ``violation_path``
+    is the repo-relative pseudo-path used to report an uncovered pair: F87
     has no source file to point at (the violation is a MISSING test), so
-    each pair carries a stable synthetic path that the baseline
-    grandfathers and the F50 net-new guard recognises.
+    each pair carries a stable synthetic path.
     """
 
     write_symbol: str
     read_symbol: str
-    baseline_path: str
+    violation_path: str
 
 
 # The DECLARED pair-registry — extend with one row per persist/load pair.
@@ -129,26 +126,26 @@ _PAIRS: dict[str, PersistLoadPair] = {
     "secrets_set_load": PersistLoadPair(
         write_symbol="set_secret",
         read_symbol="load_secrets_file",
-        baseline_path="kairix/secrets/store.py::set_secret+load_secrets_file",
+        violation_path="kairix/secrets/store.py::set_secret+load_secrets_file",
     ),
     # FileTokenStore.store persists captured connector tokens through the
     # secrets writer; the secrets read path resolves them on next boot.
     "connect_file_store": PersistLoadPair(
         write_symbol="FileTokenStore",
         read_symbol="load_secrets_file",
-        baseline_path="kairix/connect/store/file_store.py::FileTokenStore.store+load_secrets_file",
+        violation_path="kairix/connect/store/file_store.py::FileTokenStore.store+load_secrets_file",
     ),
     # The wizard config writer; the canonical layered reader reads back.
     "config_write_load": PersistLoadPair(
         write_symbol="write_config_updates",
         read_symbol="load_merged_mapping",
-        baseline_path="kairix/platform/setup/backends.py::write_config_updates+load_merged_mapping",
+        violation_path="kairix/platform/setup/backends.py::write_config_updates+load_merged_mapping",
     ),
     # EmbeddingCache persists vectors and reads them back over SQLite.
     "embedding_cache_put_get": PersistLoadPair(
         write_symbol="put_many",
         read_symbol="get_many",
-        baseline_path="kairix/core/embed/embedding_cache.py::put_many+get_many",
+        violation_path="kairix/core/embed/embedding_cache.py::put_many+get_many",
     ),
 }
 
@@ -267,16 +264,16 @@ def _covered_pairs(repo_root: Path) -> set[str]:
 
 def collect_violations(repo_root: Path = REPO_ROOT) -> set[Path]:
     """Resolve corpus coverage for every registered pair; print per-pair
-    detail lines; return the synthetic baseline paths of uncovered pairs."""
+    detail lines; return the synthetic violation paths of uncovered pairs."""
     covered = _covered_pairs(repo_root)
     violations: set[Path] = set()
     for pair_name in sorted(_PAIRS):
         if pair_name in covered:
             continue
         pair = _PAIRS[pair_name]
-        violations.add(Path(pair.baseline_path))
+        violations.add(Path(pair.violation_path))
         print(
-            f"  [f87] {pair.baseline_path}: persist/load pair '{pair_name}' "
+            f"  [f87] {pair.violation_path}: persist/load pair '{pair_name}' "
             f"({pair.write_symbol} -> {pair.read_symbol}) has no adversarial round-trip corpus"
         )
     return violations
