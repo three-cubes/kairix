@@ -101,9 +101,16 @@ class TesseractRunner:
     of this class.
     """
 
-    def __init__(self) -> None:
-        """Resolve :mod:`pytesseract` once at construction time."""
-        self._pyt = _pytesseract()
+    def __init__(self, pytesseract_module: Any = None) -> None:
+        """Resolve :mod:`pytesseract` once at construction time.
+
+        ``pytesseract_module`` is the DI seam: production leaves it
+        ``None`` and the real :mod:`pytesseract` is imported; tests pass
+        a module-shaped fake (``image_to_osd`` / ``image_to_data`` /
+        ``Output`` / ``TesseractError``) to drive the failure paths
+        without the Tesseract binary.
+        """
+        self._pyt = pytesseract_module if pytesseract_module is not None else _pytesseract()
 
     def detect_orientation(self, img: np.ndarray) -> OrientationResult:
         """Tesseract ``--psm 0`` — orientation + script detection."""

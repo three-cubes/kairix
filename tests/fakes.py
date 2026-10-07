@@ -453,6 +453,8 @@ class FakeEmbedProvider:
 
     Pass ``empty=True`` to return an empty result for every call — exercises
     the 'no vectors → skip' branch in callers (e.g. RecallChecker).
+    Pass ``raises=Exception(...)`` to make every call raise — mirrors the
+    openai SDK surfacing a connection / auth failure from the real providers.
     """
 
     def __init__(
@@ -461,14 +463,18 @@ class FakeEmbedProvider:
         dim: int = 3,
         *,
         empty: bool = False,
+        raises: BaseException | None = None,
     ) -> None:
         self._vector = vector or [0.0, 0.6, 0.8]
         self._dim = dim
         self._empty = empty
+        self._raises = raises
         self.calls: list[dict[str, Any]] = []
 
     def embed_batch(self, texts: list[str], *, model: str, dims: int) -> list[list[float]]:
         self.calls.append({"texts": list(texts), "model": model, "dims": dims})
+        if self._raises is not None:
+            raise self._raises
         if self._empty:
             return []
         return [list(self._vector) for _ in texts]
@@ -515,7 +521,8 @@ class FakeLLMBackend:
 
     Implements ``kairix.platform.llm.protocol.LLMBackend``: ``chat(messages, max_tokens)``
     returns a configured response (or successive responses), and ``embed(text)`` returns
-    a configured vector. Captures call args.
+    a configured vector. Captures call args. Pass ``embed_empty=True`` to make
+    ``embed`` return ``[]`` — the Protocol's documented failure shape.
     """
 
     def __init__(
@@ -525,6 +532,7 @@ class FakeLLMBackend:
         chat_response: str | None = None,
         embed_vector: list[float] | None = None,
         chat_raises: BaseException | None = None,
+        embed_empty: bool = False,
     ) -> None:
         # Single-response shortcut: chat_response="..." reuses the value for every call.
         if chat_response is not None:
@@ -533,6 +541,7 @@ class FakeLLMBackend:
         self._chat_call_idx = 0
         self._embed_vector = list(embed_vector or [0.0, 0.6, 0.8])
         self._chat_raises = chat_raises
+        self._embed_empty = embed_empty
         self.chat_calls: list[dict[str, Any]] = []
         self.embed_calls: list[str] = []
 
@@ -551,6 +560,8 @@ class FakeLLMBackend:
 
     def embed(self, text: str) -> list[float]:
         self.embed_calls.append(text)
+        if self._embed_empty:
+            return []
         return list(self._embed_vector)
 
 
@@ -1011,6 +1022,9 @@ class FakeProvider:
       ``embed_raises`` — when not ``None``, every ``embed_batch`` call
         raises this exception instead of returning. Used to drive the
         ``unreachable`` status branch of ``probe-config``.
+      ``chat_raises`` — when not ``None``, every ``chat`` call raises
+        this exception (mirrors a plugin surfacing ``ProviderUnreachable``
+        from its transport).
 
     Socket counters — extension for ``transport_timeout.feature``.
     ``opened`` / ``closed`` / ``peak_open`` track FD usage; the
@@ -1032,6 +1046,7 @@ class FakeProvider:
         sleep: Any = None,
         embed_latency_s: float = 0.0,
         embed_raises: BaseException | None = None,
+        chat_raises: BaseException | None = None,
     ) -> None:
         import time as _time
 
@@ -1057,6 +1072,7 @@ class FakeProvider:
         self._sleep = sleep if sleep is not None else _time.sleep
         self._embed_latency_s = float(embed_latency_s)
         self._embed_raises = embed_raises
+        self._chat_raises = chat_raises
         self.embed_calls: list[list[str]] = []
         self.chat_calls: list[dict[str, Any]] = []
         self.dimension_calls: int = 0
@@ -1085,6 +1101,8 @@ class FakeProvider:
 
     def chat(self, messages: list[dict[str, Any]], *, max_tokens: int = 800) -> str:
         self.chat_calls.append({"messages": list(messages), "max_tokens": max_tokens})
+        if self._chat_raises is not None:
+            raise self._chat_raises
         return self._chat_reply
 
     def dimension(self) -> int:
@@ -1262,6 +1280,35 @@ class FakeProviderRegistry:
 
     def available(self) -> list[str]:
         return sorted(self._providers)
+
+
+class FakeOllamaTransport:
+    """Recording ``OllamaTransport`` for the Ollama provider plugin.
+
+    Implements ``kairix.providers.ollama.OllamaTransport``:
+    ``post(path, json) -> dict``. Every call is appended to
+    ``recorded_requests``. ``responses`` maps a request path
+    (``/api/embeddings`` / ``/api/chat``) to the decoded JSON body to
+    return; unmapped paths return ``{}``. Pass ``raises=`` to make every
+    ``post`` raise — e.g. ``ConnectionRefusedError`` for a stopped sidecar,
+    which the plugin maps to ``ProviderUnreachable``.
+    """
+
+    def __init__(
+        self,
+        *,
+        responses: dict[str, dict[str, Any]] | None = None,
+        raises: BaseException | None = None,
+    ) -> None:
+        self._responses = dict(responses or {})
+        self._raises = raises
+        self.recorded_requests: list[dict[str, Any]] = []
+
+    def post(self, path: str, json: dict[str, Any]) -> dict[str, Any]:
+        self.recorded_requests.append({"path": path, "json": dict(json)})
+        if self._raises is not None:
+            raise self._raises
+        return dict(self._responses.get(path, {}))
 
 
 # ---------------------------------------------------------------------------
@@ -1728,6 +1775,47 @@ class _FakeSearchResult:
 
     def __init__(self, *, results: list[Any]) -> None:
         self.results = results
+
+
+class FakeSearchClient:
+    """Probe ``SearchClient`` for ``run_probe_search``.
+
+    Implements ``kairix.quality.probe.clients.SearchClient``:
+    ``search(query) -> Any``. Records every sampled query in ``queries``.
+    Returns a ``_FakeSearchResult`` carrying ``results``; pass ``raises=``
+    to make every call raise (the probe executor counts it as an error).
+    """
+
+    def __init__(self, *, results: list[Any] | None = None, raises: BaseException | None = None) -> None:
+        self._results = list(results or [])
+        self._raises = raises
+        self.queries: list[Any] = []
+
+    def search(self, query: Any) -> Any:
+        self.queries.append(query)
+        if self._raises is not None:
+            raise self._raises
+        return _FakeSearchResult(results=list(self._results))
+
+
+class FakeBriefingSource:
+    """In-memory ``BriefingSourceProtocol`` (``kairix.quality.contracts.briefing``).
+
+    ``fetch(agent, limit)`` returns up to ``limit`` of the configured
+    ``items``; pass ``raises=`` to make every call raise. Records every
+    ``(agent, limit)`` in ``calls``.
+    """
+
+    def __init__(self, *, items: list[dict[str, Any]] | None = None, raises: BaseException | None = None) -> None:
+        self._items = [dict(item) for item in (items or [])]
+        self._raises = raises
+        self.calls: list[tuple[str, int]] = []
+
+    def fetch(self, agent: str, limit: int = 10) -> list[dict[str, Any]]:
+        self.calls.append((agent, limit))
+        if self._raises is not None:
+            raise self._raises
+        return [dict(item) for item in self._items[:limit]]
 
 
 class FakeCrossEncoderLoader:
@@ -2257,6 +2345,263 @@ class FakeDocxExtractor:
         from kairix.core.protocols import SourceMetadata
 
         return SourceMetadata()
+
+
+# ---------------------------------------------------------------------------
+# Upstream-library adapter fakes for the extractor plugins' wire-shape
+# Protocols (``_PdfPage`` / ``_PdfDocument`` / ``_DocxDocument`` /
+# ``_PptxPresentation`` / ``_MarkitdownConverter`` / ``OcrRunner`` /
+# ``PageRenderer``). Each is injected through the real extractor's opener /
+# loader / factory seam so failure-mode contracts drive the production
+# extractor code against a failing upstream document object.
+# ---------------------------------------------------------------------------
+
+
+class FakePdfPage:
+    """``pdfplumber.Page``-shaped fake (``_PdfPage`` Protocol).
+
+    ``text=None`` models an image-only (scanned) page whose text layer is
+    empty — what pdfplumber returns for a page with no extractable text.
+    """
+
+    def __init__(self, *, text: str | None = None, tables: list[list[list[str | None]]] | None = None) -> None:
+        self._text = text
+        self._tables = [list(t) for t in (tables or [])]
+
+    def extract_text(self) -> str | None:
+        return self._text
+
+    def extract_tables(self) -> list[list[list[str | None]]]:
+        return [list(t) for t in self._tables]
+
+
+class FakePdfDocument:
+    """Context-managed ``pdfplumber.PDF``-shaped fake (``_PdfDocument`` Protocol)."""
+
+    def __init__(self, *, pages: list[Any] | None = None, metadata: dict[str, Any] | None = None) -> None:
+        self._pages = list(pages or [])
+        self._metadata = dict(metadata or {})
+
+    @property
+    def pages(self) -> list[Any]:
+        return list(self._pages)
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return dict(self._metadata)
+
+    def __enter__(self) -> FakePdfDocument:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        return None
+
+
+class FakeDocxDocument:
+    """``docx.Document``-shaped fake (``_DocxDocument`` Protocol).
+
+    Paragraph / table entries are any objects exposing python-docx's
+    ``.text`` / ``.style.name`` / ``.rows[].cells[].text`` attributes.
+    ``element`` defaults to a body-less document element (no
+    ``<w:body>``), and ``core_properties`` to an all-empty property set.
+    """
+
+    def __init__(
+        self,
+        *,
+        paragraphs: list[Any] | None = None,
+        tables: list[Any] | None = None,
+        element: Any = None,
+        core_properties: Any = None,
+    ) -> None:
+        from types import SimpleNamespace
+
+        self._paragraphs = list(paragraphs or [])
+        self._tables = list(tables or [])
+        self._element = element if element is not None else SimpleNamespace(body=None)
+        self._core_properties = (
+            core_properties if core_properties is not None else SimpleNamespace(title="", author="", created=None)
+        )
+
+    @property
+    def paragraphs(self) -> list[Any]:
+        return list(self._paragraphs)
+
+    @property
+    def tables(self) -> list[Any]:
+        return list(self._tables)
+
+    @property
+    def element(self) -> Any:
+        return self._element
+
+    @property
+    def core_properties(self) -> Any:
+        return self._core_properties
+
+
+class FakePptxPresentation:
+    """``pptx.Presentation``-shaped fake (``_PptxPresentation`` Protocol).
+
+    ``slides`` is any sized iterable of slide-shaped objects;
+    ``core_properties`` defaults to an all-empty property set.
+    """
+
+    def __init__(self, *, slides: list[Any] | None = None, core_properties: Any = None) -> None:
+        from types import SimpleNamespace
+
+        self._slides = list(slides or [])
+        self._core_properties = (
+            core_properties if core_properties is not None else SimpleNamespace(title="", author="", created=None)
+        )
+
+    @property
+    def slides(self) -> list[Any]:
+        return list(self._slides)
+
+    @property
+    def core_properties(self) -> Any:
+        return self._core_properties
+
+
+class FakeMarkitdownConverter:
+    """``markitdown.MarkItDown``-shaped fake (``_MarkitdownConverter`` Protocol).
+
+    ``convert(source)`` returns an object with ``.markdown`` /
+    ``.text_content`` / ``.title``; pass ``raises=`` to make every
+    conversion raise. Records every converted source in ``sources``.
+    """
+
+    def __init__(self, *, markdown: str = "", title: str | None = None, raises: BaseException | None = None) -> None:
+        self._markdown = markdown
+        self._title = title
+        self._raises = raises
+        self.sources: list[Any] = []
+
+    def convert(self, source: Any, **kwargs: Any) -> Any:
+        from types import SimpleNamespace
+
+        del kwargs
+        self.sources.append(source)
+        if self._raises is not None:
+            raise self._raises
+        return SimpleNamespace(markdown=self._markdown, text_content=self._markdown, title=self._title)
+
+
+class FakePageRenderer:
+    """OCR ``PageRenderer`` fake — returns pre-built page images.
+
+    ``pages`` defaults to one flat 32x32 white uint8 page. Pass
+    ``raises=`` to make ``render`` raise (e.g. Pillow's
+    ``UnidentifiedImageError`` for undecodable bytes).
+    """
+
+    def __init__(self, *, pages: tuple[Any, ...] | None = None, raises: BaseException | None = None) -> None:
+        self._pages = pages
+        self._raises = raises
+        self.calls: list[str] = []
+
+    def render(self, raw: bytes, mime: str) -> tuple[Any, ...]:
+        import numpy as np
+
+        del raw
+        self.calls.append(mime)
+        if self._raises is not None:
+            raise self._raises
+        if self._pages is not None:
+            return tuple(self._pages)
+        return (np.full((32, 32), 255, dtype=np.uint8),)
+
+
+class FakeOcrRunner:
+    """OCR ``OcrRunner`` fake — scripted orientation + recognition.
+
+    Defaults to an upright page recognised as ``text`` at 90% mean
+    confidence. ``detect_raises`` / ``recognise_raises`` make the
+    respective call raise.
+    """
+
+    def __init__(
+        self,
+        *,
+        text: str = "Recognised OCR text.",
+        mean_confidence: float = 90.0,
+        word_count: int = 3,
+        rotation_degrees: int = 0,
+        detect_raises: BaseException | None = None,
+        recognise_raises: BaseException | None = None,
+    ) -> None:
+        self._text = text
+        self._mean_confidence = mean_confidence
+        self._word_count = word_count
+        self._rotation_degrees = rotation_degrees
+        self._detect_raises = detect_raises
+        self._recognise_raises = recognise_raises
+
+    def detect_orientation(self, img: Any) -> Any:
+        from kairix.extractors.ocr.tesseract_runner import OrientationResult
+
+        del img
+        if self._detect_raises is not None:
+            raise self._detect_raises
+        return OrientationResult(rotation_degrees=self._rotation_degrees, orientation_confidence=10.0)
+
+    def recognise_text(self, img: Any) -> Any:
+        from kairix.extractors.ocr.tesseract_runner import RecognitionResult
+
+        del img
+        if self._recognise_raises is not None:
+            raise self._recognise_raises
+        return RecognitionResult(
+            text=self._text,
+            mean_confidence=self._mean_confidence,
+            word_count=self._word_count,
+        )
+
+
+class FakePytesseractModule:
+    """Module-shaped stand-in for :mod:`pytesseract` (external SDK boundary).
+
+    Injected through ``TesseractRunner(pytesseract_module=...)`` so the real
+    runner's OSD / ``image_to_data`` handling runs without the Tesseract
+    binary. ``osd`` / ``data`` are the dicts returned by ``image_to_osd`` /
+    ``image_to_data``; ``osd_raises`` / ``data_raises`` make them raise.
+    Exposes ``Output.DICT`` and a ``TesseractError`` class like the real
+    module.
+    """
+
+    class TesseractError(RuntimeError):
+        """Mirror of ``pytesseract.TesseractError``."""
+
+    class Output:
+        """Mirror of ``pytesseract.Output``."""
+
+        DICT = "dict"
+
+    def __init__(
+        self,
+        *,
+        osd: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        osd_raises: BaseException | None = None,
+        data_raises: BaseException | None = None,
+    ) -> None:
+        self._osd = dict(osd or {"rotate": 0, "orientation_conf": 10.0})
+        self._data = dict(data or {"text": ["Recognised", "OCR", "text."], "conf": [90, 90, 90]})
+        self._osd_raises = osd_raises
+        self._data_raises = data_raises
+
+    def image_to_osd(self, img: Any, output_type: Any = None) -> dict[str, Any]:
+        del img, output_type
+        if self._osd_raises is not None:
+            raise self._osd_raises
+        return dict(self._osd)
+
+    def image_to_data(self, img: Any, output_type: Any = None) -> dict[str, Any]:
+        del img, output_type
+        if self._data_raises is not None:
+            raise self._data_raises
+        return {key: list(value) for key, value in self._data.items()}
 
 
 class FakeXlsxExtractor:
