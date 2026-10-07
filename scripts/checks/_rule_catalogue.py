@@ -777,17 +777,6 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         task_type=("adding-a-connector",),
     ),
     RuleEntry(
-        id="F50",
-        gate="net-new-baseline-additions",
-        check="f50_net_new_file_violations",
-        category="production-safety",
-        scope="per-commit",
-        summary="net-new files may not appear in any per-file F-rule baseline",
-        # Any net-new file in the commit can trip this — the trigger is "a
-        # file was added", not a path-scope. Always run.
-        staged_class="always-run",
-    ),
-    RuleEntry(
         id="F63",
         gate="f63-unbounded-fetchall",
         check="f63_unbounded_fetchall",
@@ -1314,33 +1303,14 @@ _ENTRIES: tuple[RuleEntry, ...] = (
     ),
     # ----- coverage --------------------------------------------------------
     RuleEntry(
-        id="baseline-shrinking",
-        gate="baseline-shrinking",
-        check="baseline_shrinking",
-        category="coverage",
-        scope="cross-cutting",
-        summary="F49: each release tag reduces F30/F46/F47 baselines by ≥1 (or keeps at zero)",
-        run_all=False,
-    ),
-    RuleEntry(
-        id="paydown-doc-currency",
-        gate="paydown-doc-currency",
-        check="paydown_doc_currency",
-        category="agent-affordance",
-        scope="cross-cutting",
-        summary="grandfathering paydown doc reflects current baseline state",
-        run_all=False,
-    ),
-    RuleEntry(
         id="sonar-new-code",
         gate="sonar-new-code",
         check="sonar_new_code",
         category="coverage",
         scope="cross-cutting",
         summary=(
-            "SonarCloud per-file count ratchet — current per-file open-issue/hotspot counts "
-            "may not exceed the committed baseline (.architecture/baseline/sonar-per-file*.json); "
-            "deterministic, no live leak period, no skip flag"
+            "SonarCloud zero open findings — no open issue/hotspot may still be present in the "
+            "working copy (line-hash matched against main's analysis); no baseline, no skip flag"
         ),
         adr_origin="EPIC #499 Phase 2 — escape #11 KAIRIX_SKIP_SONAR_PARITY retirement",
         run_all=False,

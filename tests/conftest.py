@@ -272,9 +272,6 @@ pytest_plugins = [
     # retired post-cutover (task #132); CLI/MCP surfaces stay.
     "tests.bdd.steps.cli_cc_pair_steps",
     "tests.bdd.steps.mcp_cc_pair_steps",
-    # KFEAT-018 — release-time paydown doc snapshot currency gate.
-    # See docs/features/KFEAT-018-paydown-doc-refresh/BRIEF.md.
-    "tests.bdd.steps.check_paydown_doc_currency_steps",
     # Wave 5 Gmail — Google Workspace mailbox connector. Single-mailbox
     # per cc_pair (Onyx pattern); full-message body + envelope; History
     # API for change detection. ``connector_gmail`` (introduce stage)
