@@ -112,7 +112,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # fetch-depth 0: F16 (tc-fitness >= v0.19 cognitive_complexity) is a
+      # no-regression gate that diffs against origin/main; a shallow checkout
+      # has no base ref and the check fails closed.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
 
       # The arch-fitness-catalogue hook runs `uv run python3 …` so the
       # catalogue runner imports kairix + the shared three-cubes-fitness
