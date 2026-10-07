@@ -432,6 +432,42 @@ class TestDataDirOverride:
 
         assert data_dir(env={"KAIRIX_DATA_DIR": "~/kairix-data"}) == Path.home() / "kairix-data"
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("resolver", "var"),
+        [("reference_library_root", "KAIRIX_REFLIB_ROOT"), ("bundled_suites_root", "KAIRIX_SUITES_ROOT")],
+    )
+    def test_root_overrides_expand_user(self, resolver: str, var: str) -> None:
+        """Regression: the reference-library / suites root overrides
+        ``~``-expand like ``KAIRIX_DATA_DIR`` — pre-fix they returned
+        ``Path("~/x")``, a literal ``~`` dir under the CWD. Sabotage: return
+        ``Path(override)`` without ``.expanduser()`` in
+        ``resolve_first_existing_dir`` → both cases fail.
+        """
+        import kairix.paths as paths
+
+        assert getattr(paths, resolver)(env={var: "~/kairix-root"}) == Path.home() / "kairix-root"
+
+    @pytest.mark.unit
+    def test_warm_flag_override_expands_user(self) -> None:
+        """Regression: ``KAIRIX_WARM_FLAG_PATH=~/warm.flag`` resolves under the
+        home directory, not a literal ``~`` dir. Sabotage: drop
+        ``.expanduser()`` in ``warm_flag_path`` → fails.
+        """
+        from kairix.paths import warm_flag_path
+
+        assert warm_flag_path(env={"KAIRIX_WARM_FLAG_PATH": "~/warm.flag"}) == Path.home() / "warm.flag"
+
+    @pytest.mark.unit
+    def test_summaries_db_override_expands_user(self) -> None:
+        """Regression: ``KAIRIX_SUMMARIES_DB=~/s.db`` resolves under the home
+        directory, not a literal ``~`` dir. Sabotage: drop ``.expanduser()`` in
+        ``summaries_db_path`` → fails.
+        """
+        from kairix.paths import summaries_db_path
+
+        assert summaries_db_path(env={"KAIRIX_SUMMARIES_DB": "~/s.db"}) == Path.home() / "s.db"
+
 
 @pytest.mark.unit
 class TestDockerFhsLayout:

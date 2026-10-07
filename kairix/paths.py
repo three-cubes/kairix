@@ -499,7 +499,7 @@ def resolve_first_existing_dir(
     needed (F2-clean).
     """
     if override:
-        return Path(override)
+        return Path(override).expanduser()
     for candidate in candidates:
         if candidate.is_dir():
             return candidate
@@ -875,18 +875,20 @@ def prep_cache_path() -> Path:
     return data_dir() / "prep_cache.sqlite"
 
 
-def summaries_db_path() -> Path:
+def summaries_db_path(*, env: Mapping[str, str] | None = None) -> Path:
     """Get the summaries database path.
 
-    Configurable via KAIRIX_SUMMARIES_DB env var.
+    Configurable via KAIRIX_SUMMARIES_DB env var (``~`` is expanded).
     Default: ~/.cache/kairix/summaries.db
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
-    return Path(
-        os.environ.get(
-            "KAIRIX_SUMMARIES_DB",
-            str(Path.home() / _USER_CACHE_DIR / "kairix" / "summaries.db"),
-        )
-    )
+    e = env if env is not None else os.environ
+    raw = e.get("KAIRIX_SUMMARIES_DB")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / _USER_CACHE_DIR / "kairix" / "summaries.db"
 
 
 def read_int_env(name: str, *, default: int, env: Mapping[str, str] | None = None) -> int:
@@ -1660,7 +1662,7 @@ def env_file_override() -> str | None:
     return value if value else None
 
 
-def warm_flag_path(mode: Mode | None = None) -> Path:
+def warm_flag_path(mode: Mode | None = None, *, env: Mapping[str, str] | None = None) -> Path:
     """Path to the cross-process warm-state flag — single env-read boundary
     for ``KAIRIX_WARM_FLAG_PATH``.
 
@@ -1690,12 +1692,16 @@ def warm_flag_path(mode: Mode | None = None) -> Path:
     surface), bypass the env override and return
     ``<data_dir(mode)>/warm.flag`` directly. The env override only
     affects the no-arg form, preserving F2 (no env coupling) for the
-    explicit-mode call sites.
+    explicit-mode call sites. ``~`` in the override is expanded.
+
+    ``env``: F2-clean test seam — ``None`` (production) reads the live
+    ``os.environ`` at this paths boundary (F4); tests pass a mapping.
     """
     if mode is not None:
         return data_dir(mode) / "warm.flag"
-    override = os.environ.get("KAIRIX_WARM_FLAG_PATH", "").strip()
-    return Path(override) if override else data_dir() / "warm.flag"
+    e = env if env is not None else os.environ
+    override = e.get("KAIRIX_WARM_FLAG_PATH", "").strip()
+    return Path(override).expanduser() if override else data_dir(env=e) / "warm.flag"
 
 
 def connector_sync_disabled() -> bool:
