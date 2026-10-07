@@ -5145,16 +5145,10 @@ class FakeDrainGraphRepository:
         available: bool = True,
         raise_on_value: str | None = None,
         raise_always: bool = False,
-        reject_silently: bool = False,
     ) -> None:
         self._available = available
         self.raise_on_value: str | None = raise_on_value
         self.raise_always: bool = raise_always
-        # ``reject_silently`` — the backend rejects every query but, like the
-        # production ``Neo4jClient.cypher`` (which logs a WARNING and returns
-        # ``[]`` on ANY driver error), the failure surfaces as an empty
-        # result rather than an exception.
-        self.reject_silently: bool = reject_silently
         # Each entry: (cypher_query, params_dict)
         self.cypher_calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -5169,75 +5163,11 @@ class FakeDrainGraphRepository:
     def cypher(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         recorded_params: dict[str, Any] = dict(params or {})
         self.cypher_calls.append((query, recorded_params))
-        if self.reject_silently:
-            return []
         if self.raise_always:
             raise RuntimeError("FakeDrainGraphRepository: raise_always set")
         if self.raise_on_value is not None and recorded_params.get("value") == self.raise_on_value:
             raise RuntimeError(f"FakeDrainGraphRepository: scripted failure on value={self.raise_on_value!r}")
         return []
-
-
-class FakeNeo4jDriverCls:
-    """Stand-in for the ``neo4j.GraphDatabase`` driver class, injected
-    through :class:`kairix.knowledge.graph.client.Neo4jClient`'s public
-    ``driver_cls=`` seam (F1-clean — no patching of the driver import).
-
-    Knobs:
-      * ``connect_error`` — raised by ``verify_connectivity`` (backend
-        offline / auth rejected); the client then reports
-        ``available=False``.
-      * ``run_error`` — raised by every ``session.run`` (the server
-        rejecting a query: transaction abort, syntax error, access mode).
-      * ``rows`` — records every successful ``run`` returns.
-
-    ``runs`` records ``(query, params, default_access_mode)`` per call.
-    """
-
-    def __init__(
-        self,
-        *,
-        connect_error: BaseException | None = None,
-        run_error: BaseException | None = None,
-        rows: list[dict[str, Any]] | None = None,
-    ) -> None:
-        self.connect_error = connect_error
-        self.run_error = run_error
-        self.rows: list[dict[str, Any]] = list(rows or [])
-        self.runs: list[tuple[str, dict[str, Any], str | None]] = []
-
-    def driver(self, uri: str, auth: Any = None) -> Any:
-        del uri, auth
-        owner = self
-
-        class _Session:
-            def __init__(self, access_mode: str | None) -> None:
-                self._access_mode = access_mode
-
-            def __enter__(self) -> Any:
-                return self
-
-            def __exit__(self, *_exc: Any) -> None:
-                return None
-
-            def run(self, query: str, **params: Any) -> list[dict[str, Any]]:
-                owner.runs.append((query, dict(params), self._access_mode))
-                if owner.run_error is not None:
-                    raise owner.run_error
-                return list(owner.rows)
-
-        class _Driver:
-            def verify_connectivity(self) -> None:
-                if owner.connect_error is not None:
-                    raise owner.connect_error
-
-            def session(self, default_access_mode: str | None = None, **_: Any) -> Any:
-                return _Session(default_access_mode)
-
-            def close(self) -> None:
-                return None
-
-        return _Driver()
 
 
 class FakeBronzeStore:

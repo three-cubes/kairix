@@ -66,7 +66,8 @@ def _default_drain_repo_factory(client: Any) -> Any:
     """
     from kairix.knowledge.graph.repository import Neo4jGraphRepository
 
-    return Neo4jGraphRepository(client)
+    # raise_on_error: a rejected MERGE must mark the signal failed, never pushed.
+    return Neo4jGraphRepository(client, raise_on_error=True)
 
 
 def _health_cmd(

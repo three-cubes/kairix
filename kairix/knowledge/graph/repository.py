@@ -18,11 +18,15 @@ logger = logging.getLogger(__name__)
 class Neo4jGraphRepository:
     """GraphRepository implementation backed by Neo4j.
 
-    Satisfies kairix.core.protocols.GraphRepository.
+    Satisfies kairix.core.protocols.GraphRepository (read path: ``cypher``
+    returns ``[]`` on failure) and, with ``raise_on_error=True``,
+    kairix.core.curator.protocols.DrainGraphRepository (write path:
+    ``cypher`` raises, so a rejected MERGE is never acknowledged as pushed).
     """
 
-    def __init__(self, client: Neo4jClient) -> None:
+    def __init__(self, client: Neo4jClient, *, raise_on_error: bool = False) -> None:
         self._client = client
+        self._raise_on_error = raise_on_error
 
     @property
     def available(self) -> bool:
@@ -52,5 +56,11 @@ class Neo4jGraphRepository:
         )
 
     def cypher(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Execute an arbitrary read Cypher query. Returns [] on failure."""
+        """Execute an arbitrary Cypher query.
+
+        Returns ``[]`` on failure, or raises when built with
+        ``raise_on_error=True`` (the drain's write path).
+        """
+        if self._raise_on_error:
+            return self._client.cypher_or_raise(query, params)
         return self._client.cypher(query, params)
