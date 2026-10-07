@@ -29,6 +29,8 @@ code that should be removed, not pinned by a direct test.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from kairix.providers import ProviderHealth, ProviderUnreachable
@@ -462,3 +464,34 @@ def test_hostname_from_endpoint_handles_bare_hostname() -> None:
     assert hostname_from_endpoint("api.openai.com/v1/embeddings") == "api.openai.com"
     assert hostname_from_endpoint("") == ""
     assert hostname_from_endpoint("https://api.openai.com/v1") == "api.openai.com"
+
+
+class _FlakyHealthProvider(FakeProvider):
+    """A provider whose healthcheck passes once, then raises (a flapping endpoint)."""
+
+    def healthcheck(self) -> Any:
+        self.healthcheck_calls += 1
+        if self.healthcheck_calls > 1:
+            raise RuntimeError("health endpoint 500")
+        return super().healthcheck()
+
+
+def test_flapping_healthcheck_does_not_escape_the_report_builder() -> None:
+    """``run_probe_config`` never raises — a healthcheck that fails on its
+    second call included (PLA-472).
+
+    Regression: after the verdict path's (guarded) healthcheck passed, the
+    report builder called ``provider.healthcheck().endpoint`` again,
+    unguarded, so a flapping endpoint escaped the never-raise contract. The
+    report is built with an empty hostname instead.
+
+    Sabotage proof: restore ``endpoint_url = provider.healthcheck().endpoint``
+    in ``run_probe_config`` → the RuntimeError escapes and this test errors.
+    """
+    provider = _FlakyHealthProvider(name="fake_flap", dim=1536, embed_latency_s=0.001)
+
+    report = run_probe_config(provider, snapshotter=_StubSnapshotter(TransportSnapshot()), **_fast_runner_kwargs())
+
+    assert provider.healthcheck_calls >= 2  # the post-verdict call raised and was contained
+    assert report.provider.endpoint_hostname == ""
+    assert report.provider.name == "fake_flap"

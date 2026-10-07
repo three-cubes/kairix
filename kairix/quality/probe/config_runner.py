@@ -488,12 +488,7 @@ def _build_unreachable_report(
     measured. The ``error`` field carries a short human-readable
     description for support sharing.
     """
-    endpoint_url = ""
-    try:
-        endpoint_url = provider.healthcheck().endpoint
-    except Exception:
-        # If healthcheck itself raises, hostname falls back to "".
-        endpoint_url = ""
+    endpoint_url = _endpoint_of(provider)
     return ProbeConfigReport(
         schema_version=SCHEMA_VERSION,
         kairix_version=kairix_version,
@@ -564,6 +559,19 @@ def _merged_stage_latencies(timings: _CallTimings, snapshot: TransportSnapshot) 
 def _all_calls_failed(timings: _CallTimings) -> bool:
     """Return ``True`` when every probe call errored — drives unreachable."""
     return timings.total_calls > 0 and timings.errors == timings.total_calls
+
+
+def _endpoint_of(provider: Provider) -> str:
+    """The provider's endpoint URL for the report, or ``""`` if healthcheck raises.
+
+    Called after the verdict's own (guarded) healthcheck, so a flapping
+    endpoint that fails this second call must not escape the never-raise
+    contract — the hostname just falls back to empty.
+    """
+    try:
+        return provider.healthcheck().endpoint
+    except Exception:
+        return ""
 
 
 def _healthcheck_ok(provider: Provider) -> tuple[bool, str | None]:
@@ -694,7 +702,7 @@ def run_probe_config(
         warnings.append(snapshot_warning)
         status = STATUS_DEGRADED
     recommendations = _build_recommendations(transport, snapshot)
-    endpoint_url = provider.healthcheck().endpoint
+    endpoint_url = _endpoint_of(provider)
 
     return ProbeConfigReport(
         schema_version=SCHEMA_VERSION,
