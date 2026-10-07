@@ -262,7 +262,7 @@ def test_file_local_f26_forbidden_import_caught() -> None:
 
     Robustness (#506): the assertions are scoped to **F26's own verdict in the
     ledger**, never the aggregate exit code. ``_run_staged`` drives the FULL
-    ~40-rule staged gate, several of whose rules (F50 net-new-file vs baseline,
+    ~40-rule staged gate, several of whose rules (F94 system-path writes,
     F92 catalogue-currency, F22 path-naming, the token scanners) read
     whole-tree / git state — so a stray probe or ``__pycache__`` another test
     left in the tree could flip the aggregate ``exit_code`` to 1 even when this
@@ -569,10 +569,10 @@ def test_always_run_f92_runs_for_any_change() -> None:
     assert "F92" in _ran_rule_ids(out), f"F92 must run on a doc-only staged change; ledger:\n{out}"
 
 
-def test_always_run_f50_runs_for_any_change() -> None:
-    """F50 (net-new-file detection, always-run) runs for any staged change."""
-    f50 = next(e for e in run_checks._select_all() if e.id == "F50")
-    assert decide(f50, run_checks.resolve_script(f50), ["docs/only.md"]).run is True
+def test_always_run_f94_runs_for_any_change() -> None:
+    """F94 (system-path writes, always-run) runs for any staged change."""
+    f94 = next(e for e in run_checks._select_all() if e.id == "F94")
+    assert decide(f94, run_checks.resolve_script(f94), ["docs/only.md"]).run is True
 
 
 # ── completeness / negative-control table ───────────────────────────────

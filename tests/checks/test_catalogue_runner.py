@@ -190,7 +190,7 @@ def test_retired_delegators_dispatch_in_process() -> None:
     now resolve to a ``check_<x>.py`` and dispatch in-process — proving the
     retirement actually moved them onto the in-process path, not into a
     silent skip."""
-    retired = {"F44", "F45", "F46", "F48", "F54", "F36", "F56", "F50", "F51", "F52", "F53"}
+    retired = {"F44", "F45", "F46", "F48", "F54", "F36", "F56", "F51", "F52", "F53"}
     by_id = {e.id: e for e in run_checks._select_all()}
     for rid in retired:
         entry = by_id[rid]
@@ -215,11 +215,11 @@ def test_in_process_verdict_matches_for_a_sample() -> None:
     """A representative sample of in-process rules return the SAME verdict the
     catalogue's clean tree expects (all green today). Spans an import-boundary
     rule (F26), a location rule (F61), a regex/text rule (F76), the
-    catalogue-currency rule (F92), and a retired-delegator rule (F50) — the
+    catalogue-currency rule (F92), and a retired-delegator rule (F51) — the
     check kinds the equivalence proof covers."""
     from tc_fitness.context import CheckContext
 
-    sample_ids = {"F26", "F61", "F76", "F92", "F50"}
+    sample_ids = {"F26", "F61", "F76", "F92", "F51"}
     by_id = {e.id: e for e in run_checks._select_all()}
     ctx = CheckContext(repo_root=run_checks.REPO_ROOT)
     with ctx.install():
