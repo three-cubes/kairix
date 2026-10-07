@@ -1,8 +1,0 @@
-# F73 baseline — files grandfathered with private-infra references.
-#
-# Empty at landing: the W1 + W3 redaction commits
-# (581a17d9, 9640bd7f) paid down every then-existing offender to zero.
-# Net-new violations are blocked by F73 + F50.
-#
-# When the baseline grows: every entry needs a same-commit GH issue
-# tracking the redaction. F49 forces eventual paydown.

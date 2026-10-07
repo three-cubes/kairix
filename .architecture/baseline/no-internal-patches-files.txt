@@ -1,2 +1,0 @@
-tests/embed/test_deps.py
-tests/eval/test_cli_unit.py

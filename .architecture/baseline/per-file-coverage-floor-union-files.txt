@@ -1,6 +1,0 @@
-# kairix/worker.py — RATCHETED OFF (SGO-109, branch agent/sgo109-worker-coverage).
-# The _default_* production-default seams are now executed at unit scope (see the
-# F7 baseline note + tests/test_worker_default_seams.py). Because the union is a
-# per-line superset of the unit run, worker.py's union (F9) coverage is >= its
-# unit 94.52% — above the 90% floor — so the file no longer needs grandfathering
-# on the union gate either.

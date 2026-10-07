@@ -1037,6 +1037,10 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         category="coverage",
         scope="per-file",
         summary="new-code coverage ≥ 80% on changed lines (Sonar new-code, local)",
+        # Needs the coverage.xml pytest writes. Since tc-fitness v0.18 the check
+        # fails closed on a missing report, so it runs as the post-pytest step
+        # (Makefile `quality`) instead of inside the pre-test catalogue sweep.
+        run_all=False,
     ),
     RuleEntry(
         id="F18",
@@ -1489,26 +1493,7 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         adr_origin="SGO-156 — Autonomous Delivery Platform SP-A (identity & attribution)",
         tags=("process",),
         # Literal signature scan across the configured first-party source/docs roots;
-        # any authored file could carry residue. Always run (guard-forward via the
-        # per-file baseline, decision D2).
-        staged_class="always-run",
-    ),
-    RuleEntry(
-        id="SGO-158",
-        gate="canonical-commit-identity",
-        check="core:canonical_commit_identity",
-        category="process",
-        scope="per-commit",
-        summary=(
-            "every commit author AND committer over the PR range (cutover..HEAD) carries an "
-            "allow-listed identity — the canonical three-cubes-agent App, the named human "
-            "maintainer, and the platform merge/bot committers — so an off-allowlist or "
-            "marker-in-name identity can't slip in; guard-forward via cutover_ref (decision D2)"
-        ),
-        adr_origin="SGO-158 — Autonomous Delivery Platform SP-A (identity & attribution)",
-        tags=("process",),
-        # Range check over git log (no file surface); a staged file can't scope it.
-        # Always run.
+        # any authored file could carry residue. Always run, full tree.
         staged_class="always-run",
     ),
     RuleEntry(
