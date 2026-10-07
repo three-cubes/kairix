@@ -61,7 +61,7 @@ from tc_fitness.runner import (
     run,
 )
 from tc_fitness.runner import (
-    _dispatches_in_process as _pkg_dispatches_in_process,
+    dispatches_in_process as _pkg_dispatches_in_process,
 )
 from tc_fitness.runner import (
     _load_check_main as _pkg_load_check_main,
@@ -73,10 +73,10 @@ from tc_fitness.runner import (
     _run_one_subprocess as _pkg_run_one_subprocess,
 )
 from tc_fitness.runner import (
-    _select_all as _pkg_select_all,
+    select_all as _pkg_select_all,
 )
 from tc_fitness.runner import (
-    _select_gate as _pkg_select_gate,
+    select_gate as _pkg_select_gate,
 )
 from tc_fitness.staged import (
     StagedDecision,
