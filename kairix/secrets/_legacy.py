@@ -41,7 +41,7 @@ from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
-from kairix.secrets.encoding import decode_bundle_value
+from kairix.secrets.encoding import decode_bundle_value, split_bundle_lines
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ def load_secrets(path: str | Path | None = None) -> int:
         return 0
 
     count = 0
-    for lineno, line in enumerate(text.splitlines(), 1):
+    for lineno, line in enumerate(split_bundle_lines(text), 1):
         if _apply_secret_line(line, lineno):
             count += 1
 
@@ -158,7 +158,7 @@ def load_secrets_file(path: Path) -> dict[str, str]:
     """Parse KEY=VALUE lines from a secrets file. Cached per path."""
     result: dict[str, str] = {}
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in split_bundle_lines(path.read_text(encoding="utf-8")):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
