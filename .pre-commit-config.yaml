@@ -48,13 +48,11 @@ repos:
   # F-rules are no longer enumerated here — scripts/checks/_rule_catalogue.py
   # is the single source of truth, and scripts/checks/run_checks.py reads it
   # and dispatches every ACTIVE rule whose scope intersects the staged
-  # paths. Each check fails the commit on net-new violations; pre-existing
-  # files are grandfathered via .architecture/baseline/ and the baseline is
-  # expected to shrink over time. See docs/architecture/fitness-functions.md.
+  # paths. Each check fails the commit on any violation — nothing is
+  # grandfathered (tc-fitness v0.17+). See docs/architecture/fitness-functions.md.
   #
-  # Adding a fitness rule is now ONE RuleEntry row + its check script + its
-  # baseline — no edit to this file is needed for the rule to gate at
-  # pre-commit.
+  # Adding a fitness rule is ONE RuleEntry row + its check script — no edit
+  # to this file is needed for the rule to gate at pre-commit.
   - repo: local
     hooks:
       - id: arch-fitness-catalogue

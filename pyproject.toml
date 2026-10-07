@@ -214,10 +214,11 @@ dev = [
 # that runs the fitness checks still installs the engine via the group.
 # tc_fitness is imported by scripts/checks/*.py AND the tests/checks +
 # tests/architecture conftests, so the group is fed to every pytest-collecting
-# gate consumer (see ci.yml Stage 2/3/4.5, soak-suite, baseline-audit,
+# gate consumer (see ci.yml Stage 2/3/4.5, soak-suite,
 # mutation-suite, and safe-commit.sh --pre-pr). The python_version marker is
-# retained: the engine pins >=3.12 and kairix is >=3.12 so it always resolves,
-# and the marker keeps uv's universal resolver happy.
+# load-bearing: the engine requires >=3.13 (tc-fitness v0.17 dropped 3.12) while
+# the kairix wheel still supports >=3.12, so the gate interpreter is 3.13
+# (.python-version, CI) and a 3.12 resolve simply omits the dev-only group.
 [dependency-groups]
 fitness = [
     "three-cubes-fitness @ git+https://github.com/three-cubes/tc-fitness.git@v0.19.0 ; python_version >= '3.13'",
@@ -363,9 +364,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Engineering hub: per-file floor at 90% (F7/F9). Overall fail_under
-# tracks the current achievable floor while the per-file baseline burns
-# down; raise toward 90 as the 34 grandfathered low-coverage files lift.
+# Engineering hub: per-file floor at 90% (F7/F9), enforced on every file.
+# Overall fail_under is the project-wide no-regression floor.
 fail_under = 88
 show_missing = true
 exclude_lines = [

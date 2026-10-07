@@ -62,8 +62,7 @@ jobs:
               - 'tests/**/*.py'
               - 'pyproject.toml'
               # The fitness machinery itself: a change to the CHECK SCRIPTS,
-              # the safe-commit driver, the grandfathering baselines, or the
-              # rule catalogue must always run Stage 0 arch-fitness (+
+              # the safe-commit driver, or the rule catalogue must always run Stage 0 arch-fitness (+
               # pre-commit + contracts, which share this filter). Without
               # these entries a scripts/checks/ change skips Stage 0 entirely
               # — confirmed on PR #508, where a scripts/checks/ edit had
@@ -71,7 +70,7 @@ jobs:
               # change to the fitness rules. (#499 phase 4.)
               - 'scripts/checks/**'
               - 'scripts/safe-commit.sh'
-              - '.architecture/baseline/**'
+              - '.architecture/**'
               - '**/_rule_catalogue.py'
               # A caller change must execute the reusable workflow it changes.
               - '.github/workflows/ci.yml'
@@ -128,10 +127,9 @@ jobs:
   # ── Stage 1: Contracts (fast -- <30s) ──────────────────────────────────────
   # Engineering hub: "Stop pipeline on failure. Contract tests must execute in <30s."
   # ── Stage 0: Architecture fitness functions ───────────────────────────────
-  # Block at PR time on any net-new violation of the architectural rules
-  # encoded in scripts/checks/. Pre-existing files are grandfathered in
-  # .architecture/baseline/ and the baseline is expected to shrink over
-  # time. See docs/architecture/fitness-functions.md.
+  # Block at PR time on any violation of the architectural rules encoded in
+  # scripts/checks/, evaluated over the full tree — nothing is grandfathered
+  # (tc-fitness v0.17+). See docs/architecture/fitness-functions.md.
   arch-fitness:
     name: "Stage 0 -- Architecture fitness"
     needs: changes
@@ -451,9 +449,8 @@ jobs:
 
       - name: F7 — per-file coverage floor (90%)
         # Every kairix/* file in the MERGED coverage.xml must clear the 90%
-        # per-file floor; pre-existing files below it are grandfathered in
-        # .architecture/baseline/per-file-coverage-floor-files.txt and the
-        # baseline shrinks over time. Runs on the union of all 4 shards.
+        # per-file floor, with no grandfathered exceptions. Runs on the
+        # union of all 4 shards.
         run: uv run python3 scripts/checks/check_per_file_coverage.py coverage.xml
 
       - name: Upload merged coverage artifacts
@@ -697,9 +694,7 @@ jobs:
   # Runs F7's per-file 85% floor against the UNION of unit + integration
   # coverage. Catches files exercised only at integration scope (factory.py,
   # mcp/server.py, db/repository.py) that F7 alone would still see at 0%.
-  # The union baseline lives in
-  # .architecture/baseline/per-file-coverage-floor-union-files.txt and
-  # ratchets independently of F7's unit-only baseline.
+  # Every file must clear the floor; nothing is grandfathered.
   union-coverage:
     name: "Stage 5 -- Union coverage floor (F9)"
     runs-on: ubuntu-latest

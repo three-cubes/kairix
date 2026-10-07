@@ -6,8 +6,8 @@
 # merge) only when a change to it could WEAKEN a control, or redefine how code
 # builds / tests / merges / deploys, who may approve, the security posture, or the
 # governance canon agents obey. Everything else — src (kairix/**), Go services,
-# tests, docs, ADR design notes, coverage baselines — is WORK and auto-merges on a
-# green gate with no human (the CI gate + PR compliance check + Sonar ratchet are
+# tests, docs, ADR design notes — is WORK and auto-merges on a
+# green gate with no human (the CI gate + PR compliance check + Sonar gate are
 # the control there).
 #
 # @three-cubes/maintainers MUST contain only humans — never the three-cubes-agent
@@ -22,7 +22,8 @@
 
 # ── B. The gate definition (what "green" means — an agent must not weaken it) ─
 # Python deps + build, Go lint + module manifests, fitness checks, CI helpers,
-# the local-gate driver, and the Sonar / coverage / secret-scan baselines.
+# the local-gate driver, and the secret-scan baseline. /.architecture/ stays owned
+# so a grandfathering baseline can never be re-introduced without review.
 /pyproject.toml                    @three-cubes/maintainers
 /uv.lock                           @three-cubes/maintainers
 /Makefile                          @three-cubes/maintainers
@@ -33,7 +34,7 @@
 /scripts/ci/                       @three-cubes/maintainers
 /scripts/safe-commit.sh            @three-cubes/maintainers
 /scripts/fetch-fitness-config.sh   @three-cubes/maintainers
-/.architecture/baseline/           @three-cubes/maintainers
+/.architecture/                    @three-cubes/maintainers
 /.pre-commit-config.yaml           @three-cubes/maintainers
 /sonar-project.properties          @three-cubes/maintainers
 /codecov.yml                       @three-cubes/maintainers
