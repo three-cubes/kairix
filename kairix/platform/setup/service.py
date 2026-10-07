@@ -44,8 +44,12 @@ PHASE_FAILED = "failed"
 
 #: Azure-shaped provider plugin names (#484). The key screen shows the
 #: optional deployment-name field for these; the backend requires an
-#: endpoint and probes by deployment name for the same set.
-AZURE_PROVIDER_NAMES = frozenset({"azure_foundry", "azure_legacy"})
+#: endpoint and probes by deployment name for the same set. The two members
+#: are also exported singly for the probe-model map, the endpoint-shape
+#: remap and the wizard's default pick (F85 — one definition site).
+PLUGIN_AZURE_FOUNDRY = "azure_foundry"
+PLUGIN_AZURE_LEGACY = "azure_legacy"
+AZURE_PROVIDER_NAMES = frozenset({PLUGIN_AZURE_FOUNDRY, PLUGIN_AZURE_LEGACY})
 
 
 class SecretsWriteError(OSError):
@@ -498,6 +502,8 @@ __all__ = [
     "PHASE_FAILED",
     "PHASE_IDLE",
     "PHASE_STARTING",
+    "PLUGIN_AZURE_FOUNDRY",
+    "PLUGIN_AZURE_LEGACY",
     "AgentConnectInfo",
     "CallbackOutcome",
     "ConnectSnippet",

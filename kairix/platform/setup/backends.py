@@ -52,6 +52,8 @@ from kairix.platform.setup.service import (
     PHASE_FAILED,
     PHASE_IDLE,
     PHASE_STARTING,
+    PLUGIN_AZURE_FOUNDRY,
+    PLUGIN_AZURE_LEGACY,
     AgentConnectInfo,
     CallbackOutcome,
     ConnectSnippet,
@@ -123,11 +125,6 @@ TOKENS_PER_WORD = 1.3
 #: How many hits the first-search preview shows.
 FIRST_SEARCH_TOP_N = 5
 
-#: The two azure plugin names — referenced by the probe-model map, the
-#: endpoint requirement, and the endpoint-shape remap (F17 — one site each).
-_PLUGIN_AZURE_FOUNDRY = "azure_foundry"
-_PLUGIN_AZURE_LEGACY = "azure_legacy"
-
 #: Fallback probe model when a plugin has no entry in
 #: :data:`VALIDATION_PROBE_MODELS`.
 DEFAULT_VALIDATION_PROBE_MODEL = "text-embedding-3-large"
@@ -140,8 +137,8 @@ DEFAULT_VALIDATION_PROBE_MODEL = "text-embedding-3-large"
 VALIDATION_PROBE_MODELS: Mapping[str, str] = {
     "anthropic": "claude-3-5-haiku-latest",
     "openai": DEFAULT_VALIDATION_PROBE_MODEL,
-    _PLUGIN_AZURE_FOUNDRY: DEFAULT_VALIDATION_PROBE_MODEL,
-    _PLUGIN_AZURE_LEGACY: DEFAULT_VALIDATION_PROBE_MODEL,
+    PLUGIN_AZURE_FOUNDRY: DEFAULT_VALIDATION_PROBE_MODEL,
+    PLUGIN_AZURE_LEGACY: DEFAULT_VALIDATION_PROBE_MODEL,
     "litellm_proxy": DEFAULT_VALIDATION_PROBE_MODEL,
     "ollama": "nomic-embed-text",
 }
@@ -153,7 +150,7 @@ DEFAULT_PLUGIN_ENDPOINTS: Mapping[str, str] = {
 }
 
 #: Plugins that cannot be probed without an operator-supplied endpoint.
-ENDPOINT_REQUIRED_PLUGINS = (_PLUGIN_AZURE_FOUNDRY, _PLUGIN_AZURE_LEGACY)
+ENDPOINT_REQUIRED_PLUGINS = (PLUGIN_AZURE_FOUNDRY, PLUGIN_AZURE_LEGACY)
 
 #: Replacement marker for any API-key occurrence in an error string (F15).
 _REDACTED = "[redacted]"
@@ -1566,7 +1563,7 @@ def _normalise_plugin_name(provider: str, endpoint: str | None) -> str:
     reimplemented here. Non-azure picks are concrete plugin names from
     the installed registry and pass through verbatim.
     """
-    if provider in (_PLUGIN_AZURE_FOUNDRY, _PLUGIN_AZURE_LEGACY) and endpoint:
+    if provider in (PLUGIN_AZURE_FOUNDRY, PLUGIN_AZURE_LEGACY) and endpoint:
         return provider_plugin_name("azure", endpoint)
     return provider
 
