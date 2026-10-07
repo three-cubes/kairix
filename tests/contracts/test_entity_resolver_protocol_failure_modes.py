@@ -61,7 +61,7 @@ _FACTORIES: list[Callable[[], Any]] = [
     lambda: Neo4jClient(
         uri="bolt://neo4j.invalid:7687",
         user="neo4j",
-        password="f68-contract",
+        password="f68-contract",  # pragma: allowlist secret — test fixture value, not a credential
         driver_cls=_RefusingNeo4jDriverModule,
     ),
     lambda: FakeNeo4jClient(entities=[]),

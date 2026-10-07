@@ -39,7 +39,8 @@ def _real(queries: list[tuple[str, str]]) -> GenerateFn:
     payload = json.dumps([{"query": text, "intent": intent} for text, intent in queries])
     gen = QueryGenerator(chat_backend=FakeChatBackend(responses=[payload, payload]))
     # Credentials are per-call kwargs on the real impl (kept out of fixture state).
-    return partial(gen.generate, api_key="fake-key", endpoint="https://fake.endpoint")
+    fixture_key = "fake-key"  # pragma: allowlist secret — test fixture value, not a credential
+    return partial(gen.generate, api_key=fixture_key, endpoint="https://fake.endpoint")
 
 
 def _fake(queries: list[tuple[str, str]]) -> GenerateFn:

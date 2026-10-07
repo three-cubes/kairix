@@ -213,7 +213,10 @@ def test_idempotent_multiple_calls(tmp_path, monkeypatch) -> None:
 def test_get_secret_from_env_var() -> None:
     """get_secret returns value when the mapped env var is set."""
     # Point secrets dir at a nonexistent path so file step is skipped
-    env = {"KAIRIX_LLM_API_KEY": "test-key-from-env", "KAIRIX_SECRETS_DIR": "/nonexistent-dir-abc123"}
+    env = {
+        "KAIRIX_LLM_API_KEY": "test-key-from-env",  # pragma: allowlist secret — test fixture value, not a credential
+        "KAIRIX_SECRETS_DIR": "/nonexistent-dir-abc123",
+    }
     value = get_secret("kairix-llm-api-key", env=env)
     assert value == "test-key-from-env"
 

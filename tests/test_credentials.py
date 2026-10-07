@@ -145,7 +145,7 @@ def test_resolve_llm_raises_when_missing(tmp_path) -> None:
 @pytest.mark.unit
 def test_resolve_embed_uses_embed_specific_secrets(tmp_path) -> None:
     env = {
-        "KAIRIX_PROVIDER_EMBED_API_KEY": "embed-key",
+        "KAIRIX_PROVIDER_EMBED_API_KEY": "embed-key",  # pragma: allowlist secret — test fixture value, not a credential
         "KAIRIX_PROVIDER_EMBED_ENDPOINT": "https://embed.example.com",
         "KAIRIX_PROVIDER_EMBED_MODEL": "text-embedding-3-small",
     }
@@ -162,7 +162,7 @@ def test_resolve_embed_uses_embed_specific_secrets(tmp_path) -> None:
 def test_resolve_embed_falls_back_to_llm_secrets(tmp_path) -> None:
     """When embed-specific creds are missing, falls back to LLM creds."""
     env = {
-        "KAIRIX_PROVIDER_LLM_API_KEY": "llm-key",
+        "KAIRIX_PROVIDER_LLM_API_KEY": "llm-key",  # pragma: allowlist secret — test fixture value, not a credential
         "KAIRIX_PROVIDER_LLM_ENDPOINT": "https://api.openai.com/v1",
     }
 
@@ -188,7 +188,7 @@ def test_resolve_graph_returns_none_without_password(tmp_path) -> None:
 @pytest.mark.unit
 def test_resolve_graph_returns_credentials_with_password(tmp_path) -> None:
     env = {
-        "KAIRIX_INFRA_NEO4J_PASSWORD": "secret-pw",
+        "KAIRIX_INFRA_NEO4J_PASSWORD": "secret-pw",  # pragma: allowlist secret — test fixture value, not a credential
         "KAIRIX_INFRA_NEO4J_URI": "bolt://neo4j.test:7687",
         "KAIRIX_INFRA_NEO4J_USER": "alice",
     }
@@ -203,7 +203,7 @@ def test_resolve_graph_returns_credentials_with_password(tmp_path) -> None:
 def test_resolve_graph_uses_default_uri_when_unset(tmp_path) -> None:
     """KAIRIX_INFRA_NEO4J_URI defaults to bolt://localhost:7687 when unset."""
     env = {
-        "KAIRIX_INFRA_NEO4J_PASSWORD": "pw",
+        "KAIRIX_INFRA_NEO4J_PASSWORD": "pw",  # pragma: allowlist secret — test fixture value, not a credential
     }
     creds = get_credentials("graph", secrets=_env_loader(tmp_path, env))
     assert isinstance(creds, GraphCredentials)

@@ -71,14 +71,15 @@ def test_load_credentials_unauthorized_returns_none_for_invalid_blob(
 
     Sabotage proof (executed): in ``LinearConnector.load_credentials``
     change the invalid-key ``return None`` to
-    ``return {"api_key": "leaked"}``. Re-run: the ``real`` case fails.
+    a dict carrying the raw (invalid) key. Re-run: the ``real`` case fails.
     Restored.
     """
     conn = factory()
     assert conn.load_credentials({"unrelated": "blob"}) is None, name
     assert conn.load_credentials({"api_key": "   "}) is None, name
     # Positive control: a usable key normalises identically on both impls.
-    assert conn.load_credentials({"api_key": " lin_key "}) == {"api_key": "lin_key"}, name
+    padded, normalised = " lin_key ", "lin_key"  # pragma: allowlist secret — test fixture value, not a credential
+    assert conn.load_credentials({"api_key": padded}) == {"api_key": normalised}, name
 
 
 @pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
@@ -93,5 +94,6 @@ def test_load_credentials_raises_when_unwrap_fails(name: str, factory: Callable[
     Re-run: the ``real`` case fails because no exception fires. Restored.
     """
     conn = factory()
+    kv_ref = "secret/path"  # pragma: allowlist secret — test fixture value, not a credential
     with pytest.raises(RuntimeError, match="F68-kv-unwrap-failed"):
-        conn.load_credentials(_KeyVaultBackedCredentials(api_key="secret/path"))
+        conn.load_credentials(_KeyVaultBackedCredentials(api_key=kv_ref))
