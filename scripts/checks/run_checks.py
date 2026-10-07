@@ -61,9 +61,6 @@ from tc_fitness.runner import (
     run,
 )
 from tc_fitness.runner import (
-    dispatches_in_process as _pkg_dispatches_in_process,
-)
-from tc_fitness.runner import (
     _load_check_main as _pkg_load_check_main,
 )
 from tc_fitness.runner import (
@@ -71,6 +68,9 @@ from tc_fitness.runner import (
 )
 from tc_fitness.runner import (
     _run_one_subprocess as _pkg_run_one_subprocess,
+)
+from tc_fitness.runner import (
+    dispatches_in_process as _pkg_dispatches_in_process,
 )
 from tc_fitness.runner import (
     select_all as _pkg_select_all,

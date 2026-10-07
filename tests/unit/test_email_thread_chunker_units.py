@@ -217,3 +217,34 @@ def test_explicit_version_propagates_through_chunks() -> None:
     chunks = chunker.chunk(text=text, section_kind="text", source_uri="msg/v")
     assert chunks
     assert all(c.chunker_version == "email-unit-v9" for c in chunks)
+
+
+# Moved from tests/contracts/test_email_thread_chunker_protocol.py — the
+# contract file now proves only the Protocol-level invariants over real +
+# fake (F43); these pin email-thread-specific behaviour.
+
+
+def test_factory_returns_real_class() -> None:
+    chunker = make_chunker()
+    assert isinstance(chunker, EmailThreadChunker)
+    assert chunker.name == "email_thread"
+
+
+def test_headers_surface_into_metadata() -> None:
+    """Subject / From / Date / To get surfaced under ``header_*`` keys."""
+    chunker = make_chunker()
+    text = (
+        "Subject: Catch-up\n"
+        "From: agent-alpha@example.test\n"
+        "Date: 2026-05-30\n"
+        "To: agent-beta@example.test\n"
+        "\n"
+        "Hello agent-beta, are you free for a quick sync?\n"
+    )
+    chunks = chunker.chunk(text=text, section_kind="text", source_uri="msg/1")
+    assert len(chunks) == 1
+    metadata = chunks[0].metadata
+    assert metadata.get("header_subject") == "Catch-up"
+    assert metadata.get("header_from") == "agent-alpha@example.test"
+    assert metadata.get("header_date") == "2026-05-30"
+    assert metadata.get("header_to") == "agent-beta@example.test"

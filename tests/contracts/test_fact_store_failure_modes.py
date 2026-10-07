@@ -18,15 +18,33 @@ The four methods + their contract failure surfaces:
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
 import pytest
 
+from kairix.core.facts.store import SQLiteFactStore
 from kairix.core.protocols import FactStore
 from tests.fakes import FakeFactRecord, FakeFactStore
 
 pytestmark = pytest.mark.contract
 
+StoreFactory = Callable[[Path], FactStore]
 
-def test_add_returns_empty_when_id_already_exists() -> None:
+_IMPLEMENTATIONS: list[tuple[str, StoreFactory]] = [
+    ("real", lambda tmp_path: SQLiteFactStore(db_path=tmp_path / "facts.sqlite")),
+    ("fake", lambda _tmp_path: FakeFactStore()),
+]
+
+
+def _fact(**fields: Any) -> FakeFactRecord:
+    """A FactRecord with grounded provenance (the store rejects none)."""
+    return FakeFactRecord(source_turn_ids=("t1",), **fields)
+
+
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_add_returns_empty_when_id_already_exists(name: str, factory: StoreFactory, tmp_path: Path) -> None:
     """Re-adding the same id is the Protocol's idempotency contract —
     no exception, no overwrite, no observable change. The "returns
     empty" shape is the absence of a second row.
@@ -35,9 +53,9 @@ def test_add_returns_empty_when_id_already_exists() -> None:
     overwrite (``self._facts[fact.id] = fact``). Re-ran: the second
     add now wins and the ``value == "first"`` assertion fails. Restored.
     """
-    store: FactStore = FakeFactStore()
-    first = FakeFactRecord(id="f1", entity="agent-alpha", attribute="role", value="first")
-    second = FakeFactRecord(id="f1", entity="agent-alpha", attribute="role", value="overwrite")
+    store = factory(tmp_path)
+    first = _fact(id="f1", entity="agent-alpha", attribute="role", value="first")
+    second = _fact(id="f1", entity="agent-alpha", attribute="role", value="overwrite")
     store.add(first)
     store.add(second)  # idempotent — second add is the no-op
 
@@ -46,7 +64,8 @@ def test_add_returns_empty_when_id_already_exists() -> None:
     assert hits[0].record.value == "first"
 
 
-def test_search_returns_empty_when_no_match() -> None:
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_search_returns_empty_when_no_match(name: str, factory: StoreFactory, tmp_path: Path) -> None:
     """Empty result for a no-match query — callers iterate without a
     null check.
 
@@ -54,12 +73,15 @@ def test_search_returns_empty_when_no_match() -> None:
     when no facts match. Re-ran: the ``== []`` assertion fails.
     Restored.
     """
-    store: FactStore = FakeFactStore()
-    store.add(FakeFactRecord(id="f1", entity="agent-alpha", attribute="role", value="VP"))
+    store = factory(tmp_path)
+    store.add(_fact(id="f1", entity="agent-alpha", attribute="role", value="VP"))
     assert store.search("zztop-no-match-token") == []
 
 
-def test_search_returns_empty_when_namespace_excludes_all_rows() -> None:
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_search_returns_empty_when_namespace_excludes_all_rows(
+    name: str, factory: StoreFactory, tmp_path: Path
+) -> None:
     """Namespace filtering produces an empty result when no fact lives
     in the requested namespace — distinct from a query-mismatch empty.
 
@@ -67,9 +89,9 @@ def test_search_returns_empty_when_namespace_excludes_all_rows() -> None:
     namespace filter. Re-ran: the cross-namespace fact leaks into the
     result and the ``== []`` assertion fails. Restored.
     """
-    store: FactStore = FakeFactStore()
+    store = factory(tmp_path)
     store.add(
-        FakeFactRecord(
+        _fact(
             id="f1",
             entity="agent-alpha",
             attribute="role",
@@ -80,7 +102,8 @@ def test_search_returns_empty_when_namespace_excludes_all_rows() -> None:
     assert store.search("agent-alpha role", namespace="ns-B") == []
 
 
-def test_find_conflicts_returns_empty_when_key_unknown() -> None:
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_find_conflicts_returns_empty_when_key_unknown(name: str, factory: StoreFactory, tmp_path: Path) -> None:
     """Unknown (entity, attribute) key returns ``[]`` — distinguishable
     from "key has live facts" and from a raised error.
 
@@ -88,34 +111,36 @@ def test_find_conflicts_returns_empty_when_key_unknown() -> None:
     every fact regardless of key. Re-ran: the assertion fails because
     the unrelated fact leaks in. Restored.
     """
-    store: FactStore = FakeFactStore()
-    store.add(FakeFactRecord(id="f1", entity="agent-alpha", attribute="role", value="VP"))
+    store = factory(tmp_path)
+    store.add(_fact(id="f1", entity="agent-alpha", attribute="role", value="VP"))
     assert store.find_conflicts(entity="agent-zeta", attribute="role") == []
 
 
-def test_supersede_raises_when_old_id_absent() -> None:
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_supersede_raises_when_old_id_absent(name: str, factory: StoreFactory, tmp_path: Path) -> None:
     """Supersede on an unknown ``old_id`` raises KeyError — Protocol
     docstring explicit. Production callers handle the absent case
     explicitly; silent success would mask a logic bug.
 
-    Sabotage proof: change ``FakeFactStore.supersede`` to ``return``
-    early when ``old_id not in self._facts``. Re-ran: ``pytest.raises``
-    sees nothing. Restored.
+    Sabotage proof (executed): drop the ``_row_exists(conn, old_id)``
+    check in ``SQLiteFactStore.supersede``. Re-run: the ``real`` case's
+    ``pytest.raises`` sees nothing. Restored.
     """
-    store: FactStore = FakeFactStore()
-    store.add(FakeFactRecord(id="new", entity="x", attribute="y", value="z"))
+    store = factory(tmp_path)
+    store.add(_fact(id="new", entity="x", attribute="y", value="z"))
     with pytest.raises(KeyError, match="no fact with id 'missing'"):
         store.supersede(old_id="missing", new_id="new")
 
 
-def test_supersede_raises_when_new_id_absent() -> None:
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_supersede_raises_when_new_id_absent(name: str, factory: StoreFactory, tmp_path: Path) -> None:
     """Mirror of the above for the new_id arm — both raises are
     documented in the Protocol contract.
 
     Sabotage proof: change ``FakeFactStore.supersede`` to skip the
     new_id check. Re-ran: ``pytest.raises`` sees nothing.  Restored.
     """
-    store: FactStore = FakeFactStore()
-    store.add(FakeFactRecord(id="old", entity="x", attribute="y", value="z"))
+    store = factory(tmp_path)
+    store.add(_fact(id="old", entity="x", attribute="y", value="z"))
     with pytest.raises(KeyError, match="no fact with id 'missing'"):
         store.supersede(old_id="old", new_id="missing")

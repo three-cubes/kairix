@@ -143,6 +143,13 @@ class FakeDocumentRepository:
 
     Pass ``raises=Exception(...)`` to make every call raise (covers
     ``never-raises`` contracts in callers).
+
+    Pass ``backend_unavailable=True`` to model the production
+    :class:`~kairix.core.db.repository.SQLiteDocumentRepository` when its
+    SQLite backend cannot be opened / queried: like production it never
+    raises — ``search_fts`` / ``list_chunk_seqs`` return ``[]``,
+    ``get_by_path`` returns ``None``, ``get_chunk_dates`` returns ``{}``
+    and ``insert_or_update`` drops the write (production logs a WARNING).
     Captures every ``search_fts`` call arg in ``calls`` for assertion.
     """
 
@@ -153,8 +160,10 @@ class FakeDocumentRepository:
         raises: BaseException | None = None,
         force_rows: list[dict[str, Any]] | None = None,
         bm25_rows: list[dict[str, Any]] | None = None,
+        backend_unavailable: bool = False,
     ) -> None:
         self._docs: dict[str, dict[str, Any]] = {}
+        self._backend_unavailable = backend_unavailable
         for doc in documents or []:
             path = doc.get("path", "")
             self._docs[path] = doc
@@ -172,6 +181,8 @@ class FakeDocumentRepository:
         self.calls.append((query, collections, limit))
         if self._raises is not None:
             raise self._raises
+        if self._backend_unavailable:
+            return []
         if self._force_rows is not None:
             return list(self._force_rows[:limit])
         if self._bm25_rows is not None:
@@ -217,6 +228,8 @@ class FakeDocumentRepository:
         return results
 
     def get_by_path(self, path: str) -> dict[str, Any] | None:
+        if self._backend_unavailable:
+            return None
         return self._docs.get(path)
 
     def list_chunk_seqs(self, source_uri: str) -> list[int]:
@@ -227,6 +240,8 @@ class FakeDocumentRepository:
         heading-anchor fragments are ignored. ``[]`` when the source_uri has
         no finer chunk rows (the doc-level-only class).
         """
+        if self._backend_unavailable:
+            return []
         prefix = f"{source_uri}#"
         seqs: list[int] = []
         for path in self._docs:
@@ -239,6 +254,8 @@ class FakeDocumentRepository:
 
     def get_chunk_dates(self, paths: list[str]) -> dict[str, str]:
         result: dict[str, str] = {}
+        if self._backend_unavailable:
+            return result
         for path in paths:
             doc = self._docs.get(path)
             if doc and "chunk_date" in doc:
@@ -253,6 +270,8 @@ class FakeDocumentRepository:
         content: str,
         content_hash: str,
     ) -> None:
+        if self._backend_unavailable:
+            return
         self._docs[path] = {
             "path": path,
             "collection": collection,
@@ -269,6 +288,11 @@ class FakeGraphRepository:
     Pass ``available=False`` to simulate Neo4j-not-wired.
     Pass ``raises=Exception(...)`` to make ``cypher()`` raise (covers
     the never-raises contract in entity-boost callers).
+    Pass ``swallow_errors=True`` alongside ``raises=`` to mirror the REAL
+    :class:`kairix.knowledge.graph.repository.Neo4jGraphRepository` contract:
+    ``Neo4jClient.cypher`` logs a backend error and returns ``[]`` rather than
+    raising (the default ``raises=`` shape is a caller-robustness injection
+    with no production analogue).
     Pass ``cypher_rows=`` to supply explicit Neo4j-shaped rows for ``cypher()``
     (the ``entity_boost_neo4j`` helper expects ``{vault_path, name, labels,
     in_degree}`` which the entity-keyed ``_entities`` dict does not carry).
@@ -284,9 +308,11 @@ class FakeGraphRepository:
         *,
         raises: BaseException | None = None,
         cypher_rows: list[dict[str, Any]] | None = None,
+        swallow_errors: bool = False,
     ) -> None:
         self._available = available
         self._raises = raises
+        self._swallow_errors = swallow_errors
         self._entities: dict[str, dict[str, Any]] = {}
         self._all_entities: list[dict[str, Any]] = list(entities or [])
         for entity in entities or []:
@@ -315,6 +341,8 @@ class FakeGraphRepository:
     def cypher(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         self.cypher_calls.append((query, params))
         if self._raises is not None:
+            if self._swallow_errors:
+                return []
             raise self._raises
         if self._cypher_rows:
             return list(self._cypher_rows)
@@ -373,7 +401,9 @@ class FakeVectorRepository:
     """In-memory vector store that returns configured results.
 
     Pass ``raises=`` to make ``search()`` raise — covers never-raises
-    contracts in vector-backend callers.
+    contracts in vector-backend callers. ``add_raises=`` / ``count_raises=``
+    make ``add_vectors()`` / ``count()`` raise (a rejected batch / an
+    unreachable index handle).
     """
 
     def __init__(
@@ -381,10 +411,14 @@ class FakeVectorRepository:
         results: list[dict[str, Any]] | None = None,
         *,
         raises: BaseException | None = None,
+        add_raises: BaseException | None = None,
+        count_raises: BaseException | None = None,
     ) -> None:
         self._results: list[dict[str, Any]] = results or []
         self._vectors: list[tuple[str, list[float]]] = []
         self._raises = raises
+        self._add_raises = add_raises
+        self._count_raises = count_raises
 
     def search(
         self,
@@ -400,10 +434,14 @@ class FakeVectorRepository:
         return self._results[:k]
 
     def add_vectors(self, items: list[tuple[str, list[float]]]) -> int:
+        if self._add_raises is not None:
+            raise self._add_raises
         self._vectors.extend(items)
         return len(items)
 
     def count(self) -> int:
+        if self._count_raises is not None:
+            raise self._count_raises
         return len(self._vectors) + len(self._results)
 
 
@@ -655,11 +693,17 @@ class FakeFusion:
     contracts in pipeline callers.
     """
 
-    def __init__(self, *, raises: BaseException | None = None) -> None:
+    def __init__(self, *, raises: BaseException | None = None, swallow_errors: bool = False) -> None:
         self._raises = raises
+        # ``swallow_errors=True`` mirrors the shipped RRFFusion /
+        # BM25PrimaryFusion, which log an internal fusion error and return
+        # ``[]`` (never raise).
+        self._swallow_errors = swallow_errors
 
     def fuse(self, bm25: list[Any], vec: list[Any]) -> list[Any]:
         if self._raises is not None:
+            if self._swallow_errors:
+                return []
             raise self._raises
         return bm25 + vec
 
@@ -739,15 +783,21 @@ class FakeSearchLogger:
     """In-memory search logger that captures events.
 
     Pass ``raises=`` to make every log call raise — covers never-raises
-    contracts in pipeline callers that wrap the logger.
+    contracts in pipeline callers that wrap the logger. Add
+    ``contain_errors=True`` to model the shipped
+    :class:`kairix.core.search.logger.JsonlSearchLogger` instead: the sink
+    failure is swallowed and nothing is recorded.
     """
 
-    def __init__(self, *, raises: BaseException | None = None) -> None:
+    def __init__(self, *, raises: BaseException | None = None, contain_errors: bool = False) -> None:
         self.events: list[dict[str, Any]] = []
         self._raises = raises
+        self._contain_errors = contain_errors
 
     def _record(self, event: dict[str, Any]) -> None:
         if self._raises is not None:
+            if self._contain_errors:
+                return
             raise self._raises
         self.events.append(event)
 
@@ -765,10 +815,21 @@ class FakeCollectionResolver:
     collection lists. Anything not in the map returns None.
     """
 
-    def __init__(self, by_key: dict[tuple[str | None, str], list[str] | None] | None = None) -> None:
+    def __init__(
+        self,
+        by_key: dict[tuple[str | None, str], list[str] | None] | None = None,
+        *,
+        raises: BaseException | None = None,
+    ) -> None:
         self._by_key: dict[tuple[str | None, str], list[str] | None] = dict(by_key or {})
+        # F68 knob — mirrors the production TopologyCollectionResolver,
+        # which propagates a failing scope-profile lookup rather than
+        # silently widening scope to "no filter".
+        self._raises = raises
 
     def resolve(self, agent: str | None, scope: Any) -> list[str] | None:
+        if self._raises is not None:
+            raise self._raises
         scope_value = scope.value if hasattr(scope, "value") else str(scope)
         return self._by_key.get((agent, scope_value))
 
@@ -813,6 +874,143 @@ class FakeAgentRegistry:
         return False
 
 
+class FakeClaimExtractor:
+    """Sentence-splitting :class:`kairix.knowledge.contradict.protocols.ClaimExtractor`.
+
+    Shares the shipped ``EntityDensityClaimExtractor``'s observable
+    contract without its ranking heuristic: blank content → ``[]``; any
+    other text → at most ``top_n`` sentence strings (in input order);
+    input that is not decoded text (e.g. raw ``bytes``) raises
+    ``TypeError`` from the ``str`` sentence-split pattern rather than
+    being masked as "no claims".
+    """
+
+    _SENTENCE_SPLIT = r"(?<=[.!?])\s+(?=[A-Z])"
+
+    def extract(self, content: str, *, top_n: int = 3) -> list[str]:
+        import re
+
+        if not content or not content.strip():
+            return []
+        sentences = [s.strip() for s in re.split(self._SENTENCE_SPLIT, content.strip()) if s.strip()]
+        return sentences[:top_n]
+
+
+class FakeContradictionScorer:
+    """Scripted :class:`kairix.knowledge.contradict.protocols.ContradictionScorer`.
+
+    Returns the configured ``(score, reason)`` for every pair — default
+    ``(0.0, "")``, the Protocol's "no contradiction / unparseable" signal.
+    ``raises=`` models a programming bug inside a scorer; like the
+    shipped scorers (whose no-raise contract covers LLM parse failure
+    only), the fake lets it propagate.
+    """
+
+    def __init__(
+        self,
+        *,
+        category: str = "direct",
+        score: float = 0.0,
+        reason: str = "",
+        raises: BaseException | None = None,
+    ) -> None:
+        self.category = category
+        self._score = score
+        self._reason = reason
+        self._raises = raises
+        self.calls: list[tuple[str, str]] = []
+
+    def score(self, claim: str, candidate: str) -> tuple[float, str]:
+        self.calls.append((claim, candidate))
+        if self._raises is not None:
+            raise self._raises
+        return self._score, self._reason
+
+
+class FakeConfidenceParser:
+    """Scripted :class:`kairix.agents.research.protocols.ConfidenceParser`.
+
+    Returns the scripted confidence (clamped to ``[0.0, 1.0]``, like the
+    shipped parsers) for a known response; any other response raises
+    :class:`~kairix.agents.research.protocols.ConfidenceParseError` —
+    never a silent ``0.0`` (the bug the Protocol exists to prevent).
+    """
+
+    def __init__(self, scripted: dict[str, float] | None = None) -> None:
+        self._scripted: dict[str, float] = dict(scripted or {})
+        self.calls: list[str] = []
+
+    def parse(self, response: str) -> float:
+        from kairix.agents.research.protocols import ConfidenceParseError
+
+        self.calls.append(response)
+        if response not in self._scripted:
+            raise ConfidenceParseError(f"fake: no scripted confidence for response[:60]={response[:60]!r}")
+        return max(0.0, min(1.0, float(self._scripted[response])))
+
+
+class FakeDoctor:
+    """In-memory stand-in for the agent doctor surface
+    (:func:`kairix.agents.onboarding.doctor.doctor_check_all` /
+    :func:`~kairix.agents.onboarding.doctor.doctor_check_agent`).
+
+    Reads the same ``agents:`` config block as production but never
+    touches the filesystem: every configured surface reports
+    ``exists=True`` with ``file_count`` files (constructor knob). Returns
+    the production frozen dataclasses (:class:`SurfaceHealth`,
+    :class:`AgentHealth`, :class:`DoctorReport`) so callers see the same
+    shapes. Like production it never raises: an unknown agent yields an
+    ``overall="error"`` :class:`AgentHealth` carrying an actionable issue.
+    """
+
+    def __init__(self, *, file_count: int = 1) -> None:
+        self._file_count = file_count
+
+    def check_all(self, *, config: dict[str, object] | None = None) -> Any:
+        from kairix.agents.onboarding.doctor import DoctorReport
+
+        agents_raw = (config or {}).get("agents") or {}
+        names = sorted(agents_raw) if isinstance(agents_raw, dict) else []
+        healths = tuple(self.check_agent(name, config=config) for name in names)
+        overall = "error" if any(h.overall == "error" for h in healths) else "ok"
+        summary = f"{len(healths)} agent(s) checked — overall {overall}" if healths else "no agents configured"
+        return DoctorReport(agents=healths, overall=overall, summary_text=summary)
+
+    def check_agent(self, agent_name: str, *, config: dict[str, object] | None = None) -> Any:
+        from pathlib import Path as _Path
+
+        from kairix.agents.onboarding.doctor import AgentHealth, SurfaceHealth
+
+        agents_raw = (config or {}).get("agents") or {}
+        entry = agents_raw.get(agent_name) if isinstance(agents_raw, dict) else None
+        if not isinstance(entry, dict):
+            return AgentHealth(
+                name=agent_name,
+                harness="",
+                surfaces=(),
+                overall="error",
+                issues=(f"no config for {agent_name} — run: kairix onboard agent {agent_name}",),
+            )
+        surfaces = tuple(
+            SurfaceHealth(
+                path=_Path(str(raw["path"])),
+                label=str(raw.get("label", "")),
+                exists=True,
+                file_count=self._file_count,
+                most_recent_mtime=None,
+                issues=(),
+            )
+            for raw in entry.get("surfaces", [])
+        )
+        return AgentHealth(
+            name=agent_name,
+            harness=str(entry.get("harness", "")),
+            surfaces=surfaces,
+            overall="ok" if surfaces else "error",
+            issues=(),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Eval-module fakes (#143 Phase 1)
 #
@@ -841,9 +1039,16 @@ class FakeChatBackend:
         *,
         responses: list[str] | None = None,
         raise_on_call: Exception | None = None,
+        swallow_errors: bool = False,
     ) -> None:
         self._responses: list[str] = list(responses or [])
         self._raise_on_call = raise_on_call
+        # ``swallow_errors=True`` mirrors the production eval adapter
+        # (:class:`kairix.quality.eval.chat_backend.ProviderEvalChatBackend`),
+        # which logs a provider failure and returns ``""`` rather than
+        # raising. Default ``False`` keeps the raising shape (the
+        # unconfigured-provider ``ValueError`` path) for callers' tests.
+        self._swallow_errors = swallow_errors
         self.calls: list[dict[str, Any]] = []  # for test inspection
 
     def complete(
@@ -869,6 +1074,8 @@ class FakeChatBackend:
             }
         )
         if self._raise_on_call is not None:
+            if self._swallow_errors:
+                return ""
             raise self._raise_on_call
         if not self._responses:
             raise IndexError(
@@ -898,9 +1105,15 @@ class FakeLLMJudge:
         *,
         grades_by_query: dict[str, dict[str, int]] | None = None,
         calibration_passed: bool = True,
+        raise_on_failed_calibration: bool = False,
     ) -> None:
         self._grades_by_query = dict(grades_by_query or {})
         self._calibration_passed = calibration_passed
+        # The REAL ``kairix.quality.eval.judge.LLMJudge.calibrate`` never
+        # returns False — a failed calibration raises JudgeCalibrationError.
+        # Opt in to that faithful shape; the default keeps the legacy
+        # bool-return used by existing callers.
+        self._raise_on_failed_calibration = raise_on_failed_calibration
         self.grade_calls: list[tuple[str, list[tuple[str, str]]]] = []
         self.calibrate_calls: int = 0
 
@@ -930,6 +1143,10 @@ class FakeLLMJudge:
 
     def calibrate(self) -> bool:
         self.calibrate_calls += 1
+        if not self._calibration_passed and self._raise_on_failed_calibration:
+            from kairix.quality.eval.judge import JudgeCalibrationError
+
+            raise JudgeCalibrationError("FakeLLMJudge: calibration failed (configured)")
         return self._calibration_passed
 
 
@@ -1074,6 +1291,8 @@ class FakeProvider:
         self._sleep = sleep if sleep is not None else _time.sleep
         self._embed_latency_s = float(embed_latency_s)
         self._embed_raises = embed_raises
+        # ``chat_raises`` — when not ``None``, every ``chat`` call raises
+        # this (credential / transport failure inside the plugin).
         self._chat_raises = chat_raises
         self.embed_calls: list[list[str]] = []
         self.chat_calls: list[dict[str, Any]] = []
@@ -1368,17 +1587,25 @@ class FakeMemoryStore:
     Search scoring: returns memories whose content shares any word
     with the query, sorted by overlap ratio. Crude on purpose — the
     point of the fake is Protocol conformance, not retrieval quality.
+
+    ``add_raises`` is the failure-injection knob: when set, ``add``
+    raises it instead of persisting — mirrors a real backend whose
+    write fails (``KairixNativeMemoryStore`` raises ``OSError`` when
+    the memories directory can't be written).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, add_raises: BaseException | None = None) -> None:
         self._memories: dict[str, FakeMemory] = {}
         self._next_id = 0
+        self._add_raises = add_raises
 
     def _mint_id(self) -> str:
         self._next_id += 1
         return f"fake-mem-{self._next_id:04d}"
 
     def add(self, content: str, *, metadata: dict[str, Any] | None = None) -> str:
+        if self._add_raises is not None:
+            raise self._add_raises
         mem_id = self._mint_id()
         self._memories[mem_id] = FakeMemory(id=mem_id, content=content, score=1.0, metadata=metadata)
         return mem_id
@@ -1559,8 +1786,11 @@ class FakeFactExtractor:
     Records every ``extract`` invocation in ``calls`` for assertion.
     """
 
-    def __init__(self, scripted_facts: list[Any] | None = None) -> None:
+    def __init__(self, scripted_facts: list[Any] | None = None, *, raises: BaseException | None = None) -> None:
         self._scripted_facts = list(scripted_facts or [])
+        # F68 knob — the extraction backend (LLM) fails; like the shipped
+        # LLMFactExtractor, the error propagates (never a silent ``[]``).
+        self._raises = raises
         self.calls: list[dict[str, Any]] = []
 
     def extract(
@@ -1577,6 +1807,12 @@ class FakeFactExtractor:
                 "session_metadata": session_metadata,
             }
         )
+        # Faithful to LLMFactExtractor: an empty window short-circuits to
+        # ``[]`` before any backend call (no facts can be grounded).
+        if not turns:
+            return []
+        if self._raises is not None:
+            raise self._raises
         return list(self._scripted_facts)
 
 
@@ -1869,9 +2105,12 @@ class FakeDocumentWriter:
     ``<base_path> / <corpus_id> / <session_id>.md``.
     """
 
-    def __init__(self, base_path: Path | str = "/fake/documents") -> None:
+    def __init__(self, base_path: Path | str = "/fake/documents", *, raises: BaseException | None = None) -> None:
         self._base_path = Path(base_path)
         self.writes: list[dict[str, Any]] = []
+        # F68 knob — the backing store rejects the write (disk full, FTS5
+        # rebuild error, permission denied); propagates, never a sentinel path.
+        self._raises = raises
 
     def write(
         self,
@@ -1881,6 +2120,8 @@ class FakeDocumentWriter:
         rendered_body: str,
         frontmatter: dict[str, Any],
     ) -> Path:
+        if self._raises is not None:
+            raise self._raises
         self.writes.append(
             {
                 "corpus_id": corpus_id,
@@ -1981,10 +2222,18 @@ class FakePdfFallbackExtractor:
 
         self.name = "pdf_fallback"
         self.version = version
-        self.scripted_markdown = scripted_markdown or (
-            "Recovered PDF content from the fallback extractor.\n" + ("Line of body text from page one.\n" * 6)
+        # ``is not None`` (not ``or``) so an explicit ``""`` models the
+        # real extractor's image-only / scanned-PDF output (empty text layer).
+        self.scripted_markdown = (
+            scripted_markdown
+            if scripted_markdown is not None
+            else ("Recovered PDF content from the fallback extractor.\n" + ("Line of body text from page one.\n" * 6))
         )
-        self.scripted_page_text = scripted_page_text or "Recovered PDF page text from the fallback extractor."
+        self.scripted_page_text = (
+            scripted_page_text
+            if scripted_page_text is not None
+            else "Recovered PDF page text from the fallback extractor."
+        )
         self._DocMetadata = DocMetadata
         self._ExtractedDocument = ExtractedDocument
         self._MimeType = MimeType
@@ -2612,6 +2861,12 @@ class FakeXlsxExtractor:
     Implements the :class:`kairix.extractors.Extractor` Protocol without
     invoking the real :mod:`openpyxl` library. Returns a scripted set of
     ``Page`` objects (one per "sheet").
+
+    ``scripted_sheets=`` models a concrete workbook as ``(title, rows)``
+    pairs and renders it the way the real extractor does: sheets with no
+    non-blank cell are skipped, each surviving sheet becomes one ``Page``
+    (numbered by its 1-based sheet index) headed ``## Sheet: <title>``
+    with a pipe-syntax table (first row = header, ``---`` separator).
     """
 
     def __init__(
@@ -2620,6 +2875,7 @@ class FakeXlsxExtractor:
         version: str = "3.1.5",
         scripted_sheet_count: int = 2,
         scripted_sheet_markdown: str | None = None,
+        scripted_sheets: tuple[tuple[str, tuple[tuple[Any, ...], ...]], ...] | None = None,
     ) -> None:
         from kairix.extractors import (
             DocMetadata,
@@ -2639,6 +2895,7 @@ class FakeXlsxExtractor:
         self._MimeType = MimeType
         self._Page = Page
         self._supported_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        self.scripted_sheets = scripted_sheets
 
     def can_extract(self, mime: str, magic_bytes: bytes) -> bool:
         if isinstance(mime, str) and mime == self._supported_mime:
@@ -2647,14 +2904,31 @@ class FakeXlsxExtractor:
             return False
         return bool(isinstance(mime, str) and mime.endswith("sheet"))
 
+    @staticmethod
+    def _render_scripted_sheet(title: str, rows: tuple[tuple[Any, ...], ...]) -> str:
+        cells = [["" if cell is None else str(cell).strip() for cell in row] for row in rows]
+        width = max(len(row) for row in cells)
+        padded = [row + [""] * (width - len(row)) for row in cells]
+        lines = ["| " + " | ".join(padded[0]) + " |", "| " + " | ".join(["---"] * width) + " |"]
+        lines.extend("| " + " | ".join(row) + " |" for row in padded[1:])
+        return f"## Sheet: {title}\n\n" + "\n".join(lines)
+
+    def _scripted_numbered_sections(self) -> list[tuple[int, str]]:
+        if self.scripted_sheets is None:
+            return [(index, self.scripted_sheet_markdown) for index in range(1, self.scripted_sheet_count + 1)]
+        out: list[tuple[int, str]] = []
+        for index, (title, rows) in enumerate(self.scripted_sheets, start=1):
+            if not any(cell is not None and str(cell).strip() for row in rows for cell in row):
+                continue  # mirrors the real extractor's empty-sheet skip
+            out.append((index, self._render_scripted_sheet(title, rows)))
+        return out
+
     def extract(self, raw: bytes, mime: str) -> Any:
         del mime
-        sections = [self.scripted_sheet_markdown for _ in range(self.scripted_sheet_count)]
+        numbered = self._scripted_numbered_sections()
+        sections = [section for _, section in numbered]
         markdown = "\n\n".join(sections)
-        pages = tuple(
-            self._Page(page_number=index, text=section, has_images=False)
-            for index, section in enumerate(sections, start=1)
-        )
+        pages = tuple(self._Page(page_number=index, text=section, has_images=False) for index, section in numbered)
         confidence = min(len(markdown) / max(len(raw), 1), 1.0) if raw else 0.0
         return self._ExtractedDocument(
             markdown=markdown,
@@ -2864,12 +3138,22 @@ class FakeCorpusEmbedder:
     embedder saw the documents the writer just produced.
     """
 
-    def __init__(self, scripted_chunks_per_call: list[int] | None = None) -> None:
+    def __init__(
+        self,
+        scripted_chunks_per_call: list[int] | None = None,
+        *,
+        raises: BaseException | None = None,
+    ) -> None:
         self._scripted = list(scripted_chunks_per_call or [])
         self.calls: list[tuple[Path, ...]] = []
+        # F68 knob — the underlying embed pipeline crashes (CUDA OOM, vector
+        # index write error); propagates, never a silent ``0``.
+        self._raises = raises
 
     def embed(self, paths_to_embed: tuple[Path, ...]) -> int:
         self.calls.append(tuple(paths_to_embed))
+        if self._raises is not None:
+            raise self._raises
         if not self._scripted:
             return 0
         if len(self.calls) <= len(self._scripted):
@@ -3832,11 +4116,15 @@ class FakeLinearApiClient:
         *,
         pages: Mapping[str, list[list[dict[str, Any]]]] | None = None,
         raise_429_times: int = 0,
+        paginate_raises: BaseException | None = None,
     ) -> None:
         import copy
 
         self._pages: dict[str, list[list[dict[str, Any]]]] = {k: copy.deepcopy(v) for k, v in (pages or {}).items()}
         self._remaining_429s = raise_429_times
+        # Failure-injection knob: ``paginate`` raises this (a GraphQL /
+        # transport failure mid-poll) instead of yielding nodes.
+        self._paginate_raises = paginate_raises
         self.query_calls: list[tuple[str, dict[str, Any]]] = []
         self.paginate_calls: list[tuple[str, dict[str, Any], str]] = []
 
@@ -3870,6 +4158,8 @@ class FakeLinearApiClient:
         missing ``updatedAt`` is always yielded (the connector handles it).
         """
         self.paginate_calls.append((document, dict(variables), connection))
+        if self._paginate_raises is not None:
+            raise self._paginate_raises
         since = variables.get("since")
         for page in self._pages.get(connection, []):
             for node in page:
@@ -4449,6 +4739,58 @@ class FakeSocketModeTransport:
             raise self._ack_raises
 
 
+class FakeGmailClient:
+    """Wire-level stand-in for :class:`kairix.connectors.gmail.GmailClient`.
+
+    Lets contract tests drive the REAL :class:`GmailConnector` through
+    its public ``client=`` seam with no Gmail roundtrip. Seed
+    ``messages`` with :class:`~kairix.connectors.gmail.client.GmailMessage`
+    rows; the History API surfaces every seeded id after any start
+    historyId.
+
+    F68 knob: ``history_raises`` — when set, ``iter_history_message_ids``
+    raises it (the expired / invalid ``startHistoryId`` shape: Gmail
+    answers HTTP 404 for a historyId older than ~7 days).
+    """
+
+    def __init__(
+        self,
+        *,
+        messages: list[Any] | None = None,
+        history_raises: BaseException | None = None,
+        profile_history_id: str = "cold-start-tip",
+    ) -> None:
+        self._messages: list[Any] = list(messages or [])
+        self._by_id: dict[str, Any] = {m.message_id: m for m in self._messages}
+        self._history_raises = history_raises
+        self._profile_history_id = profile_history_id
+        self._last_history_id: str | None = None
+
+    def get_profile_history_id(self) -> str:
+        return self._profile_history_id
+
+    def iter_history_message_ids(self, *, start_history_id: str) -> Any:
+        del start_history_id
+        if self._history_raises is not None:
+            raise self._history_raises
+        self._last_history_id = "final-history-id"
+        return iter([m.message_id for m in self._messages])
+
+    def last_history_id(self) -> str | None:
+        return self._last_history_id
+
+    def get_message(self, message_id: str) -> Any:
+        return self._by_id[message_id]
+
+    def stats(self) -> Any:
+        from kairix.connectors.gmail.client import GmailStatsSnapshot
+
+        return GmailStatsSnapshot(requests=0, rate_limited_403_total=0, token_refreshes=0)
+
+    def invalidate_token(self) -> None:
+        return None
+
+
 class FakeGmailConnector:
     """Scripted :class:`kairix.core.protocols.SourceConnector` for the Gmail plugin.
 
@@ -4483,6 +4825,8 @@ class FakeGmailConnector:
         user_email: str = "agent-alpha@example.com",
         messages: list[dict[str, Any]] | None = None,
         sensitivity: str = "client-confidential",
+        profile_history_id: str = "fake-profile-tip",
+        final_history_id: str = "fake-history-tip",
     ) -> None:
         self._user = user_email
         self._messages: list[dict[str, Any]] = list(messages) if messages is not None else []
@@ -4490,22 +4834,41 @@ class FakeGmailConnector:
         self._by_id: dict[str, dict[str, Any]] = {
             str(m.get("id", f"fake-msg-{i}")): m for i, m in enumerate(self._messages)
         }
-        self._next_cursor_token: str | None = "fake-history-tip"
+        # Mirrors the real GmailConnector cursor lifecycle: ``None`` until
+        # the first tick, the live profile tip after a cold start
+        # (``list_changes(None)``), the final historyId after a warm drain.
+        self._profile_history_id = profile_history_id
+        self._final_history_id = final_history_id
+        self._next_cursor_token: str | None = None
+        # Per-tick envelope cache — populated by a warm drain, read by
+        # ``metadata_for`` (cache miss → empty SourceMetadata, as the real).
+        self._cache: dict[str, dict[str, Any]] = {}
+        self._next_cursor_by_container: dict[str, str | None] = {}
 
-    def list_changes(self, cursor: Any | None = None) -> Any:
+    def _drain_events(self, extra_metadata: dict[str, str] | None = None) -> list[Any]:
         from kairix.core.protocols import ChangeEvent
 
-        _ = cursor
         events: list[ChangeEvent] = []
         for entry_id, entry in self._by_id.items():
+            self._cache[entry_id] = entry
+            metadata = {"sensitivity": self._sensitivity, **(extra_metadata or {})}
             events.append(
                 ChangeEvent(
                     op="created",
                     item_id=entry_id,
                     modified_at=str(entry.get("date", "2026-05-28T10:00:00Z")),
-                    metadata={"sensitivity": self._sensitivity},
+                    metadata=metadata,
                 )
             )
+        return events
+
+    def list_changes(self, cursor: Any | None = None) -> Any:
+        if cursor is None:
+            # Cold start — seed the cursor at the live tip, emit nothing.
+            self._next_cursor_token = self._profile_history_id
+            return iter([])
+        events = self._drain_events()
+        self._next_cursor_token = self._final_history_id
         return iter(events)
 
     def fetch(self, item_id: str) -> Any:
@@ -4535,7 +4898,7 @@ class FakeGmailConnector:
     def metadata_for(self, item_id: str) -> Any:
         from kairix.core.protocols import SourceMetadata
 
-        entry = self._by_id.get(item_id, {})
+        entry = self._cache.get(item_id, {})
         if not entry:
             return SourceMetadata()
         from_addr = entry.get("from")
@@ -4556,8 +4919,8 @@ class FakeGmailConnector:
             properties=properties,
         )
 
-    def load_from_checkpoint(self, _container: Any, _checkpoint: Any) -> Any:
-        return self.list_changes(None)
+    def load_from_checkpoint(self, _container: Any, checkpoint: Any) -> Any:
+        return self.list_changes(checkpoint)
 
     def iter_containers(self, cc_pair_id: int) -> Any:
         from kairix.core.protocols import Container
@@ -4570,8 +4933,17 @@ class FakeGmailConnector:
             last_synced_at=None,
         )
 
-    def list_changes_for_container(self, _container: Any) -> Any:
-        return self.list_changes(None)
+    def list_changes_for_container(self, container: Any) -> Any:
+        mailbox = container.container_id
+        if container.cursor_token is None:
+            self._next_cursor_by_container[mailbox] = self._profile_history_id
+            return iter([])
+        events = self._drain_events({"mailbox": mailbox})
+        self._next_cursor_by_container[mailbox] = self._final_history_id
+        return iter(events)
+
+    def next_cursor_for_container(self, container_id: str) -> str | None:
+        return self._next_cursor_by_container.get(container_id)
 
     def load_hierarchy(self, cc_pair_id: int) -> Any:
         from kairix.core.protocols import HierarchyNode
@@ -4610,8 +4982,15 @@ class FakeExtractor:
         raise_on_quality_ok: Exception | None = None,
         raise_on_metadata_for: Exception | None = None,
         quality_ok_returns: bool | None = None,
+        claimed_mime_prefixes: tuple[str, ...] | None = None,
     ) -> None:
         from kairix.core.protocols import DocMetadata, ExtractedDocument
+
+        # ``claimed_mime_prefixes`` — when set, ``can_extract`` claims only
+        # mimes starting with one of these prefixes (e.g. ``("text/",)``,
+        # matching the shipped PassthroughExtractor). ``None`` keeps the
+        # historical claim-everything default.
+        self._claimed_mime_prefixes = claimed_mime_prefixes
 
         self._DocMetadata = DocMetadata
         self._ExtractedDocument = ExtractedDocument
@@ -4633,10 +5012,16 @@ class FakeExtractor:
         self._quality_ok_returns = quality_ok_returns
 
     def can_extract(self, mime: str, magic_bytes: bytes) -> bool:
-        del mime, magic_bytes
+        del magic_bytes
         if self._raise_on_can_extract is not None:
             raise self._raise_on_can_extract
-        return True
+        # Like the shipped extractors, the mime hint is consulted as a
+        # string — a malformed (non-str) hint raises rather than being
+        # silently claimed.
+        normalised = mime.lower()
+        if self._claimed_mime_prefixes is None:
+            return True
+        return normalised.startswith(self._claimed_mime_prefixes)
 
     def extract(self, raw: bytes, mime: str) -> Any:
         self.extract_calls.append((raw, mime))
@@ -4696,11 +5081,13 @@ class FakeEntityGraphSink:
         ``_process_item`` does NOT wrap the sink call in a try/except,
         so the exception propagates and the per-chunk transaction
         rolls back (canonical ``raises`` failure mode).
-      * ``available`` — when False, :meth:`stage` returns 0 without
-        recording the batch (the ``unavailable`` failure class —
-        mirrors the #334 behaviour where the SQLite stage rejects the
-        write because the Curator drain is unreachable; signals stay
-        with ``pushed_to_neo4j=0`` until the sink recovers).
+      * ``available`` — models the DOWNSTREAM delivery target (Curator
+        drain → Neo4j) being unreachable. Faithful to the production
+        ``_SqliteEntityGraphSink`` (PLA-472): staging is durable and
+        decoupled from delivery, so the batch is STILL staged and its
+        count returned — the signals simply wait (``pushed_to_neo4j=0``
+        in production) for the drain to recover. ``unavailable_calls``
+        counts the buffers made during the outage window.
     """
 
     def __init__(
@@ -4722,10 +5109,9 @@ class FakeEntityGraphSink:
         if self._raise_on_stage is not None:
             raise self._raise_on_stage
         if not self._available:
-            # Record the attempt count without recording the batch — the
-            # signals are NOT staged; the caller can re-attempt later.
+            # Downstream outage — staging still succeeds (durable), the
+            # signals wait for the drain. Count the outage-window call.
             self.unavailable_calls += 1
-            return 0
         batch = tuple(signals)
         self.staged.append(batch)
         return len(batch)
@@ -4759,10 +5145,16 @@ class FakeDrainGraphRepository:
         available: bool = True,
         raise_on_value: str | None = None,
         raise_always: bool = False,
+        reject_silently: bool = False,
     ) -> None:
         self._available = available
         self.raise_on_value: str | None = raise_on_value
         self.raise_always: bool = raise_always
+        # ``reject_silently`` — the backend rejects every query but, like the
+        # production ``Neo4jClient.cypher`` (which logs a WARNING and returns
+        # ``[]`` on ANY driver error), the failure surfaces as an empty
+        # result rather than an exception.
+        self.reject_silently: bool = reject_silently
         # Each entry: (cypher_query, params_dict)
         self.cypher_calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -4777,11 +5169,184 @@ class FakeDrainGraphRepository:
     def cypher(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         recorded_params: dict[str, Any] = dict(params or {})
         self.cypher_calls.append((query, recorded_params))
+        if self.reject_silently:
+            return []
         if self.raise_always:
             raise RuntimeError("FakeDrainGraphRepository: raise_always set")
         if self.raise_on_value is not None and recorded_params.get("value") == self.raise_on_value:
             raise RuntimeError(f"FakeDrainGraphRepository: scripted failure on value={self.raise_on_value!r}")
         return []
+
+
+class FakeNeo4jDriverCls:
+    """Stand-in for the ``neo4j.GraphDatabase`` driver class, injected
+    through :class:`kairix.knowledge.graph.client.Neo4jClient`'s public
+    ``driver_cls=`` seam (F1-clean — no patching of the driver import).
+
+    Knobs:
+      * ``connect_error`` — raised by ``verify_connectivity`` (backend
+        offline / auth rejected); the client then reports
+        ``available=False``.
+      * ``run_error`` — raised by every ``session.run`` (the server
+        rejecting a query: transaction abort, syntax error, access mode).
+      * ``rows`` — records every successful ``run`` returns.
+
+    ``runs`` records ``(query, params, default_access_mode)`` per call.
+    """
+
+    def __init__(
+        self,
+        *,
+        connect_error: BaseException | None = None,
+        run_error: BaseException | None = None,
+        rows: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.connect_error = connect_error
+        self.run_error = run_error
+        self.rows: list[dict[str, Any]] = list(rows or [])
+        self.runs: list[tuple[str, dict[str, Any], str | None]] = []
+
+    def driver(self, uri: str, auth: Any = None) -> Any:
+        del uri, auth
+        owner = self
+
+        class _Session:
+            def __init__(self, access_mode: str | None) -> None:
+                self._access_mode = access_mode
+
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *_exc: Any) -> None:
+                return None
+
+            def run(self, query: str, **params: Any) -> list[dict[str, Any]]:
+                owner.runs.append((query, dict(params), self._access_mode))
+                if owner.run_error is not None:
+                    raise owner.run_error
+                return list(owner.rows)
+
+        class _Driver:
+            def verify_connectivity(self) -> None:
+                if owner.connect_error is not None:
+                    raise owner.connect_error
+
+            def session(self, default_access_mode: str | None = None, **_: Any) -> Any:
+                return _Session(default_access_mode)
+
+            def close(self) -> None:
+                return None
+
+        return _Driver()
+
+
+class FakeBronzeStore:
+    """In-memory :class:`kairix.core.protocols.BronzeStore`.
+
+    Faithful to the shipped
+    :class:`kairix.core.connectors.streaming_bronze.StreamingBronzeStore`
+    (the only production BronzeStore since streaming-bronze Phase 7):
+
+      * ``write`` records ``(source_name, item_id, mime, fetched_at,
+        content_hash)`` keyed on ``(source_name, item_id)`` — repeated
+        writes replace the row — and discards the raw bytes, returning a
+        :class:`BronzeRef` with ``raw_path=None``.
+      * ``read`` ALWAYS raises
+        :class:`~kairix.core.connectors.streaming_bronze.BronzeNotPersistedError`
+        — streaming bronze retains no bytes.
+      * ``replay`` yields the rows for one ``source_name`` oldest first,
+        optionally narrowed to ``fetched_at >= since``.
+
+    F68 knob: ``raise_on_write`` — when set, :meth:`write` raises it
+    (the in-memory analogue of the SQLite layer rejecting the INSERT,
+    e.g. ``bronze_records`` absent).
+    """
+
+    def __init__(self, *, raise_on_write: BaseException | None = None) -> None:
+        self._raise_on_write = raise_on_write
+        self._rows: dict[tuple[str, str], Any] = {}
+
+    def write(self, source_name: str, item_id: str, raw: bytes, mime: str) -> Any:
+        import hashlib
+        from datetime import datetime, timezone
+
+        from kairix.core.protocols import BronzeRef
+
+        if self._raise_on_write is not None:
+            raise self._raise_on_write
+        fetched_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        ref = BronzeRef(
+            source_name=source_name,
+            item_id=item_id,
+            raw_path=None,
+            mime=mime,
+            fetched_at=fetched_at,
+            content_hash=hashlib.sha256(raw).hexdigest(),
+        )
+        self._rows[(source_name, item_id)] = ref
+        return ref
+
+    def read(self, ref: Any) -> tuple[bytes, str]:
+        from kairix.core.connectors.streaming_bronze import BronzeNotPersistedError
+
+        raise BronzeNotPersistedError(
+            f"streaming bronze does not retain raw bytes for ({ref.source_name}, {ref.item_id}). "
+            "fix: route through ``connector.fetch(item_id)`` to re-fetch from source instead of "
+            "``bronze.read(ref)``."
+        )
+
+    def replay(self, source_name: str, since: Any = None) -> Any:
+        rows = [r for (src, _item), r in self._rows.items() if src == source_name]
+        if since is not None:
+            rows = [r for r in rows if r.fetched_at >= since.isoformat()]
+        return iter(sorted(rows, key=lambda r: r.fetched_at))
+
+
+class FakeParagraphChunker:
+    """Paragraph-splitting :class:`kairix.core.protocols.Chunker`.
+
+    Holds the Protocol-level invariants every shipped chunker plugin
+    honours (``kairix/chunkers/**``):
+
+      * declares a non-empty ``version: str`` (F55);
+      * empty / whitespace-only ``text`` yields ``()`` — the Silver
+        layer relies on this to skip blank documents;
+      * any other text yields a non-empty ``tuple`` of :class:`Chunk`
+        (one per blank-line-separated paragraph), each carrying
+        ``chunker_version=self.version`` (F55) and the input
+        ``source_uri`` (F39);
+      * malformed input is not masked — like the plugins, the fake
+        calls ``text.strip()`` first, so a non-``str`` section (e.g.
+        ``None`` from an image section with no OCR text) raises
+        instead of silently returning ``()``.
+    """
+
+    name: str = "fake-paragraph"
+    version: str = "0.0.0-fake"
+
+    def chunk(self, *, text: str, section_kind: str, source_uri: str) -> tuple[Any, ...]:
+        import hashlib
+
+        from kairix.core.protocols import Chunk
+
+        stripped = text.strip()
+        if not stripped:
+            return ()
+        paragraphs = [p.strip() for p in stripped.split("\n\n") if p.strip()]
+        return tuple(
+            Chunk(
+                text=p,
+                content_hash=hashlib.sha256(p.encode("utf-8")).hexdigest(),
+                source_name="",
+                source_uri=source_uri,
+                source_modified_at="",
+                source_page=None,
+                sensitivity="internal",
+                chunker_version=self.version,
+                metadata={"section_kind": section_kind},
+            )
+            for p in paragraphs
+        )
 
 
 class FakeChunkWriter:
@@ -4801,12 +5366,24 @@ class FakeChunkWriter:
     counts.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        raise_on_upsert: BaseException | None = None,
+        raise_on_delete: BaseException | None = None,
+    ) -> None:
         self.writes: list[tuple[Any, ...]] = []
         self.deletes: list[str] = []
         self._by_uri: dict[str, int] = {}
+        # F68 knobs — the in-memory analogue of the production SQLite
+        # writer's store rejecting the statement (IntegrityError, locked,
+        # table absent). Both propagate; the writer never swallows.
+        self._raise_on_upsert = raise_on_upsert
+        self._raise_on_delete = raise_on_delete
 
     def upsert(self, chunks: Any) -> int:
+        if self._raise_on_upsert is not None:
+            raise self._raise_on_upsert
         batch = tuple(chunks)
         self.writes.append(batch)
         for c in batch:
@@ -4823,6 +5400,8 @@ class FakeChunkWriter:
         ``cursor.rowcount`` contract). Idempotent: calling twice
         returns N then 0.
         """
+        if self._raise_on_delete is not None:
+            raise self._raise_on_delete
         self.deletes.append(source_uri)
         return int(self._by_uri.pop(source_uri, 0))
 
@@ -4844,14 +5423,21 @@ class FakeEntitySummaryProjector:
         self,
         *,
         result: Any = None,
+        raises: BaseException | None = None,
     ) -> None:
         from kairix.core.protocols import EntitySummaryProjectionResult
 
         self.ticks: list[int] = []
         self._result: Any = result if result is not None else EntitySummaryProjectionResult()
+        # F68 knob — a tick-level fault (not a per-entity one, which the
+        # production projector counts in ``failed``) propagates to the
+        # worker boundary, like the real projector's injected-clock fault.
+        self._raises = raises
 
     def tick(self, *, per_tick_max_items: int = 200) -> Any:
         self.ticks.append(per_tick_max_items)
+        if self._raises is not None:
+            raise self._raises
         return self._result
 
 
@@ -4941,24 +5527,40 @@ class FakePollConnector:
     Yields the pre-seeded change events from
     :meth:`list_changes_for_container` regardless of the container's
     cursor token. Used by contract tests to assert the Protocol shape.
+
+    ``raises`` is the failure-injection knob: when set, the poll raises
+    it (mirrors a real connector whose source backend fails mid-poll —
+    the error propagates, it is never swallowed into "no changes").
     """
 
-    def __init__(self, *, events: list[Any] | None = None) -> None:
+    def __init__(self, *, events: list[Any] | None = None, raises: BaseException | None = None) -> None:
         self._events = list(events) if events is not None else []
+        self._raises = raises
 
     def list_changes_for_container(self, container: Any) -> Any:
         del container
+        if self._raises is not None:
+            raise self._raises
         return iter(self._events)
 
 
 class FakeCheckpointedConnector:
-    """Scripted :class:`kairix.core.protocols.CheckpointedConnector`."""
+    """Scripted :class:`kairix.core.protocols.CheckpointedConnector`.
 
-    def __init__(self, *, events: list[Any] | None = None) -> None:
+    F68 knob: ``raises`` — when set, :meth:`load_from_checkpoint` raises
+    it (the source rejected the checkpoint: expired delta token / HTTP
+    410), matching the shipped connectors, which propagate rather than
+    swallow so the orchestrator can fall back to a full re-sync.
+    """
+
+    def __init__(self, *, events: list[Any] | None = None, raises: BaseException | None = None) -> None:
         self._events = list(events) if events is not None else []
+        self._raises = raises
 
     def load_from_checkpoint(self, container: Any, checkpoint: str | None) -> Any:
         del container, checkpoint
+        if self._raises is not None:
+            raise self._raises
         return iter(self._events)
 
 
@@ -4967,24 +5569,41 @@ class FakeSlimConnector:
 
     Yields the pre-seeded item_id strings from
     :meth:`retrieve_all_slim_docs`. Used by prune-cycle contract tests.
+    ``raises=`` makes the id-listing raise on iteration (lazily, like the
+    shipped connectors' generator-based listing).
     """
 
-    def __init__(self, *, item_ids: list[str] | None = None) -> None:
+    def __init__(self, *, item_ids: list[str] | None = None, raises: BaseException | None = None) -> None:
         self._item_ids = list(item_ids) if item_ids is not None else []
+        self._raises = raises
 
     def retrieve_all_slim_docs(self, container: Any) -> Any:
         del container
+        if self._raises is not None:
+            return _raising_iter(self._raises)
         return iter(self._item_ids)
 
 
 class FakeSlimConnectorWithPermSync:
-    """Scripted :class:`kairix.core.protocols.SlimConnectorWithPermSync`."""
+    """Scripted :class:`kairix.core.protocols.SlimConnectorWithPermSync`.
 
-    def __init__(self, *, entries: list[tuple[str, str]] | None = None) -> None:
+    ``raises=`` makes the perm-sync listing raise on iteration (backend
+    failure or expired credentials).
+    """
+
+    def __init__(
+        self,
+        *,
+        entries: list[tuple[str, str]] | None = None,
+        raises: BaseException | None = None,
+    ) -> None:
         self._entries = list(entries) if entries is not None else []
+        self._raises = raises
 
     def retrieve_all_slim_docs_with_perms(self, container: Any) -> Any:
         del container
+        if self._raises is not None:
+            return _raising_iter(self._raises)
         return iter(self._entries)
 
 
@@ -4996,8 +5615,13 @@ class FakeEventConnector:
     contract tests.
     """
 
-    def __init__(self, *, events: list[Any] | None = None) -> None:
+    def __init__(self, *, events: list[Any] | None = None, supported: bool = True) -> None:
         self._events = list(events) if events is not None else []
+        # ``supported=False`` models a deployment with no push surface
+        # (e.g. Slack without Socket Mode wired): ``subscribe`` returns
+        # ``None`` so the framework falls back to polling — the shipped
+        # connectors' "unsupported" sentinel.
+        self._supported = supported
         self.subscribe_calls: list[str] = []
         self.renew_calls: list[str] = []
         self.unsubscribe_calls: list[str] = []
@@ -5005,6 +5629,8 @@ class FakeEventConnector:
 
     def subscribe(self, callback_url: str) -> str | None:
         self.subscribe_calls.append(callback_url)
+        if not self._supported:
+            return None
         return f"sub-{len(self.subscribe_calls)}"
 
     def renew_subscription(self, subscription_id: str) -> str:
@@ -5024,15 +5650,19 @@ class FakeResolver:
 
     Records every reindex call's failed_item_ids + include_permissions
     flag; yields seeded ChangeEvent items from :meth:`reindex`. Used
-    by per-document failure-replay contract tests.
+    by per-document failure-replay contract tests. ``raises=`` makes the
+    replay raise on iteration (systemic refetch failure).
     """
 
-    def __init__(self, *, events: list[Any] | None = None) -> None:
+    def __init__(self, *, events: list[Any] | None = None, raises: BaseException | None = None) -> None:
         self._events = list(events) if events is not None else []
+        self._raises = raises
         self.reindex_calls: list[tuple[tuple[str, ...], bool]] = []
 
     def reindex(self, failed_item_ids: tuple[str, ...], *, include_permissions: bool = False) -> Any:
         self.reindex_calls.append((failed_item_ids, include_permissions))
+        if self._raises is not None:
+            return _raising_iter(self._raises)
         return iter(self._events)
 
 
@@ -5040,14 +5670,24 @@ class FakeHierarchyConnector:
     """Scripted :class:`kairix.core.protocols.HierarchyConnector`.
 
     Yields the pre-seeded HierarchyNode list parent-before-child.
+    Pass ``raises=`` to make the walk raise AFTER yielding the seeded
+    nodes — the shape the real connectors exhibit when the backend
+    enumeration fails mid-walk (root emitted, then the source call raises).
     """
 
-    def __init__(self, *, nodes: list[Any] | None = None) -> None:
+    def __init__(self, *, nodes: list[Any] | None = None, raises: BaseException | None = None) -> None:
         self._nodes = list(nodes) if nodes is not None else []
+        self._raises = raises
 
     def load_hierarchy(self, cc_pair_id: int) -> Any:
         del cc_pair_id
-        return iter(self._nodes)
+        if self._raises is None:
+            return iter(self._nodes)
+        return self._raising_walk(self._raises)
+
+    def _raising_walk(self, exc: BaseException) -> Any:
+        yield from self._nodes
+        raise exc
 
 
 # ---------------------------------------------------------------------------
@@ -5370,7 +6010,13 @@ class FakeTokenStore:
 
 
 class FakeRefreshableToken:
-    """Configurable ``RefreshableToken`` — pinned token, optional expiry."""
+    """Configurable ``RefreshableToken`` — pinned token, optional expiry.
+
+    Faithful to :class:`kairix.connect.refresh.GoogleRefreshableToken`: an
+    empty ``token`` (none ever set) reports expired, and a failing refresh
+    surfaces as :class:`~kairix.connect.protocols.RefreshUnavailableError`
+    (the injected ``refresh_raises`` is chained as ``__cause__``).
+    """
 
     def __init__(
         self,
@@ -5385,18 +6031,23 @@ class FakeRefreshableToken:
         self.refresh_calls = 0
 
     def headers(self) -> dict[str, str]:
-        if self._expired:
+        if self.is_expired():
             self.refresh()
         return {"Authorization": f"Bearer {self._token}"}
 
     def is_expired(self) -> bool:
-        return self._expired
+        return self._expired or not self._token
 
     def refresh(self) -> None:
+        from kairix.connect.protocols import RefreshUnavailableError
+
         self.refresh_calls += 1
-        if self._raises is not None:
+        if isinstance(self._raises, RefreshUnavailableError):
             raise self._raises
+        if self._raises is not None:
+            raise RefreshUnavailableError("fake connect: access-token refresh failed.") from self._raises
         self._expired = False
+        self._token = self._token or "fake-refreshed-access-token"
 
 
 class FakeBrowserLauncher:
@@ -5872,7 +6523,12 @@ class FakeOAuth2Flow:
         wait_for_listener: bool = True,
         client_id: str = "fake-client-id",
         client_secret: str = "fake-client-secret",  # pragma: allowlist secret — fixture value
+        client_secret_path: Any = None,
     ) -> None:
+        # ``client_secret_path`` mirrors the real file-backed flows
+        # (GoogleOAuth2Flow): when set and absent on disk,
+        # ``discover_client_credentials`` raises FileNotFoundError.
+        self._client_secret_path = client_secret_path
         self.service_area = service_area
         self.scopes = scopes
         self._tokens = tokens
@@ -5888,6 +6544,8 @@ class FakeOAuth2Flow:
     def discover_client_credentials(self) -> Any:
         from kairix.connect.protocols import ClientCredentials
 
+        if self._client_secret_path is not None and not Path(self._client_secret_path).exists():
+            raise FileNotFoundError(f"FakeOAuth2Flow: client_secret.json not found at {self._client_secret_path}")
         return ClientCredentials(client_id=self._client_id, client_secret=self._client_secret)
 
     def authorize(self, *, listener: Any, timeout_s: float = 120.0) -> Any:
@@ -6484,3 +7142,786 @@ class FakeCorpusDownloader:
             url=url,
             force=force,
         )
+
+
+# ---------------------------------------------------------------------------
+# F43 parity fakes (PLA-472 slice f43b, helper B) — memory store / OAuth /
+# onboarding-scanner contract tests run ONE body over real + fake.
+# ---------------------------------------------------------------------------
+
+
+class FakeMemoryDirSearchPipeline:
+    """Index stand-in for ``KairixNativeMemoryStore``'s ``pipeline`` seam.
+
+    The real adapter writes ``<document_root>/memories/<id>.md`` and
+    relies on ``kairix embed`` + :class:`SearchPipeline` to make them
+    searchable. This fake collapses "embed then search" into a live
+    scan of that directory, so the REAL adapter's add/update/delete
+    file IO is exercised end-to-end through its public surface.
+
+    Hits are the REAL :class:`SearchPipeline` row shape —
+    ``BudgetedResult`` wrapping a ``FusedResult`` whose ``path`` is the
+    document-relative ``memories/<id>.md`` — so the adapter's own
+    hit → Memory projection (and its id round-trip into update/delete) is
+    what's exercised. Scoring matches :class:`FakeMemoryStore`
+    (query-word overlap ratio, best first).
+    """
+
+    def __init__(self, paths: KairixPaths) -> None:
+        self._dir = Path(paths.document_root) / "memories"
+        self.calls: list[str] = []
+
+    @staticmethod
+    def _body(text: str) -> str:
+        if text.startswith("---\n"):
+            end = text.find("\n---\n", 4)
+            if end != -1:
+                text = text[end + len("\n---\n") :]
+        return text.rstrip("\n")
+
+    def search(self, query: str, **kwargs: Any) -> Any:
+        del kwargs
+        self.calls.append(query)
+        q_words = set(query.lower().split())
+        from kairix.core.search.budget import BudgetedResult
+        from kairix.core.search.rrf import FusedResult
+
+        hits: list[BudgetedResult] = []
+        files = sorted(self._dir.glob("*.md")) if self._dir.is_dir() else []
+        for md in files:
+            body = self._body(md.read_text(encoding="utf-8"))
+            overlap = len(q_words & set(body.lower().split()))
+            if overlap == 0:
+                continue
+            score = overlap / max(len(q_words), 1)
+            fused = FusedResult(
+                path=f"memories/{md.name}", collection="memories", title=md.stem, snippet=body, boosted_score=score
+            )
+            hits.append(BudgetedResult(result=fused, tier="L0", token_estimate=len(body) // 4, content=body))
+        hits.sort(key=lambda h: h.result.boosted_score, reverse=True)
+        return _FakeSearchResult(results=list(hits))
+
+
+class FakeClientCredentialsOAuthConnector:
+    """Canonical fake for a client-credentials-only :class:`OAuthConnector`.
+
+    Mirrors the shipped app-only connectors (SharePoint, M365 calendar,
+    M365 email headers): there is no three-legged consent flow, so both
+    OAuthConnector classmethods raise an actionable
+    ``NotImplementedError`` rather than returning a malformed URL or an
+    empty token envelope.
+    """
+
+    _MESSAGE = (
+        "fake_client_credentials: client-credentials flow only; OAuth user flow not supported for this plugin. "
+        "fix: drive auth via the configured tenant_id / client_id / client_secret triple. "
+        "next: see tests/fakes.py FakeClientCredentialsOAuthConnector."
+    )
+
+    @classmethod
+    def oauth_authorization_url(cls, _state: str) -> str:
+        raise NotImplementedError(cls._MESSAGE)
+
+    @classmethod
+    def oauth_code_to_token(cls, _code: str) -> dict[str, Any]:
+        raise NotImplementedError(cls._MESSAGE)
+
+
+class FakeOnboardScanner:
+    """In-memory stand-in for :mod:`kairix.agents.onboarding.scanner`.
+
+    Exposes ``scan_for_agents`` / ``discover_single_agent`` with the real
+    keyword surface and returns real ``ProposedScope`` values. Models the
+    real scanner's no-detector path: every ``memory_root`` subdirectory
+    carrying ``.md`` files becomes a ``generic`` / ``medium`` proposal
+    with one ``memory`` surface (plus a ``workspace`` surface when
+    ``workspace_root/<name>/`` exists). ``detectors`` / ``harness`` are
+    accepted for signature parity and ignored. ``discover_single_agent``
+    raises ``ValueError`` naming the agent when nothing is found.
+    """
+
+    def _propose(self, agent_name: str, candidate: Path, workspace_root: Path | None) -> Any:
+        from kairix.agents.onboarding.scanner import ProposedScope
+        from kairix.core.agents.scope import AgentSurface
+
+        mds = [p for p in candidate.rglob("*.md") if p.is_file()] if candidate.is_dir() else []
+        if not mds:
+            return None
+        surfaces = [AgentSurface(path=candidate, glob="**/*.md", label="memory")]
+        if workspace_root is not None and (workspace_root / agent_name).is_dir():
+            ws = workspace_root / agent_name
+            surfaces.append(AgentSurface(path=ws, glob="**/*.md", label="workspace"))
+            mds.extend(p for p in ws.rglob("*.md") if p.is_file())
+        return ProposedScope(
+            name=agent_name,
+            surfaces=tuple(surfaces),
+            harness="generic",
+            confidence="medium",
+            file_count=len(mds),
+            most_recent_mtime=max(p.stat().st_mtime for p in mds),
+        )
+
+    def scan_for_agents(
+        self,
+        *,
+        memory_root: Path,
+        workspace_root: Path | None = None,
+        detectors: Any = None,
+    ) -> tuple[Any, ...]:
+        del detectors
+        children = sorted(memory_root.iterdir()) if memory_root.is_dir() else []
+        proposals = [self._propose(c.name, c, workspace_root) for c in children if c.is_dir()]
+        return tuple(sorted((p for p in proposals if p is not None), key=lambda p: p.name))
+
+    def discover_single_agent(
+        self,
+        agent_name: str,
+        *,
+        memory_root: Path,
+        workspace_root: Path | None = None,
+        harness: str | None = None,
+        detectors: Any = None,
+    ) -> Any:
+        del harness, detectors
+        proposal = self._propose(agent_name, memory_root / agent_name, workspace_root)
+        if proposal is None:
+            raise ValueError(f"no detector proposed surfaces for agent {agent_name!r} under {memory_root}")
+        return proposal
+
+
+class FakeSuggestionFilter:
+    """In-memory :class:`kairix.knowledge.entities.protocols.SuggestionFilter`.
+
+    Mirrors the shipped filter strategies' shape (``RolePhraseFilter``,
+    ``KnownEntityAllowlist``, ...): ``apply`` returns a NEW list and drops
+    every suggestion whose ``text`` is in ``drop_texts``; everything else
+    passes through unchanged. ``raises=`` makes ``apply`` raise verbatim —
+    the same propagation a real filter's code-level error has through
+    :class:`~kairix.knowledge.entities.filters.ChainedSuggestionFilter`.
+    """
+
+    def __init__(
+        self,
+        *,
+        drop_texts: tuple[str, ...] = (),
+        raises: BaseException | None = None,
+    ) -> None:
+        self._drop_texts = frozenset(drop_texts)
+        self._raises = raises
+        self.calls: list[tuple[list[Any], str]] = []
+
+    def apply(self, suggestions: list[Any], context: str) -> list[Any]:
+        self.calls.append((list(suggestions), context))
+        if self._raises is not None:
+            raise self._raises
+        return [s for s in suggestions if s.get("text", "") not in self._drop_texts]
+
+
+class FakeKeyVaultSecretClient:
+    """Stand-in for ``azure.keyvault.secrets.SecretClient``.
+
+    Plugs into the ``client_factory=`` seam of
+    :class:`kairix.connect.store.azure_kv_store.AzureKeyVaultTokenStore`
+    via :meth:`factory`. Records every ``set_secret`` call in
+    ``secrets``; ``raises=`` makes ``set_secret`` raise (a vault that
+    rejects the write — e.g. the identity only holds Secrets User).
+    """
+
+    def __init__(self, *, raises: BaseException | None = None) -> None:
+        self._raises = raises
+        self.secrets: dict[str, str] = {}
+        self.vault_urls: list[str] = []
+
+    def factory(self, vault_url: str, credential: object) -> FakeKeyVaultSecretClient:
+        del credential
+        self.vault_urls.append(vault_url)
+        return self
+
+    def set_secret(self, name: str, value: str) -> None:
+        if self._raises is not None:
+            raise self._raises
+        self.secrets[name] = value
+
+
+class FakeVectorIndex:
+    """In-memory stand-in for :class:`kairix.core.search.vec_index.VectorIndex`.
+
+    The ``index=`` seam of
+    :class:`kairix.core.search.vector_repository.UsearchVectorRepository`.
+    ``search`` returns the configured ``results`` (collection-filtered and
+    ``k``-capped like the real index); per-method ``*_raises=`` knobs make
+    ``search`` / ``add_vectors`` / ``__len__`` raise — a corrupt or
+    unreachable index handle.
+    """
+
+    def __init__(
+        self,
+        results: list[dict[str, Any]] | None = None,
+        *,
+        search_raises: BaseException | None = None,
+        add_raises: BaseException | None = None,
+        len_raises: BaseException | None = None,
+    ) -> None:
+        self._results: list[dict[str, Any]] = list(results or [])
+        self._hash_seqs: list[str] = []
+        self._search_raises = search_raises
+        self._add_raises = add_raises
+        self._len_raises = len_raises
+
+    def search(self, query_vec: Any, k: int = 10, collections: list[str] | None = None) -> list[dict[str, Any]]:
+        del query_vec
+        if self._search_raises is not None:
+            raise self._search_raises
+        rows = [r for r in self._results if not collections or r.get("collection") in collections]
+        return rows[:k]
+
+    def add_vectors(self, hash_seqs: list[str], vectors: list[list[float]]) -> int:
+        del vectors
+        if self._add_raises is not None:
+            raise self._add_raises
+        self._hash_seqs.extend(hash_seqs)
+        return len(hash_seqs)
+
+    def __len__(self) -> int:
+        if self._len_raises is not None:
+            raise self._len_raises
+        return len(self._hash_seqs) + len(self._results)
+
+
+class FakeChunker:
+    """Generic in-memory :class:`kairix.core.protocols.Chunker`.
+
+    Models the contract the shipped chunker plugins share: blank text
+    yields ``()``; text within ``max_tokens_per_chunk`` (whitespace word
+    count — the shipped chunkers' token proxy) is emitted verbatim as one
+    chunk; over-cap text is sub-split into cap-sized word runs. Every chunk
+    carries ``source_uri`` (F39) and ``chunker_version=self.version`` (F55).
+    The constructor rejects a non-positive cap with a ``ValueError`` naming
+    the parameter, like the real chunkers.
+    """
+
+    version: str = "0.0.0-fake"
+
+    def __init__(self, *, max_tokens_per_chunk: int = 500) -> None:
+        if max_tokens_per_chunk <= 0:
+            raise ValueError(
+                "FakeChunker: max_tokens_per_chunk must be > 0. fix: pass a positive integer.",
+            )
+        self._cap = max_tokens_per_chunk
+        self.calls: list[dict[str, str]] = []
+
+    def chunk(self, *, text: str, section_kind: str, source_uri: str) -> tuple[Any, ...]:
+        import hashlib
+
+        from kairix.core.protocols import Chunk
+
+        self.calls.append({"text": text, "section_kind": section_kind, "source_uri": source_uri})
+        tokens = text.split()
+        if not tokens:
+            return ()
+        if len(tokens) <= self._cap:
+            pieces: list[str] = [text.strip()]
+        else:
+            pieces = [" ".join(tokens[i : i + self._cap]) for i in range(0, len(tokens), self._cap)]
+        return tuple(
+            Chunk(
+                text=piece,
+                content_hash=hashlib.sha256(piece.encode("utf-8")).hexdigest(),
+                source_name="",
+                source_uri=source_uri,
+                source_modified_at="",
+                source_page=None,
+                sensitivity="internal",
+                chunker_version=self.version,
+            )
+            for piece in pieces
+        )
+
+
+class FakeNeo4jDriverClass:
+    """Stand-in for the ``neo4j.GraphDatabase`` class injected through
+    :class:`kairix.knowledge.graph.client.Neo4jClient`'s ``driver_cls=`` seam.
+
+    ``driver(uri, auth=...)`` returns a :class:`FakeNeo4jDriver`. Knobs:
+
+      * ``rows`` — result rows returned by every ``session.run``.
+      * ``responder`` — ``(query, params) -> rows`` callable; wins over
+        ``rows`` so a test can model query-dependent results (e.g. a
+        name-filtered lookup).
+      * ``run_raises`` — every ``session.run`` raises this (backend
+        error / query failure). Constraint-init queries issued at connect
+        time are exempt so the client still connects.
+      * ``connect_raises`` — ``verify_connectivity`` raises this (Neo4j
+        unreachable), leaving the client ``available is False``.
+
+    Records every ``(query, params, access_mode)`` in ``run_calls``.
+    """
+
+    def __init__(
+        self,
+        *,
+        rows: list[dict[str, Any]] | None = None,
+        responder: Any = None,
+        run_raises: BaseException | None = None,
+        connect_raises: BaseException | None = None,
+    ) -> None:
+        self.rows: list[dict[str, Any]] = list(rows or [])
+        self.responder = responder
+        self.run_raises = run_raises
+        self.connect_raises = connect_raises
+        self.run_calls: list[tuple[str, dict[str, Any], str | None]] = []
+
+    def driver(self, uri: str, auth: Any = None) -> FakeNeo4jDriver:
+        del uri, auth
+        return FakeNeo4jDriver(self)
+
+
+class FakeNeo4jDriver:
+    """Driver returned by :meth:`FakeNeo4jDriverClass.driver`."""
+
+    def __init__(self, owner: FakeNeo4jDriverClass) -> None:
+        self._owner = owner
+
+    def verify_connectivity(self) -> None:
+        if self._owner.connect_raises is not None:
+            raise self._owner.connect_raises
+
+    def session(self, default_access_mode: str | None = None) -> FakeNeo4jSession:
+        return FakeNeo4jSession(self._owner, default_access_mode)
+
+    def close(self) -> None:
+        """Intentionally empty — no live connection to release."""
+
+
+class FakeNeo4jSession:
+    """Context-managed session returned by :meth:`FakeNeo4jDriver.session`."""
+
+    def __init__(self, owner: FakeNeo4jDriverClass, access_mode: str | None) -> None:
+        self._owner = owner
+        self._access_mode = access_mode
+
+    def __enter__(self) -> FakeNeo4jSession:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        del exc
+
+    def run(self, query: str, **params: Any) -> list[dict[str, Any]]:
+        self._owner.run_calls.append((query, dict(params), self._access_mode))
+        if query.lstrip().upper().startswith("CREATE CONSTRAINT"):
+            return []
+        if self._owner.run_raises is not None:
+            raise self._owner.run_raises
+        if self._owner.responder is not None:
+            return list(self._owner.responder(query, dict(params)))
+        return list(self._owner.rows)
+
+
+class FakeHarnessDetector:
+    """In-memory :class:`kairix.core.agents.detectors.HarnessDetector`.
+
+    Mirrors the shipped detectors' contract: a missing / non-directory
+    candidate root or one carrying none of ``markers`` yields ``()``
+    (never ``None``, never a raise); otherwise one ``memory``
+    :class:`AgentSurface` anchored at the candidate root.
+    """
+
+    def __init__(self, *, name: str = "fake-harness", markers: tuple[str, ...] = ("FAKE.md",)) -> None:
+        self.name = name
+        self._markers = markers
+
+    def propose_surfaces(self, agent_name: str, candidate_root: Path) -> tuple[Any, ...]:
+        del agent_name
+        from kairix.core.agents.scope import AgentSurface
+
+        if not candidate_root.is_dir():
+            return ()
+        if not any((candidate_root / marker).exists() for marker in self._markers):
+            return ()
+        return (AgentSurface(path=candidate_root, glob="**/*.md", label="memory"),)
+
+
+class FakePromptGradingChatBackend:
+    """``ChatBackend`` that grades the relevance-judge prompt by stem.
+
+    Reads the ``[<label>] <stem>: <document>`` lines the real
+    :class:`kairix.quality.eval.judge.LLMJudge` renders and replies with a
+    JSON object mapping each label whose stem appears in ``grades_by_stem``
+    to its grade — stems absent from the map are omitted from the reply
+    (a partial LLM answer). Deterministic regardless of the judge's
+    candidate shuffle.
+    """
+
+    def __init__(self, *, grades_by_stem: dict[str, int]) -> None:
+        self._grades_by_stem = dict(grades_by_stem)
+        self.calls: list[str] = []
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        api_key: str,
+        endpoint: str,
+        deployment: str,
+        system: str | None = None,
+        temperature: float = 0.0,
+        timeout_s: float = 30.0,
+    ) -> str:
+        import json
+        import re
+
+        del api_key, endpoint, deployment, system, temperature, timeout_s
+        self.calls.append(prompt)
+        reply: dict[str, int] = {}
+        for label, stem in re.findall(r"^\[([A-Z])\] (.+?): <document>", prompt, re.MULTILINE):
+            if stem in self._grades_by_stem:
+                reply[label] = self._grades_by_stem[stem]
+        return json.dumps(reply)
+
+
+# ---------------------------------------------------------------------------
+# F43 limb-2 parity support (PLA-472, slice f43b-C) — faithful fakes + scripted
+# wire stubs that let the failure-mode / protocol contract tests run ONE
+# assertion body over the real production impl AND the fake.
+# ---------------------------------------------------------------------------
+
+
+class FakeScoringStrategy:
+    """Faithful :class:`kairix.core.protocols.ScoringStrategy` fake.
+
+    Mirrors the shipped scorers (``NDCGScorer`` / ``ExactMatchScorer``): an
+    empty ``retrieved`` list or an empty ``gold`` list scores ``0.0`` ("nothing
+    to score"); otherwise the configured ``score``. ``raises=`` makes every call
+    raise (a scorer whose gold parse / backend crashed). Distinct from
+    :class:`FakeScorer`, which returns its fixed score unconditionally.
+    """
+
+    def __init__(self, *, score: float = 1.0, raises: BaseException | None = None) -> None:
+        self._score = score
+        self._raises = raises
+
+    def score(self, retrieved: list[str], gold: list[dict[str, Any]]) -> float:
+        if self._raises is not None:
+            raise self._raises
+        if not retrieved or not gold:
+            return 0.0
+        return self._score
+
+
+class FakeSlideChunker:
+    """Faithful single-page :class:`kairix.core.protocols.Chunker` for the slide plugin.
+
+    Mirrors :class:`kairix.chunkers.slide.SlideChunker` on Silver's per-page
+    path: blank text yields ``()``; any other text collapses to exactly one
+    chunk carrying the stripped text, ``source_uri`` (F39) and
+    ``chunker_version=self.version`` (F55). Multi-slide header splitting is
+    deliberately not modelled.
+    """
+
+    def __init__(self, *, name: str = "slide", version: str = "0.0.0-fake-slide") -> None:
+        self.name = name
+        self.version = version
+
+    def chunk(self, *, text: str, section_kind: str, source_uri: str) -> tuple[Any, ...]:
+        import hashlib
+
+        from kairix.core.protocols import Chunk
+
+        del section_kind
+        stripped = text.strip()
+        if not stripped:
+            return ()
+        return (
+            Chunk(
+                text=stripped,
+                content_hash=hashlib.sha256(stripped.encode("utf-8")).hexdigest(),
+                source_name="",
+                source_uri=source_uri,
+                source_modified_at="",
+                source_page=1,
+                sensitivity="internal",
+                chunker_version=self.version,
+                metadata={"slide_number": "1", "slide_title": ""},
+            ),
+        )
+
+
+class FakeSheetRowChunker:
+    """Faithful :class:`kairix.core.protocols.Chunker` for the sheet-row plugin.
+
+    Mirrors :class:`kairix.chunkers.sheet_row.SheetRowChunker`: blank text or a
+    table with no data rows yields ``()``; a sheet with at most
+    ``small_sheet_threshold`` data rows becomes one whole-sheet chunk; larger
+    sheets emit one ``header + separator + row`` chunk per data row. Every
+    chunk carries ``source_uri`` (F39) and ``chunker_version`` (F55).
+    """
+
+    def __init__(
+        self,
+        *,
+        small_sheet_threshold: int = 50,
+        name: str = "sheet_row",
+        version: str = "0.0.0-fake-sheet-row",
+    ) -> None:
+        self.name = name
+        self.version = version
+        self.small_sheet_threshold = small_sheet_threshold
+
+    def chunk(self, *, text: str, section_kind: str, source_uri: str) -> tuple[Any, ...]:
+        import hashlib
+
+        from kairix.core.protocols import Chunk
+
+        del section_kind
+        stripped = text.strip()
+        rows = [line for line in stripped.splitlines() if line.lstrip().startswith("|")]
+        if len(rows) < 3:
+            return ()
+        header, separator, data_rows = rows[0], rows[1], rows[2:]
+        if len(data_rows) <= self.small_sheet_threshold:
+            pieces = [stripped]
+        else:
+            pieces = ["\n".join([header, separator, row]) for row in data_rows]
+        return tuple(
+            Chunk(
+                text=piece,
+                content_hash=hashlib.sha256(piece.encode("utf-8")).hexdigest(),
+                source_name="",
+                source_uri=source_uri,
+                source_modified_at="",
+                source_page=None,
+                sensitivity="internal",
+                chunker_version=self.version,
+            )
+            for piece in pieces
+        )
+
+
+class FakeChunkerRegistry:
+    """In-memory chunker registry (the ``DefaultSilverProcessor(chunker_registry=)`` seam).
+
+    ``dispatch`` returns the configured chunker (default :class:`FakeChunker`)
+    and records every ``(kind, mime, section_kind)`` request. ``raises=`` makes
+    ``dispatch`` raise — the seam for injecting a Silver chunking failure into
+    the real processor.
+    """
+
+    def __init__(self, *, chunker: Any | None = None, raises: BaseException | None = None) -> None:
+        self._chunker = chunker
+        self._raises = raises
+        self.dispatch_calls: list[tuple[str, str, str]] = []
+
+    def dispatch(self, *, kind: str, mime: str, section_kind: str) -> Any:
+        self.dispatch_calls.append((kind, mime, section_kind))
+        if self._raises is not None:
+            raise self._raises
+        return self._chunker if self._chunker is not None else FakeChunker()
+
+
+class FakeSilverProcessor:
+    """Faithful :class:`kairix.core.protocols.SilverProcessor` fake.
+
+    Mirrors :class:`kairix.core.connectors.silver.DefaultSilverProcessor` at
+    the contract level: blank markdown yields ``SilverOutput(chunks=(),
+    entity_signals=())``; non-blank markdown yields one chunk per blank-line
+    separated paragraph carrying ``source_uri`` / ``source_modified_at`` /
+    ``sensitivity`` (F39). ``raises=`` makes ``process`` raise (a chunking or
+    signal-extraction crash).
+    """
+
+    def __init__(self, *, raises: BaseException | None = None) -> None:
+        self._raises = raises
+        self.calls: list[str] = []
+
+    def process(
+        self,
+        raw: Any,
+        extracted: Any,
+        source_uri: str,
+        source_modified_at: str,
+        sensitivity: Any,
+        connector_metadata: Any | None = None,
+        extractor_metadata: Any | None = None,
+        extractor_name: str | None = None,
+        extractor_version: str | None = None,
+        extraction_status: str = "ok",
+    ) -> Any:
+        import hashlib
+
+        from kairix.core.protocols import Chunk, SilverOutput
+
+        del connector_metadata, extractor_metadata, extractor_name, extractor_version, extraction_status
+        self.calls.append(source_uri)
+        if self._raises is not None:
+            raise self._raises
+        paragraphs = [p.strip() for p in str(extracted.markdown).split("\n\n") if p.strip()]
+        chunks = tuple(
+            Chunk(
+                text=paragraph,
+                content_hash=hashlib.sha256(paragraph.encode("utf-8")).hexdigest(),
+                source_name=raw.source_name,
+                source_uri=source_uri,
+                source_modified_at=source_modified_at,
+                source_page=None,
+                sensitivity=sensitivity,
+                chunker_version="fake-silver",
+            )
+            for paragraph in paragraphs
+        )
+        return SilverOutput(chunks=chunks, entity_signals=())
+
+
+class FakeSlackWebApi:
+    """Scripted Slack Web API behind ``httpx.MockTransport`` for real-connector legs.
+
+    ``responses`` maps a Web API method name (``"conversations.history"``)
+    to either a JSON payload dict (merged over an ``ok: true`` empty-page
+    default) or an ``int`` HTTP status. Unscripted methods answer
+    ``ok: true`` with empty ``messages`` / ``members`` / ``channels``.
+    :meth:`build_connector` returns a real
+    :class:`kairix.connectors.slack.SlackConnector` wired to this stub through
+    its ``web_client_factory`` seam — no real Slack call is ever made.
+    """
+
+    _TOKEN = "xoxb-test-fake-token-value"  # pragma: allowlist secret — fixture value
+
+    def __init__(self, *, responses: dict[str, Any] | None = None) -> None:
+        self._responses = dict(responses or {})
+        self.calls: list[str] = []
+
+    def handle(self, request: Any) -> Any:
+        import httpx
+
+        method = str(request.url).rsplit("/", 1)[-1]
+        self.calls.append(method)
+        scripted = self._responses.get(method)
+        if isinstance(scripted, int):
+            return httpx.Response(scripted, json={"ok": False})
+        payload: dict[str, Any] = {
+            "ok": True,
+            "messages": [],
+            "members": [],
+            "channels": [],
+            "response_metadata": {"next_cursor": ""},
+        }
+        if scripted:
+            payload.update(scripted)
+        return httpx.Response(200, json=payload)
+
+    def build_connector(self) -> Any:
+        import httpx
+
+        from kairix.connectors.slack import SlackConnector, SlackCredentials, SlackWebClient
+
+        shared = httpx.Client(transport=httpx.MockTransport(self.handle))
+
+        def _builder(_credentials: Any) -> Any:
+            return SlackWebClient(token=self._TOKEN, http_client=shared)
+
+        return SlackConnector(credentials=SlackCredentials(bot_token=self._TOKEN), web_client_factory=_builder)
+
+
+class FakeSharePointGraphApi:
+    """Scripted Microsoft Graph behind ``httpx.MockTransport`` for real-connector legs.
+
+    ``items`` are drive-item dicts (``id`` / ``name`` / ``mime`` /
+    ``content`` bytes) emitted on the delta page; ``/content`` for an id in
+    ``content_failures`` answers that HTTP status (``int``) or raises that
+    exception (e.g. ``httpx.ReadTimeout``). :meth:`build_connector` returns a
+    real :class:`kairix.connectors.sharepoint.SharePointConnector` wired through
+    its ``auth`` / ``client_builder`` seams with a no-op retry sleeper.
+    """
+
+    drive_id = "b!drive-fake-graph"
+    _SECRET = "fake-secret-value"  # pragma: allowlist secret — fixture value
+
+    def __init__(
+        self,
+        *,
+        items: list[dict[str, Any]] | None = None,
+        content_failures: dict[str, Any] | None = None,
+    ) -> None:
+        self._items = list(items or [])
+        self._content_failures = dict(content_failures or {})
+
+    def _delta_page(self) -> dict[str, Any]:
+        return {
+            "value": [
+                {
+                    "id": item["id"],
+                    "name": item.get("name", f"{item['id']}.md"),
+                    "lastModifiedDateTime": "2026-05-22T10:00:00Z",
+                    "webUrl": f"https://contoso.sharepoint.com/sites/team/Documents/{item['id']}",
+                    "file": {"mimeType": item.get("mime", "text/markdown")},
+                    "parentReference": {"driveId": self.drive_id},
+                    "size": len(item.get("content", b"")),
+                }
+                for item in self._items
+            ],
+            "@odata.deltaLink": f"https://graph.microsoft.com/v1.0/drives/{self.drive_id}/root/delta?token=fake",
+        }
+
+    def handle(self, request: Any) -> Any:
+        import httpx
+
+        url = str(request.url)
+        if "/oauth2/v2.0/token" in url:
+            return httpx.Response(200, json={"access_token": "fake-bearer", "expires_in": 3600, "token_type": "Bearer"})
+        if url.endswith("/content"):
+            for item in self._items:
+                if f"/items/{item['id']}/content" not in url:
+                    continue
+                failure = self._content_failures.get(item["id"])
+                if isinstance(failure, BaseException):
+                    raise failure
+                if isinstance(failure, int):
+                    return httpx.Response(failure)
+                return httpx.Response(200, content=item.get("content", b""))
+            return httpx.Response(404)
+        return httpx.Response(200, json=self._delta_page())
+
+    def build_connector(self) -> Any:
+        import httpx
+
+        from kairix.connectors.sharepoint import (
+            SharePointConnector,
+            SharePointCredentials,
+            SharePointDriveSpec,
+            SharePointGraphClient,
+        )
+        from kairix.transport.auth.oauth2_client_creds import OAuth2ClientCredsAuth
+
+        shared = httpx.Client(transport=httpx.MockTransport(self.handle))
+        auth = OAuth2ClientCredsAuth(
+            tenant_id="fake-tenant",
+            client_id="fake-client",
+            client_secret=self._SECRET,
+            scope="https://graph.microsoft.com/.default",
+            http_client=shared,
+        )
+        return SharePointConnector(
+            drives=[SharePointDriveSpec(drive_id=self.drive_id)],
+            credentials=SharePointCredentials(
+                tenant_id="fake-tenant", client_id="fake-client", client_secret=self._SECRET
+            ),
+            auth=auth,
+            client_builder=lambda a: SharePointGraphClient(auth=a, http_client=shared, sleep_fn=lambda _s: None),
+        )
+
+
+class _RaisingIterator:
+    """Iterator that raises ``exc`` on first ``next()`` — lazy failure like a real paged listing."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    def __iter__(self) -> _RaisingIterator:
+        return self
+
+    def __next__(self) -> Any:
+        raise self._exc
+
+
+def _raising_iter(exc: BaseException) -> Iterator[Any]:
+    """Return an iterator whose first ``next()`` raises ``exc`` (deferred, not at call time)."""
+    return _RaisingIterator(exc)

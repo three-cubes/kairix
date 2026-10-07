@@ -1,4 +1,9 @@
-"""Protocol-shape contract for :mod:`kairix.core.agents.scope` (PR 1.1 / #420).
+"""Shape contract for :mod:`kairix.core.agents.scope` (PR 1.1 / #420).
+
+Moved from ``tests/contracts/test_agent_scope_protocol.py`` (PLA-472):
+``AgentSurface`` / ``AgentScope`` are concrete frozen value objects with a
+single implementation — there is no Protocol and no fake to prove parity
+against — so these shape pins are unit tests of that one implementation.
 
 Pins the structural promises of :class:`AgentSurface` + :class:`AgentScope`
 that callers will depend on once PR 1.2 swaps the hardcoded
@@ -23,7 +28,7 @@ import pytest
 
 from kairix.core.agents.scope import AgentScope, AgentSurface
 
-pytestmark = pytest.mark.contract
+pytestmark = pytest.mark.unit
 
 
 # Sabotage-proof: changed @dataclass(frozen=True) to @dataclass on AgentSurface

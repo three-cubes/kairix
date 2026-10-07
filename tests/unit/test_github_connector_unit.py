@@ -1482,3 +1482,45 @@ def test_quiet_repo_reemits_zero_commits_on_next_tick() -> None:
     assert len(first) == 1, f"tick 1 should emit the boundary commit; got {first!r}"
     second = list(connector.list_changes(cursor=connector.next_cursor()))
     assert second == [], f"quiet repo must re-emit ZERO events on tick 2; got {second!r}"
+
+
+# ---------------------------------------------------------------------------
+# Per-repo cursor isolation (moved from tests/contracts/test_github_protocol.py
+# — the per-repo cursor map is GitHub-implementation behaviour, not a
+# Protocol contract the fake shares; PLA-472).
+# ---------------------------------------------------------------------------
+
+
+class _TwoRepoCommitClient(_StubClient):
+    """Two repos, one commit each, so each repo's cursor advances to its own SHA."""
+
+    def list_installation_repositories(self):
+        return tuple(
+            GitHubRepoRef(repo_id=i, full_name=name, default_branch="main", visibility="private", archived=False)
+            for i, name in enumerate(("agent-alpha-org/repo-one", "agent-alpha-org/repo-two"), start=1)
+        )
+
+    def list_commits_since(self, *, full_name: str, since: str | None):
+        _ = since
+        sha, committed_at = {
+            "agent-alpha-org/repo-one": ("sha-1", "2026-05-23T01:00:00Z"),
+            "agent-alpha-org/repo-two": ("sha-2", "2026-05-23T05:00:00Z"),
+        }[full_name]
+        return (GitHubCommitRef(sha=sha, committed_at=committed_at, message="seed", author="agent-alpha"),)
+
+
+def test_github_connector_per_repo_cursor_isolation() -> None:
+    """Two repos must advance their cursors independently.
+
+    Sabotage-proof (executed): in ``GitHubConnector.list_changes`` record
+    every repo's cursor under one shared key → only one repo appears in
+    the serialised cursor map and this test fails. Restored.
+    """
+    connector = GitHubConnector(client=_TwoRepoCommitClient())  # type: ignore[arg-type]  # F3 rationale: local stub mirrors GitHubApiClient shape but isn't typed as the Protocol — boundary-only suppression for the test seam
+    list(connector.list_changes(cursor=None))
+    state = deserialise_cursor(connector.next_cursor())
+    assert "agent-alpha-org/repo-one" in state
+    assert "agent-alpha-org/repo-two" in state
+    assert state["agent-alpha-org/repo-one"].code_sha != state["agent-alpha-org/repo-two"].code_sha, (
+        "per-repo cursors must be isolated; both repos got the same code_sha"
+    )

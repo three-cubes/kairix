@@ -1,182 +1,101 @@
 """Contract tests for the ``calendar_event`` Chunker plugin (F43, F55).
 
-Pins:
-* :class:`CalendarEventChunker` satisfies the :class:`Chunker` Protocol.
-* Module-level ``version`` is non-empty AND identical to
-  :attr:`CalendarEventChunker.version`.
+Pins the :class:`~kairix.core.protocols.Chunker` Protocol invariants with
+ONE body per invariant, run over BOTH the shipped
+:class:`CalendarEventChunker` and the canonical
+:class:`tests.fakes.FakeParagraphChunker` (F43 behavioural parity):
+
+* The instance satisfies the :class:`Chunker` Protocol.
+* ``version`` is non-empty AND identical to its declaration site (for
+  the plugin: the module-level ``version``, on class and instance).
 * Every emitted :class:`Chunk` carries ``chunker_version=self.version``
   (F55 invariant) AND ``source_uri`` (F39 invariant).
-* One event → exactly one chunk; recurrence is metadata, not text-
-  expansion (ADR-028 §"Calendar event").
-* Empty / both-blank-subject-and-description envelopes produce no
-  chunks rather than near-noise.
+* Empty / whitespace-only input produces no chunks.
+
+Calendar-envelope semantics (one event → one chunk, recurrence as
+metadata, malformed / blank envelopes dropped, alternative field names)
+live in ``tests/unit/test_calendar_event_chunker_units.py``.
 
 Sabotage-proofs (mutate prod → confirm fail → restore):
 * Delete ``version: str = version`` from the class → asserts in
-  ``test_chunker_declares_version`` fail.
+  ``test_chunker_declares_version`` fail for the ``real`` case.
 * Drop ``chunker_version=self.version`` from ``_build_chunk`` →
   asserts in ``test_emitted_chunks_carry_chunker_version`` fail.
-* Change ``one event → one chunk`` to ``one chunk per occurrence`` →
-  asserts in ``test_recurring_event_emits_one_chunk_only`` fail.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import pytest
 
 from kairix.chunkers.calendar_event import CalendarEventChunker
 from kairix.chunkers.calendar_event import version as cal_version
 from kairix.core.protocols import Chunk, Chunker
+from tests.fakes import FakeParagraphChunker
 
 pytestmark = [pytest.mark.contract]
 
+_EVENT = {
+    "subject": "weekly sync",
+    "description": "agenda outline",
+    "start": "2026-05-30T10:00:00+00:00",
+    "end": "2026-05-30T10:30:00+00:00",
+    "attendees": ["agent-alpha@example.com", "agent-beta@example.com"],
+    "location": "room-alpha",
+    "calendar_id": "cal-alpha",
+}
 
-def _event(**overrides: object) -> dict[str, object]:
-    """Build a baseline calendar-event dict for fixture seeding."""
-    base: dict[str, object] = {
-        "subject": "weekly sync",
-        "description": "agenda outline",
-        "start": "2026-05-30T10:00:00+00:00",
-        "end": "2026-05-30T10:30:00+00:00",
-        "attendees": ["agent-alpha@example.com", "agent-beta@example.com"],
-        "location": "room-alpha",
-        "calendar_id": "cal-alpha",
-    }
-    base.update(overrides)
-    return base
-
-
-def test_chunker_satisfies_protocol() -> None:
-    """The class is recognised as a runtime :class:`Chunker`."""
-    chunker = CalendarEventChunker()
-    assert isinstance(chunker, Chunker)
+# (name, factory, declared version, representative non-empty input)
+_IMPLEMENTATIONS: list[tuple[str, Callable[[], Chunker], str, str]] = [
+    ("real", CalendarEventChunker, cal_version, json.dumps(_EVENT)),
+    ("fake", FakeParagraphChunker, FakeParagraphChunker.version, "weekly sync\n\nagenda outline"),
+]
+_IDS = [impl[0] for impl in _IMPLEMENTATIONS]
 
 
-def test_chunker_declares_version() -> None:
-    """F55: module-level + class-level version is non-empty and consistent."""
-    assert isinstance(cal_version, str)
-    assert cal_version.strip() != ""
-    assert CalendarEventChunker.version == cal_version
-    assert CalendarEventChunker().version == cal_version
+@pytest.mark.parametrize("name,factory,declared,sample", _IMPLEMENTATIONS, ids=_IDS)
+def test_chunker_satisfies_protocol(name: str, factory: Callable[[], Chunker], declared: str, sample: str) -> None:
+    """The instance is recognised as a runtime :class:`Chunker`."""
+    assert isinstance(factory(), Chunker), name
 
 
-def test_empty_input_yields_no_chunks() -> None:
-    chunker = CalendarEventChunker()
-    assert chunker.chunk(text="", section_kind="text", source_uri="cal://event/1") == ()
-    assert chunker.chunk(text="   \n  ", section_kind="text", source_uri="cal://event/1") == ()
+@pytest.mark.parametrize("name,factory,declared,sample", _IMPLEMENTATIONS, ids=_IDS)
+def test_chunker_declares_version(name: str, factory: Callable[[], Chunker], declared: str, sample: str) -> None:
+    """F55: declared + class-level + instance version is non-empty and consistent."""
+    assert isinstance(declared, str)
+    assert declared.strip() != "", name
+    assert getattr(factory, "version", None) == declared, name
+    assert factory().version == declared, name
 
 
-def test_one_event_yields_exactly_one_chunk() -> None:
-    chunker = CalendarEventChunker()
-    envelope = json.dumps(_event())
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="cal://event/1")
-    assert len(chunks) == 1
-    assert isinstance(chunks[0], Chunk)
+@pytest.mark.parametrize("name,factory,declared,sample", _IMPLEMENTATIONS, ids=_IDS)
+def test_empty_input_yields_no_chunks(name: str, factory: Callable[[], Chunker], declared: str, sample: str) -> None:
+    chunker = factory()
+    assert chunker.chunk(text="", section_kind="text", source_uri="cal://event/1") == (), name
+    assert chunker.chunk(text="   \n  ", section_kind="text", source_uri="cal://event/1") == (), name
 
 
-def test_emitted_chunks_carry_chunker_version() -> None:
+@pytest.mark.parametrize("name,factory,declared,sample", _IMPLEMENTATIONS, ids=_IDS)
+def test_emitted_chunks_carry_chunker_version(
+    name: str, factory: Callable[[], Chunker], declared: str, sample: str
+) -> None:
     """F55: every Chunk threads ``chunker_version=self.version``."""
-    chunker = CalendarEventChunker()
-    envelope = json.dumps(_event())
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="cal://event/1")
-    assert chunks
+    chunker = factory()
+    chunks = chunker.chunk(text=sample, section_kind="text", source_uri="cal://event/1")
+    assert chunks, name
     for chunk in chunks:
-        assert chunk.chunker_version == chunker.version
+        assert isinstance(chunk, Chunk)
+        assert chunk.chunker_version == chunker.version, name
 
 
-def test_emitted_chunks_carry_source_uri_per_f39() -> None:
-    chunker = CalendarEventChunker()
-    envelope = json.dumps(_event())
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="cal://event/XYZ")
-    assert chunks
+@pytest.mark.parametrize("name,factory,declared,sample", _IMPLEMENTATIONS, ids=_IDS)
+def test_emitted_chunks_carry_source_uri_per_f39(
+    name: str, factory: Callable[[], Chunker], declared: str, sample: str
+) -> None:
+    chunker = factory()
+    chunks = chunker.chunk(text=sample, section_kind="text", source_uri="cal://event/XYZ")
+    assert chunks, name
     for chunk in chunks:
-        assert chunk.source_uri == "cal://event/XYZ"
-
-
-def test_recurring_event_emits_one_chunk_only() -> None:
-    """ADR-028 invariant: recurrence is metadata, NOT text-expansion."""
-    chunker = CalendarEventChunker()
-    envelope = json.dumps(_event(recurrence="RRULE:FREQ=WEEKLY;COUNT=10"))
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="cal://event/recurrer")
-    assert len(chunks) == 1, "Recurring events MUST emit one chunk; recurrence is metadata only."
-
-
-def test_both_blank_subject_and_description_yields_no_chunks() -> None:
-    """A pure-metadata event has no embedding signal — drop it."""
-    chunker = CalendarEventChunker()
-    envelope = json.dumps(_event(subject="", description="", attendees=[]))
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="cal://event/empty")
-    assert chunks == ()
-
-
-def test_malformed_json_yields_no_chunks() -> None:
-    """Bad input is dropped (chunker is downstream of connector/extractor)."""
-    chunker = CalendarEventChunker()
-    assert chunker.chunk(text="not json", section_kind="text", source_uri="cal://event/x") == ()
-
-
-def test_list_envelope_with_single_event_is_accepted() -> None:
-    """A list-wrapped single event decodes the same as a bare dict."""
-    chunker = CalendarEventChunker()
-    envelope = json.dumps([_event()])
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="cal://event/list-wrap")
-    assert len(chunks) == 1
-
-
-def test_list_envelope_empty_yields_no_chunks() -> None:
-    chunker = CalendarEventChunker()
-    assert chunker.chunk(text="[]", section_kind="text", source_uri="cal://event/empty-list") == ()
-
-
-def test_scalar_json_yields_no_chunks() -> None:
-    """A JSON scalar (number, bool, string) isn't an event envelope."""
-    chunker = CalendarEventChunker()
-    assert chunker.chunk(text="42", section_kind="text", source_uri="cal://event/x") == ()
-
-
-def test_alternative_field_names_are_honoured() -> None:
-    """``title`` / ``body`` / ``rrule`` / ``calendarId`` fallbacks are honoured."""
-    chunker = CalendarEventChunker()
-    envelope = json.dumps(
-        {
-            "title": "alt-naming event",
-            "body": "alt-body content",
-            "start_iso": "2026-05-30T09:00:00Z",
-            "end_iso": "2026-05-30T09:15:00Z",
-            "rrule": "RRULE:FREQ=MONTHLY",
-            "calendarId": "alt-cal",
-        }
-    )
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="cal://event/alt")
-    assert len(chunks) == 1
-    assert "alt-naming event" in chunks[0].text
-    assert "alt-body content" in chunks[0].text
-    assert chunks[0].metadata["recurrence_rule"] == "RRULE:FREQ=MONTHLY"
-    assert chunks[0].metadata["calendar_id"] == "alt-cal"
-
-
-def test_unparseable_iso_dates_drop_duration() -> None:
-    """``start``/``end`` that aren't valid ISO-8601 → ``duration_minutes`` empty."""
-    chunker = CalendarEventChunker()
-    envelope = json.dumps(_event(start="not-a-date", end="also-not-a-date"))
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="cal://event/bad")
-    assert chunks[0].metadata["duration_minutes"] == ""
-
-
-def test_description_with_no_urls_emits_empty_linked_docs() -> None:
-    chunker = CalendarEventChunker()
-    envelope = json.dumps(_event(description="no links here at all"))
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="cal://event/no-links")
-    assert chunks[0].metadata["linked_docs"] == ""
-
-
-def test_attendees_non_sequence_is_silently_ignored() -> None:
-    """An ``attendees`` value that isn't a sequence (e.g. a single string) → empty."""
-    chunker = CalendarEventChunker()
-    # The connector contract is a list of strings; defensively a single string
-    # is treated as no attendees rather than splitting into characters.
-    envelope = json.dumps(_event(attendees="not-a-list"))
-    chunks = chunker.chunk(text=envelope, section_kind="text", source_uri="cal://event/odd")
-    assert chunks[0].metadata["attendees"] == ""
+        assert chunk.source_uri == "cal://event/XYZ", name

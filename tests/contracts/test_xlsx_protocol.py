@@ -7,16 +7,20 @@ class satisfies the same shape — driven against a real openpyxl-built
 workbook (synthesised in-memory) without monkeypatching the upstream
 library (F1-clean).
 
+Every test runs ONE body over both impls (F43 limb 2). Workbook-shaped
+tests use ``_workbook_extractor``: the real impl parses openpyxl-built
+bytes, the fake models the same sheet spec via ``scripted_sheets=``.
+
 Sabotage-proofs:
 
   * Deleting ``version`` from :mod:`kairix.extractors.xlsx`
     breaks ``test_extractor_declares_version``.
   * Flipping ``can_extract`` to ``return True`` for ``text/plain``
-    on the real impl breaks ``test_real_rejects_plain_text``.
+    on the real impl breaks ``test_rejects_plain_text``.
   * Flipping the quality gate's char threshold to ``0`` breaks
     ``test_quality_ok_false_on_empty_workbook``.
   * Disabling :func:`_render_workbook`'s empty-sheet skip breaks
-    ``test_real_skips_empty_sheets``.
+    ``test_skips_empty_sheets``.
 """
 
 from __future__ import annotations
@@ -29,9 +33,6 @@ import pytest
 
 from kairix.extractors import ExtractedDocument, Extractor
 from kairix.extractors.xlsx import (
-    XlsxExtractor,
-)
-from kairix.extractors.xlsx import (
     make_extractor as make_real_extractor,
 )
 from kairix.extractors.xlsx import (
@@ -42,44 +43,36 @@ from tests.fakes import FakeXlsxExtractor
 pytestmark = pytest.mark.contract
 
 
-# Test fixture bytes — synthesised in-memory by openpyxl. Mirroring the
-# spec's "sample.xlsx" expectation (3 sheets, Data + Empty + Charts;
-# only Data + Charts survive the empty-sheet skip).
+# Test fixture bytes — synthesised in-memory by openpyxl from a sheet spec.
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-def _build_three_sheet_workbook_bytes() -> bytes:
-    """Build an xlsx with three sheets: Data, Empty, Charts.
+_Sheets = tuple[tuple[str, tuple[tuple[object, ...], ...]], ...]
 
-    Data + Charts carry small grids; Empty is left untouched. The
-    production extractor skips Empty; both fakes' and real's
-    contract assertions check the surviving page count.
-    """
+#: Mirrors the spec's "sample.xlsx" expectation (3 sheets, Data + Empty +
+#: Charts; only Data + Charts survive the empty-sheet skip).
+_THREE_SHEETS: _Sheets = (
+    ("Data", (("product", "units"), ("widget", 10))),
+    ("Empty", ()),
+    ("Charts", (("region", "value"), ("north", 42))),
+)
+_ONE_BLANK_SHEET: _Sheets = (("Blank", ()),)
+
+
+def _workbook_bytes(sheets: _Sheets) -> bytes:
+    """Build a real xlsx (in-memory, openpyxl) from ``(title, rows)`` pairs."""
     workbook = openpyxl.Workbook()
-    data = workbook.active
-    data.title = "Data"
-    data.append(["product", "units"])
-    data.append(["widget", 10])
-    workbook.create_sheet(title="Empty")
-    charts = workbook.create_sheet(title="Charts")
-    charts.append(["region", "value"])
-    charts.append(["north", 42])
+    workbook.remove(workbook.active)
+    for title, rows in sheets:
+        sheet = workbook.create_sheet(title=title)
+        for row in rows:
+            sheet.append(list(row))
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
 
 
-def _build_one_empty_sheet_bytes() -> bytes:
-    """Build an xlsx with one sheet, all cells blank."""
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.title = "Blank"
-    buffer = io.BytesIO()
-    workbook.save(buffer)
-    return buffer.getvalue()
-
-
-_THREE_SHEET_BYTES = _build_three_sheet_workbook_bytes()
+_THREE_SHEET_BYTES = _workbook_bytes(_THREE_SHEETS)
 
 
 _Factory = Callable[[], Extractor]
@@ -96,27 +89,55 @@ def _extractor(request: pytest.FixtureRequest) -> Extractor:
     return factory()
 
 
-@pytest.mark.contract
-def test_xlsx_extractor_satisfies_protocol() -> None:
-    """The real factory returns an instance that is a runtime ``Extractor``."""
-    real = make_real_extractor()
-    assert isinstance(real, Extractor)
-    assert isinstance(real, XlsxExtractor)
+_WorkbookFactory = Callable[[_Sheets], tuple[Extractor, bytes]]
+
+
+def _real_for_workbook(sheets: _Sheets) -> tuple[Extractor, bytes]:
+    return make_real_extractor(), _workbook_bytes(sheets)
+
+
+def _fake_for_workbook(sheets: _Sheets) -> tuple[Extractor, bytes]:
+    return FakeXlsxExtractor(scripted_sheets=sheets), _workbook_bytes(sheets)
+
+
+@pytest.fixture(
+    params=[
+        pytest.param(_fake_for_workbook, id="fake"),
+        pytest.param(_real_for_workbook, id="real"),
+    ]
+)
+def _workbook_extractor(request: pytest.FixtureRequest) -> _WorkbookFactory:
+    """Per-workbook factory: (extractor, raw xlsx bytes) for a sheet spec.
+
+    The real impl parses the openpyxl-built bytes; the fake models the
+    same workbook from the spec (``scripted_sheets=``).
+    """
+    factory: _WorkbookFactory = request.param
+    return factory
 
 
 @pytest.mark.contract
-def test_extractor_declares_version() -> None:
-    """F40 requirement — module-level ``version`` is non-empty."""
+def test_xlsx_extractor_satisfies_protocol(_extractor: Extractor) -> None:
+    """Both impls are runtime ``Extractor`` instances registered as ``xlsx``.
+
+    Sabotage proof: in :class:`XlsxExtractor.__init__` set
+    ``self.name = "xlsx-x"``; the real leg fails. Restored.
+    """
+    assert isinstance(_extractor, Extractor)
+    assert _extractor.name == "xlsx"
+
+
+@pytest.mark.contract
+def test_extractor_declares_version(_extractor: Extractor) -> None:
+    """F40 requirement — module-level ``version`` is non-empty and is the
+    version both impls carry (the fake pins the same openpyxl version).
+
+    Sabotage proof: in :func:`kairix.extractors.xlsx.make_extractor` pass
+    ``version="0"``; the real leg fails. Restored.
+    """
     assert isinstance(xlsx_version, str)
     assert xlsx_version.strip() != ""
-
-
-@pytest.mark.contract
-def test_real_factory_returns_xlsx_instance() -> None:
-    """``make_extractor`` returns a real :class:`XlsxExtractor`."""
-    real = make_real_extractor()
-    assert isinstance(real, XlsxExtractor)
-    assert real.name == "xlsx"
+    assert _extractor.version == xlsx_version
 
 
 @pytest.mark.contract
@@ -132,17 +153,24 @@ def test_can_extract_claims_sheet_suffix_by_magic(_extractor: Extractor) -> None
 
 
 @pytest.mark.contract
-def test_real_rejects_plain_text() -> None:
-    """The real impl refuses ``text/plain`` — that's passthrough's job."""
-    real = make_real_extractor()
-    assert real.can_extract("text/plain", b"hello") is False
+def test_rejects_plain_text(_extractor: Extractor) -> None:
+    """Both impls refuse ``text/plain`` — that's passthrough's job.
+
+    Sabotage proof: in :meth:`XlsxExtractor.can_extract` return ``True``
+    up front; the real leg fails. Restored.
+    """
+    assert _extractor.can_extract("text/plain", b"hello") is False
 
 
 @pytest.mark.contract
-def test_real_rejects_bare_zip_without_sheet_mime() -> None:
-    """ZIP magic alone is ambiguous; the real impl waits for a sheet mime."""
-    real = make_real_extractor()
-    assert real.can_extract("application/octet-stream", b"PK\x03\x04") is False
+def test_rejects_bare_zip_without_sheet_mime(_extractor: Extractor) -> None:
+    """ZIP magic alone is ambiguous; both impls wait for a sheet mime.
+
+    Sabotage proof: in :meth:`XlsxExtractor.can_extract` replace the final
+    ``mime.endswith("sheet")`` check with ``True``; the real leg fails.
+    Restored.
+    """
+    assert _extractor.can_extract("application/octet-stream", b"PK\x03\x04") is False
 
 
 @pytest.mark.contract
@@ -161,19 +189,32 @@ def test_quality_ok_true_on_substantive_workbook(_extractor: Extractor) -> None:
 
 
 @pytest.mark.contract
-def test_quality_ok_false_on_empty_workbook() -> None:
-    """Quality gate fails when openpyxl recovers no sheet content."""
-    real = make_real_extractor()
-    doc = real.extract(_build_one_empty_sheet_bytes(), _XLSX_MIME)
-    assert real.quality_ok(doc) is False
+def test_quality_ok_false_on_empty_workbook(_workbook_extractor: _WorkbookFactory) -> None:
+    """Quality gate fails when the workbook yields no sheet content.
+
+    Sabotage proof: in :mod:`kairix.extractors.xlsx.extractor` set
+    ``_QUALITY_MIN_CHARS = 0`` and drop the ``len(doc.pages) < 1`` guard;
+    the real leg fails. Restored.
+    """
+    extractor, raw = _workbook_extractor(_ONE_BLANK_SHEET)
+    doc = extractor.extract(raw, _XLSX_MIME)
+    assert extractor.quality_ok(doc) is False
 
 
 @pytest.mark.contract
-def test_real_skips_empty_sheets() -> None:
-    """Empty sheets contribute no Page — exactly two pages survive (Data + Charts)."""
-    real = make_real_extractor()
-    doc = real.extract(_THREE_SHEET_BYTES, _XLSX_MIME)
+def test_skips_empty_sheets(_workbook_extractor: _WorkbookFactory) -> None:
+    """Empty sheets contribute no Page — exactly two pages survive (Data + Charts),
+    numbered by their 1-based sheet index.
+
+    Sabotage proof: in :func:`_render_workbook` remove the
+    ``if _sheet_is_skippable(sheet): continue`` skip; the real leg fails
+    (three pages, ``## Sheet: Empty`` present). Restored.
+    """
+    extractor, raw = _workbook_extractor(_THREE_SHEETS)
+    doc = extractor.extract(raw, _XLSX_MIME)
     assert len(doc.pages) == 2
+    assert [page.page_number for page in doc.pages] == [1, 3]
     assert "## Sheet: Data" in doc.markdown
     assert "## Sheet: Charts" in doc.markdown
     assert "## Sheet: Empty" not in doc.markdown
+    assert "| product | units |" in doc.markdown
