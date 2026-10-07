@@ -622,16 +622,13 @@ echo -n "  confidential... "
 bash scripts/pre-commit-confidential-check.sh 2>/dev/null || { echo -e "${RED}FAIL${NC}"; exit 1; }
 echo -e "${GREEN}OK${NC}"
 
-# 8. Sonar per-file ratchet — deterministic parity against the committed
-# baseline (.architecture/baseline/sonar-per-file*.json) so Sonar findings are
-# batched and fixed pre-push, not discovered per-cycle. The gate compares the
-# project's CURRENT per-file open-issue counts to the committed snapshot and
-# fails any file over baseline. It is deterministic (no live leak period), so
-# there is no skip flag — the only non-failure path is "SonarCloud unreachable
-# -> warn + exit 0", which the check handles internally. Default scope is the
-# working set; pass --all for the full-repo view.
-# See docs/architecture/local-first-feedback-loops.md.
-echo -n "  sonar per-file ratchet... "
+# 8. Sonar zero open findings — any open SonarCloud issue/hotspot on main whose
+# flagged line is still in the working copy fails, so Sonar findings are batched
+# and fixed pre-push, not discovered per-cycle. No baseline, no skip flag — the
+# only non-failure path is "SonarCloud unreachable -> warn + exit 0", which the
+# check handles internally. Default scope is the working set; pass --all for the
+# full-repo view. See docs/architecture/local-first-feedback-loops.md.
+echo -n "  sonar open findings... "
 run_gate python3 scripts/checks/check_sonar_new_code.py
 if [[ "$GATE_RC" -ne 0 ]]; then
     echo -e "${RED}FAIL${NC}"
