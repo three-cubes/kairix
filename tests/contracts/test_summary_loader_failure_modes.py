@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from kairix.core.search.budget import apply_budget
+from kairix.core.search.budget import BudgetDeps, apply_budget
 from kairix.core.search.rrf import FusedResult
 from kairix.knowledge.summaries.loader import get_l0, get_l1
 from tests.fakes import FakeSummaryLoader
@@ -91,7 +91,7 @@ def test_get_l0_raises_on_unmigrated_store_budget_serves_stripped_snippet(factor
     with pytest.raises(sqlite3.OperationalError, match="summaries"):
         loader.get_l0("ops/deploy-runbook.md")
 
-    budgeted = apply_budget([_hit(0.01)], budget=3000, summary_loader=loader)
+    budgeted = apply_budget([_hit(0.01)], budget=3000, deps=BudgetDeps(tier_summaries=loader))
 
     assert [(b.result.path, b.tier, b.content) for b in budgeted] == [("ops/deploy-runbook.md", "L0", _STRIPPED)]
 
@@ -109,7 +109,7 @@ def test_get_l1_returns_empty_when_store_absent_budget_serves_stripped_snippet(f
     loader = factory()
     assert loader.get_l1("ops/deploy-runbook.md") is None
 
-    budgeted = apply_budget([_hit(0.20)], budget=1000, summary_loader=loader)
+    budgeted = apply_budget([_hit(0.20)], budget=1000, deps=BudgetDeps(tier_summaries=loader))
 
     assert [(b.tier, b.content) for b in budgeted] == [("L1", _STRIPPED)]
     assert budgeted[0].token_estimate > 0
