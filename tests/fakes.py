@@ -1125,6 +1125,55 @@ class FakeProvider:
             self.closed += 1
 
 
+class FakeSocketCounter:
+    """Standalone :class:`kairix.transport.timeout.SocketCounter`.
+
+    The minimal FD-accounting counter — the same ``opened`` / ``closed``
+    / ``peak_open`` ledger :class:`FakeProvider` carries, without the
+    provider surface. Lets transport-timeout tests prove the
+    ``TimeoutBudget`` ledger contract over more than one counter
+    implementation (F43 parity).
+    """
+
+    def __init__(self) -> None:
+        import threading
+
+        self.opened: int = 0
+        self.closed: int = 0
+        self.peak_open: int = 0
+        self._lock = threading.Lock()
+
+    def open(self) -> None:
+        """Record a socket open; bump ``peak_open`` if the running balance grew."""
+        with self._lock:
+            self.opened += 1
+            self.peak_open = max(self.peak_open, self.opened - self.closed)
+
+    def close(self) -> None:
+        """Record a socket close — must be called for every open()."""
+        with self._lock:
+            self.closed += 1
+
+
+class FakeTransportSnapshotter:
+    """In-memory :class:`kairix.quality.probe.config_runner.TransportSnapshotter`.
+
+    Returns the configured :class:`TransportSnapshot` (an empty one by
+    default — the "transport layer never exercised" shape) and counts
+    calls in ``snapshot_calls``.
+    """
+
+    def __init__(self, snapshot: Any = None) -> None:
+        self._snapshot = snapshot
+        self.snapshot_calls: int = 0
+
+    def snapshot(self) -> Any:
+        from kairix.quality.probe.config_runner import TransportSnapshot
+
+        self.snapshot_calls += 1
+        return self._snapshot if self._snapshot is not None else TransportSnapshot()
+
+
 class FakeClock:
     """Deterministic clock for retry / timeout BDD scenarios.
 
@@ -3988,6 +4037,71 @@ class FakeSlackConnector:
         return SourceMetadata()
 
 
+class FakeSocketModeTransport:
+    """In-process :class:`kairix.connectors.slack.socket_mode.SocketModeTransport`.
+
+    Drives :class:`SlackSocketModeHandler` without a WebSocket. Knobs:
+
+    - ``open_script`` — per-``open()`` outcome, in order: ``None`` opens
+      cleanly, an exception instance is raised. The LAST entry repeats
+      once the script is exhausted (an empty script always opens), so a
+      ``[None, ConnectionResetError(...)]`` script runs one session and
+      then fails every reconnect — the handler's budget then trips it
+      to POLL_ONLY instead of looping forever.
+    - ``events`` — raw envelopes yielded by the FIRST ``iter_events``
+      session only; later sessions yield nothing.
+    - ``iter_raises`` — raised from ``iter_events`` after the scripted
+      events (a mid-stream WebSocket drop).
+    - ``ack_raises`` / ``close_raises`` — raised from ``ack`` / ``close``.
+
+    Recorders: ``open_calls``, ``close_calls``, ``acked`` (envelope ids
+    whose ack was attempted).
+    """
+
+    def __init__(
+        self,
+        *,
+        open_script: tuple[BaseException | None, ...] = (),
+        events: tuple[Mapping[str, Any], ...] = (),
+        iter_raises: BaseException | None = None,
+        ack_raises: BaseException | None = None,
+        close_raises: BaseException | None = None,
+    ) -> None:
+        self._open_script = list(open_script)
+        self._events = list(events)
+        self._iter_raises = iter_raises
+        self._ack_raises = ack_raises
+        self._close_raises = close_raises
+        self.open_calls: int = 0
+        self.close_calls: int = 0
+        self.acked: list[str] = []
+
+    def open(self) -> None:
+        if self._open_script:
+            outcome = self._open_script[min(self.open_calls, len(self._open_script) - 1)]
+        else:
+            outcome = None
+        self.open_calls += 1
+        if outcome is not None:
+            raise outcome
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self._close_raises is not None:
+            raise self._close_raises
+
+    def iter_events(self) -> Iterator[Mapping[str, Any]]:
+        events, self._events = self._events, []
+        yield from events
+        if self._iter_raises is not None:
+            raise self._iter_raises
+
+    def ack(self, envelope_id: str) -> None:
+        self.acked.append(envelope_id)
+        if self._ack_raises is not None:
+            raise self._ack_raises
+
+
 class FakeGmailConnector:
     """Scripted :class:`kairix.core.protocols.SourceConnector` for the Gmail plugin.
 
@@ -5276,6 +5390,100 @@ class FakeMcpDispatchClient:
         from kairix.agents.mcp.client_dispatcher import McpToolResult
 
         return McpToolResult(payload=dict(self._envelope), is_error=self._is_error)
+
+
+class FakeReadinessGate:
+    """In-memory :class:`kairix.agents.mcp.readiness.ReadinessGate`.
+
+    Starts not-ready (the cold-start default) unless ``ready=True``;
+    ``mark_ready`` flips the flag and is idempotent. ``mark_ready_calls``
+    records how many times the startup hook fired.
+    """
+
+    def __init__(self, *, ready: bool = False) -> None:
+        self._ready = ready
+        self.mark_ready_calls: int = 0
+
+    def is_ready(self) -> bool:
+        return self._ready
+
+    def mark_ready(self) -> None:
+        self.mark_ready_calls += 1
+        self._ready = True
+
+
+class FakeStage:
+    """Scriptable :class:`kairix.core.observability.stage.Stage`.
+
+    Knobs:
+
+    - ``outcome`` — the :class:`StageOutcome` ``process`` returns on the
+      happy path (defaults to ``FETCH_OK``).
+    - ``process_raises`` — raised from ``process`` instead of returning.
+    - ``classify_code`` — the :class:`StatusCode` ``classify_exception``
+      maps every exception to (defaults to ``PIPELINE_STAGE_NO_EMIT``).
+    - ``classify_raises`` — raised from ``classify_exception`` (an
+      unmapped exception class blowing up the classifier itself).
+
+    Recorders: ``processed`` (item ids seen) and ``classified`` (the
+    exceptions handed to the classifier).
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str = "fetch",
+        outcome: Any = None,
+        process_raises: BaseException | None = None,
+        classify_code: Any = None,
+        classify_raises: BaseException | None = None,
+    ) -> None:
+        self.name = name
+        self._outcome = outcome
+        self._process_raises = process_raises
+        self._classify_code = classify_code
+        self._classify_raises = classify_raises
+        self.processed: list[str] = []
+        self.classified: list[BaseException] = []
+
+    def process(self, ctx: Any) -> Any:
+        from kairix.core.observability.stage import StageOutcome
+        from kairix.core.observability.status_codes import StatusCode
+
+        self.processed.append(ctx.item_id)
+        if self._process_raises is not None:
+            raise self._process_raises
+        return self._outcome if self._outcome is not None else StageOutcome(code=StatusCode.FETCH_OK)
+
+    def classify_exception(self, exc: BaseException) -> Any:
+        from kairix.core.observability.status_codes import StatusCode
+
+        self.classified.append(exc)
+        if self._classify_raises is not None:
+            raise self._classify_raises
+        return self._classify_code if self._classify_code is not None else StatusCode.PIPELINE_STAGE_NO_EMIT
+
+
+class FakeOpenclawContext:
+    """In-memory openclaw plugin context (``OpenclawContext`` Protocol).
+
+    Exposes ``agent_name`` and ``appendSystemContext``; appended text is
+    captured in ``appended``. ``append_raises`` makes every
+    ``appendSystemContext`` call raise (openclaw's prompt assembly
+    failing), after recording the attempt in ``append_attempts``.
+    """
+
+    def __init__(self, *, agent_name: str = "agent-alpha", append_raises: BaseException | None = None) -> None:
+        self.agent_name = agent_name
+        self._append_raises = append_raises
+        self.appended: list[str] = []
+        self.append_attempts: list[str] = []
+
+    def appendSystemContext(self, text: str) -> None:  # noqa: N802 — openclaw API name fixed by the OpenclawContext Protocol
+        self.append_attempts.append(text)
+        if self._append_raises is not None:
+            raise self._append_raises
+        self.appended.append(text)
 
 
 # ---------------------------------------------------------------------------
