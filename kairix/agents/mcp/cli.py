@@ -337,9 +337,10 @@ def main(argv: list[str] | None = None, *, deps: McpCliDeps | None = None) -> No
 def _resolve_port(args: argparse.Namespace, *, deps: McpCliDeps) -> int:
     """Resolve MCP port: CLI flag → env var → config → auto-detect.
 
-    The auto-detect path uses ``deps.is_port_available_fn`` /
-    ``find_available_port_fn`` — production callers leave deps at the
-    default; tests inject fakes via the McpCliDeps DI seam.
+    The env var is read from ``deps.serve_env``; the auto-detect path uses
+    ``deps.is_port_available_fn`` / ``find_available_port_fn`` — production
+    callers leave deps at the default; tests inject fakes via the
+    McpCliDeps DI seam.
     """
     from kairix.paths import mcp_port_raw
 
@@ -347,8 +348,10 @@ def _resolve_port(args: argparse.Namespace, *, deps: McpCliDeps) -> int:
     if "--port" in sys.argv:
         return int(args.port)
 
-    # Environment variable (env read lives in kairix.paths — F4)
-    env_port = mcp_port_raw()
+    # Environment variable (env read lives in kairix.paths — F4). Read from
+    # ``deps.serve_env`` (the resolved process env in production) so tests
+    # drive the env branch with an explicit mapping, never an os.environ write.
+    env_port = mcp_port_raw(environ=deps.serve_env)
     if env_port:
         return int(env_port)
 

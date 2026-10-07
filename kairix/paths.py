@@ -1319,14 +1319,20 @@ def mcp_port(default: int = 8080) -> int:
         return default
 
 
-def mcp_port_raw() -> str | None:
+def mcp_port_raw(*, environ: Mapping[str, str] | None = None) -> str | None:
     """Raw ``KAIRIX_MCP_PORT`` env-var value, or ``None`` when unset.
 
     Use this when callers need to distinguish "operator set the env var"
     from "fell back to the default" — e.g. argparse-driven flag-vs-env
     precedence in ``kairix mcp serve``.
+
+    ``environ`` is the test seam — mirrors :func:`mcp_bind_host`: production
+    leaves it None and the function reads ``os.environ``; callers holding a
+    resolved env mapping (``McpCliDeps.serve_env``) pass it so tests never
+    mutate process env (F2).
     """
-    raw = os.environ.get("KAIRIX_MCP_PORT")
+    env = environ if environ is not None else os.environ
+    raw = env.get("KAIRIX_MCP_PORT")
     return raw if raw else None
 
 

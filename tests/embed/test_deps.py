@@ -254,37 +254,27 @@ def test_default_migrate_content_vectors_applies_schema_migration() -> None:
 # ── default_get_document_root — tolerated-failure branch ─────────────
 
 
+# An operator path override naming a home directory that does not exist
+# (``~<no-such-user>/...``) makes the real kairix.paths resolver raise
+# ``RuntimeError`` from ``Path.expanduser`` — a genuine paths-layer failure,
+# driven through the ``env=`` seam instead of swapping ``kairix.paths`` in
+# ``sys.modules`` (F1) or writing the process env (F2).
+_UNRESOLVABLE_HOME_PATH = "~kairix-no-such-user-zz/kairix"
+
+
 @pytest.mark.unit
 def test_default_get_document_root_returns_none_when_paths_layer_raises() -> None:
-    """When the paths layer is unavailable, ``deps.get_document_root()``
-    returns ``None`` (and logs a warning) rather than propagating.
+    """When the paths layer raises, ``deps.get_document_root()`` returns
+    ``None`` (and logs a warning) rather than propagating.
 
     The embed pipeline only uses the document root for chunk-date
-    heuristics; a missing paths layer must not crash the run.
+    heuristics; a failing paths layer must not crash the run.
 
-    Driven by replacing the ``kairix.paths`` module in ``sys.modules``
-    with a sentinel whose ``document_root()`` raises. The default
-    wrapper imports lazily so the swap is observed.
+    Sabotage proof: dropping the ``try/except`` in the default wrapper lets
+    the ``RuntimeError`` escape and this test errors.
     """
-    import sys
-    import types
-
-    fake_paths = types.ModuleType("kairix.paths")
-
-    def _boom() -> str:
-        raise RuntimeError("paths layer not initialised")
-
-    fake_paths.document_root = _boom  # type: ignore[attr-defined]  # synthetic stand-in module; mypy doesn't know our test attrs
-    real_paths = sys.modules.get("kairix.paths")
-    sys.modules["kairix.paths"] = fake_paths
-    try:
-        deps = EmbedDependencies()
-        result = deps.get_document_root()
-    finally:
-        if real_paths is not None:
-            sys.modules["kairix.paths"] = real_paths
-        else:
-            sys.modules.pop("kairix.paths", None)
+    deps = EmbedDependencies()
+    result = deps.get_document_root(env={"KAIRIX_DOCUMENT_ROOT": _UNRESOLVABLE_HOME_PATH})
 
     assert result is None
 
@@ -368,69 +358,33 @@ def test_default_open_embedding_cache_constructs_cache_outside_pytest(tmp_path) 
     the path via ``kairix.paths.embedding_cache_path`` and returns an
     open ``EmbeddingCache``.
 
-    Drives both the path-resolution branch (sys.modules swap on
-    ``kairix.paths`` so the lazy import inside the wrapper picks up
-    our stand-in) and the os.environ "no PYTEST_CURRENT_TEST" branch
-    (temporarily unset).
+    Driven through the ``env=`` seam: the explicit mapping carries no
+    ``PYTEST_CURRENT_TEST`` (so the test-isolation guard passes) and points
+    ``KAIRIX_CACHE_DIR`` at ``tmp_path`` (so the real resolver lands the
+    cache there) — no ``sys.modules`` swap, no process-env write.
     """
-    import os
-    import sys
-    import types
-
     from kairix.core.embed.embedding_cache import EmbeddingCache
 
-    target = tmp_path / "cache.sqlite"
-    fake_paths = types.ModuleType("kairix.paths")
-    fake_paths.embedding_cache_path = lambda: target  # type: ignore[attr-defined]  # synthetic stand-in module; mypy doesn't know our test attrs
-
-    real_paths = sys.modules.get("kairix.paths")
-    sys.modules["kairix.paths"] = fake_paths
-    real_env = os.environ.pop("PYTEST_CURRENT_TEST", None)
+    deps = EmbedDependencies()
+    result = deps.open_embedding_cache(env={"KAIRIX_CACHE_DIR": str(tmp_path)})
     try:
-        deps = EmbedDependencies()
-        result = deps.open_embedding_cache()
+        assert isinstance(result, EmbeddingCache)
+        assert result.path == tmp_path / "embedding_cache.sqlite"
     finally:
-        if real_env is not None:
-            os.environ["PYTEST_CURRENT_TEST"] = real_env
-        if real_paths is not None:
-            sys.modules["kairix.paths"] = real_paths
-        else:
-            sys.modules.pop("kairix.paths", None)
         if isinstance(result, EmbeddingCache):
             result.close()
-
-    assert isinstance(result, EmbeddingCache)
-    assert result.path == target
 
 
 @pytest.mark.unit
 def test_default_open_embedding_cache_swallows_paths_layer_failure() -> None:
     """When the paths layer raises during cache-path resolution, the
     wrapper logs and returns ``None`` rather than crashing the embed
-    pipeline."""
-    import os
-    import sys
-    import types
+    pipeline.
 
-    fake_paths = types.ModuleType("kairix.paths")
-
-    def _boom() -> Any:
-        raise RuntimeError("paths layer not initialised")
-
-    fake_paths.embedding_cache_path = _boom  # type: ignore[attr-defined]  # synthetic stand-in module; mypy doesn't know our test attrs
-
-    real_paths = sys.modules.get("kairix.paths")
-    sys.modules["kairix.paths"] = fake_paths
-    real_env = os.environ.pop("PYTEST_CURRENT_TEST", None)
-    try:
-        deps = EmbedDependencies()
-        result = deps.open_embedding_cache()
-    finally:
-        if real_env is not None:
-            os.environ["PYTEST_CURRENT_TEST"] = real_env
-        if real_paths is not None:
-            sys.modules["kairix.paths"] = real_paths
-        else:
-            sys.modules.pop("kairix.paths", None)
+    Sabotage proof: dropping the ``try/except`` lets the resolver's
+    ``RuntimeError`` escape and this test errors.
+    """
+    deps = EmbedDependencies()
+    result = deps.open_embedding_cache(env={"KAIRIX_CACHE_DIR": _UNRESOLVABLE_HOME_PATH})
 
     assert result is None

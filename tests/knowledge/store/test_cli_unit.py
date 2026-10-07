@@ -16,7 +16,6 @@ tests fill the remaining branches:
 from __future__ import annotations
 
 import io
-import os
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
@@ -41,37 +40,26 @@ def _drive(args: list[str], **kw: Any) -> tuple[str, str, int]:
     return out.getvalue(), err.getvalue(), code
 
 
-@pytest.fixture
-def _no_docroot_env():
-    """Remove KAIRIX_DOCUMENT_ROOT from env for the duration of the test."""
-    prev = os.environ.pop("KAIRIX_DOCUMENT_ROOT", None)
-    try:
-        yield
-    finally:
-        if prev is not None:
-            os.environ["KAIRIX_DOCUMENT_ROOT"] = prev
-
-
-def test_crawl_exits_1_when_document_root_missing(_no_docroot_env) -> None:
+def test_crawl_exits_1_when_document_root_missing() -> None:
     """Public surface: ``kairix store crawl`` with no --document-root and
     no KAIRIX_DOCUMENT_ROOT env → exit 1 with the expected error.
 
     Sabotage: drop the ``sys.exit(1)`` in ``_resolve_document_root`` →
     the CLI proceeds and code is no longer 1 / stderr message is missing.
     """
-    _stdout, stderr, code = _drive(["crawl"])
+    _stdout, stderr, code = _drive(["crawl"], deps=StoreCliDeps(environ={}))
     assert code == 1
     assert "KAIRIX_DOCUMENT_ROOT" in stderr
 
 
-def test_crawl_uses_document_root_from_env_when_arg_missing(_no_docroot_env, tmp_path: Path) -> None:
+def test_crawl_uses_document_root_from_env_when_arg_missing(tmp_path: Path) -> None:
     """Public surface: when --document-root is omitted, the env var is the
     fallback the crawler sees.
 
     Sabotage: drop the ``env = document_root_override(); if env: return env``
     branch → the crawler captures None / wrong value, this assertion fails.
     """
-    os.environ["KAIRIX_DOCUMENT_ROOT"] = str(tmp_path)
+    env = {"KAIRIX_DOCUMENT_ROOT": str(tmp_path)}
     captured: dict[str, Any] = {}
 
     def _capturing_crawl(**kw: Any) -> Any:
@@ -91,19 +79,17 @@ def test_crawl_uses_document_root_from_env_when_arg_missing(_no_docroot_env, tmp
             errors=[],
         )
 
-    try:
-        _stdout, _stderr, code = _drive(
-            ["crawl", "--dry-run"],
-            neo4j_client=FakeNeo4jClient(entities=[]),
-            crawler=_capturing_crawl,
-        )
-    finally:
-        del os.environ["KAIRIX_DOCUMENT_ROOT"]
+    _stdout, _stderr, code = _drive(
+        ["crawl", "--dry-run"],
+        neo4j_client=FakeNeo4jClient(entities=[]),
+        crawler=_capturing_crawl,
+        deps=StoreCliDeps(environ=env),
+    )
     assert code == 0
     assert captured["document_root"] == str(tmp_path)
 
 
-def test_crawl_document_root_arg_wins_over_env(_no_docroot_env, tmp_path: Path) -> None:
+def test_crawl_document_root_arg_wins_over_env(tmp_path: Path) -> None:
     """Public surface: --document-root takes precedence over the env var.
 
     Sabotage: invert the priority (``return env if env else arg``) → the
@@ -111,7 +97,7 @@ def test_crawl_document_root_arg_wins_over_env(_no_docroot_env, tmp_path: Path) 
     """
     arg_path = tmp_path / "arg-target"
     arg_path.mkdir()
-    os.environ["KAIRIX_DOCUMENT_ROOT"] = "/env-path"
+    env = {"KAIRIX_DOCUMENT_ROOT": "/env-path"}
     captured: dict[str, Any] = {}
 
     def _capturing_crawl(**kw: Any) -> Any:
@@ -131,14 +117,12 @@ def test_crawl_document_root_arg_wins_over_env(_no_docroot_env, tmp_path: Path) 
             errors=[],
         )
 
-    try:
-        _stdout, _stderr, code = _drive(
-            ["crawl", "--document-root", str(arg_path), "--dry-run"],
-            neo4j_client=FakeNeo4jClient(entities=[]),
-            crawler=_capturing_crawl,
-        )
-    finally:
-        del os.environ["KAIRIX_DOCUMENT_ROOT"]
+    _stdout, _stderr, code = _drive(
+        ["crawl", "--document-root", str(arg_path), "--dry-run"],
+        neo4j_client=FakeNeo4jClient(entities=[]),
+        crawler=_capturing_crawl,
+        deps=StoreCliDeps(environ=env),
+    )
     assert code == 0
     assert captured["document_root"] == str(arg_path)
 
