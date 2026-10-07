@@ -47,7 +47,10 @@ def test_quality_gate_caller_uses_supported_v2_inputs_and_preserves_gate_behavio
     arch_fitness = _workflow("ci.yml")["jobs"]["arch-fitness"]
     assert arch_fitness["uses"].endswith(f"@{PIPELINES_V2_SHA}")
     assert "ci-requirements-path" not in arch_fitness["with"]
-    assert arch_fitness["with"]["run-no-attribution"] is True
+    # The in-gate attribution scan runs on every PR; it is scoped off only in
+    # the merge queue, where there is no PR context (the bare no-attribution
+    # job covers each PR's commits + title/body).
+    assert arch_fitness["with"]["run-no-attribution"] == "${{ github.event_name == 'pull_request' }}"
     assert arch_fitness["with"]["fetch-depth"] == 0
     assert arch_fitness["with"]["upload-coverage-artifact"] is False
 
@@ -69,3 +72,14 @@ def test_fitness_engine_is_pinned_to_the_v2_compatible_release() -> None:
     lockfile = (REPO_ROOT / "uv.lock").read_text(encoding="utf-8")
     assert f"tc-fitness.git@{FITNESS_VERSION}" in pyproject
     assert f"tc-fitness.git?rev={FITNESS_VERSION}" in lockfile
+
+
+def test_quality_gate_runs_in_the_merge_queue() -> None:
+    """org-main-product's merge queue needs the required Quality gate to report on
+    merge_group, and a queue run must never be cancelled (that ejects the PR).
+    Sabotage: drop the merge_group trigger, or make cancel-in-progress
+    unconditionally true → fails."""
+    workflow = _workflow("ci.yml")
+    triggers = workflow.get("on", workflow.get(True))
+    assert "merge_group" in triggers
+    assert "merge_group" in str(workflow["concurrency"]["cancel-in-progress"])
