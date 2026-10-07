@@ -601,6 +601,54 @@ def check_document_root_configured(env: Mapping[str, str] | None = None) -> Chec
 # Backwards-compat alias
 
 
+def _vector_search_verdict(result: Any) -> CheckResult:
+    """Judge one probe search result: vec leg failed, empty index, or working."""
+    vec_count = getattr(result, "vec_count", None)
+    bm25_count = getattr(result, "bm25_count", None)
+    vec_failed = getattr(result, "vec_failed", None)
+    result_count = len(result.results) if hasattr(result, "results") else 0
+
+    if vec_failed:
+        return CheckResult(
+            name=_CHECK_VECTOR_SEARCH_WORKING,
+            ok=False,
+            detail=(
+                f"Vector search failed (vec_failed=True). Results: {result_count} (BM25 only). bm25={bm25_count}, vec=0"
+            ),
+            fix=(
+                "Vector search failure usually means Azure credentials aren't loaded.\n"
+                "Check: kairix onboard check  — look at secrets_loaded result.\n"
+                "If secrets are loaded, check the embed ran:\n"
+                "  kairix search 'test query'\n"
+                "  If vec=0: run kairix embed --limit 20 to test."
+            ),
+        )
+
+    if vec_count is not None and vec_count == 0 and result_count == 0:
+        return CheckResult(
+            name=_CHECK_VECTOR_SEARCH_WORKING,
+            ok=False,
+            detail="Search returned 0 results (vec=0, bm25=0) — vault may not be embedded yet",
+            fix=(
+                "Run: kairix embed --limit 20  (test embed)\n"
+                "Then: kairix embed             (full vault embed)\n"
+                "See OPERATIONS.md §First-Run Sequence for full steps."
+            ),
+        )
+
+    detail_parts = [f"results={result_count}"]
+    if vec_count is not None:
+        detail_parts.append(f"vec={vec_count}")
+    if bm25_count is not None:
+        detail_parts.append(f"bm25={bm25_count}")
+
+    return CheckResult(
+        name=_CHECK_VECTOR_SEARCH_WORKING,
+        ok=True,
+        detail=f"Vector search working ({', '.join(detail_parts)})",
+    )
+
+
 def check_vector_search_working(pipeline: Any | None = None) -> CheckResult:
     """Vector search returns results with vec_count > 0 (not BM25-only fallback).
 
@@ -614,52 +662,7 @@ def check_vector_search_working(pipeline: Any | None = None) -> CheckResult:
 
             pipeline = build_search_pipeline()
         result = pipeline.search(query="knowledge management", budget=500)
-
-        vec_count = getattr(result, "vec_count", None)
-        bm25_count = getattr(result, "bm25_count", None)
-        vec_failed = getattr(result, "vec_failed", None)
-        result_count = len(result.results) if hasattr(result, "results") else 0
-
-        if vec_failed:
-            return CheckResult(
-                name=_CHECK_VECTOR_SEARCH_WORKING,
-                ok=False,
-                detail=(
-                    f"Vector search failed (vec_failed=True). "
-                    f"Results: {result_count} (BM25 only). bm25={bm25_count}, vec=0"
-                ),
-                fix=(
-                    "Vector search failure usually means Azure credentials aren't loaded.\n"
-                    "Check: kairix onboard check  — look at secrets_loaded result.\n"
-                    "If secrets are loaded, check the embed ran:\n"
-                    "  kairix search 'test query'\n"
-                    "  If vec=0: run kairix embed --limit 20 to test."
-                ),
-            )
-
-        if vec_count is not None and vec_count == 0 and result_count == 0:
-            return CheckResult(
-                name=_CHECK_VECTOR_SEARCH_WORKING,
-                ok=False,
-                detail="Search returned 0 results (vec=0, bm25=0) — vault may not be embedded yet",
-                fix=(
-                    "Run: kairix embed --limit 20  (test embed)\n"
-                    "Then: kairix embed             (full vault embed)\n"
-                    "See OPERATIONS.md §First-Run Sequence for full steps."
-                ),
-            )
-
-        detail_parts = [f"results={result_count}"]
-        if vec_count is not None:
-            detail_parts.append(f"vec={vec_count}")
-        if bm25_count is not None:
-            detail_parts.append(f"bm25={bm25_count}")
-
-        return CheckResult(
-            name=_CHECK_VECTOR_SEARCH_WORKING,
-            ok=True,
-            detail=f"Vector search working ({', '.join(detail_parts)})",
-        )
+        return _vector_search_verdict(result)
 
     except Exception as exc:
         return CheckResult(

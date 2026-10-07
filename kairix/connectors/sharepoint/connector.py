@@ -594,6 +594,28 @@ class SharePointConnector:
         self._next_cursor = _serialise_cursor(next_links) if next_links else None
         return iter(events)
 
+    def _stage_page_items(
+        self,
+        items: tuple[DriveItemRef, ...],
+        spec: SharePointDriveSpec,
+        staged: list[ChangeEvent],
+        staged_cache: dict[str, DriveItemRef],
+    ) -> None:
+        """Stage one delta page's in-scope items as events + cache entries.
+
+        Items filtered out by ``spec`` or that map to no event are skipped;
+        nothing is merged into the live cache here — :meth:`_drain_drive`
+        commits the staged set only once the drive drains.
+        """
+        for item in items:
+            if not self._item_passes_spec_filter(item, spec=spec):
+                continue
+            event = self._item_to_event(item, drive_id=spec.drive_id)
+            if event is None:
+                continue
+            staged_cache[event.item_id] = item
+            staged.append(event)
+
     def _drain_drive(
         self,
         spec: SharePointDriveSpec,
@@ -621,14 +643,7 @@ class SharePointConnector:
         while url is not None:
             page = self._graph.fetch_delta_page(url)
             pages_seen += 1
-            for item in page.items:
-                if not self._item_passes_spec_filter(item, spec=spec):
-                    continue
-                event = self._item_to_event(item, drive_id=drive_id)
-                if event is None:
-                    continue
-                staged_cache[event.item_id] = item
-                staged.append(event)
+            self._stage_page_items(page.items, spec, staged, staged_cache)
             if page.delta_link is not None:
                 last_delta_link = page.delta_link
             if (

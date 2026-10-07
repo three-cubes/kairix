@@ -220,6 +220,36 @@ class _NoopCursor:
         return None
 
 
+def _run_drain_batches(drain_db: Any, repo: Any, *, max_batches: int, batch_size: int) -> tuple[Any, int]:
+    """Run up to ``max_batches`` drain ticks, summing them into one result.
+
+    Stops early when Neo4j is unavailable or a tick reports nothing
+    pushed / failed / skipped (the queue is empty). Returns the aggregate
+    ``NeoDrainResult`` and the number of ticks actually run.
+    """
+    from kairix.core.curator.drain import NeoDrainResult, run_neo4j_drain_tick
+
+    aggregate = NeoDrainResult(pushed=0, failed=0, skipped_relationships=0, neo4j_available=True, elapsed_ms=0)
+    batches_run = 0
+    for _ in range(max_batches):
+        tick = run_neo4j_drain_tick(drain_db, repo, batch_size=batch_size)
+        batches_run += 1
+        aggregate = NeoDrainResult(
+            pushed=aggregate.pushed + tick.pushed,
+            failed=aggregate.failed + tick.failed,
+            skipped_relationships=aggregate.skipped_relationships + tick.skipped_relationships,
+            neo4j_available=tick.neo4j_available,
+            elapsed_ms=aggregate.elapsed_ms + tick.elapsed_ms,
+        )
+        # Stop early when the queue is empty (and we did at least
+        # one tick), or when Neo4j is unavailable.
+        if not tick.neo4j_available:
+            break
+        if tick.pushed == 0 and tick.failed == 0 and tick.skipped_relationships == 0:
+            break
+    return aggregate, batches_run
+
+
 def _drain_cmd(
     args: argparse.Namespace,
     *,
@@ -240,8 +270,6 @@ def _drain_cmd(
     dispatch path without modifying any state. Useful for "what would
     this batch touch?" before committing to a real drain.
     """
-    from kairix.core.curator.drain import NeoDrainResult, run_neo4j_drain_tick
-
     db_path = Path(args.db_path) if args.db_path else None
     raw_db = db_factory(db_path)
     repo: Any
@@ -258,25 +286,10 @@ def _drain_cmd(
         )
         drain_db = raw_db
 
-    aggregate = NeoDrainResult(pushed=0, failed=0, skipped_relationships=0, neo4j_available=True, elapsed_ms=0)
-    batches_run = 0
     try:
-        for _ in range(args.max_batches):
-            tick = run_neo4j_drain_tick(drain_db, repo, batch_size=args.batch_size)
-            batches_run += 1
-            aggregate = NeoDrainResult(
-                pushed=aggregate.pushed + tick.pushed,
-                failed=aggregate.failed + tick.failed,
-                skipped_relationships=aggregate.skipped_relationships + tick.skipped_relationships,
-                neo4j_available=tick.neo4j_available,
-                elapsed_ms=aggregate.elapsed_ms + tick.elapsed_ms,
-            )
-            # Stop early when the queue is empty (and we did at least
-            # one tick), or when Neo4j is unavailable.
-            if not tick.neo4j_available:
-                break
-            if tick.pushed == 0 and tick.failed == 0 and tick.skipped_relationships == 0:
-                break
+        aggregate, batches_run = _run_drain_batches(
+            drain_db, repo, max_batches=args.max_batches, batch_size=args.batch_size
+        )
     finally:
         raw_db.close()
 

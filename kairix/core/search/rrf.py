@@ -586,6 +586,13 @@ def _compute_entity_boost_factor(
     return 1.0 + boost_amount
 
 
+def _unboosted(results: list[FusedResult]) -> list[FusedResult]:
+    """Carry each result's RRF score through as its boosted score, unchanged order."""
+    for r in results:
+        r.boosted_score = r.rrf_score
+    return results
+
+
 def entity_boost_neo4j(
     results: list[FusedResult],
     neo4j_client: object,
@@ -608,15 +615,11 @@ def entity_boost_neo4j(
 
     cfg = config if config is not None else EntityBoostConfig()
     if not cfg.enabled or neo4j_client is None or not getattr(neo4j_client, "available", False):
-        for r in results:
-            r.boosted_score = r.rrf_score
-        return results
+        return _unboosted(results)
 
     path_idx, dir_idx, slug_idx, max_in_deg = _build_entity_index(neo4j_client)
     if not path_idx and not dir_idx:
-        for r in results:
-            r.boosted_score = r.rrf_score
-        return results
+        return _unboosted(results)
 
     for r in results:
         mention_count, in_deg = _lookup_mention_count(r.path, path_idx, dir_idx, slug_idx)

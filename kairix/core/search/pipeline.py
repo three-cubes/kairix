@@ -559,6 +559,23 @@ class SearchPipeline:
             _logger.warning("pipeline: classify failed — %s", e)
             return QueryIntent.SEMANTIC, 0.0
 
+    def _validate_explicit_collections(
+        self,
+        collections: list[str],
+        agent: str,
+        scope: Scope,
+    ) -> tuple[list[str] | None, str | None]:
+        """GH #373 — validate operator-supplied collection names against the
+        actor's scope via the resolver's ``validate_explicit``. A raised
+        exception or a reported error yields ``(None, <message>)``."""
+        try:
+            filtered, error = self.resolver.validate_explicit(agent, collections, scope)
+        except Exception as e:
+            return None, str(e)
+        if error is not None:
+            return None, error
+        return filtered, None
+
     def _resolve_collections(
         self,
         collections: list[str] | None,
@@ -578,13 +595,7 @@ class SearchPipeline:
         """
         if collections is not None:
             if agent is not None and hasattr(self.resolver, "validate_explicit"):
-                try:
-                    filtered, error = self.resolver.validate_explicit(agent, collections, scope)
-                except Exception as e:
-                    return None, str(e)
-                if error is not None:
-                    return None, error
-                return filtered, None
+                return self._validate_explicit_collections(collections, agent, scope)
             return collections, None
         if self.resolver is None:
             return collections, None
