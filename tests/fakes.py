@@ -4953,7 +4953,7 @@ class FakeGmailConnector:
             raw_node_id="gmail",
             raw_parent_id=None,
             display_name=f"Gmail ({self._user})",
-            link="https://mail.google.com/mail/u/0/",
+            link="https://mail.google.com/mail/u/0/#inbox",
             node_type="FOLDER",
             external_access_json=None,
             sensitivity_hint=None,

@@ -361,7 +361,9 @@ def test_gmail_connector_load_hierarchy_emits_single_root_folder(factory: _Build
     """load_hierarchy emits one root FOLDER for the mailbox (Wave E shim).
 
     Sabotage proof: in ``GmailConnector.load_hierarchy`` changed
-    ``node_type="FOLDER"`` to ``"SPACE"`` → the real leg failed. Restored.
+    ``node_type="FOLDER"`` to ``"SPACE"`` → the real leg failed. Building the
+    link with ``rstrip('#inbox/')`` (the pre-PLA-472 bug) drops the ``/``
+    before ``#inbox`` → the real leg fails on the link. Restored.
     """
     connector = factory([_message("gm-msg-cap")])
     nodes = list(connector.load_hierarchy(cc_pair_id=42))
@@ -371,6 +373,7 @@ def test_gmail_connector_load_hierarchy_emits_single_root_folder(factory: _Build
     assert root.cc_pair_id == 42
     assert root.node_type == "FOLDER"
     assert "Gmail" in root.display_name
+    assert root.link == "https://mail.google.com/mail/u/0/#inbox"
 
 
 @pytest.mark.contract
