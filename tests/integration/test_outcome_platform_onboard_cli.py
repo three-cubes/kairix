@@ -31,15 +31,15 @@ Sabotage-proof (executed locally):
     on ``returncode == 0`` and on the missing "Source: <tmp>" line.
     Restored after observing the failure.
 
-Latency baseline (2024 M-series Mac): subprocess wall ~800ms cold;
-threshold 5000ms for CI variance + slower hardware.
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -70,7 +70,6 @@ def test_onboard_guide_subprocess_dry_run_emits_source_and_dest(tmp_path: Path) 
     doc_root = tmp_path / "vault"
     doc_root.mkdir()
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -88,7 +87,6 @@ def test_onboard_guide_subprocess_dry_run_emits_source_and_dest(tmp_path: Path) 
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"onboard guide exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -100,8 +98,6 @@ def test_onboard_guide_subprocess_dry_run_emits_source_and_dest(tmp_path: Path) 
     assert "Dest:" in stdout, f"dest line missing: {stdout!r}"
     # Destination should be inside the tmp document root, not the host's real vault.
     assert str(doc_root) in stdout, f"dest does not land under tmp doc_root: {stdout!r}"
-
-    assert elapsed_ms < 5000.0, f"onboard guide subprocess took {elapsed_ms:.1f}ms (threshold 5000ms)"
 
 
 def test_onboard_guide_subprocess_resolves_bundled_source_without_guide_src(tmp_path: Path) -> None:

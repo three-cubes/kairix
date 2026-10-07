@@ -32,10 +32,9 @@ ignoring the ``--state-path`` arg and falling back to the default
 the production data dir → returns 1 with "no state file" on stderr →
 the happy-path assertion on ``returncode == 0`` fails. Restored.
 
-Latency baseline: subprocess.run with cold Python startup measured
-~600ms wall on a 2024 M-series Mac (interpreter + import graph
-dominate; the actual status read is sub-5ms). The 5s threshold gives
-~8x headroom for CI variance and slower hardware.
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
@@ -43,7 +42,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -85,7 +83,6 @@ def test_worker_status_subprocess_envelope_outcome(tmp_path: Path) -> None:
     state_path = tmp_path / "worker-state.json"
     seeded = _seed_worker_state(state_path)
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -101,7 +98,6 @@ def test_worker_status_subprocess_envelope_outcome(tmp_path: Path) -> None:
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"worker status exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -119,8 +115,6 @@ def test_worker_status_subprocess_envelope_outcome(tmp_path: Path) -> None:
     assert envelope["last_embed_run_at"] == 1716_000_000.0, f"last_embed_run_at: {envelope}"
     assert envelope["last_embed_did_work"] is True, f"last_embed_did_work: {envelope}"
     assert envelope["started_at"] == 1715_999_000.0, f"started_at: {envelope}"
-
-    assert elapsed_ms < 5000.0, f"worker status subprocess took {elapsed_ms:.1f}ms (baseline ~600ms, threshold 5000ms)"
 
 
 def test_worker_status_subprocess_exits_non_zero_on_missing_state(tmp_path: Path) -> None:

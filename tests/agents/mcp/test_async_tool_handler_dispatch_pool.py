@@ -224,68 +224,76 @@ def test_dispatch_pool_isolated_from_obs_pool(obs_executor: ThreadPoolExecutor, 
     Production trace 2026-06-04 also showed ``_record_mcp_call`` blocking
     the event loop in the wrapper's ``finally`` — the fix moved the write
     onto a dedicated single-thread executor. This test proves the two
-    pools are independent: even when the obs pool is saturated, the next
-    dispatch runs immediately.
+    pools are independent: the observability write is held open on a
+    gate the test only releases AFTER both dispatches have returned, so
+    both calls must complete while the obs write is still pending.
 
-    Sabotage proof: revert the ``finally`` block to call
-    ``_record_mcp_call(...)`` synchronously instead of
-    ``obs_executor.submit(...)`` — then the second call below waits for
-    the first call's obs write before its handler runs, and the
-    cross-call wall-clock balloons.
+    Deterministic outcome assertion (no wall-clock ceiling, F82): the
+    test records whether the obs write was still pending when the calls
+    returned. If the wrapper waited on the obs write, the write would run
+    to the end of its (bounded) gate wait before the call returned and
+    ``obs_write_finished`` would already be set.
+
+    Sabotage proof: change ``_submit_call_log`` to wait on the submitted
+    future (``.submit(...).result()``) instead of fire-and-forget — the
+    obs write then completes before each dispatch returns and the
+    ``pending_when_returned`` assertion fails.
     """
     started: dict[int, tuple[float, int]] = {}
+    release_obs = threading.Event()
+    obs_write_finished = threading.Event()
 
-    def slow_obs_write(*_a: object, **_k: object) -> None:
-        # Simulate a slow observability backend (lock contention, fsync stall, ...).
-        time.sleep(0.4)
+    def gated_obs_write(*_a: object, **_k: object) -> None:
+        # Simulate a stalled observability backend (lock contention, fsync
+        # stall, ...). The bounded wait is a hang guard for the sabotaged
+        # (synchronous) shape, which would otherwise deadlock the loop.
+        release_obs.wait(timeout=2.0)
+        obs_write_finished.set()
 
-    # An obs executor whose submitted task takes 0.4s. We don't drain it -- the
-    # whole point is that fire-and-forget submission must not block the caller.
-    slow_obs_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-slow-obs")
+    # An obs executor whose submitted task blocks on the gate. It is only
+    # released after both dispatches return — fire-and-forget submission
+    # must not block the caller.
+    gated_obs_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-gated-obs")
 
     try:
-        # Wrap so EVERY observability submission calls slow_obs_write.
-        # Easiest: replace obs_executor_fn with one that returns the slow pool.
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="test-dispatch") as dispatch:
 
             def quick_handler(call_id: int = 0) -> dict[str, int]:
                 started[call_id] = (time.monotonic(), threading.get_ident())
                 return {"id": call_id}
 
-            # Custom obs pool that performs slow_obs_write on every submit.
-            class _SlowObs:
+            # Custom obs pool that performs gated_obs_write on every submit.
+            class _GatedObs:
                 def submit(self, *_a: object, **_k: object) -> object:
-                    return slow_obs_pool.submit(slow_obs_write)
+                    return gated_obs_pool.submit(gated_obs_write)
 
             wrapped = async_tool_handler(
                 quick_handler,
                 deps=AsyncToolHandlerDeps(
                     db_path_fn=lambda: silent_db_path,
                     dispatch_executor_fn=lambda: dispatch,
-                    obs_executor_fn=lambda: _SlowObs(),  # type: ignore[arg-type]  # duck-typed test seam — only .submit is exercised
+                    obs_executor_fn=lambda: _GatedObs(),  # type: ignore[arg-type]  # duck-typed test seam — only .submit is exercised
                 ),
             )
 
-            async def fire_two() -> None:
-                t0 = time.monotonic()
-                await wrapped(call_id=0)
-                elapsed_first = time.monotonic() - t0
-                t1 = time.monotonic()
-                await wrapped(call_id=1)
-                elapsed_second = time.monotonic() - t1
-                # Both calls should complete in well under the obs sleep (0.4s)
-                # because the obs write is fire-and-forget.
-                assert elapsed_first < 0.2, (
-                    f"first call should return immediately (obs write fire-and-forget); took {elapsed_first:.3f}s"
-                )
-                assert elapsed_second < 0.2, (
-                    f"second call should return immediately (obs queue does not block dispatch); "
-                    f"took {elapsed_second:.3f}s"
-                )
+            async def fire_two() -> list[dict[str, int]]:
+                first = await wrapped(call_id=0)
+                second = await wrapped(call_id=1)
+                return [first, second]
 
-            asyncio.run(fire_two())
+            results = asyncio.run(fire_two())
+            pending_when_returned = not obs_write_finished.is_set()
+            release_obs.set()
+
+        assert [r["id"] for r in results] == [0, 1], f"both dispatches must return their result; got {results!r}"
+        assert sorted(started) == [0, 1], f"both handlers must have run; started={sorted(started)}"
+        assert pending_when_returned, (
+            "dispatch returned only after the observability write finished — "
+            "the obs write is blocking the dispatch path (must be fire-and-forget)"
+        )
     finally:
-        slow_obs_pool.shutdown(wait=False)
+        release_obs.set()
+        gated_obs_pool.shutdown(wait=True)
 
 
 def test_production_default_dispatch_pool_absorbs_six_dogfood_agents() -> None:

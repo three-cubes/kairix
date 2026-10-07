@@ -19,6 +19,7 @@ contract:
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -198,28 +199,37 @@ def test_every_degraded_snapshot_carries_a_next_action() -> None:
 
 def test_probe_time_cap_marks_slow_probe_offline_and_returns_within_budget() -> None:
     """Sabotage anchor: remove the threading timeout in ``_run_with_timeout``
-    and this test hangs for 5 seconds, exceeding the ``budget_s`` ceiling
-    set below."""
+    and ``probe_health`` waits for the slow callable — which then finishes
+    (its gate wait is bounded) and reports ``True``, so the probe is NOT
+    marked degraded and the "still pending" assertion fails.
+
+    Deterministic outcome shape (no wall-clock ceiling, F82): the slow
+    probe blocks on a gate the test only opens AFTER ``probe_health``
+    returns, so a budget-enforcing probe necessarily returns while the
+    slow callable is still pending."""
+    release = threading.Event()
+    slow_probe_finished = threading.Event()
 
     def slow_probe() -> bool:
-        time.sleep(5.0)
+        # Bounded wait = hang guard for the sabotaged (no-timeout) shape.
+        release.wait(timeout=5.0)
+        slow_probe_finished.set()
         return True
 
-    started = time.monotonic()
-    out = probe_health(
-        HealthDeps(
-            secrets_loaded_fn=lambda: True,
-            embed_backend_available_fn=slow_probe,
-            bm25_index_available_fn=lambda: True,
-            neo4j_available_fn=lambda: True,
-        ),
-        budget_s=0.5,
-    )
-    elapsed = time.monotonic() - started
-    # The probe must NOT have waited for the slow callable. Slice is
-    # budget_s/4 = 0.125s; even with thread-launch overhead we should
-    # be well under the slow callable's 5s sleep.
-    assert elapsed < 2.0, f"probe took {elapsed:.2f}s — slow probe was not cancelled"
+    try:
+        out = probe_health(
+            HealthDeps(
+                secrets_loaded_fn=lambda: True,
+                embed_backend_available_fn=slow_probe,
+                bm25_index_available_fn=lambda: True,
+                neo4j_available_fn=lambda: True,
+            ),
+            budget_s=0.5,
+        )
+        # The probe must NOT have waited for the slow callable.
+        assert not slow_probe_finished.is_set(), "probe_health waited for the slow probe — it was not cancelled"
+    finally:
+        release.set()
     # The slow probe is treated as offline.
     assert out.vector_search == "degraded"
     assert "embed backend probe exceeded" in out.degraded_reason

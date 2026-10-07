@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -41,14 +40,12 @@ def test_features_status_subprocess_text_mode_lists_registered_flags() -> None:
     ``obsidian_connector_primary`` retired post-cutover (task #132); this
     test now asserts the connector_dex_crm representative is present.
     """
-    t0 = time.monotonic()
     proc = subprocess.run(
         [sys.executable, "-m", "kairix.cli", "features", "status"],
         capture_output=True,
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"features status exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -56,7 +53,6 @@ def test_features_status_subprocess_text_mode_lists_registered_flags() -> None:
     assert "connector_dex_crm" in proc.stdout, f"expected the connector_dex_crm row in stdout: {proc.stdout!r}"
     # Operator surfaces should stay fast — failing the budget here means
     # the dispatcher is doing real work it shouldn't.
-    assert elapsed_ms < 10000.0, f"features status subprocess took {elapsed_ms:.1f}ms (threshold 10000ms)"
 
 
 def test_features_status_subprocess_json_mode_emits_envelope() -> None:

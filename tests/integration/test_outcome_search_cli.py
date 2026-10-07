@@ -36,7 +36,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -56,7 +55,6 @@ def test_search_cli_subprocess_emits_envelope_with_query_echo() -> None:
     assertion, not just returncode.
     """
     query = "what is kairix search"
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -71,7 +69,6 @@ def test_search_cli_subprocess_emits_envelope_with_query_echo() -> None:
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     # Returncode is informational; the envelope is the load-bearing assertion.
     assert proc.stdout, f"empty stdout — subprocess crashed before envelope render. stderr={proc.stderr!r}"
@@ -84,8 +81,6 @@ def test_search_cli_subprocess_emits_envelope_with_query_echo() -> None:
     assert "bm25_count" in envelope, f"bm25_count field missing: {sorted(envelope.keys())}"
     assert "vec_count" in envelope, f"vec_count field missing: {sorted(envelope.keys())}"
     assert "latency_ms" in envelope, f"latency_ms field missing: {sorted(envelope.keys())}"
-
-    assert elapsed_ms < 30000.0, f"search subprocess took {elapsed_ms:.1f}ms (threshold 30000ms)"
 
 
 def test_search_cli_subprocess_envelope_carries_error_when_provider_missing() -> None:

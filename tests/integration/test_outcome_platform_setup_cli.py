@@ -40,9 +40,9 @@ Sabotage-proof (executed locally):
     ``~/Documents`` path, the assertion on ``document_root ==
     str(tmp_path)`` failed. Restored after observing the failure.
 
-Latency baseline (2024 M-series Mac): subprocess wall ~2000ms cold
-(setup imports the LLM backend factory + Neo4j client lazily);
-threshold 15000ms for CI variance + slower hardware.
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
@@ -50,7 +50,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -68,7 +67,6 @@ def test_setup_cli_subprocess_json_envelope_outcome(tmp_path: Path) -> None:
     doc_root = tmp_path / "vault"
     doc_root.mkdir()
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -86,7 +84,6 @@ def test_setup_cli_subprocess_json_envelope_outcome(tmp_path: Path) -> None:
         text=True,
         timeout=60,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"setup exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -109,8 +106,6 @@ def test_setup_cli_subprocess_json_envelope_outcome(tmp_path: Path) -> None:
     # ('all documents') populates this in non-interactive mode.
     assert "collections" in envelope, f"collections block missing: {sorted(envelope.keys())}"
     assert envelope["collections"]["shared"], f"collections.shared empty: {envelope['collections']!r}"
-
-    assert elapsed_ms < 15000.0, f"setup subprocess took {elapsed_ms:.1f}ms (threshold 15000ms)"
 
 
 def test_setup_cli_subprocess_exits_non_zero_on_missing_document_root(tmp_path: Path) -> None:

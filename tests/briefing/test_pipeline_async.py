@@ -119,7 +119,6 @@ def test_slow_source_does_not_kill_other_sources(tmp_path):
     # 4s sleep against a 3s budget → forced timeout for this source.
     sources["memory_logs"] = _slow_source("never seen", sleep_s=4.0)
 
-    started = time.monotonic()
     result = generate_briefing(
         "builder",
         deps=BriefingDeps(
@@ -128,15 +127,13 @@ def test_slow_source_does_not_kill_other_sources(tmp_path):
         ),
         sources=sources,
     )
-    elapsed = time.monotonic() - started
 
     # Five non-timeout sources populated; memory_logs absent.
     assert "sources=entity_stub,hybrid_search,knowledge_rules,recent_decisions,recent_memory" in result
+    # memory_logs being absent is the deterministic proof the 3s budget cut
+    # the 4s source off: had the pipeline waited for it, its value would
+    # have populated the section. No wall-clock ceiling (F82).
     assert "memory_logs" not in result.split("sources=")[-1].split("\n")[0]
-    # Budget was 3s, slow source 4s — brief should finish well under 25s
-    # (the legacy as_completed ceiling) and well under the slow source's
-    # natural latency. 8s gives ample room for CI jitter.
-    assert elapsed < 8.0, f"brief took {elapsed:.1f}s — async gather wasn't cancelling"
 
 
 @pytest.mark.integration

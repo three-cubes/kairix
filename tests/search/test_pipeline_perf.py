@@ -162,41 +162,91 @@ class _SleepVectorBackend:
 # ---------------------------------------------------------------------------
 
 
+class _RendezvousBM25Backend:
+    """BM25 backend that blocks on a shared two-party barrier.
+
+    Pairs with :class:`_RendezvousVectorBackend`: both legs can only pass
+    the barrier if they are in flight AT THE SAME TIME. Sequential dispatch
+    leaves the first leg alone at the barrier until its bounded wait breaks
+    it — a deterministic parallelism proof with no wall-clock ceiling (F82).
+    """
+
+    def __init__(self, barrier: threading.Barrier) -> None:
+        self.barrier = barrier
+        self.rendezvous_ok: bool | None = None
+        self.calls = 0
+
+    def search(self, query: str, collections: list[str] | None = None, limit: int = 20) -> list[dict]:
+        self.calls += 1
+        try:
+            self.barrier.wait()
+            self.rendezvous_ok = True
+        except threading.BrokenBarrierError:
+            self.rendezvous_ok = False
+        return [{"file": f"bm25-{query}.md", "title": "bm25", "snippet": "", "score": 1.0, "collection": "c"}]
+
+    def get_chunk_dates(self, paths: list[str]) -> dict[str, str]:
+        return {}
+
+
+class _RendezvousVectorBackend:
+    """Vector backend twin of :class:`_RendezvousBM25Backend`."""
+
+    def __init__(self, barrier: threading.Barrier) -> None:
+        self.barrier = barrier
+        self.rendezvous_ok: bool | None = None
+        self.calls = 0
+
+    def search(
+        self,
+        query: str,
+        collections: list[str] | None = None,
+        limit: int = 10,
+        *,
+        timings: dict[str, float] | None = None,
+    ) -> list[dict]:
+        self.calls += 1
+        try:
+            self.barrier.wait()
+            self.rendezvous_ok = True
+        except threading.BrokenBarrierError:
+            self.rendezvous_ok = False
+        return [{"path": f"vec-{query}.md", "distance": 0.1, "collection": "c"}]
+
+
 @pytest.mark.unit
 def test_dispatch_runs_bm25_and_vector_in_parallel() -> None:
-    """BM25 and vector legs overlap on the wall-clock — they no longer serialise.
+    """BM25 and vector legs are in flight concurrently — they no longer serialise.
 
-    Each leg sleeps; the test asserts the elapsed wall-clock is closer to
-    ``max(bm25, vector)`` than to ``bm25 + vector``. Concretely, with
-    bm25=80ms and vector=120ms, sequential would be ~200ms and parallel
-    ~120ms; we assert <175ms to leave headroom for pool scheduling
-    overhead while still failing loudly if dispatch reverts to sequential.
+    Each leg waits on a shared two-party barrier. Only concurrent dispatch
+    lets both legs reach the barrier together; sequential dispatch leaves
+    the first leg waiting alone until the barrier's bounded timeout (a
+    hang guard, not a timing assertion) breaks it. The outcome — did both
+    legs rendezvous — is deterministic on any host load (F82).
 
     Sabotage-proof: in ``SearchPipeline._dispatch_backends``, replace the
     ``submit + future.result()`` pair with the prior sequential
-    ``rows = _run_bm25(); rows2, failed = _run_vector()`` and re-run; the
-    elapsed time will reach ~200ms and this assert will fail.
+    ``bm25_results = _run_bm25(); vec_results, vec_failed = _run_vector()``
+    and re-run; the first leg's barrier wait breaks and the
+    ``rendezvous_ok`` assertions fail.
     """
-    bm25 = _SleepBM25Backend(delay_s=0.08)
-    vector = _SleepVectorBackend(delay_s=0.12)
+    barrier = threading.Barrier(2, timeout=2.0)
+    bm25 = _RendezvousBM25Backend(barrier)
+    vector = _RendezvousVectorBackend(barrier)
     pipeline = _make_pipeline(bm25_backend=bm25, vector_backend=vector)
 
-    t0 = time.monotonic()
     result = pipeline.search("hot path")
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     # Both legs ran exactly once — neither was skipped by the parallelism.
     assert bm25.calls == 1
     assert vector.calls == 1
-    # Parallel-collapsed wall-clock: dispatch ≈ max(bm25, vector) + overhead.
-    # Sequential would be ≥ 200ms; parallel headroom budget is 175ms.
-    assert elapsed_ms < 175, (
-        f"dispatch ran sequentially: elapsed={elapsed_ms:.1f}ms (expected ~120ms parallel, would be ~200ms sequential)"
-    )
+    # Both legs met at the barrier — they were in flight concurrently.
+    assert bm25.rendezvous_ok is True, "bm25 leg never met the vector leg — dispatch ran sequentially"
+    assert vector.rendezvous_ok is True, "vector leg never met the bm25 leg — dispatch ran sequentially"
     # Stage-level confirmation: per-leg timings still reported (operators
-    # rely on them in probe data) and BOTH > 50ms — proves both legs ran.
-    assert result.stage_latency_ms["bm25"] >= 50.0
-    assert result.stage_latency_ms["vector"] >= 50.0
+    # rely on them in probe data).
+    assert "bm25" in result.stage_latency_ms
+    assert "vector" in result.stage_latency_ms
 
 
 @pytest.mark.unit
