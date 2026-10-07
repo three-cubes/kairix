@@ -511,3 +511,166 @@ def test_extractor_quality_method_raising_yields_ok_status_via_public_pipeline(t
     """Extractor whose quality_ok raises -> safe-quality-ok swallows -> status='ok'."""
     status = _run_one_item_through_factory_pipeline(tmp_path, _ExtractorRaisingQuality())
     assert status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Pipeline handling of SourceConnector methods that raise mid-item
+# (moved from tests/contracts/test_source_connector_failure_modes.py —
+# these pin ConnectorPipeline behaviour; no shipped connector raises from
+# source_link / sensitivity_for / next_cursor / metadata_for, so the
+# failure is injected via FakeSourceConnector's knobs).
+# ---------------------------------------------------------------------------
+
+
+def _factory_pipeline(
+    db: sqlite3.Connection,
+    *,
+    chunk_writer: FakeChunkWriter | None = None,
+) -> Any:
+    """ConnectorPipeline composed via the factory entry point (F47 shape)."""
+    from kairix.core.factory import build_connector_pipeline
+
+    return build_connector_pipeline(
+        db=db,
+        collection="default",
+        chunk_writer=chunk_writer if chunk_writer is not None else FakeChunkWriter(),
+        entity_graph_sink=FakeEntityGraphSink(),
+    )
+
+
+def _factory_event(item_id: str, modified_at: str = "2026-01-01T00:00:00Z") -> ChangeEvent:
+    return ChangeEvent(op="created", item_id=item_id, modified_at=modified_at)
+
+
+def _factory_dead_letter_rows(db: sqlite3.Connection, source_name: str) -> list[tuple[str, str]]:
+    return list(
+        db.execute(
+            "SELECT item_id, last_error FROM connector_deadletter WHERE source_name = ? ORDER BY item_id",
+            (source_name,),
+        ).fetchall()  # F63-bounded: one-source fixture DB, at most a handful of rows
+    )
+
+
+def _factory_cursor_token(db: sqlite3.Connection, source_name: str) -> str | None:
+    row = db.execute(
+        "SELECT cursor_token FROM connector_cursors WHERE source_name = ?",
+        (source_name,),
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+def test_source_link_raises_propagates_and_rolls_back_chunk(tmp_path: Path) -> None:
+    """``source_link`` is called by ``_process_item`` AFTER bronze write
+    + extract — a raise propagates and rolls back that chunk's
+    bronze rows. The pipeline does NOT wrap ``source_link`` in a
+    try/except (only ``fetch`` and ``extract`` are absorbed) — so the
+    expected behaviour is "exception escapes ``run_batch``".
+
+    Sabotage proof: in ``FakeSourceConnector.source_link`` remove the
+    ``if item_id in self._raise_on_source_link: raise ...`` block.
+    Re-run: the test fails because ``pytest.raises`` sees nothing and
+    the items index successfully. Restored.
+    """
+    db = sqlite3.connect(":memory:")
+    create_schema(db)
+    source = FakeSourceConnector(
+        name="source-link-raises",
+        events=[_factory_event("item-001")],
+        content={"item-001": b"body"},
+        raise_on_source_link={"item-001"},
+    )
+    pipeline = _factory_pipeline(db)
+    with pytest.raises(RuntimeError, match="simulated source_link failure"):
+        pipeline.run_batch(source, FakeExtractor())
+    db.close()
+
+
+def test_sensitivity_for_raises_propagates_and_rolls_back_chunk(tmp_path: Path) -> None:
+    """``sensitivity_for`` is called by ``_process_item`` for the silver
+    pass. A raise here propagates — the chunk rolls back and no
+    content / entity_signals row is written for that item.
+
+    Sabotage proof: comment out the raise branch in
+    ``FakeSourceConnector.sensitivity_for``. Re-run: the test fails
+    because ``pytest.raises`` sees no exception. Restored.
+    """
+    db = sqlite3.connect(":memory:")
+    create_schema(db)
+    writer = FakeChunkWriter()
+    source = FakeSourceConnector(
+        name="sensitivity-raises",
+        events=[_factory_event("item-001")],
+        content={"item-001": b"body"},
+        raise_on_sensitivity_for={"item-001"},
+    )
+    pipeline = _factory_pipeline(db, chunk_writer=writer)
+    with pytest.raises(RuntimeError, match="simulated sensitivity_for failure"):
+        pipeline.run_batch(source, FakeExtractor())
+    # Failing chunk rolled back — no chunk batch reached the writer
+    # (the silver pass raised before reaching ``chunk_writer.upsert``).
+    assert writer.writes == [], f"writer must not have received chunks; got {writer.writes!r}"
+    db.close()
+
+
+def test_next_cursor_raises_propagates_and_aborts_commit(tmp_path: Path) -> None:
+    """``next_cursor`` is called by ``_commit_and_flush`` at end-of-chunk
+    AND end-of-batch. A raise during ``next_cursor`` propagates;
+    the cursor never advances and the pipeline rolls back.
+
+    Sabotage proof: comment out the raise branch in
+    ``FakeSourceConnector.next_cursor``. Re-run: the test fails
+    because ``pytest.raises`` sees no exception and the cursor
+    advance attempt succeeds. Restored.
+    """
+    db = sqlite3.connect(":memory:")
+    create_schema(db)
+    source = FakeSourceConnector(
+        name="next-cursor-raises",
+        events=[_factory_event("item-001")],
+        content={"item-001": b"body"},
+        raise_on_next_cursor=RuntimeError("F68-next-cursor-raises"),
+    )
+    pipeline = _factory_pipeline(db)
+    with pytest.raises(RuntimeError, match="F68-next-cursor-raises"):
+        pipeline.run_batch(source, FakeExtractor())
+    # Cursor row never created — the commit didn't survive the raise.
+    assert _factory_cursor_token(db, "next-cursor-raises") is None
+    db.close()
+
+
+def test_metadata_for_raises_returns_empty_metadata_chunk_still_indexed(tmp_path: Path) -> None:
+    """ADR-021 Wave E.5 contract — ``metadata_for`` failing is NEVER
+    fatal. The pipeline falls back to empty :class:`SourceMetadata`
+    via :func:`_safe_connector_metadata` and the chunk still flows to
+    the writer.
+
+    Note this is intentionally the only Protocol method on
+    SourceConnector whose ``raises`` failure class observably looks
+    like ``returns_empty`` — the wrapper absorbs the exception by
+    design (see ``kairix/core/connectors/pipeline.py:464``).
+
+    Sabotage proof: in ``kairix/core/connectors/pipeline.py``
+    :func:`_safe_connector_metadata`, change the
+    ``except Exception: return SourceMetadata()`` to ``except Exception: raise``.
+    Re-run: the test fails because the pipeline now propagates the
+    RuntimeError instead of falling back. Restored.
+    """
+    db = sqlite3.connect(":memory:")
+    create_schema(db)
+    writer = FakeChunkWriter()
+    source = FakeSourceConnector(
+        name="metadata-raises",
+        events=[_factory_event("item-001")],
+        content={"item-001": b"body-content"},
+        raise_on_metadata_for={"item-001"},
+    )
+    pipeline = _factory_pipeline(db, chunk_writer=writer)
+    result = pipeline.run_batch(source, FakeExtractor())
+
+    # The chunk IS written — metadata_for failure is absorbed.
+    assert result.processed == 1
+    assert result.dead_lettered == 0
+    assert len(writer.writes) == 1, f"writer should have received exactly one chunk batch; got {writer.writes!r}"
+    # And no dead-letter entry — metadata failures do not dead-letter.
+    assert _factory_dead_letter_rows(db, "metadata-raises") == []
+    db.close()

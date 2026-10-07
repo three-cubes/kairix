@@ -12,10 +12,10 @@ from pathlib import Path
 MAX_FILE_SIZE: int = 50_000  # 50KB
 MIN_FILE_SIZE: int = 500  # 500 bytes
 
-# Match h1 and h2 headings
-_HEADING_RE = re.compile(
-    r"^(#{1,2})\s+(.+)$", re.MULTILINE
-)  # NOSONAR — bounded `{1,2}` repetition; line-anchored via re.MULTILINE; backtracking is linear in line length.
+# Match h1 and h2 headings. Only same-line spaces may follow the ``#`` run (an
+# empty ``##`` heading must not borrow the next line as its title), and the
+# title starts at its first non-space character — linear-time, no overlap.
+_HEADING_RE = re.compile(r"^(#{1,2})[^\S\n]+(\S.*)$", re.MULTILINE)
 
 
 def needs_split(text: str, max_size: int = MAX_FILE_SIZE) -> bool:

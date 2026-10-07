@@ -121,7 +121,7 @@ def test_new_cli_subcommand_with_feature_passes(tmp_path: Path) -> None:
 
 def test_real_repo_gate_is_green() -> None:
     """The real F45 detector run against the full repo emits no
-    net-new violations vs ``.architecture/baseline/f45-files.txt``.
+    violations (there is no grandfathering).
 
     F45 in default (staged) mode against a clean tree finds nothing,
     so the gate stays green. This guards against regressions in the

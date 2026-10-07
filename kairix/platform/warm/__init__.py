@@ -12,6 +12,6 @@ Bindings:
     MCP:  tool_warm (real binding — idempotent, fast once warm)
 """
 
-from kairix.platform.warm.runner import WARMUP_QUERY, WarmFailure, WarmResult, WarmStep, run_warm
+from kairix.platform.warm.runner import WARMUP_QUERY, WarmDeps, WarmFailure, WarmResult, WarmStep, run_warm
 
-__all__ = ["WARMUP_QUERY", "WarmFailure", "WarmResult", "WarmStep", "run_warm"]
+__all__ = ["WARMUP_QUERY", "WarmDeps", "WarmFailure", "WarmResult", "WarmStep", "run_warm"]

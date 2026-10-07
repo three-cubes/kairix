@@ -29,7 +29,7 @@ from pytest_bdd import given, parsers, then, when
 
 from kairix.core.factory import QUERY_CACHE_DISABLED, FactoryDeps, build_search_pipeline
 from kairix.core.search.config import RetrievalConfig
-from kairix.quality.probe.runner import ProbeResult, SampledQuery, run_probe_search
+from kairix.quality.probe.runner import ProbeDeps, ProbeResult, SampledQuery, run_probe_search
 from tests.fakes import (
     FakeClassifier,
     FakeCollectionResolver,
@@ -132,7 +132,7 @@ class _LatencyInjectingClient:
 def _build_real_pipeline_searcher() -> Any:
     """Real SearchPipeline composed from canonical fakes via the production factory.
 
-    Adapts the resulting pipeline to the probe runner's ``searcher`` shape.
+    Adapts the resulting pipeline to the probe runner's ``ProbeDeps.search`` shape.
     """
     doc_repo = FakeDocumentRepository(
         documents=[{"path": "p.md", "title": "T", "content": "alpha bravo charlie", "collection": "c"}]
@@ -202,8 +202,7 @@ def _when_run_probe(_state: dict[str, Any], n: int, c: int) -> None:
         suite="fake",
         queries=n,
         concurrency=c,
-        suite_loader=_state["loader"],
-        searcher=_state["searcher"],
+        deps=ProbeDeps(load_suite=_state["loader"], search=_state["searcher"]),
     )
 
 

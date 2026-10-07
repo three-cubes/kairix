@@ -1,6 +1,0 @@
-# F34 baseline — kairix/core/connectors/** may not import kairix/connectors/**
-# or kairix/extractors/**.
-#
-# Empty at landing — no kairix/core/connectors/ surface exists yet (Wave 0
-# ships the rule with the surface scheduled for Wave 1). F49 shrinking still
-# applies once Wave 1 lands; the baseline only ever shrinks.

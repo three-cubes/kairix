@@ -83,9 +83,11 @@ _CARD_LINE_RE = re.compile(
 )  # NOSONAR — re.MULTILINE-anchored; no nested quantifiers; backtracking is linear.
 
 # Section heading for boards (## Heading at start of line)
-_SECTION_H2_RE = re.compile(
-    r"^##\s+(.+)$", re.MULTILINE
-)  # NOSONAR — single-line via re.MULTILINE; bounded by line length.
+# The title starts at the first non-space character; the ``[^\S\n]`` branch
+# keeps the historical match for a whitespace-only title (``"##  "``). The
+# two branches never share a character class with ``\s+``'s run, so matching
+# is linear-time.
+_SECTION_H2_RE = re.compile(r"^##\s+(\S.*|[^\S\n])$", re.MULTILINE)
 
 
 # ---------------------------------------------------------------------------

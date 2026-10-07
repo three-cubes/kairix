@@ -90,7 +90,7 @@ def _mk_e2e_sync(
 
 def test_current_tree_is_clean() -> None:
     """The real F36 detector run against the full repo emits no
-    net-new violations vs ``.architecture/baseline/f36-files.txt``.
+    violations (there is no grandfathering).
     Wave 0 state: no connectors/, no extractors/, no e2e_connector_sync
     feature -> empty result.
     """

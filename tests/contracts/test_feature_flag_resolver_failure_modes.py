@@ -2,46 +2,75 @@
 
 Two methods + canonical failure shapes:
 
-  * ``get(name)`` — raises ``KeyError`` on unknown flag (matches the
-    production resolver's behaviour so typo-flags surface immediately
-    instead of silently returning False).
+  * ``get(name)`` — raises ``KeyError`` on unknown flag (typo-flags
+    surface immediately instead of silently returning False).
   * ``iter_all()`` — returns an iterator that yields nothing for an
     empty registry (the ``returns_empty`` shape).
 
-Both shapes are pinned through the canonical :class:`FakeFeatureFlagResolver`.
+Every body runs over BOTH the production resolver — the
+:mod:`kairix.core.features.resolver` ``flag`` / ``iter_status`` functions
+composed into the Protocol surface, with their ``registry_reader`` /
+``env_reader`` / ``overlay_reader`` DI seams pinned to an empty registry
+and no overrides — and the canonical
+:class:`tests.fakes.FakeFeatureFlagResolver` (F43 behavioural parity).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from typing import Any, ClassVar
+
 import pytest
 
+from kairix.core.features.resolver import FlagStatus, flag, iter_status
 from kairix.core.protocols import FeatureFlagResolver
 from tests.fakes import FakeFeatureFlagResolver
 
 pytestmark = pytest.mark.contract
 
 
-def test_get_raises_keyerror_when_flag_unknown() -> None:
-    """An unknown flag name raises KeyError — Protocol contract pins
-    "unknown flags MUST surface", not "silently return False" (which
-    would mask typos forever).
+class _ProductionResolver:
+    """The production resolver functions behind the Protocol surface."""
 
-    Sabotage proof: change ``FakeFeatureFlagResolver.get`` to
-    ``return False`` on unknown flags. Re-ran: ``pytest.raises`` sees
-    nothing and the test fails. Restored.
+    _SEAMS: ClassVar[dict[str, Any]] = {
+        "registry_reader": dict,  # empty registry
+        "env_reader": lambda _name: None,  # no env overrides
+        "overlay_reader": dict,  # no config overlay
+    }
+
+    def get(self, name: str) -> bool:
+        return flag(name, **self._SEAMS)
+
+    def iter_all(self) -> Iterator[FlagStatus]:
+        return iter_status(**self._SEAMS)
+
+
+_IMPLEMENTATIONS: list[tuple[str, Callable[[], FeatureFlagResolver]]] = [
+    ("real", _ProductionResolver),
+    ("fake", FakeFeatureFlagResolver),
+]
+
+
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_get_raises_keyerror_when_flag_unknown(name: str, factory: Callable[[], FeatureFlagResolver]) -> None:
+    """An unknown flag name raises KeyError — the contract pins "unknown
+    flags MUST surface", not "silently return False" (which would mask
+    typos forever).
+
+    Sabotage proof (executed): in ``kairix.core.features.resolver.flag``
+    replace ``raise _unknown_flag_error(...)`` with ``return False``.
+    Re-run: the ``real`` case's ``pytest.raises`` sees nothing. Restored.
     """
-    resolver: FeatureFlagResolver = FakeFeatureFlagResolver()
     with pytest.raises(KeyError, match="unknown feature flag"):
-        resolver.get("never-registered-flag")
+        factory().get("never-registered-flag")
 
 
-def test_iter_all_returns_empty_when_no_flags_declared() -> None:
-    """An empty resolver yields nothing — callers iterate without a
-    null check.
+@pytest.mark.parametrize("name,factory", _IMPLEMENTATIONS)
+def test_iter_all_returns_empty_when_no_flags_declared(name: str, factory: Callable[[], FeatureFlagResolver]) -> None:
+    """An empty registry yields nothing — callers iterate without a null
+    check.
 
-    Sabotage proof: change ``FakeFeatureFlagResolver.iter_all`` to
-    yield a sentinel FlagStatus when ``self._flags`` is empty.
-    Re-ran: ``list(...) == []`` fails. Restored.
+    Sabotage proof: in ``iter_status`` yield a sentinel FlagStatus when
+    the registry is empty. Re-run: the ``real`` case fails. Restored.
     """
-    resolver: FeatureFlagResolver = FakeFeatureFlagResolver()
-    assert list(resolver.iter_all()) == []
+    assert list(factory().iter_all()) == [], name

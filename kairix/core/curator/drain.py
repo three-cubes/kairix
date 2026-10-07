@@ -472,10 +472,14 @@ def default_open_db() -> sqlite3.Connection:
 
 
 def _default_make_repo(client: Any) -> Any:
-    """Production-default wrap of a Neo4j client into a DrainGraphRepository."""
+    """Production-default wrap of a Neo4j client into a DrainGraphRepository.
+
+    ``raise_on_error=True``: a rejected MERGE must raise so the row is marked
+    failed, not acknowledged as pushed (the read-path client swallows errors).
+    """
     from kairix.knowledge.graph.repository import Neo4jGraphRepository
 
-    return Neo4jGraphRepository(client)
+    return Neo4jGraphRepository(client, raise_on_error=True)
 
 
 @dataclass

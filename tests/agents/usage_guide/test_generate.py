@@ -132,17 +132,10 @@ def test_render_guide_rejects_a_template_without_markers() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _seed_template(tmp_path: Path) -> Path:
-    template = tmp_path / "guide.md.tmpl"
-    template.write_text(_real_template(), encoding="utf-8")
-    return template
-
-
 def test_main_writes_the_rendered_guide(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    template = _seed_template(tmp_path)
     out = tmp_path / "guide.md"
 
-    rc = generate.main([], template_path=template, guide_path=out)
+    rc = generate.main([], template_text=_real_template(), guide_path=out)
 
     assert rc == 0
     assert out.read_text(encoding="utf-8") == generate.render_guide(_real_template())
@@ -150,27 +143,24 @@ def test_main_writes_the_rendered_guide(tmp_path: Path, capsys: pytest.CaptureFi
 
 
 def test_main_check_is_green_when_guide_is_current(tmp_path: Path) -> None:
-    template = _seed_template(tmp_path)
     out = tmp_path / "guide.md"
-    generate.main([], template_path=template, guide_path=out)
+    generate.main([], template_text=_real_template(), guide_path=out)
 
-    rc = generate.main(["--check"], template_path=template, guide_path=out)
+    rc = generate.main(["--check"], template_text=_real_template(), guide_path=out)
     assert rc == 0
 
 
 def test_main_check_fires_when_guide_is_stale(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    template = _seed_template(tmp_path)
     out = tmp_path / "guide.md"
     out.write_text("stale — not regenerated\n", encoding="utf-8")
 
-    rc = generate.main(["--check"], template_path=template, guide_path=out)
+    rc = generate.main(["--check"], template_text=_real_template(), guide_path=out)
     assert rc == 1
     assert "STALE" in capsys.readouterr().out
 
 
 def test_main_check_fires_when_guide_is_absent(tmp_path: Path) -> None:
-    template = _seed_template(tmp_path)
-    rc = generate.main(["--check"], template_path=template, guide_path=tmp_path / "missing.md")
+    rc = generate.main(["--check"], template_text=_real_template(), guide_path=tmp_path / "missing.md")
     assert rc == 1
 
 
@@ -180,10 +170,9 @@ def test_main_accepts_a_write_target_inside_the_allowed_roots(tmp_path: Path) ->
     Complements the reject case below — proves the S2083 confinement does not
     regress the legitimate keyword-only test seam.
     """
-    template = _seed_template(tmp_path)
     out = tmp_path / "accepted-guide.md"
 
-    rc = generate.main([], template_path=template, guide_path=out)
+    rc = generate.main([], template_text=_real_template(), guide_path=out)
 
     assert rc == 0
     assert out.read_text(encoding="utf-8") == generate.render_guide(_real_template())
@@ -198,13 +187,32 @@ def test_main_rejects_a_write_target_outside_the_allowed_roots(tmp_path: Path) -
     """
     from kairix.paths import PathTraversalError
 
-    template = _seed_template(tmp_path)
     escape = Path("/etc") / "kairix-usage-guide-escape" / "guide.md"
 
     with pytest.raises(PathTraversalError):
-        generate.main([], template_path=template, guide_path=escape)
+        generate.main([], template_text=_real_template(), guide_path=escape)
 
     assert not escape.exists()
+
+
+def test_main_rejects_a_dot_dot_traversal_out_of_the_allowed_roots(tmp_path: Path) -> None:
+    """A ``guide_path`` that climbs out with ``..`` segments is rejected.
+
+    The path is spelled under ``tmp_path`` but its ``..`` components resolve
+    to ``/etc``; confinement resolves before checking, so the traversal is
+    caught and nothing is written. Sabotage: drop the ``confine_to_roots``
+    guard in ``main`` and the write is attempted at the escaped location.
+    """
+    from kairix.paths import PathTraversalError
+
+    climb = "../" * (len(tmp_path.resolve().parts) + 2)
+    escape = tmp_path / f"{climb}etc/kairix-usage-guide-escape/guide.md"
+    assert escape.resolve() == Path("/etc/kairix-usage-guide-escape/guide.md").resolve()
+
+    with pytest.raises(PathTraversalError):
+        generate.main([], template_text=_real_template(), guide_path=escape)
+
+    assert not escape.resolve().exists()
 
 
 def test_committed_bundled_guide_is_current() -> None:

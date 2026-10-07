@@ -1,6 +1,0 @@
-# F97 — agent-facing surfaces embed/return the shared SourceRef breadcrumb (PLA-274).
-# Intentionally EMPTY: the breadcrumb contract shipped clean — every
-# registered surface (search / timeline / entity / prep / research /
-# contradict) carries a SourceRef from the foundational PLA-274 change, so
-# there are zero grandfathered offenders. A net-new violation here means a
-# new agent surface skipped the contract; fix the surface, don't add a row.

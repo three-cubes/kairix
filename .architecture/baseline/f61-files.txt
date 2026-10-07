@@ -1,9 +1,0 @@
-# F61 baseline — files outside kairix/core/connectors/ that directly
-# construct _SqliteChunkWriter(db, collection=...). Grandfathered
-# offenders only; baseline is shrink-only per F49.
-#
-# Wave C (2026-05-23) paid kairix/worker.py + kairix/core/factory.py
-# down to zero by routing through
-# kairix/core/connectors/collection_router.py:_legacy_chunk_writer.
-# The gate stays armed against any future direct construction outside
-# the framework.

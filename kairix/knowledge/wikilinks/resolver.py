@@ -12,8 +12,9 @@ Entity sources:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kairix.knowledge.graph.client import Neo4jClient
@@ -60,7 +61,7 @@ def _make_link(name: str) -> str:
 # NOSONAR: each capture is bounded by a distinct literal
 # delimiter (`|` or backtick); no nested quantifiers — backtracking is
 # linear in line length. Input is the bootstrap entity-table markdown file.
-_TABLE_ROW_RE = re.compile(r"^\|\s*(?P<entity>[^|]+?)\s*\|\s*`(?P<link>\[\[[^\]]+\]\])`\s*\|\s*`(?P<path>[^`]+)`\s*\|")
+_TABLE_ROW_RE = re.compile(r"^\|(?P<entity>[^|]+)\|\s*`(?P<link>\[\[[^\]]+\]\])`\s*\|\s*`(?P<path>[^`]+)`\s*\|")
 
 
 _SECTION_TYPE_MAP = {
@@ -95,7 +96,7 @@ def _parse_bootstrap_row(line: str, current_section: str) -> WikiEntity | None:
     # Strip trailing parenthetical notes from vault_path.
     # NOSONAR: non-greedy `.*?` bounded by `)` and end-anchor; operates on
     # a single short path string (≤ a few hundred chars).
-    vault_path = re.sub(r"\s*\(.*?\)\s*$", "", m.group("path").strip()).strip()
+    vault_path = re.sub(r"\([^()]*\)\s*$", "", m.group("path").strip()).strip()
     if not vault_path or not entity_name:
         return None
     # Unescape \| inside wikilinks (markdown table escaping)
@@ -237,11 +238,30 @@ def load_entities_from_neo4j(client: Neo4jClient | None = None) -> list[WikiEnti
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class ResolverDeps:
+    """Injectable entity sources for :func:`get_entities`.
+
+    Canonical Deps shape (``kairix/worker.py::WorkerDeps``). Production
+    callers omit ``deps`` and the ``default_factory`` binds the real loaders;
+    tests construct ``ResolverDeps(load_neo4j=..., load_bootstrap=...)`` to
+    drive the sparse / unavailable / sufficient paths without monkey-patching
+    the resolver module.
+
+    - ``load_neo4j``: primary source — defaults to
+      :func:`load_entities_from_neo4j`; called with ``client=``.
+    - ``load_bootstrap``: fallback source — defaults to
+      :func:`load_entities_from_bootstrap`.
+    """
+
+    load_neo4j: Callable[..., list[WikiEntity]] = field(default_factory=lambda: load_entities_from_neo4j)
+    load_bootstrap: Callable[[], list[WikiEntity]] = field(default_factory=lambda: load_entities_from_bootstrap)
+
+
 def get_entities(
     client: Neo4jClient | None = None,
     *,
-    neo4j_loader: Any = None,
-    bootstrap_loader: Any = None,
+    deps: ResolverDeps | None = None,
 ) -> list[WikiEntity]:
     """
     Load entities from Neo4j (preferred), then bootstrap index.
@@ -252,21 +272,15 @@ def get_entities(
     Args:
         client: Passed through to the Neo4j loader; production callers omit
             it for the default Neo4j connection.
-        neo4j_loader: Public DI seam — defaults to
-            :func:`load_entities_from_neo4j`. Tests pass a fake to drive the
-            sparse / unavailable / sufficient paths without monkey-patching
-            the resolver module.
-        bootstrap_loader: Public DI seam — defaults to
-            :func:`load_entities_from_bootstrap`. Tests pass a fake to drive
-            the fallback path with a controlled bootstrap.
+        deps: :class:`ResolverDeps` carrying the Neo4j + bootstrap entity
+            sources. ``None`` (production) binds the real loaders.
     """
-    _neo4j = neo4j_loader if neo4j_loader is not None else load_entities_from_neo4j
-    _bootstrap = bootstrap_loader if bootstrap_loader is not None else load_entities_from_bootstrap
+    deps = deps if deps is not None else ResolverDeps()
 
     # Try Neo4j first
-    neo4j_entities = _neo4j(client=client)
+    neo4j_entities = deps.load_neo4j(client=client)
     if len(neo4j_entities) >= _DB_THRESHOLD:
         return neo4j_entities
 
     # Fallback to bootstrap
-    return _bootstrap()
+    return deps.load_bootstrap()

@@ -12,9 +12,10 @@ line's logic is changed — proof the tests assert presence, not behaviour.
 
 This runner makes the sabotage proof mechanical and diff-scoped. It follows
 the org's shared mutation contract: a homegrown mutator (no mutmut/stryker
-dependency) and a ratcheted survivors baseline. The per-commit leg is
-diff-scoped and hard-capped so it stays bounded; the nightly
-``mutation-suite.yml`` runs full-scope against the ratchet.
+dependency) and NO committed survivor list (PLA-472 retired the ratchet).
+The per-commit leg is diff-scoped and hard-capped so it stays bounded; the
+nightly ``mutation-suite.yml`` runs the same strict verdict at a wider
+(since-last-release) scope.
 
 What it does
 ------------
@@ -46,11 +47,10 @@ Each survivor prints::
     fix: add/strengthen an assertion that pins this behaviour.
     next: ...
 
-Exit code is non-zero iff a survivor is found AND it is not already in the
-ratcheted baseline (``--baseline`` mode). In the default diff-scoped
-safe-commit mode there is no baseline — ANY survivor on a staged change
-fails the gate, because the staged change is exactly what the author can
-strengthen a test for right now.
+Exit code is non-zero iff ANY survivor is found. There is no survivor
+list that could excuse one — in both the diff-scoped safe-commit leg and
+the nightly ``--base`` leg, every survivor fails the gate and is fixed at
+source by strengthening the impacted test.
 """
 
 from __future__ import annotations
@@ -85,8 +85,6 @@ MAX_MUTANTS = 20
 PER_MUTANT_TIMEOUT_S = 60
 TOTAL_BUDGET_S = 150.0
 MAX_IMPACTED_TEST_FILES = 40
-
-DEFAULT_SURVIVORS_BASELINE = REPO_ROOT / ".architecture" / "baseline" / "mutation-survivors-files.txt"
 
 _RED = "\033[0;31m"
 _GREEN = "\033[0;32m"
@@ -471,35 +469,16 @@ def _survivor_report(result: MutantResult) -> str:
     )
 
 
-def _load_baseline(path: Path) -> set[str]:
-    """Ratcheted survivor keys (``<file>:<line>:<original>-><mutation>``)."""
-    if not path.exists():
-        return set()
-    return {
-        line.strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.startswith("#")
-    }
-
-
-def _survivor_key(m: Mutant) -> str:
-    return f"{m.path}:{m.lineno}:{m.original}->{m.mutation}"
-
-
 def run(
     *,
     base: str | None,
-    baseline_path: Path | None,
-    write_baseline: bool,
     max_mutants: int = MAX_MUTANTS,
 ) -> int:
     """Diff-scoped mutation run. Returns process exit code.
 
     * ``base`` — diff ref, or ``None`` for the staged diff.
-    * ``baseline_path`` — when set, survivors already in the ratchet do NOT
-      fail (nightly full-scope mode). ``None`` → strict (safe-commit mode).
-    * ``write_baseline`` — rewrite the baseline to exactly the surviving set
-      (the ratchet update; nightly only). Refuses to GROW the count.
+
+    Any survivor fails — there is no survivor list to excuse one.
     """
     touched = changed_lines(base)
     if not touched:
@@ -572,71 +551,19 @@ def run(
     ran = len(capped) - budget_skipped
     print(f"--- {len(survivors)} survivor(s) of {ran} mutant(s) run; {total_elapsed:.1f}s total ---")
 
-    return _verdict(survivors, baseline_path, write_baseline, skipped)
+    return _verdict(survivors)
 
 
-def _verdict(
-    survivors: list[MutantResult],
-    baseline_path: Path | None,
-    write_baseline: bool,
-    skipped: int,
-) -> int:
-    """Translate the survivor set into an exit code + the ratchet update."""
-    survivor_keys = {_survivor_key(r.mutant) for r in survivors}
-
-    if write_baseline and baseline_path is not None:
-        return _ratchet(survivor_keys, baseline_path)
-
+def _verdict(survivors: list[MutantResult]) -> int:
+    """Translate the survivor set into an exit code — any survivor fails."""
     if not survivors:
         print(f"{_GREEN}PASS mutation_parity{_RESET} — 0 survivors (every mutant on the diff was killed).")
         return 0
 
-    baseline = _load_baseline(baseline_path) if baseline_path is not None else set()
-    new_survivors = [r for r in survivors if _survivor_key(r.mutant) not in baseline]
-
-    if not new_survivors:
-        print(f"{_YELLOW}PASS mutation_parity{_RESET} — {len(survivors)} survivor(s), all in the ratchet baseline.")
-        return 0
-
-    print(f"{_RED}FAIL mutation_parity{_RESET} — {len(new_survivors)} new survivor(s):", file=sys.stderr)
-    for result in new_survivors:
+    print(f"{_RED}FAIL mutation_parity{_RESET} — {len(survivors)} survivor(s):", file=sys.stderr)
+    for result in survivors:
         print(_survivor_report(result), file=sys.stderr)
     return 1
-
-
-def _ratchet(survivor_keys: set[str], baseline_path: Path) -> int:
-    """Rewrite the survivors baseline — but REFUSE to grow the count.
-
-    The ratchet only ever holds or shrinks: a nightly run that produces
-    MORE survivors than the recorded baseline fails (someone added
-    untested logic), leaving the baseline untouched for triage."""
-    previous = _load_baseline(baseline_path)
-    if len(survivor_keys) > len(previous):
-        print(
-            f"{_RED}FAIL mutation_parity{_RESET} — survivor count grew "
-            f"{len(previous)} -> {len(survivor_keys)}; the ratchet only holds or shrinks.",
-            file=sys.stderr,
-        )
-        print(
-            "  fix: kill the new survivor(s) by strengthening the impacted tests; the baseline is NOT updated.",
-            file=sys.stderr,
-        )
-        print("  next: re-run the nightly mutation-suite once the new survivors are pinned.", file=sys.stderr)
-        return 1
-    header = (
-        "# Ratcheted surviving-mutant baseline (#499 Phase 1 — mutation gate).\n"
-        "# One key per line: <file>:<line>:<original>-><mutation>. The nightly\n"
-        "# mutation-suite.yml rewrites this to the current surviving set and FAILS\n"
-        "# if the count grows. Pay it down by strengthening the impacted test so\n"
-        "# the mutant is killed, then drop its line. Count must never increase.\n"
-    )
-    baseline_path.parent.mkdir(parents=True, exist_ok=True)
-    baseline_path.write_text(header + "".join(f"{key}\n" for key in sorted(survivor_keys)), encoding="utf-8")
-    print(
-        f"{_GREEN}PASS mutation_parity{_RESET} — ratchet updated: "
-        f"{len(survivor_keys)} survivor(s) (was {len(previous)})."
-    )
-    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -647,33 +574,13 @@ def main(argv: list[str] | None = None) -> int:
         help="diff against this ref (e.g. origin/main) instead of the staged diff",
     )
     parser.add_argument(
-        "--baseline",
-        default=None,
-        help="ratcheted survivors baseline; survivors already in it do not fail (nightly mode)",
-    )
-    parser.add_argument(
-        "--write-baseline",
-        action="store_true",
-        help="rewrite the baseline to the current surviving set (nightly ratchet update; refuses to grow)",
-    )
-    parser.add_argument(
         "--max-mutants",
         type=int,
         default=MAX_MUTANTS,
         help=f"hard cap on mutants generated (default {MAX_MUTANTS})",
     )
     args = parser.parse_args(argv)
-
-    baseline_path = Path(args.baseline) if args.baseline else None
-    if args.write_baseline and baseline_path is None:
-        baseline_path = DEFAULT_SURVIVORS_BASELINE
-
-    return run(
-        base=args.base,
-        baseline_path=baseline_path,
-        write_baseline=args.write_baseline,
-        max_mutants=args.max_mutants,
-    )
+    return run(base=args.base, max_mutants=args.max_mutants)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,0 @@
-tests/conftest.py
-tests/integration/conftest.py
-tests/test_credentials.py
-tests/test_paths.py
-tests/test_secrets.py

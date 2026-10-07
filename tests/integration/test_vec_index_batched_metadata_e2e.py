@@ -8,19 +8,16 @@ synthetic vectors. Asserts:
   * result count + ordering match the usearch primitive's output
   * active-flag filter still works through the public ``search`` entry
   * collection-filter still works through the public ``search`` entry
-  * per-search wall-clock stays under 50 ms for ``k=20`` (smoke band;
-    pins the basic shape — no contention since single-threaded)
+  * a ``k=20`` search resolves all metadata in ONE batched SELECT
 
-The benchmark assertion is loose on purpose. The N+1 regression
-profiled at 440 ms (#287 W2A report) blew past 50 ms even single
-threaded, so this guard catches the obvious regression class without
-flaking on CI noise.
+The N+1 regression (#287 W2A report, profiled at 440 ms) is guarded by
+counting the metadata SELECTs through the SQL-trace seam — a
+deterministic outcome — rather than a wall-clock ceiling (F82).
 """
 
 from __future__ import annotations
 
 import sqlite3
-import time
 from pathlib import Path
 from typing import Any
 
@@ -147,17 +144,18 @@ def test_search_collection_filter_through_batched_fetch(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
-def test_search_wall_clock_smoke_under_50ms(tmp_path: Path) -> None:
-    """Single-threaded smoke: k=20 over 50 docs finishes well under 50 ms.
+def test_search_k20_resolves_metadata_in_one_select(tmp_path: Path) -> None:
+    """k=20 over 50 docs resolves all metadata with ONE batched SELECT.
 
-    The N+1 regression profiled at 440 ms even single-threaded would
-    fail this; the current batched implementation runs in ~5-10 ms on
-    a developer laptop.
+    The N+1 regression (#287 — profiled at 440 ms) issued one metadata
+    SELECT per ANN match. The deterministic outcome that matters is the
+    query count, not the wall clock (F82): the SQL trace installed via
+    the public ``set_metadata_trace_callback`` seam counts exactly the
+    SELECTs production issues against ``documents``.
 
-    Sabotage: reverting the helper to per-row SELECT pushes the wall
-    clock past 50 ms even single-threaded once the working set spills
-    out of the page cache, because each SELECT re-acquires the WAL
-    journal lock.
+    Sabotage: setting ``_IN_CLAUSE_BATCH_SIZE = 1`` (per-row SELECT, the
+    N+1 shape) makes the trace record 20 metadata SELECTs and the
+    single-SELECT assertion fires.
     """
     db_path = _seed(tmp_path, n_docs=50)
     idx = _make_index(tmp_path, db_path, n_docs=50)
@@ -166,16 +164,16 @@ def test_search_wall_clock_smoke_under_50ms(tmp_path: Path) -> None:
     query = rng.random(1536, dtype=np.float32)
     query /= np.linalg.norm(query)
 
-    # Warm-up to load the page cache; we're pinning the steady-state shape,
-    # not the cold-cache shape (production loads stay warm across queries).
-    idx.search(query, k=20)
-
-    start = time.perf_counter()
-    results = idx.search(query, k=20)
-    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    sql_log: list[str] = []
+    idx.set_metadata_trace_callback(sql_log.append)
+    try:
+        results = idx.search(query, k=20)
+    finally:
+        idx.set_metadata_trace_callback(None)
 
     assert len(results) == 20
-    assert elapsed_ms < 50.0, (
-        f"vector_ann post-batch single-threaded wall clock should be <50 ms; "
-        f"got {elapsed_ms:.1f} ms — possible N+1 regression"
+    metadata_selects = [sql for sql in sql_log if "FROM documents" in sql]
+    assert len(metadata_selects) == 1, (
+        f"k=20 search should resolve metadata in a single batched SELECT; "
+        f"saw {len(metadata_selects)} — possible N+1 regression"
     )

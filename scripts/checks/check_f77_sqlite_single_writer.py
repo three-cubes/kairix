@@ -8,10 +8,10 @@ invisible — two writers locking the same page means each waits, and
 the visible signal is latency-under-load, never a test failure.
 
 F77 makes the writer-coordinator discipline structural. Every
-``sqlite3.connect(...)`` call site under ``kairix/`` is grandfathered
-in the baseline; net-new connect sites must be added to the explicit
-allow-list (workflow: add an entry to ``_ALLOWLIST`` here with a
-rationale) or the gate trips.
+``sqlite3.connect(...)`` call site under ``kairix/`` must sit inside the
+rule's declared writer-coordinator scope (``_ALLOWLIST_PATHS`` — the
+rule definition, not a grandfather list); any other connect site trips
+the gate.
 
 Acknowledged limitation (status: proxy)
 ---------------------------------------

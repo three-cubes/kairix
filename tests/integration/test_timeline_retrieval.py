@@ -14,7 +14,7 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.mark.integration
-def test_timeline_finds_memory_logs(real_db, real_document_root):
+def test_timeline_finds_memory_logs(real_db, real_document_root, real_agents_config):
     """Timeline retrieval finds agent memory logs within date range."""
     from kairix.core.temporal.index import query_temporal_chunks
 
@@ -23,12 +23,14 @@ def test_timeline_finds_memory_logs(real_db, real_document_root):
         "session update",
         start=today - timedelta(days=2),
         end=today,
+        document_root=real_document_root,
+        config=real_agents_config,
     )
     assert len(results) > 0
 
 
 @pytest.mark.integration
-def test_timeline_returns_empty_for_future_dates(real_db, real_document_root):
+def test_timeline_returns_empty_for_future_dates(real_db, real_document_root, real_agents_config):
     """Timeline returns empty for dates with no memory logs."""
     from kairix.core.temporal.index import query_temporal_chunks
 
@@ -36,5 +38,7 @@ def test_timeline_returns_empty_for_future_dates(real_db, real_document_root):
         "anything",
         start=date(2099, 1, 1),
         end=date(2099, 12, 31),
+        document_root=real_document_root,
+        config=real_agents_config,
     )
     assert len(results) == 0

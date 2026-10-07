@@ -25,14 +25,13 @@ Scope:
 
 - Every tracked file whose name ends in ``.sh`` OR whose first line is a
   ``#!`` shebang naming ``bash`` or ``sh``.
-- Files inside ``.architecture/baseline/``, ``reference-library/``, and
-  ``benchmark-results/`` are exempt.
+- Files inside ``reference-library/`` and ``benchmark-results/`` are
+  exempt.
 - The detector and its test (which embed example disables in docstrings)
   are self-exempt.
 
-Baseline at ``.architecture/baseline/shellcheck-disable-with-reason-files.txt``
-grandfathers any pre-existing offenders so the rule lands without forcing
-a sweep. Net-new violations block at safe-commit and CI.
+There is no grandfathering: every bare disable anywhere in the tracked
+tree fails the gate. Add the rationale at source.
 
 Failure output follows F21: leads with the fix, includes ``run:`` for
 re-running the gate, and shows a Pass/Forbidden example.
@@ -46,7 +45,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BASELINE_FILE = ROOT / ".architecture" / "baseline" / "shellcheck-disable-with-reason-files.txt"
 
 # Matches: ``# shellcheck disable=SC2034`` and ``# shellcheck disable=SC2034,SC2046``.
 # Captures everything after the directive on the same line so the caller
@@ -72,7 +70,6 @@ RATIONALE_MARKERS: tuple[str, ...] = (
 MIN_RATIONALE_LEN = 10
 
 EXEMPT_PREFIX = (
-    ".architecture/baseline/",
     "reference-library/",
     "benchmark-results/",
 )
@@ -111,16 +108,6 @@ Forbidden example:
   # shellcheck disable=SC1090
   . "$SECRETS_FILE"
 """
-
-
-def _load_baseline() -> set[str]:
-    if not BASELINE_FILE.exists():
-        return set()
-    return {
-        line.strip()
-        for line in BASELINE_FILE.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
 
 
 def _is_exempt_path(rel: str) -> bool:
@@ -224,6 +211,22 @@ def _preceding_line_has_rationale(lines: list[str], idx: int) -> bool:
     return _is_rationale_comment(lines[j].strip())
 
 
+def _shell_files(root: Path, files: list[str]) -> list[str]:
+    """Return the non-exempt tracked paths in ``files`` that are shell scripts."""
+    return [
+        rel for rel in files if not _is_exempt_path(rel) and (root / rel).is_file() and _is_shell_file(root / rel, rel)
+    ]
+
+
+def collect_violations(root: Path, files: list[str]) -> list[str]:
+    """Scan every shell script among ``files`` (repo-relative, under ``root``).
+
+    Returns every bare disable in every non-exempt file — there is no
+    grandfathering.
+    """
+    return [hit for rel in _shell_files(root, files) for hit in _scan_file(root / rel, rel)]
+
+
 def main() -> int:
     try:
         files = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).splitlines()
@@ -231,56 +234,16 @@ def main() -> int:
         print("FAIL shellcheck_disable_with_reason: could not enumerate tracked files", file=sys.stderr)
         return 1
 
-    baseline = _load_baseline()
-    net_new: list[str] = []
-    matched_baseline_files: set[str] = set()
-    shell_file_count = 0
-
-    for rel in files:
-        if _is_exempt_path(rel):
-            continue
-        path = ROOT / rel
-        if not path.is_file():
-            continue
-        if not _is_shell_file(path, rel):
-            continue
-        shell_file_count += 1
-        hits = _scan_file(path, rel)
-        if not hits:
-            continue
-        if rel in baseline:
-            matched_baseline_files.add(rel)
-            continue
-        net_new.extend(hits)
-
-    if net_new:
-        print("FAIL F33 shellcheck_disable_with_reason: net-new violations", file=sys.stderr)
-        for v in net_new:
+    violations = collect_violations(ROOT, files)
+    if violations:
+        print("FAIL F33 shellcheck_disable_with_reason: violations found", file=sys.stderr)
+        for v in violations:
             print(f"  {v}", file=sys.stderr)
         print("", file=sys.stderr)
         print(REMEDIATION, file=sys.stderr)
         return 1
 
-    stale = baseline - matched_baseline_files
-    if stale:
-        # Baseline shrinks when a grandfathered file is cleaned up — keep
-        # the baseline file truthful by failing on stale entries.
-        print(
-            "FAIL F33 shellcheck_disable_with_reason: baseline has stale "
-            "entries (file no longer offends or no longer exists)",
-            file=sys.stderr,
-        )
-        for s in sorted(stale):
-            print(f"  remove from baseline: {s}", file=sys.stderr)
-        print("", file=sys.stderr)
-        print(
-            f"fix: remove the listed lines from {BASELINE_FILE.relative_to(ROOT)}",
-            file=sys.stderr,
-        )
-        print('run: bash scripts/safe-commit.sh "chore(baseline): shrink F33"', file=sys.stderr)
-        return 1
-
-    print(f"PASS F33 shellcheck_disable_with_reason ({shell_file_count} shell files scanned)")
+    print(f"ok F33 shellcheck_disable_with_reason — clean ({len(_shell_files(ROOT, files))} shell files scanned).")
     return 0
 
 

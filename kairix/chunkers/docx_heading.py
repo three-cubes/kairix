@@ -51,7 +51,7 @@ PLUGIN_NAME = "docx_heading"
 
 #: Regex matching a markdown heading line: ``# Title`` / ``## Title`` /
 #: ``### Title``. Capturing groups: (hash prefix, title text).
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*)$")
 
 #: A line is a table row when it starts with a pipe character (after
 #: any leading whitespace). Markdown pipe-syntax tables are contiguous

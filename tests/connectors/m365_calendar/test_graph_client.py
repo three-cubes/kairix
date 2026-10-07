@@ -328,3 +328,213 @@ def test_410_response_raises_typed_delta_expired_error() -> None:
         client.fetch_delta_page("https://graph.microsoft.com/v1.0/expired-calendar-delta")
 
     assert raised.value.response.status_code == 410
+
+
+# ---------------------------------------------------------------------------
+# Graph error envelopes — throttling / transient 5xx retry loop (GH #357)
+# driven at unit scope through the public ``http_client`` + ``sleep_fn`` +
+# ``max_attempts`` constructor seams. No wall-clock sleep, no network.
+# ---------------------------------------------------------------------------
+
+_WINDOW_START = "2026-05-01T00:00:00Z"
+_WINDOW_END = "2026-06-01T00:00:00Z"
+_THROTTLE_ENVELOPE: dict[str, Any] = {"error": {"code": "TooManyRequests", "message": "throttled"}}
+_EMPTY_DELTA_PAYLOAD: dict[str, Any] = {"value": [], "@odata.deltaLink": "delta-after-retry"}
+
+
+def _scripted_client(
+    responses: list[httpx.Response],
+    *,
+    sleeps: list[float],
+    max_attempts: int = 3,
+) -> tuple[M365GraphCalendarClient, list[httpx.Request]]:
+    """Client whose transport replays ``responses`` in order, recording each request."""
+    seen: list[httpx.Request] = []
+    queue = list(responses)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return queue.pop(0)
+
+    http = httpx.Client(transport=httpx.MockTransport(_handler), auth=_stub_auth())
+    client = M365GraphCalendarClient(
+        user_id="operator@example.com",
+        auth=_stub_auth(),
+        http_client=http,
+        sleep_fn=sleeps.append,
+        max_attempts=max_attempts,
+    )
+    return client, seen
+
+
+@pytest.mark.unit
+def test_429_with_retry_after_waits_server_value_then_succeeds() -> None:
+    """A 429 carrying ``Retry-After: 7`` is retried after exactly 7s.
+
+    Sabotage-proof: make ``_wait_strategy`` ignore ``_parse_retry_after``
+    (always use exponential backoff) — the recorded sleep becomes 2.0,
+    not 7.0, and this test fails.
+    """
+    sleeps: list[float] = []
+    client, seen = _scripted_client(
+        [
+            httpx.Response(429, headers={"Retry-After": "7"}, json=_THROTTLE_ENVELOPE),
+            httpx.Response(200, json=_EMPTY_DELTA_PAYLOAD),
+        ],
+        sleeps=sleeps,
+    )
+
+    page = client.fetch_initial_delta(_WINDOW_START, _WINDOW_END)
+
+    assert sleeps == [7.0]
+    assert len(seen) == 2
+    assert page.delta_link == "delta-after-retry"
+
+
+@pytest.mark.unit
+def test_500_without_retry_after_uses_bounded_exponential_backoff() -> None:
+    """A transient 500 is retried with exponential backoff inside [2s, 60s].
+
+    Sabotage-proof: drop 500 from ``_RETRYABLE_STATUS_CODES`` — the
+    first 500 raises ``HTTPStatusError`` instead of being retried and
+    this test fails.
+    """
+    sleeps: list[float] = []
+    client, seen = _scripted_client(
+        [
+            httpx.Response(500, json={"error": {"code": "InternalServerError"}}),
+            httpx.Response(200, json=_EMPTY_DELTA_PAYLOAD),
+        ],
+        sleeps=sleeps,
+    )
+
+    page = client.fetch_delta_page("https://graph.microsoft.com/v1.0/next-page")
+
+    assert len(seen) == 2
+    assert len(sleeps) == 1
+    assert 2.0 <= sleeps[0] <= 60.0
+    assert page.events == ()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("retry_after_headers", [{"Retry-After": "soon"}, {}], ids=["unparseable", "absent"])
+def test_unusable_retry_after_falls_back_to_backoff(retry_after_headers: dict[str, str]) -> None:
+    """A 503 whose ``Retry-After`` is garbage or absent falls back to backoff.
+
+    Graph documents the seconds form only; an HTTP-date / garbage value
+    (or a missing header) must not crash the retry loop.
+
+    Sabotage-proof: remove the ``except (TypeError, ValueError)`` guard
+    in ``_parse_retry_after`` — ``float("soon")`` raises ValueError out
+    of the wait strategy and the ``unparseable`` case fails; make the
+    ``if raw is None`` branch return ``0.0`` instead of ``None`` and the
+    ``absent`` case records a 0s wait instead of backing off, so it fails.
+    """
+    sleeps: list[float] = []
+    client, _seen = _scripted_client(
+        [
+            httpx.Response(503, headers=retry_after_headers, json=_THROTTLE_ENVELOPE),
+            httpx.Response(200, json=_EMPTY_DELTA_PAYLOAD),
+        ],
+        sleeps=sleeps,
+    )
+
+    client.fetch_initial_delta(_WINDOW_START, _WINDOW_END)
+
+    assert len(sleeps) == 1
+    assert 2.0 <= sleeps[0] <= 60.0
+
+
+@pytest.mark.unit
+def test_persistent_throttle_exhausts_attempts_and_raises_status_error() -> None:
+    """When every attempt is throttled the final 429 surfaces as HTTPStatusError.
+
+    Sabotage-proof: in the ``except RetryError`` branch return ``final``
+    without calling ``raise_for_graph_status`` — no exception is raised
+    and this test fails.
+    """
+    sleeps: list[float] = []
+    client, seen = _scripted_client(
+        [httpx.Response(429, headers={"Retry-After": "1"}, json=_THROTTLE_ENVELOPE) for _ in range(2)],
+        sleeps=sleeps,
+        max_attempts=2,
+    )
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        client.fetch_initial_delta(_WINDOW_START, _WINDOW_END)
+
+    assert raised.value.response.status_code == 429
+    assert len(seen) == 2  # max_attempts honoured — no third request
+    assert sleeps == [1.0]
+
+
+@pytest.mark.unit
+def test_403_is_permanent_and_not_retried() -> None:
+    """A 403 envelope raises immediately without a retry sleep.
+
+    Sabotage-proof: add 403 to ``_RETRYABLE_STATUS_CODES`` — the client
+    sleeps and re-requests, so the ``sleeps`` / ``seen`` assertions fail.
+    """
+    sleeps: list[float] = []
+    client, seen = _scripted_client(
+        [httpx.Response(403, json={"error": {"code": "ErrorAccessDenied"}})],
+        sleeps=sleeps,
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client.fetch_initial_delta(_WINDOW_START, _WINDOW_END)
+
+    assert sleeps == []
+    assert len(seen) == 1
+
+
+@pytest.mark.unit
+def test_malformed_event_sub_objects_decode_to_empty_defaults() -> None:
+    """Wrong-typed Graph sub-objects degrade to empty values, never raise.
+
+    Covers ``attendees`` not a list, attendee entries that are not
+    objects / whose ``emailAddress`` is not an object, and
+    ``organizer`` / ``location`` / ``start`` / ``end`` that are not
+    objects (or whose ``emailAddress`` is not an object).
+
+    Sabotage-proof: remove the ``isinstance(raw, dict)`` guard in
+    ``_location_display`` — ``"Room 1".get`` raises AttributeError and
+    this test fails.
+    """
+    payload = {
+        "value": [
+            {
+                "id": "malformed-alpha",
+                "attendees": "not-a-list",
+                "organizer": "not-an-object",
+                "location": "Room 1",
+                "start": "2026-05-25T09:00:00Z",
+                "end": None,
+            },
+            {
+                "id": "malformed-beta",
+                "attendees": [
+                    "bare-string-entry",
+                    {"emailAddress": "not-an-object"},
+                    {"emailAddress": {"address": ""}},
+                    {"emailAddress": {"address": "agent-alpha@example.com"}},
+                ],
+                "organizer": {"emailAddress": ["not", "an", "object"]},
+            },
+        ],
+        "@odata.deltaLink": "delta-link",
+    }
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    page = _client_with_handler(_handler).fetch_initial_delta(_WINDOW_START, _WINDOW_END)
+
+    alpha, beta = page.events
+    assert alpha.attendees == ()
+    assert alpha.organiser == ""
+    assert alpha.location == ""
+    assert alpha.start_iso == ""
+    assert alpha.end_iso == ""
+    assert beta.attendees == ("agent-alpha@example.com",)
+    assert beta.organiser == ""

@@ -197,7 +197,7 @@ class TestRetrieverContract:
     def test_fake_retriever_returns_empty_for_unknown_query(self) -> None:
         retriever = FakeRetriever()
         result = retriever.retrieve("unknown query")
-        assert result.results == []
+        assert result.paths == []
         assert result.vec_failed is False
 
     def test_fake_retriever_returns_configured_result(self) -> None:

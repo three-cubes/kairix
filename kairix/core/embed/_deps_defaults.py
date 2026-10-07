@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from collections.abc import Mapping
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -38,11 +39,15 @@ def default_get_azure_config() -> tuple[str, str, str]:
     return get_azure_config_from_credentials()
 
 
-def default_preflight_check(api_key: str, endpoint: str, deployment: str) -> int:
-    """Production default for ``EmbedDependencies.preflight_check``."""
+def default_preflight_check(api_key: str, endpoint: str, deployment: str, **kwargs: Any) -> int:
+    """Production default for ``EmbedDependencies.preflight_check``.
+
+    ``**kwargs`` pass through to :func:`kairix.core.embed.embed.preflight_check`
+    (e.g. its ``client=`` seam), mirroring :func:`default_embed_batch`.
+    """
     from kairix.core.embed.embed import preflight_check
 
-    return preflight_check(api_key, endpoint, deployment)
+    return preflight_check(api_key, endpoint, deployment, **kwargs)
 
 
 def default_embed_batch(
@@ -73,7 +78,7 @@ def default_migrate_content_vectors(db: sqlite3.Connection) -> None:
     migrate_content_vectors(db)
 
 
-def default_open_embedding_cache() -> Any:
+def default_open_embedding_cache(*, env: Mapping[str, str] | None = None) -> Any:
     """Production default for ``EmbedDependencies.open_embedding_cache``.
 
     Resolves the path under ``KAIRIX_DOCUMENT_ROOT/.kairix/cache/`` via
@@ -92,14 +97,21 @@ def default_open_embedding_cache() -> Any:
     state between unrelated tests. Test code that genuinely wants the
     cache path exercised passes a ``tmp_path``-backed
     :class:`EmbeddingCache` through the constructor seam.
+
+    ``env`` is the F2-clean seam (mirrors :func:`kairix.paths.embedding_cache_path`):
+    ``None`` (production) reads the live process env; a caller passing an
+    explicit mapping gets both the pytest guard and the cache-path
+    resolution evaluated against that mapping, so the construct + failure
+    branches are reachable without mutating ``os.environ``.
     """
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    resolved_env = env if env is not None else os.environ
+    if resolved_env.get("PYTEST_CURRENT_TEST"):
         return None
     try:
         from kairix.core.embed.embedding_cache import EmbeddingCache
         from kairix.paths import embedding_cache_path
 
-        return EmbeddingCache(embedding_cache_path())
+        return EmbeddingCache(embedding_cache_path(env=env))
     except Exception as e:
         logger.warning("default_open_embedding_cache: cache unavailable — %s", e)
         return None
@@ -120,18 +132,21 @@ def default_get_reflib_index_mode() -> str:
     return load_reference_library().index
 
 
-def default_get_document_root() -> str | None:
+def default_get_document_root(*, env: Mapping[str, str] | None = None) -> str | None:
     """Production default for ``EmbedDependencies.get_document_root``.
 
     Resolution failures are tolerated — the embed pipeline only uses the
     document root for chunk-date heuristics. Returning ``None`` lets the
     pipeline run without crashing when the kairix paths layer is
     unavailable (e.g. a test process with no kairix.config.yaml on disk).
+
+    ``env`` is the F2-clean seam forwarded to :func:`kairix.paths.document_root`
+    — ``None`` (production) reads the live process env.
     """
     try:
         from kairix.paths import document_root
 
-        return str(document_root())
+        return str(document_root(env=env))
     except Exception as e:
         logger.warning("default_get_document_root: paths layer unavailable — %s", e)
         return None

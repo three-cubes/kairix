@@ -15,7 +15,7 @@ set -e
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM \
     | grep -E '\.(py|md|yaml|yml|sh|json|toml)$' \
     | grep -vE '^(scripts/pre-commit-confidential-check\.sh|scripts/checks/check_no_private_infra_refs\.py|tests/checks/test_no_private_infra_refs\.py)$' \
-    || true)
+    || true)  # grep exits 1 when no staged file matches — an empty list is the "nothing to scan" case handled below
 
 if [[ -z "$STAGED_FILES" ]]; then
     exit 0
@@ -41,7 +41,7 @@ fi
 FAILURES=0
 
 for pattern in "${BLOCKED_PATTERNS[@]}"; do
-    MATCHES=$(echo "$STAGED_FILES" | xargs grep -lnE "$pattern" 2>/dev/null || true)
+    MATCHES=$(echo "$STAGED_FILES" | xargs grep -lnE "$pattern" 2>/dev/null || true)  # grep -l exits 1 when the pattern is absent — that is the clean case, not an error
     if [[ -n "$MATCHES" ]]; then
         echo "BLOCKED: confidential pattern found in staged files:"
         echo "$MATCHES" | while read -r file; do

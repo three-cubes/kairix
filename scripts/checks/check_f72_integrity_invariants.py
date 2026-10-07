@@ -49,9 +49,8 @@ Detection
 
 Violations are reported with a synthetic path key
 ``tests/integrity_invariants/test_<name>.py::<missing_requirement>`` so
-the baseline file lists "what's known-broken" in human-readable form.
-The baseline is empty at landing — all five seed invariants ship with
-their matching test files.
+the failure output lists "what's broken" in human-readable form.
+There is no grandfathering: every violation fails the gate.
 """
 
 from __future__ import annotations
@@ -285,7 +284,7 @@ def collect_violations(repo_root: Path = REPO_ROOT) -> set[Path]:
 
     Returns repo-relative synthetic paths of the form
     ``tests/integrity_invariants/test_<name>.py::<missing>`` so each
-    distinct missing requirement appears as its own baseline entry.
+    distinct missing requirement appears as its own violation.
     """
     invariants = _load_registry(repo_root)
     if not invariants:

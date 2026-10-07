@@ -28,9 +28,9 @@ Sabotage-proofs (both executed locally — see commit message):
     output is suppressed and rc would be 0 → both rc==1 and the
     "Error loading results" assertions fail. Restored.
 
-Latency baseline (2024 M-series Mac): subprocess wall ~150ms per test
-(cold Python interpreter + import graph dominate). Threshold: 10000ms
-(~65x headroom for CI variance + slower hardware).
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
@@ -38,7 +38,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -84,7 +83,6 @@ def test_benchmark_cli_subprocess_compare_envelope_outcome(tmp_path: Path) -> No
     _write_result(result_a, weighted_total=0.65, ndcg_at_10=0.70)
     _write_result(result_b, weighted_total=0.72, ndcg_at_10=0.75)
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -99,7 +97,6 @@ def test_benchmark_cli_subprocess_compare_envelope_outcome(tmp_path: Path) -> No
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"benchmark compare exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -117,8 +114,6 @@ def test_benchmark_cli_subprocess_compare_envelope_outcome(tmp_path: Path) -> No
     # value follows. Pin the up-arrow because B > A in the fixture.
     assert "Delta:" in proc.stdout, f"delta line missing: {proc.stdout!r}"
     assert "0.070" in proc.stdout, f"delta absolute value missing: {proc.stdout!r}"
-
-    assert elapsed_ms < 10000.0, f"benchmark compare subprocess took {elapsed_ms:.1f}ms (threshold 10000ms)"
 
 
 def test_benchmark_cli_subprocess_exits_non_zero_on_missing_result_file(tmp_path: Path) -> None:

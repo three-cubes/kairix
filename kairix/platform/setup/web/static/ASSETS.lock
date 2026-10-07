@@ -28,6 +28,13 @@
       "sha256": "04805061789283558f38efd7059c7aab42c83cfe912a51b78cb6b6bab05a738f",
       "url": "(first-party) kairix/platform/setup/web/static/kairix.css",
       "rationale": "First-party wizard stylesheet (the kx-* layout primitives, #488). Not third-party, but pinned here too so the manifest covers EVERY served static file — a tampered kairix.css fails the sha check the same way a swapped vendor file does."
+    },
+    "kx-reveal.js": {
+      "vendored": false,
+      "version": "first-party",
+      "sha256": "e85dde1156ec8ccbd5f6d676534d61d7ad603bbd262b831d265b12e36c9bc682",
+      "url": "(first-party) kairix/platform/setup/web/static/kx-reveal.js",
+      "rationale": "First-party HTMX afterSwap glue that reveals a data-kx-reveal-on action button (key + folder screens) once its success card renders. Lifted out of two near-duplicate inline scripts (F91 Limb B) into one 'self'-served file; pinned so a tampered copy fails the sha check like any other served asset."
     }
   }
 }

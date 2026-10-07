@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 # Regex: extract all [[wikilinks]] from text (ignores [[Link|Alias]] alias part)
 _WIKILINK_PATTERN = WIKILINK_RE
 
+# Raw YAML frontmatter block (closing fence need not end in a newline). The
+# opening fence takes only same-line trailing spaces (``[^\S\n]*``) so it can't
+# trade newlines with the block body — linear-time; blank lines after the fence
+# stay in the block, which ``yaml.safe_load`` ignores.
+_FRONTMATTER_BLOCK_PATTERN = r"\A---[^\S\n]*\n(.*?)\n---"
+
 # Directory names under 02-Areas to search for People-Notes
 _PEOPLE_DIRS = {"People-Notes", "people-notes"}
 
@@ -507,9 +513,7 @@ def parse_frontmatter(path: Path) -> dict[str, Any]:
         # No frontmatter found at all — also try lenient match (no trailing newline)
         import re
 
-        lenient = re.match(
-            r"\A---\s*\n(.*?)\n---", text, re.DOTALL
-        )  # NOSONAR — non-greedy `.*?` bounded by `\n---`; file-bounded frontmatter input.
+        lenient = re.match(_FRONTMATTER_BLOCK_PATTERN, text, re.DOTALL)
         if not lenient:
             return {}
         block = lenient.group(1)
@@ -517,9 +521,7 @@ def parse_frontmatter(path: Path) -> dict[str, Any]:
         # Re-extract the raw YAML block for full yaml.safe_load parsing
         import re
 
-        match = re.match(
-            r"\A---\s*\n(.*?)\n---", text, re.DOTALL
-        )  # NOSONAR — same bounded-input rationale as the lenient match above.
+        match = re.match(_FRONTMATTER_BLOCK_PATTERN, text, re.DOTALL)
         if not match:
             return dict(simple_parsed)  # fallback to simple parsing
         block = match.group(1)

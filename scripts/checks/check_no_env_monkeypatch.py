@@ -8,7 +8,7 @@ Resolves #217 (prior grep-based detector matched docstring text
 containing the literal substring ``monkeypatch.setenv ... KAIRIX_``).
 
 Output: one violation file path per line on stdout, sorted, deduplicated.
-Pipes into ``arch_gate`` from ``_lib.sh`` for baseline diff.
+Pipes into ``arch_gate`` from ``_lib.sh``, which fails on any path.
 """
 
 from __future__ import annotations

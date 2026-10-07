@@ -139,7 +139,7 @@ def run_search() -> None:
 
 def test_real_repo_gate_is_green() -> None:
     """The real F46 detector run against the full repo emits no
-    net-new violations vs ``.architecture/baseline/F46-files.txt``.
+    violations (there is no grandfathering).
     """
     detector = _load_detector()
     assert detector.main() == 0

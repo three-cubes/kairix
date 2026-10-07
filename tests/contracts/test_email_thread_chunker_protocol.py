@@ -1,31 +1,37 @@
 """Contract tests for :class:`EmailThreadChunker` (ADR-028 Wave G.1).
 
-Pins:
-  * Plugin instance satisfies the
-    :class:`kairix.core.protocols.Chunker` runtime-checkable Protocol.
-  * Plugin declares non-empty ``version`` + ``name`` attributes (F55).
-  * Every emitted :class:`Chunk` carries ``chunker_version=`` matching
-    the plugin instance's version (F55).
-  * Empty / whitespace-only input emits no chunks.
-  * Headers (``Subject`` / ``From`` / ``Date``) surface into
-    ``Chunk.metadata`` under stable keys.
+Pins the :class:`~kairix.core.protocols.Chunker` Protocol invariants with
+ONE body per invariant, run over BOTH the shipped plugin (built through
+its ``make_chunker`` entry-point factory) and the canonical
+:class:`tests.fakes.FakeParagraphChunker` (F43 behavioural parity):
 
-Sabotage proofs (executed inline):
-  * F55 carry-through: a Chunk constructed without chunker_version
-    trips the assertion shape used in
-    ``test_emitted_chunks_carry_plugin_version``.
+  * The instance satisfies the runtime-checkable :class:`Chunker`
+    Protocol and declares a non-empty ``version`` equal to its
+    declaration site (F55).
+  * Every emitted :class:`Chunk` carries ``chunker_version=`` matching
+    the instance's version (F55) and the input ``source_uri`` (F39).
+  * Empty / whitespace-only input emits no chunks.
+  * ``chunk`` returns a ``tuple``, never a list.
+
+Email-specific behaviour (headers surfaced into ``Chunk.metadata``, the
+factory's concrete type, quoted-reply stripping) lives in
+``tests/unit/test_email_thread_chunker_units.py``.
+
+Sabotage proof (executed): in ``_build_email_chunk`` change
+``chunker_version=chunker_version`` to ``chunker_version="drift"`` → the
+``real`` case of ``test_emitted_chunks_carry_plugin_version`` fails.
+Restored.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
-from kairix.chunkers.email_thread import (
-    EmailThreadChunker,
-    make_chunker,
-    version,
-)
+from kairix.chunkers.email_thread import make_chunker, version
 from kairix.core.protocols import Chunk, Chunker
+from tests.fakes import FakeParagraphChunker
 
 pytestmark = pytest.mark.contract
 
@@ -39,75 +45,57 @@ To: agent-beta@example.test
 Hello agent-beta, are you free for a quick sync?
 """
 
+# (name, factory, declared version, representative non-empty input)
+_IMPLEMENTATIONS: list[tuple[str, Callable[[], Chunker], str, str]] = [
+    ("real", make_chunker, version, _SINGLE_MESSAGE),
+    ("fake", FakeParagraphChunker, FakeParagraphChunker.version, _SINGLE_MESSAGE),
+]
+_IDS = [impl[0] for impl in _IMPLEMENTATIONS]
 
-def test_plugin_satisfies_chunker_protocol() -> None:
-    chunker = make_chunker()
-    assert isinstance(chunker, Chunker)
-    assert chunker.name == "email_thread"
-    assert chunker.version == version
+
+@pytest.mark.parametrize("name,factory,declared,sample", _IMPLEMENTATIONS, ids=_IDS)
+def test_plugin_satisfies_chunker_protocol(
+    name: str, factory: Callable[[], Chunker], declared: str, sample: str
+) -> None:
+    chunker = factory()
+    assert isinstance(chunker, Chunker), name
+    assert chunker.version == declared, name
     assert chunker.version  # non-empty (F55)
 
 
-def test_factory_returns_real_class() -> None:
-    chunker = make_chunker()
-    assert isinstance(chunker, EmailThreadChunker)
-
-
-def test_emitted_chunks_carry_plugin_version() -> None:
-    """Every Chunk carries chunker_version=self.version (F55).
-
-    Sabotage-proof executed: a Chunk built without chunker_version
-    proves the assertion would fail if the plugin stopped threading
-    the version through.
-    """
-    chunker = EmailThreadChunker(version="email-v3")
-    chunks = chunker.chunk(text=_SINGLE_MESSAGE, section_kind="text", source_uri="msg/1")
-    assert chunks
+@pytest.mark.parametrize("name,factory,declared,sample", _IMPLEMENTATIONS, ids=_IDS)
+def test_emitted_chunks_carry_plugin_version(
+    name: str, factory: Callable[[], Chunker], declared: str, sample: str
+) -> None:
+    """Every Chunk carries chunker_version=self.version (F55)."""
+    chunker = factory()
+    chunks = chunker.chunk(text=sample, section_kind="text", source_uri="msg/1")
+    assert chunks, name
     for chunk in chunks:
         assert isinstance(chunk, Chunk)
-        assert chunk.chunker_version == "email-v3"
-
-    sabotaged = Chunk(
-        text="z",
-        content_hash="h",
-        source_name="",
-        source_uri="msg/1",
-        source_modified_at="",
-        source_page=None,
-        sensitivity="internal",
-    )
-    assert sabotaged.chunker_version != "email-v3"
+        assert chunk.chunker_version == declared, name
 
 
-def test_empty_input_emits_no_chunks() -> None:
-    chunker = make_chunker()
-    assert chunker.chunk(text="", section_kind="text", source_uri="x") == ()
-    assert chunker.chunk(text="   \n  ", section_kind="text", source_uri="x") == ()
+@pytest.mark.parametrize("name,factory,declared,sample", _IMPLEMENTATIONS, ids=_IDS)
+def test_empty_input_emits_no_chunks(name: str, factory: Callable[[], Chunker], declared: str, sample: str) -> None:
+    chunker = factory()
+    assert chunker.chunk(text="", section_kind="text", source_uri="x") == (), name
+    assert chunker.chunk(text="   \n  ", section_kind="text", source_uri="x") == (), name
 
 
-def test_headers_surface_into_metadata() -> None:
-    """Subject / From / Date / To get surfaced under ``header_*`` keys."""
-    chunker = make_chunker()
-    chunks = chunker.chunk(text=_SINGLE_MESSAGE, section_kind="text", source_uri="msg/1")
-    assert len(chunks) == 1
-    metadata = chunks[0].metadata
-    assert metadata.get("header_subject") == "Catch-up"
-    assert metadata.get("header_from") == "agent-alpha@example.test"
-    assert metadata.get("header_date") == "2026-05-30"
-    assert metadata.get("header_to") == "agent-beta@example.test"
-
-
-def test_emitted_chunks_propagate_source_uri() -> None:
-    chunker = make_chunker()
-    chunks = chunker.chunk(text=_SINGLE_MESSAGE, section_kind="text", source_uri="thread/42")
-    assert chunks
+@pytest.mark.parametrize("name,factory,declared,sample", _IMPLEMENTATIONS, ids=_IDS)
+def test_emitted_chunks_propagate_source_uri(
+    name: str, factory: Callable[[], Chunker], declared: str, sample: str
+) -> None:
+    chunker = factory()
+    chunks = chunker.chunk(text=sample, section_kind="text", source_uri="thread/42")
+    assert chunks, name
     for chunk in chunks:
-        assert chunk.source_uri == "thread/42"
+        assert chunk.source_uri == "thread/42", name
 
 
-def test_chunk_method_returns_tuple_not_list() -> None:
-    chunker = make_chunker()
-    assert isinstance(
-        chunker.chunk(text=_SINGLE_MESSAGE, section_kind="text", source_uri="x"),
-        tuple,
-    )
+@pytest.mark.parametrize("name,factory,declared,sample", _IMPLEMENTATIONS, ids=_IDS)
+def test_chunk_method_returns_tuple_not_list(
+    name: str, factory: Callable[[], Chunker], declared: str, sample: str
+) -> None:
+    assert isinstance(factory().chunk(text=sample, section_kind="text", source_uri="x"), tuple), name

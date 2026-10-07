@@ -3,7 +3,7 @@ Unit tests for kairix.quality.eval.monitor.
 
 Every test drives behaviour through the public surface — ``run_monitor`` and
 ``generate_report``. The benchmark runner and suite loader are injected via
-the ``suite_loader=`` and ``benchmark_runner=`` kwargs (real callables, not
+``MonitorDeps(load_suite=, run_benchmark=)`` (real callables, not
 @patch). No private helpers are imported. Log-file content is observed by
 reading the JSONL output and via the regression_detail string emitted by
 ``run_monitor`` (which embeds the rolling baseline).
@@ -22,13 +22,14 @@ import pytest
 from kairix.quality.benchmark.runner import BenchmarkResult
 from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
 from kairix.quality.eval.monitor import (
+    MonitorDeps,
     MonitorResult,
     generate_report,
     run_monitor,
 )
 
 # ---------------------------------------------------------------------------
-# Helpers — fake suite_loader / benchmark_runner factories
+# Helpers — fake load_suite / run_benchmark factories
 # ---------------------------------------------------------------------------
 
 
@@ -119,17 +120,19 @@ def test_returns_monitor_result_with_n_cases_and_weighted_ndcg(tmp_path: Path) -
     result = run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(log_path),
-        suite_loader=_suite_loader_with_n_cases(10),
-        benchmark_runner=_benchmark_runner_with_scores(
-            0.75,
-            {
-                "recall": 0.80,
-                "temporal": 0.70,
-                "entity": 0.75,
-                "conceptual": 0.72,
-                "multi_hop": 0.65,
-                "procedural": 0.68,
-            },
+        deps=MonitorDeps(
+            load_suite=_suite_loader_with_n_cases(10),
+            run_benchmark=_benchmark_runner_with_scores(
+                0.75,
+                {
+                    "recall": 0.80,
+                    "temporal": 0.70,
+                    "entity": 0.75,
+                    "conceptual": 0.72,
+                    "multi_hop": 0.65,
+                    "procedural": 0.68,
+                },
+            ),
         ),
     )
 
@@ -154,8 +157,7 @@ def test_returns_empty_result_when_suite_has_zero_cases(tmp_path: Path) -> None:
     result = run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(tmp_path / "monitor.jsonl"),
-        suite_loader=_suite_loader_with_n_cases(0),
-        benchmark_runner=_spy_runner,
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(0), run_benchmark=_spy_runner),
     )
 
     assert result.n_cases == 0
@@ -176,8 +178,7 @@ def test_first_run_with_no_baseline_does_not_flag_regression(tmp_path: Path) -> 
     result = run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(tmp_path / "monitor.jsonl"),
-        suite_loader=_suite_loader_with_n_cases(5),
-        benchmark_runner=_benchmark_runner_with_scores(0.72),
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(5), run_benchmark=_benchmark_runner_with_scores(0.72)),
     )
     assert result.regression is False
     assert result.regression_detail is None
@@ -204,8 +205,7 @@ def test_baseline_average_is_computed_from_in_window_log_entries(tmp_path: Path)
         log_path=str(log_path),
         alert_threshold=0.05,
         window_days=7,
-        suite_loader=_suite_loader_with_n_cases(5),
-        benchmark_runner=_benchmark_runner_with_scores(0.6),
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(5), run_benchmark=_benchmark_runner_with_scores(0.6)),
     )
 
     assert result.regression is True
@@ -234,8 +234,7 @@ def test_baseline_excludes_log_entries_outside_window(tmp_path: Path) -> None:
         log_path=str(log_path),
         alert_threshold=0.05,
         window_days=7,
-        suite_loader=_suite_loader_with_n_cases(5),
-        benchmark_runner=_benchmark_runner_with_scores(0.4),
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(5), run_benchmark=_benchmark_runner_with_scores(0.4)),
     )
 
     assert result.regression is True
@@ -256,8 +255,7 @@ def test_no_regression_when_drop_is_within_alert_threshold(tmp_path: Path) -> No
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(log_path),
         alert_threshold=0.05,
-        suite_loader=_suite_loader_with_n_cases(5),
-        benchmark_runner=_benchmark_runner_with_scores(0.73),
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(5), run_benchmark=_benchmark_runner_with_scores(0.73)),
     )
     assert result.regression is False
     assert result.regression_detail is None
@@ -273,8 +271,7 @@ def test_no_regression_when_score_improves(tmp_path: Path) -> None:
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(log_path),
         alert_threshold=0.01,
-        suite_loader=_suite_loader_with_n_cases(5),
-        benchmark_runner=_benchmark_runner_with_scores(0.9),
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(5), run_benchmark=_benchmark_runner_with_scores(0.9)),
     )
     assert result.regression is False
 
@@ -294,8 +291,7 @@ def test_returns_empty_result_when_suite_loader_raises(tmp_path: Path) -> None:
     result = run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(tmp_path / "monitor.jsonl"),
-        suite_loader=_raising_loader,
-        benchmark_runner=_benchmark_runner_with_scores(0.5),  # never called
+        deps=MonitorDeps(load_suite=_raising_loader, run_benchmark=_benchmark_runner_with_scores(0.5)),  # never called
     )
 
     assert isinstance(result, MonitorResult)
@@ -313,8 +309,7 @@ def test_returns_empty_result_when_runner_raises(tmp_path: Path) -> None:
     result = run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(tmp_path / "monitor.jsonl"),
-        suite_loader=_suite_loader_with_n_cases(5),
-        benchmark_runner=_raising_runner,
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(5), run_benchmark=_raising_runner),
     )
 
     assert isinstance(result, MonitorResult)
@@ -334,8 +329,9 @@ def test_each_run_appends_an_entry_to_the_log(tmp_path: Path) -> None:
         run_monitor(
             suite_path=str(tmp_path / "canary.yaml"),
             log_path=str(log_path),
-            suite_loader=_suite_loader_with_n_cases(3),
-            benchmark_runner=_benchmark_runner_with_scores(0.72),
+            deps=MonitorDeps(
+                load_suite=_suite_loader_with_n_cases(3), run_benchmark=_benchmark_runner_with_scores(0.72)
+            ),
         )
 
     entries = _read_log(log_path)
@@ -351,17 +347,19 @@ def test_log_entry_for_a_run_records_its_ts_n_cases_and_weighted_ndcg(tmp_path: 
     run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(log_path),
-        suite_loader=_suite_loader_with_n_cases(7),
-        benchmark_runner=_benchmark_runner_with_scores(
-            0.8,
-            {
-                "recall": 1.0,
-                "temporal": 1.0,
-                "entity": 1.0,
-                "conceptual": 1.0,
-                "multi_hop": 1.0,
-                "procedural": 1.0,
-            },
+        deps=MonitorDeps(
+            load_suite=_suite_loader_with_n_cases(7),
+            run_benchmark=_benchmark_runner_with_scores(
+                0.8,
+                {
+                    "recall": 1.0,
+                    "temporal": 1.0,
+                    "entity": 1.0,
+                    "conceptual": 1.0,
+                    "multi_hop": 1.0,
+                    "procedural": 1.0,
+                },
+            ),
         ),
     )
 
@@ -451,8 +449,7 @@ def test_corrupt_log_lines_are_skipped_when_loading_for_baseline(tmp_path: Path)
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(log_path),
         alert_threshold=0.05,
-        suite_loader=_suite_loader_with_n_cases(5),
-        benchmark_runner=_benchmark_runner_with_scores(0.5),
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(5), run_benchmark=_benchmark_runner_with_scores(0.5)),
     )
 
     # Baseline = 0.8 (from the one valid entry). 0.5 is a 37.5% drop → regression.
@@ -477,8 +474,7 @@ def test_naive_timestamps_in_log_are_treated_as_utc_for_baseline_window(tmp_path
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(log_path),
         alert_threshold=0.05,
-        suite_loader=_suite_loader_with_n_cases(5),
-        benchmark_runner=_benchmark_runner_with_scores(0.5),
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(5), run_benchmark=_benchmark_runner_with_scores(0.5)),
     )
     # Baseline = 0.8 (the naive entry was correctly placed within the window).
     assert result.regression is True
@@ -493,8 +489,7 @@ def test_run_monitor_writes_to_explicit_log_path(tmp_path: Path) -> None:
     run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(log_path),
-        suite_loader=_suite_loader_with_n_cases(2),
-        benchmark_runner=_benchmark_runner_with_scores(0.6),
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(2), run_benchmark=_benchmark_runner_with_scores(0.6)),
     )
 
     assert log_path.exists(), "run_monitor must persist the log to the explicit path"
@@ -553,8 +548,7 @@ def test_log_entries_missing_ts_or_weighted_ndcg_are_excluded_from_baseline(tmp_
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(log_path),
         alert_threshold=0.05,
-        suite_loader=_suite_loader_with_n_cases(5),
-        benchmark_runner=_benchmark_runner_with_scores(0.5),
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(5), run_benchmark=_benchmark_runner_with_scores(0.5)),
     )
 
     # Only the one complete entry (0.8) contributes. 0.5 is a 37.5% drop → regression.

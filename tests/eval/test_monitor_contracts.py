@@ -17,7 +17,7 @@ import pytest
 
 from kairix.quality.benchmark.runner import BenchmarkResult
 from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
-from kairix.quality.eval.monitor import MonitorResult, run_monitor
+from kairix.quality.eval.monitor import MonitorDeps, MonitorResult, run_monitor
 
 
 def _suite_with_cases(n: int):
@@ -79,8 +79,7 @@ def test_monitor_result_vec_failed_count_counts_cases_with_failed_vector_search(
     result = run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(tmp_path / "monitor.jsonl"),
-        suite_loader=_suite_with_cases(3),
-        benchmark_runner=_runner,
+        deps=MonitorDeps(load_suite=_suite_with_cases(3), run_benchmark=_runner),
     )
 
     # Two of three cases have vec_failed=True — the count must reflect that.
@@ -121,8 +120,7 @@ def test_monitor_weighted_ndcg_equals_weighted_sum_of_category_scores(tmp_path: 
     result = run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(tmp_path / "monitor.jsonl"),
-        suite_loader=_suite_with_cases(6),
-        benchmark_runner=_runner,
+        deps=MonitorDeps(load_suite=_suite_with_cases(6), run_benchmark=_runner),
     )
 
     # Reconstruct the expected weighted sum: every CATEGORY_WEIGHTS key, with
@@ -172,8 +170,7 @@ def test_monitor_regression_detail_is_none_when_regression_is_false(tmp_path: Pa
     result = run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(log_path),
-        suite_loader=_suite_with_cases(3),
-        benchmark_runner=_runner,
+        deps=MonitorDeps(load_suite=_suite_with_cases(3), run_benchmark=_runner),
     )
 
     assert result.regression is False
@@ -201,8 +198,7 @@ def test_monitor_never_raises_when_loader_returns_a_malformed_suite(tmp_path: Pa
     result = run_monitor(
         suite_path=str(tmp_path / "canary.yaml"),
         log_path=str(tmp_path / "monitor.jsonl"),
-        suite_loader=_malformed_loader,
-        benchmark_runner=lambda *_a, **_kw: None,  # never called
+        deps=MonitorDeps(load_suite=_malformed_loader, run_benchmark=lambda *_a, **_kw: None),  # never called
     )
 
     assert isinstance(result, MonitorResult)

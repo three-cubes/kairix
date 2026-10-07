@@ -380,14 +380,27 @@ class Neo4jClient:
         """
         if not self._driver:
             return []
-        access_mode = "WRITE" if _is_write_query(query) else "READ"
         try:
-            with self._driver.session(default_access_mode=access_mode) as session:
-                result = session.run(query, **(params or {}))
-                return [dict(r) for r in result]
+            return self.cypher_or_raise(query, params)
         except Exception as e:
             logger.warning("cypher query failed: %s", e)
             return []
+
+    def cypher_or_raise(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """Execute a Cypher query, RAISING on failure instead of returning ``[]``.
+
+        Same access-mode derivation as :meth:`cypher`. For callers that must
+        not treat a rejected write as applied — the entity-signal drain acks a
+        row as pushed only when its MERGE did not raise. Raises
+        ``ConnectionError`` when no driver is connected, otherwise whatever
+        the Neo4j driver raised.
+        """
+        if not self._driver:
+            raise ConnectionError("neo4j: no active connection")
+        access_mode = "WRITE" if _is_write_query(query) else "READ"
+        with self._driver.session(default_access_mode=access_mode) as session:
+            result = session.run(query, **(params or {}))
+            return [dict(r) for r in result]
 
     def reset_graph(self) -> tuple[int, int]:
         """Drop every node and every relationship from the graph.

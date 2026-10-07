@@ -22,6 +22,8 @@ from typing import Any
 import pytest
 
 from kairix.core.protocols import Memory, MemoryStore
+from kairix.core.search.budget import BudgetedResult, Tier
+from kairix.core.search.rrf import FusedResult
 from kairix.memory_stores import KairixNativeMemory, KairixNativeMemoryStore
 from kairix.paths import KairixPaths
 from tests.fakes import FakePaths
@@ -36,24 +38,30 @@ pytestmark = pytest.mark.contract
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _StubHit:
-    """SearchPipeline hit shape — matches what use_cases.search consumes."""
+def _stub_hit(
+    path: str,
+    title: str,
+    snippet: str,
+    score: float,
+    tier: Tier = "L0",
+    tokens: int = 0,
+    collection: str = "shared",
+) -> BudgetedResult:
+    """Build a hit in the REAL SearchPipeline shape (``BudgetedResult``).
 
-    path: str
-    title: str
-    snippet: str
-    score: float
-    tier: str = "l0"
-    tokens: int = 0
-    collection: str = "shared"
+    The pipeline returns ``BudgetedResult`` rows wrapping a ``FusedResult``
+    (path/title/collection/score on ``.result``, text on ``.content``) —
+    the old flat stub encoded a shape the real pipeline never produces.
+    """
+    fused = FusedResult(path=path, collection=collection, title=title, snippet=snippet, boosted_score=score)
+    return BudgetedResult(result=fused, tier=tier, token_estimate=tokens, content=snippet)
 
 
 @dataclass
 class _StubSearchResult:
     """Stand-in for kairix.core.search.pipeline.SearchResult."""
 
-    results: list[_StubHit]
+    results: list[BudgetedResult]
     query: str = ""
     intent: Any = None
     bm25_count: int = 0
@@ -65,7 +73,7 @@ class _StubSearchResult:
 class _StubPipeline:
     """Records every search() call; returns a configured list of hits."""
 
-    def __init__(self, hits: list[_StubHit] | None = None) -> None:
+    def __init__(self, hits: list[BudgetedResult] | None = None) -> None:
         self._hits = list(hits or [])
         self.calls: list[dict[str, Any]] = []
 
@@ -160,13 +168,14 @@ def test_search_maps_hits_to_memory_objects(tmp_path) -> None:
     """Pipeline hits map cleanly into ``KairixNativeMemory`` records."""
     paths = FakePaths(document_root=tmp_path)
     hits = [
-        _StubHit(path="/a/b.md", title="Doc B", snippet="snippet b", score=0.9),
-        _StubHit(path="/c/d.md", title="Doc D", snippet="snippet d", score=0.6),
+        _stub_hit(path="memories/b.md", title="Doc B", snippet="snippet b", score=0.9),
+        _stub_hit(path="memories/d.md", title="Doc D", snippet="snippet d", score=0.6),
     ]
     store = KairixNativeMemoryStore(pipeline=_StubPipeline(hits=hits), paths=paths)
     result = store.search("anything")
     assert len(result) == 2
-    assert result[0].id == "/a/b.md"
+    assert result[0].id == "b", "id is the file stem — the same id add() returns"
+    assert result[0].metadata["path"] == "memories/b.md"
     assert result[0].content == "snippet b"
     assert result[0].score == 0.9
     assert result[0].metadata["title"] == "Doc B"
@@ -176,7 +185,7 @@ def test_search_maps_hits_to_memory_objects(tmp_path) -> None:
 def test_search_caps_results_at_top_k(tmp_path) -> None:
     """``top_k`` truncates the pipeline's result list."""
     paths = FakePaths(document_root=tmp_path)
-    hits = [_StubHit(path=f"/x/{i}.md", title=f"t{i}", snippet=f"s{i}", score=1.0 - i * 0.1) for i in range(10)]
+    hits = [_stub_hit(path=f"/x/{i}.md", title=f"t{i}", snippet=f"s{i}", score=1.0 - i * 0.1) for i in range(10)]
     store = KairixNativeMemoryStore(pipeline=_StubPipeline(hits=hits), paths=paths)
     result = store.search("anything", top_k=3)
     assert len(result) == 3, f"top_k=3 must cap result count; got {len(result)}"

@@ -20,8 +20,7 @@ Either signal missing → flagged. A binary that has the ``version`` var
 but no flag registered to print it isn't honouring G1; same for a flag
 registered without a build-time stamp target.
 
-Baseline: ``.architecture/baseline/go-version-flag-files.txt`` ships
-empty. New Go services land at zero violations by design.
+There is no grandfathering: every violation fails the gate.
 """
 
 from __future__ import annotations

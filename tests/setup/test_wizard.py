@@ -961,3 +961,58 @@ def test_wizard_index_prompt_shows_one_time_cost_estimate(tmp_path: Path, monkey
     out = capsys.readouterr().out
     assert "one-time indexing cost: ~$0.17" in out, f"scan-priced estimate missing:\n{out}"
     assert "monthly" not in out.lower(), "the per-month cost guess must be gone"
+
+
+@pytest.fixture
+def _restored_environ() -> Any:
+    """Snapshot the process environment and restore it after the test.
+
+    The production hydrate seam's JOB is to load the bundle into
+    ``os.environ``; this fixture undoes that side effect so it can't leak into
+    later tests. It never sets a value to influence a production read (F2).
+    """
+    import os
+
+    snapshot = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(snapshot)
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("_restored_environ")
+def test_persist_llm_credentials_hydrates_bundle_with_the_production_default(tmp_path: Path) -> None:
+    """With no ``hydrate_fn`` injected, the production default
+    (``refresh_secrets``) loads the just-written bundle into the process env,
+    so the in-process connection test resolves the stored values. A variable
+    the operator already exported keeps priority (sidecar secrets are fallback).
+
+    Sabotage proof: make ``_default_hydrate`` return 0 without calling
+    ``refresh_secrets`` — the endpoint/model values never reach ``os.environ``
+    and the assertions below fail. Restored.
+    """
+    import os
+
+    from kairix.platform.setup.wizard import persist_llm_credentials
+
+    written = {
+        "KAIRIX_PROVIDER_LLM_API_KEY": "example-credential-value",  # pragma: allowlist secret — generic fixture
+        "KAIRIX_PROVIDER_LLM_ENDPOINT": "https://example-resource.services.ai.azure.com",
+        "KAIRIX_PROVIDER_EMBED_MODEL": "text-embedding-3-large",  # pragma: allowlist secret — model name
+        "KAIRIX_PROVIDER_LLM_MODEL": "gpt-4o-mini",  # pragma: allowlist secret — model name
+    }
+    before = {name: os.environ.get(name) for name in written}
+    bundle = tmp_path / "kairix.env"
+
+    path = persist_llm_credentials(
+        written["KAIRIX_PROVIDER_LLM_API_KEY"],
+        written["KAIRIX_PROVIDER_LLM_ENDPOINT"],
+        written["KAIRIX_PROVIDER_EMBED_MODEL"],
+        written["KAIRIX_PROVIDER_LLM_MODEL"],
+        bundle_path=bundle,
+    )
+
+    assert path == bundle
+    for name, value in written.items():
+        expected = before[name] if before[name] is not None else value
+        assert os.environ.get(name) == expected, name

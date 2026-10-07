@@ -1,7 +1,0 @@
-# F94 baseline — kairix/** files that write to a system/OS path (literal target).
-# Grandfathered offenders only; net-new violations block at safe-commit + CI.
-#
-# Empty by design: the codebase routes every runtime config/state write
-# through kairix.paths (the writable data dir) and the config overlay, so
-# kairix runs least-privilege on hardened / read-only-root VMs. The system
-# installer (kairix/install/**) is exempt in the detector, not here.

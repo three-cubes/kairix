@@ -24,7 +24,7 @@ import pytest
 
 from kairix.core.factory import QUERY_CACHE_DISABLED, FactoryDeps, build_search_pipeline
 from kairix.core.search.config import RetrievalConfig
-from kairix.quality.probe.runner import SampledQuery, run_probe_search
+from kairix.quality.probe.runner import ProbeDeps, SampledQuery, run_probe_search
 from tests.fakes import (
     FakeClassifier,
     FakeCollectionResolver,
@@ -114,8 +114,7 @@ def test_per_query_records_carry_documented_keys() -> None:
         suite="x",
         queries=8,
         concurrency=2,
-        suite_loader=_suite_loader,
-        searcher=_make_searcher(pipeline),
+        deps=ProbeDeps(load_suite=_suite_loader, search=_make_searcher(pipeline)),
     )
     assert len(result.per_query_stages) == 8
     for record in result.per_query_stages:
@@ -144,8 +143,7 @@ def test_per_query_stage_latency_includes_embed_http_and_vector_ann() -> None:
         suite="x",
         queries=5,
         concurrency=1,
-        suite_loader=_suite_loader,
-        searcher=_make_searcher(pipeline),
+        deps=ProbeDeps(load_suite=_suite_loader, search=_make_searcher(pipeline)),
     )
     for record in result.per_query_stages:
         stage_map = record["stage_latency_ms"]
@@ -174,8 +172,7 @@ def test_per_query_embed_http_plus_vector_ann_sums_to_vector() -> None:
         suite="x",
         queries=6,
         concurrency=1,
-        suite_loader=_suite_loader,
-        searcher=_make_searcher(pipeline),
+        deps=ProbeDeps(load_suite=_suite_loader, search=_make_searcher(pipeline)),
     )
     for record in result.per_query_stages:
         stage_map = record["stage_latency_ms"]
@@ -201,8 +198,7 @@ def test_envelope_per_query_stages_is_json_shaped_list_of_records() -> None:
         suite="x",
         queries=4,
         concurrency=2,
-        suite_loader=_suite_loader,
-        searcher=_make_searcher(pipeline),
+        deps=ProbeDeps(load_suite=_suite_loader, search=_make_searcher(pipeline)),
     )
     env = result.to_envelope()
     assert "per_query_stages" in env
@@ -253,8 +249,7 @@ def test_slow_query_surfaces_in_per_query_records() -> None:
         suite="x",
         queries=30,
         concurrency=4,
-        suite_loader=_custom_loader,
-        searcher=latency_injecting_searcher,
+        deps=ProbeDeps(load_suite=_custom_loader, search=latency_injecting_searcher),
     )
     # At least the slow query made it into the sample (high probability with
     # 30 queries pulled from ~31 cases; the test asserts conditionally on it

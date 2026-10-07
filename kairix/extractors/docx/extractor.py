@@ -107,7 +107,7 @@ def _default_document_opener() -> DocxOpener:
     """
     try:
         import docx as _docx
-    except ImportError as exc:  # pragma: no cover — import path validated by make_extractor() test
+    except ImportError as exc:
         raise RuntimeError(
             "docx: the upstream 'python-docx' package is not installed. "
             "fix: pip install 'Kairix-agentic-knowledge-mgt[docx]' "

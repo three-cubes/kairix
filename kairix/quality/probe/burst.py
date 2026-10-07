@@ -15,8 +15,9 @@ Module API:
     if not result.passed:
         print(f"qps_drop={result.qps_drop_pct}% (peak={result.peak_qps} sustained={result.sustained_qps})")
 
-Test seam: ``suite_loader`` and ``searcher`` are injectable (same shape as
-``runner.py``) so tests stay hermetic with fakes from tests/fakes.py.
+Test seam: :class:`kairix.quality.probe.runner.ProbeDeps` (``load_suite`` +
+``search``) is injectable — the same Deps ``run_probe_search`` takes — so tests
+stay hermetic with fakes from tests/fakes.py.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from kairix.quality.probe.executor import run_concurrent
-from kairix.quality.probe.runner import SampledQuery
+from kairix.quality.probe.runner import ProbeDeps, SampledQuery
 from kairix.quality.probe.sampler import sample_weighted
 
 DEFAULT_QPS_DROP_PCT_THRESHOLD = 30.0  # % — sustained must stay within this of peak
@@ -146,29 +147,6 @@ def _bucket_to_envelope(b: BurstBucket) -> dict[str, float | int]:
         "errors": b.errors,
         "qps": b.qps,
     }
-
-
-def _default_suite_loader(suite: str) -> list[Any]:  # pragma: no cover — production path
-    """Resolve a suite name → list of BenchmarkCase. Production-only seam.
-
-    Mirrors ``run_probe_search``'s loader so the operator gets the same
-    name-shortcut UX (#222). Tests inject a fake list of cases.
-    """
-    from kairix.quality.benchmark.suite import load_suite, resolve_suite_path
-
-    suite_path = resolve_suite_path(suite)
-    return load_suite(str(suite_path)).cases
-
-
-def _default_search_fn(q: SampledQuery) -> Any:  # pragma: no cover — production path
-    """Thin shim over :class:`InProcessSearchClient`.
-
-    See :mod:`kairix.quality.probe.clients` for the Protocol contract +
-    future MCPHttpSearchClient drop-in (#284).
-    """
-    from kairix.quality.probe.clients import InProcessSearchClient
-
-    return InProcessSearchClient().search(q)
 
 
 def _build_sampled_queries(cases: list[Any], total_queries: int, seed: int) -> list[SampledQuery]:
@@ -380,8 +358,7 @@ def run_probe_burst(
     qps_drop_threshold_pct: float = DEFAULT_QPS_DROP_PCT_THRESHOLD,
     include_warmup: bool = False,
     *,
-    suite_loader: Callable[[str], list[Any]] | None = None,
-    searcher: Callable[[SampledQuery], Any] | None = None,
+    deps: ProbeDeps | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> BurstResult:
     """Inject ``total_queries`` as fast as possible and measure throughput drop.
@@ -397,8 +374,9 @@ def run_probe_burst(
             stats from every bucket (raw timeline mode). Default False — most
             operators want pre-completion + partial-final buckets excluded so
             ``peak_qps`` / ``sustained_qps`` reflect steady-state behaviour.
-        suite_loader: test seam — returns list[BenchmarkCase] for a suite name.
-        searcher: test seam — runs one SampledQuery through a search pipeline.
+        deps: :class:`~kairix.quality.probe.runner.ProbeDeps` carrying the
+            suite loader + per-query search callable. ``None`` (production)
+            binds the same defaults as ``run_probe_search``.
         clock: monotonic clock used for run and completion timestamps. Defaults
             to :func:`time.perf_counter`; deterministic callers may inject a
             controlled monotonic timeline.
@@ -419,10 +397,10 @@ def run_probe_burst(
     if bucket_ms < 1:
         raise ValueError(f"bucket_ms must be >= 1; got {bucket_ms}")
 
-    loader = suite_loader or _default_suite_loader
-    fn = searcher or _default_search_fn
+    deps = deps if deps is not None else ProbeDeps()
+    fn = deps.search
 
-    cases = loader(suite)
+    cases = deps.load_suite(suite)
     sampled = _build_sampled_queries(cases, total_queries, seed)
 
     run_start = clock()

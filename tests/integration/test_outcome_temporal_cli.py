@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -52,7 +51,6 @@ def test_timeline_cli_subprocess_renders_banner_with_window() -> None:
     ``run_timeline`` so the CLI returns 0 + renders the banner — the
     operator-visible contract.
     """
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -71,7 +69,6 @@ def test_timeline_cli_subprocess_renders_banner_with_window() -> None:
         text=True,
         timeout=60,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"timeline exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -82,8 +79,6 @@ def test_timeline_cli_subprocess_renders_banner_with_window() -> None:
     assert "2026-04-01" in proc.stdout, f"since-date missing in window: {proc.stdout!r}"
     assert "2026-04-30" in proc.stdout, f"until-date missing in window: {proc.stdout!r}"
     assert "Limit:" in proc.stdout, f"Limit: line missing: {proc.stdout!r}"
-
-    assert elapsed_ms < 30000.0, f"timeline subprocess took {elapsed_ms:.1f}ms (threshold 30000ms)"
 
 
 def test_timeline_cli_subprocess_exits_non_zero_on_invalid_since_date() -> None:

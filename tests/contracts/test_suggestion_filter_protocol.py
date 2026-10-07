@@ -1,10 +1,14 @@
 """Contract tests: SuggestionFilter protocol conformance.
 
-Verifies that every public filter strategy (and a small in-test fake)
-satisfies the :class:`SuggestionFilter` protocol via ``isinstance()``.
+Verifies that every public filter strategy AND the canonical
+:class:`tests.fakes.FakeSuggestionFilter` satisfy the
+:class:`SuggestionFilter` protocol via ``isinstance()`` and honour the
+shared ``apply`` return shape — one parametrized body (F43).
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import pytest
 
@@ -15,35 +19,33 @@ from kairix.knowledge.entities.filters import (
     RolePhraseFilter,
 )
 from kairix.knowledge.entities.protocols import Suggestion, SuggestionFilter
+from tests.fakes import FakeSuggestionFilter
+
+pytestmark = pytest.mark.contract
 
 
-@pytest.mark.contract
-class TestSuggestionFilterProtocolCompliance:
-    """All public filter classes satisfy SuggestionFilter."""
+@pytest.mark.parametrize(
+    "factory",
+    [
+        RolePhraseFilter,
+        lambda: KnownEntityAllowlist([]),
+        lambda: NerLabelFilter(set(), set()),
+        lambda: ChainedSuggestionFilter(filters=[]),
+        FakeSuggestionFilter,
+    ],
+    ids=["role_phrase", "known_entity_allowlist", "ner_label", "chained", "fake"],
+)
+def test_filter_satisfies_protocol(factory: Callable[[], SuggestionFilter]) -> None:
+    """Every filter is a runtime :class:`SuggestionFilter`; a neutral
+    suggestion passes through ``apply`` as a NEW list (never the input
+    list object, never None).
 
-    @pytest.mark.contract
-    def test_role_phrase_filter_satisfies_protocol(self) -> None:
-        assert isinstance(RolePhraseFilter(), SuggestionFilter)
-
-    @pytest.mark.contract
-    def test_known_entity_allowlist_satisfies_protocol(self) -> None:
-        assert isinstance(KnownEntityAllowlist([]), SuggestionFilter)
-
-    @pytest.mark.contract
-    def test_ner_label_filter_satisfies_protocol(self) -> None:
-        assert isinstance(NerLabelFilter(set(), set()), SuggestionFilter)
-
-    @pytest.mark.contract
-    def test_chained_suggestion_filter_satisfies_protocol(self) -> None:
-        assert isinstance(ChainedSuggestionFilter(filters=[]), SuggestionFilter)
-
-    @pytest.mark.contract
-    def test_in_test_fake_satisfies_protocol(self) -> None:
-        """An ad-hoc fake implementing apply() satisfies the protocol."""
-
-        class FakeFilter:
-            def apply(self, suggestions: list[Suggestion], context: str) -> list[Suggestion]:
-                del context
-                return list(suggestions)
-
-        assert isinstance(FakeFilter(), SuggestionFilter)
+    Sabotage proof: rename ``RolePhraseFilter.apply`` to ``apply_x``; the
+    ``role_phrase`` leg's isinstance check fails. Restored.
+    """
+    flt = factory()
+    assert isinstance(flt, SuggestionFilter)
+    neutral: list[Suggestion] = [{"text": "Acme", "label": "ORG", "source": "ner", "confidence": 0.9}]
+    out = flt.apply(neutral, "Acme announced results")
+    assert out is not neutral
+    assert [s["text"] for s in out] == ["Acme"]

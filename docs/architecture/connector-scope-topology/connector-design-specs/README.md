@@ -13,7 +13,7 @@ Plus four cross-cutting additions every spec carries:
 6. **Retrieval-quality contract** — per-connector gold-suite shape that catches IM-6-class regressions on this connector specifically
 7. **Implementation sequence** — explicit order of methods to land (lowest-novelty-risk first)
 8. **Test-fixture corpus contract** — what fixtures the E2E ships with under `tests/fixtures/<connector>/`
-9. **Expected F-rule baseline movements** — explicit delta at landing so cherry-pick review has the comparison point
+9. **Expected F-rule impact** — which F-rules the slice touches and how it lands at zero violations (there are no baseline files since PLA-472), so cherry-pick review has the comparison point
 
 ## Index
 
@@ -35,7 +35,7 @@ Slack first because its proactive-failure-mode design carries the most novel sur
 
 - **Reading**: §0 is the fastest orientation — "current state → target" + the mermaid diagram. §2 is the implementation contract for a subagent.
 - **Implementing**: follow the §7.5 implementation sequence end-to-end. Each method's acceptance criterion is the §2 row.
-- **Reviewing a cherry-pick**: §8 names the expected F-rule baseline movements; if reality differs, ask why before merging.
+- **Reviewing a cherry-pick**: §8 names the expected F-rule impact; if reality differs, ask why before merging.
 - **Operating**: §3 + §4 are the runbook — the dashboards / log queries / failure-mode catalogue.
 
 ## See also

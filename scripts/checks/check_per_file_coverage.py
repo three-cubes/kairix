@@ -7,8 +7,7 @@ the ``coverage.xml`` report must be ≥90% covered.
 Modes:
 
   - **F7 (unit only)**: invoked with one argument or no argument —
-    defaults gate name to ``per-file-coverage-floor`` and reads
-    baseline from ``per-file-coverage-floor-files.txt``. Reflects
+    defaults gate name to ``per-file-coverage-floor``. Reflects
     unit + bdd + contract coverage from Stage 2.
 
   - **F9 (union)**: invoked with a second positional argument naming
@@ -18,12 +17,9 @@ Modes:
     all test scopes; production-wiring files exercised only at
     integration scope no longer measure as uncovered.
 
-Files currently below the floor for a given gate are listed in
-``.architecture/baseline/<gate-name>-files.txt``. The check fails if a
-file NOT in that baseline is below the floor.
-
-Existing baseline files are grandfathered. The expectation is the
-baseline shrinks over time as testing improves.
+The check fails if ANY kairix/* file in the report is below the floor.
+There is no grandfathering (PLA-472 retired the per-file baselines): a
+file below the floor is fixed at source.
 
 Usage:
     python3 scripts/checks/check_per_file_coverage.py [coverage.xml] [gate-name]
@@ -65,11 +61,10 @@ the gap signals:
 
   * Genuinely production-only Adapter (dispatch + dep wiring; substantive
     logic delegated to tested modules)
-    → grandfather the file in this baseline with a rationale comment
-      (see kairix/agents/mcp/cold_start.py + kairix/worker.py for the
-      pattern). F50 blocks net-new files from baseline accretion, so
-      this only applies to pre-existing files; new code must be testable
-      via a Deps DI seam from day one.
+    → put the wiring behind a Deps DI seam (see kairix/worker.py::WorkerDeps)
+      so tests drive the dispatch branches with fakes, and cover the thin
+      remaining glue with an integration test (it counts toward the F9
+      union floor). There is no baseline to grandfather the file into.
 
 fix: pick the right path above for THIS file's gap. Do NOT add a unit
 test that calls the function once just to push coverage above {FLOOR:.0f}%
@@ -116,7 +111,7 @@ def parse_coverage(coverage_xml: Path) -> dict[Path, float]:
     Cobertura XML uses ``<source>`` to declare the source root and then
     emits ``<class filename="...">`` paths *relative to that root*. We
     prepend the source root so paths are repo-relative (``kairix/foo.py``)
-    matching how the baseline file stores them.
+    matching how the gate reports them.
     """
     if not coverage_xml.exists():
         print(f"ERROR: coverage report not found at {coverage_xml}", file=sys.stderr)

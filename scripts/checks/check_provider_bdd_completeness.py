@@ -29,8 +29,8 @@ NOT a plugin.
 The detector lists plugins, then for each plugin checks both the
 per-plugin feature file existence and Examples-row presence across
 every ``e2e_provider_*.feature``. Violations are reported as the
-plugin name (one entry per missing-coverage plugin), grandfathered
-through ``.architecture/baseline/f28-files.txt``.
+plugin name (one entry per missing-coverage plugin).
+There is no grandfathering: every violation fails the gate.
 
 If ``kairix/providers/`` does not exist or has no plugin
 subdirectories, the check passes trivially.
@@ -244,7 +244,7 @@ def collect_violations(repo_root: Path = REPO_ROOT) -> set[Path]:
         Examples-table row for ``<name>`` AND lacks the
         ``@<name>_no_<journey>`` opt-out tag.
 
-    The synthetic path is what the baseline tracks — one entry per
+    The synthetic path is what the gate reports — one entry per
     plugin missing coverage. Empty set if there are no plugins.
     """
     providers_root = repo_root / _PROVIDERS_DIR_REL

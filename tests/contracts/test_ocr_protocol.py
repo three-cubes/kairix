@@ -128,27 +128,64 @@ def _extractor(request: pytest.FixtureRequest) -> Extractor:
     return factory()
 
 
-@pytest.mark.contract
-def test_ocr_extractor_satisfies_protocol() -> None:
-    """The real factory returns an instance that is a runtime ``Extractor``."""
-    real = _make_real_with_stubs()
-    assert isinstance(real, Extractor)
-    assert isinstance(real, OcrExtractor)
+@pytest.fixture(
+    params=[
+        pytest.param(lambda: FakeOcrExtractor(scripted_confidence=0.30), id="fake"),
+        pytest.param(lambda: _make_real_with_stubs(mean_confidence=30.0), id="real"),
+    ]
+)
+def _low_confidence_extractor(request: pytest.FixtureRequest) -> Extractor:
+    """Extractor whose recognition comes back at 30% confidence (0.30 normalised)."""
+    factory: _Factory = request.param
+    return factory()
 
 
 @pytest.mark.contract
-def test_extractor_declares_version() -> None:
-    """F40 requirement — module-level ``version`` is non-empty."""
+def test_ocr_extractor_satisfies_protocol(_extractor: Extractor) -> None:
+    """Fake and real (stubbed) instances are runtime ``Extractor``s.
+
+    Sabotage proof: rename ``OcrExtractor.quality_ok`` in
+    kairix/extractors/ocr/extractor.py — the real leg's runtime probe fails.
+    """
+    assert isinstance(_extractor, Extractor)
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    "factory",
+    [pytest.param(make_real_extractor, id="real"), pytest.param(FakeOcrExtractor, id="fake")],
+)
+def test_extractor_declares_version(factory: _Factory) -> None:
+    """F40 requirement — module-level ``version`` is non-empty and every
+    impl carries it (the fake mirrors the plugin's declared version).
+
+    Sabotage proof: make ``make_extractor`` in kairix/extractors/ocr/__init__.py
+    pass ``version="0.0.0"`` — the real leg's equality fails.
+    """
     assert isinstance(ocr_version, str)
     assert ocr_version.strip() != ""
+    assert factory().version == ocr_version
 
 
 @pytest.mark.contract
-def test_real_factory_returns_ocr_instance() -> None:
-    """``make_extractor`` returns a real :class:`OcrExtractor`."""
-    real = make_real_extractor()
-    assert isinstance(real, OcrExtractor)
-    assert real.name == "ocr"
+@pytest.mark.parametrize(
+    "factory,expected_cls",
+    [
+        pytest.param(make_real_extractor, OcrExtractor, id="real"),
+        pytest.param(FakeOcrExtractor, FakeOcrExtractor, id="fake"),
+    ],
+)
+def test_real_factory_returns_ocr_instance(factory: _Factory, expected_cls: type) -> None:
+    """``make_extractor`` returns a real :class:`OcrExtractor`; both impls
+    are runtime ``Extractor``s registered under the ``ocr`` plugin name.
+
+    Sabotage proof: change ``PLUGIN_NAME`` in kairix/extractors/ocr/extractor.py
+    to ``"ocr2"`` — the real leg's name assertion fails.
+    """
+    impl = factory()
+    assert isinstance(impl, expected_cls)
+    assert isinstance(impl, Extractor)
+    assert impl.name == "ocr"
 
 
 @pytest.mark.contract
@@ -172,10 +209,13 @@ def test_can_extract_claims_image_mimes(_extractor: Extractor) -> None:
 
 
 @pytest.mark.contract
-def test_real_rejects_plain_text() -> None:
-    """The real impl refuses ``text/plain`` — that's passthrough's job."""
-    real = _make_real_with_stubs()
-    assert real.can_extract("text/plain", b"hello") is False
+def test_real_rejects_plain_text(_extractor: Extractor) -> None:
+    """Fake and real refuse ``text/plain`` — that's passthrough's job.
+
+    Sabotage proof: make ``OcrExtractor.can_extract`` return ``True`` for
+    ``text/plain`` — the real leg fails.
+    """
+    assert _extractor.can_extract("text/plain", b"hello") is False
 
 
 @pytest.mark.contract
@@ -194,8 +234,12 @@ def test_quality_ok_true_on_high_confidence_output(_extractor: Extractor) -> Non
 
 
 @pytest.mark.contract
-def test_quality_ok_false_on_low_confidence() -> None:
-    """Quality gate fails when Tesseract reports low confidence."""
-    extractor = _make_real_with_stubs(mean_confidence=30.0)
-    doc = extractor.extract(b"%PDF-1.4\n" + b"y" * 256, "application/pdf")
-    assert extractor.quality_ok(doc) is False
+def test_quality_ok_false_on_low_confidence(_low_confidence_extractor: Extractor) -> None:
+    """Quality gate fails when Tesseract reports low confidence.
+
+    Sabotage proof: set ``_QUALITY_MIN_CONFIDENCE = 0.0`` in
+    kairix/extractors/ocr/extractor.py — the real leg's gate passes.
+    """
+    doc = _low_confidence_extractor.extract(b"%PDF-1.4\n" + b"y" * 256, "application/pdf")
+    assert doc.confidence < 0.6
+    assert _low_confidence_extractor.quality_ok(doc) is False

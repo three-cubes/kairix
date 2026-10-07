@@ -9,79 +9,62 @@ The Protocol pins the SHAPE of the flow (classmethods, NOT instance
 methods) because the flow happens BEFORE the connector instance exists.
 Failure surface:
 
-  * ``raises`` — surfaces typed exception when the input is malformed
-    (empty state / empty code) for the inline failing impl; the
-    real shipped connectors deliberately tolerate the empty case
-    (they return a deterministic URL or envelope) so the orchestrator
-    can probe the surface.
-  * ``returns_partial`` — the shipped GitHub connector's
-    ``oauth_code_to_token`` returns an envelope WITHOUT the
-    access_token (the actual exchange happens in the callback handler);
-    the partial-envelope shape is the documented contract.
+  * ``raises`` — a connector with no three-legged consent flow
+    (client-credentials / app-only auth) surfaces a typed, actionable
+    ``NotImplementedError`` from both classmethods instead of handing
+    the operator a malformed URL or an empty token envelope.
+
+F43 parity: each test runs ONE body over the REAL client-credentials
+connectors that ship the OAuthConnector shim (SharePoint, M365 calendar,
+M365 email headers) AND the canonical
+:class:`FakeClientCredentialsOAuthConnector`.
 """
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
+from kairix.connectors.m365_calendar.connector import M365CalendarConnector
+from kairix.connectors.m365_email_headers.connector import M365EmailHeadersConnector
+from kairix.connectors.sharepoint.connector import SharePointConnector
 from kairix.core.protocols import OAuthConnector
+from tests.fakes import FakeClientCredentialsOAuthConnector
 
 pytestmark = pytest.mark.contract
 
-
-class _FailingOAuthConnector:
-    """Inline :class:`OAuthConnector` with raises-knobs."""
-
-    _raise_on_url: BaseException | None = None
-    _raise_on_token: BaseException | None = None
-
-    @classmethod
-    def oauth_authorization_url(cls, state: str) -> str:
-        del state
-        if cls._raise_on_url is not None:
-            raise cls._raise_on_url
-        return "https://example.invalid/authorize"
-
-    @classmethod
-    def oauth_code_to_token(cls, code: str) -> dict[str, Any]:
-        del code
-        if cls._raise_on_token is not None:
-            raise cls._raise_on_token
-        return {"access_token": "x"}
+_CLIENT_CREDENTIALS_CONNECTORS = [
+    pytest.param(SharePointConnector, id="real-sharepoint"),
+    pytest.param(M365CalendarConnector, id="real-m365_calendar"),
+    pytest.param(M365EmailHeadersConnector, id="real-m365_email_headers"),
+    pytest.param(FakeClientCredentialsOAuthConnector, id="fake"),
+]
 
 
-def test_oauth_authorization_url_raises_propagates_typed_exception() -> None:
-    """A URL-builder failure (e.g. invalid state encoding) surfaces —
-    callers must NOT redirect the operator to a malformed URL.
+@pytest.mark.parametrize("connector", _CLIENT_CREDENTIALS_CONNECTORS)
+def test_oauth_authorization_url_raises_propagates_typed_exception(connector: type[OAuthConnector]) -> None:
+    """A URL-builder failure surfaces — callers must NOT redirect the
+    operator to a malformed URL. The error is actionable (F21 ``fix:``).
 
-    Sabotage proof: drop the ``raise`` in
-    ``_FailingOAuthConnector.oauth_authorization_url``. Re-run:
-    pytest.raises sees nothing. Restored.
+    Sabotage proof: change ``SharePointConnector.oauth_authorization_url``
+    (kairix/connectors/sharepoint/connector.py) to ``return ""``. Re-run:
+    the real-sharepoint leg's pytest.raises sees nothing. Restored.
     """
-
-    class _RaisingURL(_FailingOAuthConnector):
-        _raise_on_url = ValueError("F68-oauth-url-raises")
-
-    conn: type[OAuthConnector] = _RaisingURL
-    with pytest.raises(ValueError, match="F68-oauth-url-raises"):
-        conn.oauth_authorization_url("state-value")
+    with pytest.raises(NotImplementedError, match="client-credentials flow only") as exc_info:
+        connector.oauth_authorization_url("state-value")
+    assert "fix:" in str(exc_info.value)
 
 
-def test_oauth_code_to_token_raises_propagates_typed_exception() -> None:
+@pytest.mark.parametrize("connector", _CLIENT_CREDENTIALS_CONNECTORS)
+def test_oauth_code_to_token_raises_propagates_typed_exception(connector: type[OAuthConnector]) -> None:
     """A code-exchange failure surfaces — callers must NOT silently
     return an empty token dict because the next request would 401 with
     no diagnostic context.
 
-    Sabotage proof: drop the ``raise`` in
-    ``_FailingOAuthConnector.oauth_code_to_token``. Re-run:
-    pytest.raises sees nothing. Restored.
+    Sabotage proof: change ``M365CalendarConnector.oauth_code_to_token``
+    (kairix/connectors/m365_calendar/connector.py) to ``return {}``.
+    Re-run: the real-m365_calendar leg's pytest.raises sees nothing.
+    Restored.
     """
-
-    class _RaisingToken(_FailingOAuthConnector):
-        _raise_on_token = RuntimeError("F68-oauth-token-raises")
-
-    conn: type[OAuthConnector] = _RaisingToken
-    with pytest.raises(RuntimeError, match="F68-oauth-token-raises"):
-        conn.oauth_code_to_token("code-value")
+    with pytest.raises(NotImplementedError, match="client-credentials flow only") as exc_info:
+        connector.oauth_code_to_token("code-value")
+    assert "fix:" in str(exc_info.value)

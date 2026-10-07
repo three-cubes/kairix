@@ -69,7 +69,7 @@ _ENTRY_HEAD_PATTERN = re.compile(
         "(?P<term>[^"]+)"     # quoted term
         \s*:\s*
         (?P<label>[A-Z_]+)    # uppercase label
-        (?P<tail>.*)$         # everything after the label — flags parsed separately
+        (?P<tail>(?:[^A-Z_\n].*)?)$  # everything after the label — flags parsed separately
     """,
     re.VERBOSE,
 )

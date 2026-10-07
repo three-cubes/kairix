@@ -18,11 +18,7 @@ Allow-list:
     shouldn't normally exist under ``services/`` but the exclusion mirrors
     F23's defensive posture.
 
-Baseline:
-
-  - ``.architecture/baseline/go-readme-coverage-files.txt`` lists missing
-    README paths (one per line). New services land at zero violations by
-    construction; the baseline file ships empty.
+There is no grandfathering: every violation fails the gate.
 """
 
 from __future__ import annotations
@@ -59,9 +55,8 @@ Forbidden example:
 
 Why: every Go binary represents a deliberate decision to leave the
 Python default. The README is where that decision is documented and
-where the next operator-reader picks up the context. Net-new
-violations block; pre-existing missing READMEs are grandfathered in
-.architecture/baseline/go-readme-coverage-files.txt until written."""
+where the next operator-reader picks up the context. Every
+violation blocks — there is no grandfathering; write the README."""
 
 
 def collect_violations(services_root: Path = SERVICES_DIR) -> set[Path]:

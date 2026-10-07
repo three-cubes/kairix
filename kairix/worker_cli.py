@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -44,8 +45,6 @@ from kairix.paths import worker_pause_flag_path, worker_state_path
 from kairix.worker_state import WorkerState, read_state
 
 if TYPE_CHECKING:
-    import sqlite3
-
     from kairix.core.connectors.topology_applier import ConfigDriftReport
 
 # argparse store-true action — extracted because the literal appears

@@ -318,7 +318,7 @@ Mechanical gates that fire and the tests that satisfy them:
 | F36 (connector plugin) | `connector_skills.feature` + Examples-table row in the E2E connector features |
 | F1/F2/F5/F6 | inject `RecommendDeps` / fakes from `tests/fakes.py`; no `@patch`, no `KAIRIX_*` setenv, public surface only, no `*_fn=None` |
 | F7/F9 | ≥90% per-file coverage on the new files |
-| F50 | net-new files born clean — no baseline grandfathering |
+| Full-tree gate | new files born clean — every F-rule runs over the whole tree with no baseline |
 
 **Recommendation-quality eval (F75-forward):** a gold set of `task → expected
 capability` cases under `kairix/data/suites/` (re-using the `SuiteRunner`

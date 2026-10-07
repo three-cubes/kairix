@@ -17,7 +17,7 @@ WHICH transport it measures decides which question gets answered:
   MCP framing, real warm-server pipeline, real client-side stopwatch. This
   is the PVT measurement (see docs/architecture/performance-testing-approach.md).
 
-The probe's ``searcher`` kwarg accepts any ``Callable[[SampledQuery], Any]``.
+The probe's ``ProbeDeps.search`` field accepts any ``Callable[[SampledQuery], Any]``.
 The Protocol below names the contract and exists for documentation +
 ``isinstance`` checks; the runtime kwarg type stays Callable so a bare
 lambda still works in tests, and so future client classes drop in by
@@ -42,7 +42,7 @@ class SearchClient(Protocol):
 
     Structural typing: any object with ``search(SampledQuery) -> Any``
     satisfies the protocol. Tests usually pass a bare callable to the
-    probe's ``searcher=`` kwarg, which IS Callable-shaped, not Protocol-
+    probe's ``ProbeDeps.search`` field, which IS Callable-shaped, not Protocol-
     shaped — both forms are accepted.
     """
 

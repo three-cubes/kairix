@@ -61,8 +61,8 @@ class LocationRule:
     """One location / singleton rule, expressed declaratively.
 
     Fields:
-        name: gate / baseline key (e.g. ``"f29"`` →
-            ``.architecture/baseline/f29-files.txt``).
+        name: gate name used in the verdict line (e.g. ``"f29"`` →
+            ``FAIL [arch:f29]``).
         kind: detection discriminator — ``"filename-regex"`` / ``"def-name"``
             / ``"ctor-call"``.
         pattern: compiled regex (filename / def-name kinds) or the literal

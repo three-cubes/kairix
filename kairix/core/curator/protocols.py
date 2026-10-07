@@ -27,8 +27,10 @@ class DrainGraphRepository(Protocol):
 
       * ``available`` — boolean; when ``False`` the drain treats the
         backend as unreachable and skips the tick.
-      * ``cypher(query, params)`` — executes a Cypher MERGE; rows
-        returned are ignored (the drain doesn't read them).
+      * ``cypher(query, params)`` — executes a Cypher MERGE and RAISES
+        when the backend rejects it; rows returned are ignored (the drain
+        doesn't read them). A swallowed failure would be acknowledged as
+        pushed and the signal lost.
 
     Implementations:
       * Production:
@@ -43,5 +45,5 @@ class DrainGraphRepository(Protocol):
         ...
 
     def cypher(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Run a Cypher MERGE; return rows (drain ignores)."""
+        """Run a Cypher MERGE; raise on failure; return rows (drain ignores)."""
         ...

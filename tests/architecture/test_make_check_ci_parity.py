@@ -27,10 +27,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MAKEFILE = _REPO_ROOT / "Makefile"
 _PYTHON_VERSION_FILE = _REPO_ROOT / ".python-version"
 
-# The CI Stage 2 python runtime matrix is 3.12-only (``requires-python >=3.12``;
-# the tc_fitness gate engine itself requires 3.12+). A pinned ``.python-version``
-# makes ``uv``/pyenv select the same interpreter locally.
-_CI_PYTHON = "3.12"
+# The CI Stage 2 python runtime matrix is 3.13-only: the tc_fitness gate engine
+# requires 3.13+ (v0.17 dropped 3.12; the kairix wheel still supports >=3.12). A
+# pinned ``.python-version`` makes ``uv``/pyenv select the same interpreter locally.
+_CI_PYTHON = "3.13"
 
 
 def _prerequisites_of(target: str, makefile_text: str) -> list[str]:
@@ -83,7 +83,7 @@ def test_check_target_runs_ci_coverage_gate() -> None:
 
 
 def test_python_version_pinned_to_ci_runtime() -> None:
-    """A pinned ``.python-version`` selects the CI runtime (3.12) locally."""
+    """A pinned ``.python-version`` selects the CI runtime (3.13) locally."""
     assert _PYTHON_VERSION_FILE.exists(), ".python-version must exist so uv/pyenv pin the CI interpreter locally"
     pinned = _PYTHON_VERSION_FILE.read_text(encoding="utf-8").strip()
     assert pinned.startswith(_CI_PYTHON), f".python-version must pin the CI runtime {_CI_PYTHON}, got '{pinned}'"

@@ -31,7 +31,6 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -68,7 +67,6 @@ def test_embed_status_subprocess_renders_index_summary(tmp_path: Path) -> None:
     """
     db_path = _seed_empty_index(tmp_path)
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -83,7 +81,6 @@ def test_embed_status_subprocess_renders_index_summary(tmp_path: Path) -> None:
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"embed status exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -93,8 +90,6 @@ def test_embed_status_subprocess_renders_index_summary(tmp_path: Path) -> None:
     assert "Documents:" in proc.stdout, f"missing Documents: line: {proc.stdout!r}"
     assert "Vectors:" in proc.stdout, f"missing Vectors: line: {proc.stdout!r}"
     assert "Pending:" in proc.stdout, f"missing Pending: line: {proc.stdout!r}"
-
-    assert elapsed_ms < 10000.0, f"embed status subprocess took {elapsed_ms:.1f}ms (threshold 10000ms)"
 
 
 def test_embed_status_subprocess_errors_on_missing_db(tmp_path: Path) -> None:

@@ -28,6 +28,7 @@ _CHECKS_DIR = _REPO_ROOT / "scripts" / "checks"
 if str(_CHECKS_DIR) not in sys.path:
     sys.path.insert(0, str(_CHECKS_DIR))
 
+import check_no_hardcoded_user_paths as f31  # noqa: E402
 from check_no_hardcoded_user_paths import _scan_file  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -91,3 +92,44 @@ def test_multiple_violations_in_one_file_all_get_reported(tmp_path: Path) -> Non
     assert len(violations) == 2
     assert "leaky.py:1" in violations[0]
     assert "leaky.py:2" in violations[1]
+
+
+def _recreate_retired_baseline(root: Path, gate_file: str, entry: str) -> None:
+    """Write a file at the retired ``.architecture/baseline/`` location naming
+    ``entry`` — the shape that used to grandfather it. PLA-472: it must have
+    no effect on the verdict."""
+    baseline = root / ".architecture" / "baseline" / gate_file
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    baseline.write_text(f"{entry}\n", encoding="utf-8")
+
+
+def test_violation_fails_even_with_a_recreated_baseline_file(tmp_path: Path) -> None:
+    """PLA-472: no grandfathering. A file listed in a re-created
+    ``no-hardcoded-user-paths-files.txt`` is still reported, and the module
+    exposes no baseline loader.
+
+    Sabotage proof (executed): re-adding ``if rel in baseline: continue`` (with
+    ``_load_baseline`` reading ``root/.architecture/baseline/...``) to
+    ``collect_violations`` drops the hit and this test goes red; restored →
+    green.
+    """
+    (tmp_path / "kairix").mkdir()
+    (tmp_path / "kairix" / "leaky.py").write_text('ROOT = "/Users/alice/dev/kairix"\n', encoding="utf-8")
+    _recreate_retired_baseline(tmp_path, "no-hardcoded-user-paths-files.txt", "kairix/leaky.py")
+
+    violations = f31.collect_violations(tmp_path, ["kairix/leaky.py"])
+
+    assert len(violations) == 1
+    assert violations[0].startswith("kairix/leaky.py:1")
+    assert not hasattr(f31, "_load_baseline")
+    assert not hasattr(f31, "BASELINE_FILE")
+
+
+def test_retired_baseline_dir_is_not_exempt() -> None:
+    """The retired ``.architecture/baseline/`` tree is no longer an exempt
+    prefix — a hardcoded path committed there is scanned like any other file.
+
+    Sabotage proof (executed): re-adding ``".architecture/baseline/"`` to
+    ``EXEMPT_PREFIX`` flips this red; restored → green.
+    """
+    assert f31._is_exempt_path(".architecture/baseline/x-files.txt") is False

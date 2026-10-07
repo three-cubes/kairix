@@ -29,6 +29,8 @@ code that should be removed, not pinned by a direct test.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from kairix.providers import ProviderHealth, ProviderUnreachable
@@ -275,6 +277,48 @@ def test_cache_recommendation_does_not_fire_at_zero_hit_rate() -> None:
     assert "cache_max_entries" not in fields
 
 
+class _RaisingSnapshotter:
+    """In-test ``TransportSnapshotter`` whose ``snapshot()`` raises."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.calls = 0
+
+    def snapshot(self) -> TransportSnapshot:
+        self.calls += 1
+        raise self._exc
+
+
+def test_raising_snapshotter_yields_degraded_report_instead_of_raising() -> None:
+    """``run_probe_config`` never raises — a failing snapshotter included (PLA-472).
+
+    Regression: ``snapshotter.snapshot()`` was called unguarded, so a
+    transport-stats failure escaped the documented never-raise contract.
+    It must instead produce a ``degraded`` report with a zeroed transport
+    section, the uniform stage keys, no invented recommendations, and a
+    warning naming the failure.
+
+    Sabotage proof: removing the try/except around ``snapshotter.snapshot()``
+    lets the RuntimeError escape and this test errors.
+    """
+    provider = FakeProvider(name="fake_snap", dim=1536, embed_latency_s=0.001)
+    snapshotter = _RaisingSnapshotter(RuntimeError("coalescer stats unavailable"))
+
+    report = run_probe_config(provider, snapshotter=snapshotter, **_fast_runner_kwargs())
+
+    assert snapshotter.calls == 1
+    assert report.status == STATUS_DEGRADED
+    assert report.exit_code == EXIT_CODE_DEGRADED
+    assert (
+        report.transport.coalesce_ratio,
+        report.transport.cache_hit_rate,
+        report.transport.pool_acquire_p50_ms,
+    ) == (0.0, 0.0, 0.0)
+    assert set(report.stage_latency_ms) == _REQUIRED_STAGE_KEYS
+    assert report.tuning_recommendations == []
+    assert any("coalescer stats unavailable" in w for w in report.warnings), report.warnings
+
+
 # ---------------------------------------------------------------------------
 # Schema fidelity
 # ---------------------------------------------------------------------------
@@ -420,3 +464,34 @@ def test_hostname_from_endpoint_handles_bare_hostname() -> None:
     assert hostname_from_endpoint("api.openai.com/v1/embeddings") == "api.openai.com"
     assert hostname_from_endpoint("") == ""
     assert hostname_from_endpoint("https://api.openai.com/v1") == "api.openai.com"
+
+
+class _FlakyHealthProvider(FakeProvider):
+    """A provider whose healthcheck passes once, then raises (a flapping endpoint)."""
+
+    def healthcheck(self) -> Any:
+        self.healthcheck_calls += 1
+        if self.healthcheck_calls > 1:
+            raise RuntimeError("health endpoint 500")
+        return super().healthcheck()
+
+
+def test_flapping_healthcheck_does_not_escape_the_report_builder() -> None:
+    """``run_probe_config`` never raises — a healthcheck that fails on its
+    second call included (PLA-472).
+
+    Regression: after the verdict path's (guarded) healthcheck passed, the
+    report builder called ``provider.healthcheck().endpoint`` again,
+    unguarded, so a flapping endpoint escaped the never-raise contract. The
+    report is built with an empty hostname instead.
+
+    Sabotage proof: restore ``endpoint_url = provider.healthcheck().endpoint``
+    in ``run_probe_config`` → the RuntimeError escapes and this test errors.
+    """
+    provider = _FlakyHealthProvider(name="fake_flap", dim=1536, embed_latency_s=0.001)
+
+    report = run_probe_config(provider, snapshotter=_StubSnapshotter(TransportSnapshot()), **_fast_runner_kwargs())
+
+    assert provider.healthcheck_calls >= 2  # the post-verdict call raised and was contained
+    assert report.provider.endpoint_hostname == ""
+    assert report.provider.name == "fake_flap"

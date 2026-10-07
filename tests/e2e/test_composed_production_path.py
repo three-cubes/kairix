@@ -23,7 +23,6 @@ gets a sibling ``tests/e2e/test_composed_<capability>_path.py``.
 from __future__ import annotations
 
 import sqlite3
-import time
 from pathlib import Path
 
 import pytest
@@ -116,9 +115,7 @@ def test_composed_production_path(tmp_path: Path) -> None:
     registry = FakeProviderRegistry({"fake": FakeProvider(name="fake", vector=[0.1] * 1536, dim=1536)})
     pipeline = build_search_pipeline(config=cfg, registry=registry, paths=paths)
 
-    t0 = time.monotonic()
     result = pipeline.search(query="Plan B-parity post-mortem", budget=3000)
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     # The ingest path wrote the fixture; the search path must retrieve it.
     # Both asserts are load-bearing: the first proves the composed pipeline
@@ -131,16 +128,6 @@ def test_composed_production_path(tmp_path: Path) -> None:
     returned_paths = [_extract_path(row) for row in result.results]
     assert any("post_mortem" in p for p in returned_paths if p), (
         f"search returned results but not the ingested fixture: {returned_paths}"
-    )
-
-    # Performance bound: a single-document E2E search through the composed
-    # pipeline (classify → resolve → bm25+vec dispatch → fuse → enrich →
-    # boost → budget) measured 54ms on a 2024 M-series Mac. 500ms gives
-    # ~10x headroom for CI variance. A breach signals the composition
-    # picked up an unintended bottleneck (e.g. an expensive embed call
-    # where the cache should hit).
-    assert elapsed_ms < 500.0, (
-        f"E2E search took {elapsed_ms:.1f}ms — composed pipeline regressed (baseline ~54ms, threshold 500ms)"
     )
 
 

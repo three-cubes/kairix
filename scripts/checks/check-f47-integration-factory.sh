@@ -6,7 +6,7 @@
 # (single-layer boundary proofs) or under tests/contracts/.
 #
 # This wrapper delegates to the AST detector; the Python script owns the
-# baseline-diff gate and prints the F21 action-marked remediation on failure.
+# gate verdict and prints the F21 action-marked remediation on failure.
 
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,7 +18,7 @@ next: see tests/integration/test_vec_index_lifecycle.py for the canonical
 pattern, and docs/architecture/test-discipline-hardening.md §4.2.
 run: bash scripts/checks/check-f47-integration-factory.sh"
 
-# The detector embeds its own baseline-diff gate (gate() from the tc_fitness package)
+# The detector embeds its own gate (gate() from the tc_fitness package; any violation fails)
 # — mirrors the F30 pattern. Echo the remediation if the script exits
 # non-zero so operators get the action markers regardless of how the
 # wrapper is invoked.

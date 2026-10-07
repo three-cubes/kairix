@@ -327,6 +327,12 @@ def _conformance_check() -> None:
 # required args.
 _BROWSER_CHECK: BrowserLauncher = _DefaultBrowser()
 
+#: Public name for the production :class:`BrowserLauncher` every Google flow
+#: falls back to when no ``browser=`` is injected — lets the
+#: ``BrowserLauncher`` contract test prove the shipped launcher and the
+#: canonical fake share one behaviour (F43) without a private import.
+DefaultBrowserLauncher = _DefaultBrowser
+
 
 __all__ = [
     "CALENDAR_READONLY_SCOPE",
@@ -334,5 +340,6 @@ __all__ = [
     "DRIVE_READONLY_SCOPE",
     "GMAIL_READONLY_SCOPE",
     "GOOGLE_TOKEN_URI",
+    "DefaultBrowserLauncher",
     "GoogleOAuth2Flow",
 ]

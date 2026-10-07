@@ -32,7 +32,7 @@ Trees enforced (first match wins; the order matters):
       CORE-binding config table ``_core_bindings.py`` (the
       ``[tool.tc_fitness.core_checks.*]`` blocks the catalogue's
       ``core:<module>`` rows inherit),
-      ``run-all.sh``, ``audit_baselines.py``, ``merge_coverage_xml.py``,
+      ``run-all.sh``, ``merge_coverage_xml.py``,
       the catalogue-runner tooling ``run_checks.py`` /
       ``generate_catalogue_docs.py`` (#499 — the in-process AST cache +
       precise staged selection now live in the shared three-cubes-fitness
@@ -42,8 +42,6 @@ Trees enforced (first match wins; the order matters):
   ``docs/operations/runbooks/`` and ``docs/runbooks/``
       Runbook docs. ``<topic>-<scenario>.md`` (kebab-case) or
       ``INDEX.md``.
-  ``.architecture/baseline/``
-      Baseline ratchets. ``<rule-name>-files.txt``.
 
 Files outside every tree-rule (top-level config, ``.github/``, etc.)
 are not constrained by F22.
@@ -51,11 +49,8 @@ are not constrained by F22.
 The detector walks ``git ls-files`` (tracked files only — generated
 artefacts and the worktree's ignored cruft are out of scope) and for
 each path picks the FIRST tree-rule whose prefix matches; if that
-rule's regex rejects the basename, the path is flagged.
-
-Baseline at ``.architecture/baseline/path-naming-files.txt`` lists
-current offenders so the gate lands green; the baseline is expected
-to shrink as files get renamed.
+rule's regex rejects the basename, the path is flagged. There is no
+grandfathering: every offending path fails the gate until renamed.
 """
 
 from __future__ import annotations
@@ -79,12 +74,11 @@ _SNAKE_FEATURE = re.compile(r"^[a-z][a-z0-9_]*\.feature$")
 _CHECK_SCRIPT_PY = re.compile(
     r"^(check_[a-z0-9_]+|_fitness_rule|_rule_catalogue|_integrity_invariants_registry"
     r"|_import_boundary_engine|_location_engine|_core_bindings|_mcp_registry"
-    r"|audit_baselines|merge_coverage_xml|run_checks|generate_catalogue_docs|mutation_parity"
+    r"|merge_coverage_xml|run_checks|generate_catalogue_docs|mutation_parity"
     r"|rules)\.py$"
 )
 _CHECK_SCRIPT_SH = re.compile(r"^(check[-_][a-z0-9-]+|_lib|run-all)\.sh$")
 _RUNBOOK_MD = re.compile(r"^(INDEX|README|[a-z][a-z0-9-]*)\.md$")
-_BASELINE_TXT = re.compile(r"^[a-z][a-z0-9-]*-files\.txt$")
 
 _TREE_RULES: tuple[tuple[str, re.Pattern[str], tuple[re.Pattern[str], ...]], ...] = (
     # Importable Python package — snake_case .py files only.
@@ -101,8 +95,6 @@ _TREE_RULES: tuple[tuple[str, re.Pattern[str], tuple[re.Pattern[str], ...]], ...
     # Runbooks — kebab-case markdown (or INDEX).
     ("docs/operations/runbooks/", re.compile(r"\.md$"), (_RUNBOOK_MD,)),
     ("docs/runbooks/", re.compile(r"\.md$"), (_RUNBOOK_MD,)),
-    # Architecture baseline lists — <rule-name>-files.txt.
-    (".architecture/baseline/", re.compile(r"\.txt$"), (_BASELINE_TXT,)),
 )
 
 REMEDIATION = """Refactor the file path to satisfy its tree's naming convention.
@@ -115,7 +107,6 @@ common cases are:
   - tests/bdd/features/*.feature → snake_case.feature
   - scripts/checks/check_*.py  → check_<rule>.py
   - docs/**/runbooks/*.md      → kebab-case.md
-  - .architecture/baseline/*.txt → <rule-name>-files.txt
 next: re-run python3 scripts/checks/check_path_naming.py to confirm
 the gate goes green.
 run: bash scripts/checks/run-all.sh
@@ -135,9 +126,8 @@ Forbidden example:
 
 Why: agents and humans cross-reference paths constantly (in CLAUDE.md,
 runbooks, error messages). A consistent shape per tree means a path
-mentioned in one place is greppable everywhere. Net-new violations
-block; pre-existing violators are grandfathered in
-.architecture/baseline/path-naming-files.txt until renamed."""
+mentioned in one place is greppable everywhere. Every violation
+blocks — there is no grandfathering; rename the file at source."""
 
 
 def _git_ls_files(repo_root: Path = REPO_ROOT) -> list[str]:

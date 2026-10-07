@@ -21,8 +21,7 @@ Detection: for each ``services/<name>/go.mod``:
 Empty ``go.mod`` (stdlib-only services like ``services/hello``) reports
 zero violations: nothing to rationalise.
 
-Baseline: ``.architecture/baseline/go-dependency-rationale-files.txt``
-ships empty. Adding a dep without a rationale fails at landing.
+There is no grandfathering: every violation fails the gate. Adding a dep without a rationale fails at landing.
 """
 
 from __future__ import annotations

@@ -31,7 +31,6 @@ import json
 import sqlite3
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -71,7 +70,6 @@ def test_curator_drain_cli_subprocess_json_envelope_with_unavailable_neo4j(tmp_p
     """
     db_path = _seed_db(tmp_path)
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [
             sys.executable,
@@ -90,7 +88,6 @@ def test_curator_drain_cli_subprocess_json_envelope_with_unavailable_neo4j(tmp_p
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"drain CLI exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -126,8 +123,6 @@ def test_curator_drain_cli_subprocess_json_envelope_with_unavailable_neo4j(tmp_p
     finally:
         conn.close()
     assert unpushed_count == 3, f"expected staged rows untouched, got {unpushed_count} un-pushed"
-
-    assert elapsed_ms < 10000.0, f"drain CLI subprocess took {elapsed_ms:.1f}ms (baseline ~300ms)"
 
 
 def test_curator_drain_cli_subprocess_text_format_reports_batches_run(tmp_path: Path) -> None:

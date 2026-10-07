@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from kairix.core.search.config import RerankConfig, RetrievalConfig
-from kairix.platform.warm import WARMUP_QUERY, run_warm
+from kairix.platform.warm import WARMUP_QUERY, WarmDeps, run_warm
 from kairix.platform.warm.runner import DETAIL_RERANK_NOT_WIRED
 from tests.fakes import FakeCrossEncoderLoader, FakeSearchPipeline
 
@@ -38,15 +38,15 @@ class _FakeStatsResult:
         self.detail = detail
 
 
-def _ok_deps() -> dict[str, Any]:
+def _ok_deps() -> WarmDeps:
     """Builders that all succeed — happy-path injection."""
     fake = _FakePipeline()
-    return {
-        "pipeline_builder": lambda: fake,
-        "search_probe": lambda p: p.search(query="__test__"),
-        "graph_client_opener": _FakeGraphClient,
-        "sqlite_stats_ensurer": lambda: _FakeStatsResult(),
-    }
+    return WarmDeps(
+        build_pipeline=lambda: fake,
+        search_probe=lambda p: p.search(query="__test__"),
+        open_graph_client=_FakeGraphClient,
+        ensure_sqlite_stats=lambda: _FakeStatsResult(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +56,7 @@ def _ok_deps() -> dict[str, Any]:
 
 def test_happy_path_runs_every_step() -> None:
     """All five steps execute and report ok=True."""
-    result = run_warm(**_ok_deps())
+    result = run_warm(deps=_ok_deps())
     assert result.ok is True
     assert result.failures == []
     assert {s.name for s in result.steps} == {
@@ -103,10 +103,12 @@ def test_pipeline_build_failure_skips_probe_but_runs_graph() -> None:
         raise RuntimeError("factory exploded")
 
     result = run_warm(
-        pipeline_builder=boom,
-        search_probe=lambda p: p,
-        graph_client_opener=_FakeGraphClient,
-        sqlite_stats_ensurer=lambda: _FakeStatsResult(),
+        deps=WarmDeps(
+            build_pipeline=boom,
+            search_probe=lambda p: p,
+            open_graph_client=_FakeGraphClient,
+            ensure_sqlite_stats=lambda: _FakeStatsResult(),
+        ),
     )
     assert result.ok is False
     by_name = {s.name: s for s in result.steps}
@@ -130,10 +132,12 @@ def test_graph_failure_doesnt_block_search_warmup() -> None:
         raise ConnectionError("Neo4j unreachable")
 
     result = run_warm(
-        pipeline_builder=lambda: fake,
-        search_probe=lambda p: p.search(query="__test__"),
-        graph_client_opener=boom_graph,
-        sqlite_stats_ensurer=lambda: _FakeStatsResult(),
+        deps=WarmDeps(
+            build_pipeline=lambda: fake,
+            search_probe=lambda p: p.search(query="__test__"),
+            open_graph_client=boom_graph,
+            ensure_sqlite_stats=lambda: _FakeStatsResult(),
+        ),
     )
     assert result.ok is False
     by_name = {s.name: s for s in result.steps}
@@ -149,7 +153,7 @@ def test_graph_failure_doesnt_block_search_warmup() -> None:
 
 
 def test_envelope_shape_matches_design_spec() -> None:
-    env = run_warm(**_ok_deps()).to_envelope()
+    env = run_warm(deps=_ok_deps()).to_envelope()
     for key in ("ok", "total_duration_s", "steps", "failures"):
         assert key in env, f"missing key {key!r}; got {sorted(env.keys())}"
     for step in env["steps"]:
@@ -173,7 +177,7 @@ def test_progress_callback_fires_once_per_stage_in_order() -> None:
     """
     observed: list[str] = []
 
-    run_warm(progress_callback=observed.append, **_ok_deps())
+    run_warm(progress_callback=observed.append, deps=_ok_deps())
 
     assert observed == [
         "build_search_pipeline",
@@ -196,7 +200,7 @@ def test_progress_callback_exception_does_not_abort_warm() -> None:
     def explode(_stage_name: str) -> None:
         raise RuntimeError("observer boom")
 
-    result = run_warm(progress_callback=explode, **_ok_deps())
+    result = run_warm(progress_callback=explode, deps=_ok_deps())
 
     assert result.ok is True, f"callback exception must not abort warm; got {result.failures!r}"
     assert {s.name for s in result.steps} == {
@@ -216,17 +220,17 @@ def test_progress_callback_exception_does_not_abort_warm() -> None:
 _TEST_RERANK_MODEL = "cross-encoder/test-warm-model"
 
 
-def _rerank_deps(cfg: RetrievalConfig, loader: FakeCrossEncoderLoader) -> dict[str, Any]:
+def _rerank_deps(cfg: RetrievalConfig, loader: FakeCrossEncoderLoader) -> WarmDeps:
     """Happy-path deps whose built pipeline carries ``cfg`` and whose
     cross-encoder load is routed through the recording ``loader``."""
     pipeline = FakeSearchPipeline(config=cfg)
-    return {
-        "pipeline_builder": lambda: pipeline,
-        "search_probe": lambda p: p.search(query="__test__"),
-        "graph_client_opener": _FakeGraphClient,
-        "sqlite_stats_ensurer": lambda: _FakeStatsResult(),
-        "cross_encoder_loader": loader,
-    }
+    return WarmDeps(
+        build_pipeline=lambda: pipeline,
+        search_probe=lambda p: p.search(query="__test__"),
+        open_graph_client=_FakeGraphClient,
+        ensure_sqlite_stats=lambda: _FakeStatsResult(),
+        load_cross_encoder=loader,
+    )
 
 
 def _rerank_step(result: Any) -> Any:
@@ -252,7 +256,7 @@ def test_warms_cross_encoder_when_rerank_wired_via_intents() -> None:
     assert cfg.rerank.enabled is False and cfg.rerank_intents, "fixture must be wired via intents, not enabled"
     loader = FakeCrossEncoderLoader()
 
-    result = run_warm(**_rerank_deps(cfg, loader))
+    result = run_warm(deps=_rerank_deps(cfg, loader))
 
     assert loader.models == [_TEST_RERANK_MODEL], (
         f"warm must force-load the config's rerank model exactly once; got {loader.models!r}"
@@ -270,7 +274,7 @@ def test_warms_cross_encoder_when_rerank_force_enabled() -> None:
     cfg = RetrievalConfig(rerank=RerankConfig(enabled=True, model=_TEST_RERANK_MODEL), rerank_intents=())
     loader = FakeCrossEncoderLoader()
 
-    result = run_warm(**_rerank_deps(cfg, loader))
+    result = run_warm(deps=_rerank_deps(cfg, loader))
 
     assert loader.models == [_TEST_RERANK_MODEL], f"force-enabled rerank must warm the model; got {loader.models!r}"
     assert _rerank_step(result).ok is True
@@ -287,7 +291,7 @@ def test_does_not_warm_cross_encoder_when_rerank_fully_disabled() -> None:
     cfg = RetrievalConfig(rerank=RerankConfig(enabled=False, model=_TEST_RERANK_MODEL), rerank_intents=())
     loader = FakeCrossEncoderLoader()
 
-    result = run_warm(**_rerank_deps(cfg, loader))
+    result = run_warm(deps=_rerank_deps(cfg, loader))
 
     assert loader.calls == 0, f"disabled rerank must not load the cross-encoder; got models={loader.models!r}"
     step = _rerank_step(result)

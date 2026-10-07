@@ -36,16 +36,15 @@ Sabotage-proof (both executed):
       — the no-subcommand test's ``returncode == 1`` assertion fails.
       Restored.
 
-Latency baseline (2024 M-series Mac): subprocess wall ~150-300ms (the
-MCP CLI lazy-imports build_server / uvicorn so --help is fast). Test
-threshold: 10000ms.
+No wall-clock ceiling is asserted (F82): elapsed time measures the host
+scheduler, not kairix behaviour. The subprocess ``timeout=`` is a hang
+guard only; the assertions are on exit code + emitted output.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -59,14 +58,12 @@ def test_mcp_cli_subprocess_help_outcome() -> None:
     the ``serve`` subcommand is discoverable from the help output. F30
     contract: subprocess + stdout content assertion.
     """
-    t0 = time.monotonic()
     proc = subprocess.run(
         [sys.executable, "-m", "kairix.cli", "mcp", "--help"],
         capture_output=True,
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"mcp --help exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
@@ -75,8 +72,6 @@ def test_mcp_cli_subprocess_help_outcome() -> None:
         f"help text missing top-level CLI description: {proc.stdout!r}"
     )
     assert "serve" in proc.stdout, f"help text missing serve subcommand: {proc.stdout!r}"
-
-    assert elapsed_ms < 10000.0, f"mcp --help subprocess took {elapsed_ms:.1f}ms (baseline ~200ms, threshold 10000ms)"
 
 
 def test_mcp_cli_subprocess_no_subcommand_exits_one() -> None:

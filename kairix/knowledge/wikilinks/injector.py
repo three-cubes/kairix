@@ -88,9 +88,8 @@ def should_inject(path: str, *, paths: KairixPaths | None = None) -> bool:
         return False
 
     # Check for ineligible substrings
-    for substr in _INELIGIBLE_SUBSTRINGS:
-        if substr in path:
-            return False
+    if any(substr in path for substr in _INELIGIBLE_SUBSTRINGS):
+        return False
 
     # Check file size if it exists
     try:
@@ -106,16 +105,10 @@ def should_inject(path: str, *, paths: KairixPaths | None = None) -> bool:
     if path.startswith(workspace_prefix):
         parts = path[len(workspace_prefix) :].split("/")
         # parts[0] = workspace name, parts[1] = 'memory', parts[-1] = filename
-        if len(parts) >= 3 and parts[1] == "memory":
-            return True
-        return False
+        return len(parts) >= 3 and parts[1] == "memory"
 
-    # Obsidian vault paths
-    for prefix in prefixes[1:]:  # skip <workspace-root>/ already handled
-        if path.startswith(prefix):
-            return True
-
-    return False
+    # Obsidian vault paths — skip <workspace-root>/ (already handled above)
+    return any(path.startswith(prefix) for prefix in prefixes[1:])
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +211,24 @@ def _find_already_linked(content: str) -> set[str]:
     return linked
 
 
+def _frontmatter_end(content: str) -> int:
+    """Offset just past a leading ``---`` frontmatter block, or 0 if none.
+
+    The block includes the closing ``---`` and its trailing newline (when
+    present). An unclosed leading ``---`` is not frontmatter.
+    """
+    if not content.startswith("---"):
+        return 0
+    end = content.find("\n---", 3)
+    if end == -1:
+        return 0
+    # Include the closing --- and trailing newline (the four chars of "\n---")
+    fm_end = end + 4
+    if fm_end < len(content) and content[fm_end] == "\n":
+        fm_end += 1
+    return fm_end
+
+
 def _parse_segments(content: str) -> list[tuple[str, str]]:
     """
     Split content into typed segments:
@@ -228,20 +239,12 @@ def _parse_segments(content: str) -> list[tuple[str, str]]:
     Inline code (backtick spans) are handled in _inject_in_text.
     """
     segments: list[tuple[str, str]] = []
-    pos = 0
     n = len(content)
 
-    # Check for frontmatter (must be at very start of file)
-    if content.startswith("---"):
-        # Find closing ---
-        end = content.find("\n---", 3)
-        if end != -1:
-            # Include the closing --- and trailing newline (the four chars of "\n---")
-            fm_end = end + 4
-            if fm_end < n and content[fm_end] == "\n":
-                fm_end += 1
-            segments.append(("frontmatter", content[pos:fm_end]))
-            pos = fm_end
+    # Frontmatter (must be at very start of file)
+    pos = _frontmatter_end(content)
+    if pos:
+        segments.append(("frontmatter", content[:pos]))
 
     # Process remaining content
     while pos < n:

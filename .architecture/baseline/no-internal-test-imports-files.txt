@@ -1,6 +1,0 @@
-# F5 — pre-existing tests reaching into kairix.* private (_-prefixed) names
-# via attribute access on imported modules. Baseline drained 2026-06-06 —
-# remaining helpers were renamed to public surfaces (the test-touched
-# helpers were already part of the production DI / module behaviour
-# contract; the underscore was misleading). See the safe-commit commit for
-# the rename list.

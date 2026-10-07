@@ -9,10 +9,8 @@ sibling module — F5):
   - Default construction returns a dataclass whose fields are all
     callable production wrappers.
   - Production-default behaviour exercised by *calling* the
-    auto-bound callables and observing pass-through to the
-    embed/schema/paths modules. The wrappers are swapped at their
-    underlying module's public attribute so the lazy imports inside
-    the wrappers see our stand-in implementations.
+    auto-bound callables against the real embed/schema/paths code —
+    the network-bound ones through the embed module's ``client=`` seam.
 
 The default-callable tests verify the wiring via the public renamed
 helpers ``get_azure_config_from_credentials`` /
@@ -22,6 +20,7 @@ helpers ``get_azure_config_from_credentials`` /
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -144,202 +143,156 @@ def test_deps_two_instances_share_default_callables() -> None:
     assert d1.get_document_root is d2.get_document_root
 
 
-# ── Default-callable behaviour — pass-through via module-attribute swap ──
+# ── Default-callable behaviour — driven through the real production path ──
+#
+# Each default wrapper is exercised for real: the network-bound ones through
+# the embed module's own ``client=`` seam (threaded via ``**kwargs``), the
+# local ones against an in-memory SQLite / the hermetic session env. No
+# kairix module attribute is swapped (F1).
+
+
+class _RecordingEmbeddingItem:
+    def __init__(self, index: int, embedding: list[float]) -> None:
+        self.index = index
+        self.embedding = embedding
+
+
+class _RecordingEmbeddings:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, *, model: str, input: list[str], dimensions: int) -> Any:
+        self.calls.append({"model": model, "input": list(input), "dimensions": dimensions})
+
+        return SimpleNamespace(data=[_RecordingEmbeddingItem(i, [0.1] * dimensions) for i in range(len(input))])
+
+
+class _RecordingOpenAIClient:
+    """OpenAI-compatible fake for the embed module's ``client=`` seam."""
+
+    def __init__(self) -> None:
+        self.embeddings = _RecordingEmbeddings()
 
 
 @pytest.mark.unit
-def test_default_get_azure_config_calls_through_to_embed_module() -> None:
-    """The default ``get_azure_config`` wrapper delegates to
-    ``kairix.core.embed.embed.get_azure_config_from_credentials`` (the function-local
-    lazy import resolves freshly each call, so swapping the embed
-    module attribute is sufficient).
+def test_default_get_azure_config_resolves_through_embed_credentials() -> None:
+    """The default ``get_azure_config`` wrapper resolves the ``embed``
+    credentials chain. The hermetic session baseline clears every operator
+    provider credential, so the real chain raises the typed
+    ``SecretNotFoundError`` (a ``LookupError``) naming the missing secret.
 
-    Sabotage proof: if the wrapper hard-coded a stale reference, the
-    swap would not be observed and the assertion would fail.
+    Sabotage proof: a wrapper that returned a hard-coded tuple instead of
+    delegating would not raise and this assertion fails.
     """
-    from kairix.core.embed import embed as embed_mod
+    from kairix.secrets import SecretNotFoundError
 
-    real = embed_mod.get_azure_config_from_credentials
-    embed_mod.get_azure_config_from_credentials = lambda: ("KEY", "https://e", "DEPLOY")  # type: ignore[assignment]  # module-attribute swap to drive failure paths; restored in finally
-    try:
-        deps = EmbedDependencies()
-        result = deps.get_azure_config()
-    finally:
-        embed_mod.get_azure_config_from_credentials = real  # type: ignore[assignment]  # module-attribute swap to drive failure paths; restored in finally
-
-    assert result == ("KEY", "https://e", "DEPLOY")
+    deps = EmbedDependencies()
+    with pytest.raises(SecretNotFoundError, match="api-key"):
+        deps.get_azure_config()
 
 
 @pytest.mark.unit
 def test_default_preflight_check_calls_through_to_embed_module() -> None:
     """The default ``preflight_check`` wrapper delegates to
-    ``kairix.core.embed.embed.preflight_check`` and threads the
-    (api_key, endpoint, deployment) tuple unchanged.
+    ``kairix.core.embed.embed.preflight_check`` — the deployment reaches the
+    client and the returned dims are the embedding length.
+
+    Sabotage proof: dropping the ``**kwargs`` pass-through (or the delegation)
+    builds a real client against ``https://e`` instead of using the fake.
     """
-    from kairix.core.embed import embed as embed_mod
+    client = _RecordingOpenAIClient()
+    deps = EmbedDependencies()
+    result = deps.preflight_check("k", "https://e", "deploy-x", client=client)
 
-    captured: dict[str, object] = {}
-
-    def fake_preflight(api_key: str, endpoint: str, deployment: str, **_kw: object) -> int:
-        captured["args"] = (api_key, endpoint, deployment)
-        return 1536
-
-    real = embed_mod.preflight_check
-    embed_mod.preflight_check = fake_preflight  # type: ignore[assignment]  # module-attribute swap to drive failure paths; restored in finally
-    try:
-        deps = EmbedDependencies()
-        result = deps.preflight_check("k", "e", "d")
-    finally:
-        embed_mod.preflight_check = real  # type: ignore[assignment]  # module-attribute swap to drive failure paths; restored in finally
-
-    assert result == 1536
-    assert captured["args"] == ("k", "e", "d")
+    assert result == client.embeddings.calls[0]["dimensions"]
+    assert client.embeddings.calls[0]["model"] == "deploy-x"
+    assert client.embeddings.calls[0]["input"] == ["preflight check"]
 
 
 @pytest.mark.unit
 def test_default_embed_batch_calls_through_to_embed_module() -> None:
-    """The default ``embed_batch`` wrapper passes texts + Azure config
-    + dims through to ``kairix.core.embed.embed.embed_batch``.
+    """The default ``embed_batch`` wrapper passes texts + deployment + dims
+    through to ``kairix.core.embed.embed.embed_batch``.
     """
-    from kairix.core.embed import embed as embed_mod
-
-    captured: dict[str, object] = {}
-
-    def fake_batch(
-        texts: list[str],
-        api_key: str,
-        endpoint: str,
-        deployment: str,
-        dims: int,
-        **_kw: object,
-    ) -> list[list[float]]:
-        captured["call"] = (list(texts), api_key, endpoint, deployment, dims)
-        return [[0.1] * dims for _ in texts]
-
-    real = embed_mod.embed_batch
-    embed_mod.embed_batch = fake_batch  # type: ignore[assignment]  # module-attribute swap to drive failure paths; restored in finally
-    try:
-        deps = EmbedDependencies()
-        result = deps.embed_batch(["hi"], "k", "e", "d", 4)
-    finally:
-        embed_mod.embed_batch = real  # type: ignore[assignment]  # module-attribute swap to drive failure paths; restored in finally
+    client = _RecordingOpenAIClient()
+    deps = EmbedDependencies()
+    result = deps.embed_batch(["hi"], "k", "https://e", "d", 4, client=client)
 
     assert result == [[0.1, 0.1, 0.1, 0.1]]
-    assert captured["call"] == (["hi"], "k", "e", "d", 4)
+    assert client.embeddings.calls == [{"model": "d", "input": ["hi"], "dimensions": 4}]
 
 
 @pytest.mark.unit
-def test_default_open_usearch_index_calls_through_to_embed_module() -> None:
-    """The default ``open_usearch_index`` wrapper returns whatever
-    ``kairix.core.embed.embed.open_default_usearch_index`` returns (incl.
-    ``None``).
+def test_default_open_usearch_index_is_none_when_worker_writes_disabled() -> None:
+    """The default ``open_usearch_index`` wrapper returns what
+    ``open_default_usearch_index`` returns — ``None`` under the default
+    (unset) ``KAIRIX_WORKER_WRITES_VEC_INDEX`` gate (#335).
     """
-    from kairix.core.embed import embed as embed_mod
-
-    sentinel = object()
-    real = embed_mod.open_default_usearch_index
-    embed_mod.open_default_usearch_index = lambda: sentinel  # type: ignore[assignment]  # module-attribute swap to drive failure paths; restored in finally
-    try:
-        deps = EmbedDependencies()
-        result = deps.open_usearch_index()
-    finally:
-        embed_mod.open_default_usearch_index = real  # type: ignore[assignment]  # module-attribute swap to drive failure paths; restored in finally
-
-    assert result is sentinel
+    deps = EmbedDependencies()
+    assert deps.open_usearch_index() is None
 
 
 @pytest.mark.unit
-def test_default_migrate_content_vectors_calls_through_to_schema_module() -> None:
-    """The default ``migrate_content_vectors`` wrapper threads the
-    SQLite connection through to ``kairix.core.embed.schema.migrate_content_vectors``.
+def test_default_migrate_content_vectors_applies_schema_migration() -> None:
+    """The default ``migrate_content_vectors`` wrapper runs the real
+    ``kairix.core.embed.schema.migrate_content_vectors`` against the
+    connection — the ``chunk_date`` column is added.
+
+    Sabotage proof: a no-op wrapper leaves the column missing.
     """
-    from kairix.core.embed import schema as schema_mod
-
-    seen: list[sqlite3.Connection] = []
-
-    def fake_migrate(db: sqlite3.Connection) -> None:
-        seen.append(db)
-
-    real = schema_mod.migrate_content_vectors
-    schema_mod.migrate_content_vectors = fake_migrate  # type: ignore[assignment]  # module-attribute swap to drive failure paths; restored in finally
+    db = sqlite3.connect(":memory:")
     try:
-        db = sqlite3.connect(":memory:")
-        try:
-            deps = EmbedDependencies()
-            deps.migrate_content_vectors(db)
-        finally:
-            db.close()
+        db.execute("CREATE TABLE content_vectors (hash_seq TEXT PRIMARY KEY, embedding BLOB)")
+        EmbedDependencies().migrate_content_vectors(db)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(content_vectors)")}
     finally:
-        schema_mod.migrate_content_vectors = real  # type: ignore[assignment]  # module-attribute swap to drive failure paths; restored in finally
+        db.close()
 
-    assert len(seen) == 1
+    assert "chunk_date" in columns
 
 
 # ── default_get_document_root — tolerated-failure branch ─────────────
 
 
+# An operator path override naming a home directory that does not exist
+# (``~<no-such-user>/...``) makes the real kairix.paths resolver raise
+# ``RuntimeError`` from ``Path.expanduser`` — a genuine paths-layer failure,
+# driven through the ``env=`` seam instead of swapping ``kairix.paths`` in
+# ``sys.modules`` (F1) or writing the process env (F2).
+_UNRESOLVABLE_HOME_PATH = "~kairix-no-such-user-zz/kairix"
+
+
 @pytest.mark.unit
 def test_default_get_document_root_returns_none_when_paths_layer_raises() -> None:
-    """When the paths layer is unavailable, ``deps.get_document_root()``
-    returns ``None`` (and logs a warning) rather than propagating.
+    """When the paths layer raises, ``deps.get_document_root()`` returns
+    ``None`` (and logs a warning) rather than propagating.
 
     The embed pipeline only uses the document root for chunk-date
-    heuristics; a missing paths layer must not crash the run.
+    heuristics; a failing paths layer must not crash the run.
 
-    Driven by replacing the ``kairix.paths`` module in ``sys.modules``
-    with a sentinel whose ``document_root()`` raises. The default
-    wrapper imports lazily so the swap is observed.
+    Sabotage proof: dropping the ``try/except`` in the default wrapper lets
+    the ``RuntimeError`` escape and this test errors.
     """
-    import sys
-    import types
-
-    fake_paths = types.ModuleType("kairix.paths")
-
-    def _boom() -> str:
-        raise RuntimeError("paths layer not initialised")
-
-    fake_paths.document_root = _boom  # type: ignore[attr-defined]  # synthetic stand-in module; mypy doesn't know our test attrs
-    real_paths = sys.modules.get("kairix.paths")
-    sys.modules["kairix.paths"] = fake_paths
-    try:
-        deps = EmbedDependencies()
-        result = deps.get_document_root()
-    finally:
-        if real_paths is not None:
-            sys.modules["kairix.paths"] = real_paths
-        else:
-            sys.modules.pop("kairix.paths", None)
+    deps = EmbedDependencies()
+    result = deps.get_document_root(env={"KAIRIX_DOCUMENT_ROOT": _UNRESOLVABLE_HOME_PATH})
 
     assert result is None
 
 
 @pytest.mark.unit
-def test_default_get_document_root_returns_string_on_success(tmp_path: Any) -> None:
-    """When ``document_root()`` returns a Path, the default wrapper
-    stringifies it.
+def test_default_get_document_root_returns_string_on_success() -> None:
+    """The default wrapper stringifies the resolved ``kairix.paths.document_root()``.
 
     Sabotage proof: if the wrapper started returning the Path object
     directly (skipping ``str(...)``), downstream callers expecting a
     string would silently break; this asserts the string contract.
     """
-    import sys
-    import types
+    from kairix.paths import document_root
 
-    fake_paths = types.ModuleType("kairix.paths")
-    fake_paths.document_root = lambda: tmp_path  # type: ignore[attr-defined]  # synthetic stand-in module; mypy doesn't know our test attrs
-    real_paths = sys.modules.get("kairix.paths")
-    sys.modules["kairix.paths"] = fake_paths
-    try:
-        deps = EmbedDependencies()
-        result = deps.get_document_root()
-    finally:
-        if real_paths is not None:
-            sys.modules["kairix.paths"] = real_paths
-        else:
-            sys.modules.pop("kairix.paths", None)
+    result = EmbedDependencies().get_document_root()
 
     assert isinstance(result, str)
-    assert result == str(tmp_path)
+    assert result == str(document_root())
 
 
 # ── default_get_reflib_index_mode — production-default wrapper (#475) ─
@@ -405,69 +358,33 @@ def test_default_open_embedding_cache_constructs_cache_outside_pytest(tmp_path) 
     the path via ``kairix.paths.embedding_cache_path`` and returns an
     open ``EmbeddingCache``.
 
-    Drives both the path-resolution branch (sys.modules swap on
-    ``kairix.paths`` so the lazy import inside the wrapper picks up
-    our stand-in) and the os.environ "no PYTEST_CURRENT_TEST" branch
-    (temporarily unset).
+    Driven through the ``env=`` seam: the explicit mapping carries no
+    ``PYTEST_CURRENT_TEST`` (so the test-isolation guard passes) and points
+    ``KAIRIX_CACHE_DIR`` at ``tmp_path`` (so the real resolver lands the
+    cache there) — no ``sys.modules`` swap, no process-env write.
     """
-    import os
-    import sys
-    import types
-
     from kairix.core.embed.embedding_cache import EmbeddingCache
 
-    target = tmp_path / "cache.sqlite"
-    fake_paths = types.ModuleType("kairix.paths")
-    fake_paths.embedding_cache_path = lambda: target  # type: ignore[attr-defined]  # synthetic stand-in module; mypy doesn't know our test attrs
-
-    real_paths = sys.modules.get("kairix.paths")
-    sys.modules["kairix.paths"] = fake_paths
-    real_env = os.environ.pop("PYTEST_CURRENT_TEST", None)
+    deps = EmbedDependencies()
+    result = deps.open_embedding_cache(env={"KAIRIX_CACHE_DIR": str(tmp_path)})
     try:
-        deps = EmbedDependencies()
-        result = deps.open_embedding_cache()
+        assert isinstance(result, EmbeddingCache)
+        assert result.path == tmp_path / "embedding_cache.sqlite"
     finally:
-        if real_env is not None:
-            os.environ["PYTEST_CURRENT_TEST"] = real_env
-        if real_paths is not None:
-            sys.modules["kairix.paths"] = real_paths
-        else:
-            sys.modules.pop("kairix.paths", None)
         if isinstance(result, EmbeddingCache):
             result.close()
-
-    assert isinstance(result, EmbeddingCache)
-    assert result.path == target
 
 
 @pytest.mark.unit
 def test_default_open_embedding_cache_swallows_paths_layer_failure() -> None:
     """When the paths layer raises during cache-path resolution, the
     wrapper logs and returns ``None`` rather than crashing the embed
-    pipeline."""
-    import os
-    import sys
-    import types
+    pipeline.
 
-    fake_paths = types.ModuleType("kairix.paths")
-
-    def _boom() -> Any:
-        raise RuntimeError("paths layer not initialised")
-
-    fake_paths.embedding_cache_path = _boom  # type: ignore[attr-defined]  # synthetic stand-in module; mypy doesn't know our test attrs
-
-    real_paths = sys.modules.get("kairix.paths")
-    sys.modules["kairix.paths"] = fake_paths
-    real_env = os.environ.pop("PYTEST_CURRENT_TEST", None)
-    try:
-        deps = EmbedDependencies()
-        result = deps.open_embedding_cache()
-    finally:
-        if real_env is not None:
-            os.environ["PYTEST_CURRENT_TEST"] = real_env
-        if real_paths is not None:
-            sys.modules["kairix.paths"] = real_paths
-        else:
-            sys.modules.pop("kairix.paths", None)
+    Sabotage proof: dropping the ``try/except`` lets the resolver's
+    ``RuntimeError`` escape and this test errors.
+    """
+    deps = EmbedDependencies()
+    result = deps.open_embedding_cache(env={"KAIRIX_CACHE_DIR": _UNRESOLVABLE_HOME_PATH})
 
     assert result is None

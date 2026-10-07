@@ -4,8 +4,8 @@
 The F6 detector (``scripts/checks/check_no_test_only_kwargs.py``) flags
 ``*_fn=None`` / ``*_loader=None`` / ``*_factory=None`` / ``*_builder=None`` /
 ``*_provider=None`` / ``*_resolver=None`` test-only kwargs on production
-free functions. This test file pins each suffix, the public/private
-allow-list semantics, the ``ClassDef``-method exemption (constructor /
+free functions. This test file pins each suffix, the absence of any
+allow-list (PLA-472 — public and private hosts are always flagged), the ``ClassDef``-method exemption (constructor /
 method injection IS the canonical Deps shape), and the dataclass-field
 ``default_factory=...`` safe path.
 
@@ -82,7 +82,7 @@ def _resolve_thing(*, thing_loader=None):
     return thing_loader() if thing_loader else "default"
 """
     f = _write_module(tmp_path, src, name="loader_priv.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert any(v.endswith("::_resolve_thing::thing_loader") for v in violations)
 
 
@@ -100,7 +100,7 @@ def _resolve_thing(*, thing_factory=None):
     return thing_factory() if thing_factory else "default"
 """
     f = _write_module(tmp_path, src, name="factory_priv.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert any(v.endswith("::_resolve_thing::thing_factory") for v in violations)
 
 
@@ -119,7 +119,7 @@ def _resolve_thing(*, thing_builder=None):
     return thing_builder() if thing_builder else "default"
 """
     f = _write_module(tmp_path, src, name="builder_priv.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert any(v.endswith("::_resolve_thing::thing_builder") for v in violations)
 
 
@@ -131,7 +131,7 @@ def _resolve_thing(*, thing_provider=None):
     return thing_provider() if thing_provider else "default"
 """
     f = _write_module(tmp_path, src, name="provider_priv.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert any(v.endswith("::_resolve_thing::thing_provider") for v in violations)
 
 
@@ -143,7 +143,7 @@ def _resolve_thing(*, thing_resolver=None):
     return thing_resolver() if thing_resolver else "default"
 """
     f = _write_module(tmp_path, src, name="resolver_priv.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert any(v.endswith("::_resolve_thing::thing_resolver") for v in violations)
 
 
@@ -164,71 +164,64 @@ def _resolve_thing(*, search_fn=None):
     return search_fn() if search_fn else "default"
 """
     f = _write_module(tmp_path, src, name="fn_priv.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert any(v.endswith("::_resolve_thing::search_fn") for v in violations)
 
 
 # ---------------------------------------------------------------------------
-# Suffix coverage on PUBLIC functions — same set fires unless allow-listed
+# Suffix coverage on PUBLIC functions — same set fires; no allow-list
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 def test_underscore_loader_kwarg_on_public_function_is_flagged(tmp_path: Path) -> None:
     """A public function ``def resolve_thing(*, thing_loader=None)`` is
-    flagged when not allow-listed — matches today's ``_fn`` behaviour.
+    flagged — matches the ``_fn`` behaviour.
     """
     src = """
 def resolve_thing(*, thing_loader=None):
     return thing_loader() if thing_loader else "default"
 """
     f = _write_module(tmp_path, src, name="loader_pub.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert any(v.endswith("::resolve_thing::thing_loader") for v in violations)
 
 
 @pytest.mark.unit
-def test_public_function_allow_listed_is_not_flagged(tmp_path: Path) -> None:
-    """Public function with an allow-list entry is rescued — the documented
-    legitimate composition-seam path.
+def test_no_allow_list_can_rescue_a_flagged_param(tmp_path: Path) -> None:
+    """PLA-472: F6 has no allow-list. The detector's public surface takes
+    only the file path — there is no channel through which an allow set (or
+    a re-created ``test-only-kwargs-allow-files.txt``) could rescue a
+    flagged parameter, and the module no longer reads any allow file.
+
+    Even with a file at the old allow-list location naming the exact
+    qualified param, the param is still flagged.
+
+    Sabotage proof (executed): re-adding an ``allow`` parameter to
+    ``file_violations`` flips the signature assertion red; re-adding a
+    module-level ``_read_allow_list`` flips the ``hasattr`` assertion red.
+    Restored → green.
     """
-    src = """
-def resolve_thing(*, thing_loader=None):
-    return thing_loader() if thing_loader else "default"
-"""
-    f = _write_module(tmp_path, src, name="loader_pub_allowed.py")
-    # The detector emits the qualified param string differently
-    # depending on whether ``f`` is inside REPO_ROOT (relative dotted
-    # path) or under tmp (absolute-style synthetic dotted path). Round-
-    # trip the value: read the actual violation, then build the allow
-    # set from it. This pins the allow-list semantic without
-    # second-guessing the module-path encoder.
-    v = file_violations(f, set())
-    assert len(v) == 1
-    assert v[0].endswith("::resolve_thing::thing_loader")
-    assert file_violations(f, set(v)) == []
+    import inspect
 
+    import check_no_test_only_kwargs as detector
 
-@pytest.mark.unit
-def test_private_function_allow_listed_is_rescued(tmp_path: Path) -> None:
-    """A private function with an allow-list entry is rescued — pragmatic
-    handling for the documented defensive-degradation seams (e.g.
-    ``_resolve_production_fact_extractor::factory_loader``).
-
-    The convention is that net-new private allow-list entries carry an
-    immediately preceding ``#`` rationale comment in the allow-list file;
-    the mechanical check does not enforce the comment (review does), so
-    this test only pins the detector's allow-list-honouring behaviour.
-    """
     src = """
 def _resolve_thing(*, thing_loader=None):
     return thing_loader() if thing_loader else "default"
 """
-    f = _write_module(tmp_path, src, name="loader_priv_allowed.py")
-    v = file_violations(f, set())
+    f = _write_module(tmp_path, src, name="loader_priv_no_rescue.py")
+    v = file_violations(f)
     assert len(v) == 1
-    qualified = v[0]
-    assert file_violations(f, {qualified}) == []
+    assert v[0].endswith("::_resolve_thing::thing_loader")
+    allow_file = tmp_path / ".architecture" / "baseline" / "test-only-kwargs-allow-files.txt"
+    allow_file.parent.mkdir(parents=True)
+    allow_file.write_text(v[0] + "\n", encoding="utf-8")
+
+    assert file_violations(f) == v
+    assert list(inspect.signature(file_violations).parameters) == ["path"]
+    assert not hasattr(detector, "_read_allow_list")
+    assert not hasattr(detector, "_ALLOW_FILE")
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +249,7 @@ class Thing:
         self.loader = thing_loader
 """
     f = _write_module(tmp_path, src, name="method.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     # The constructor's thing_loader kwarg must NOT appear in violations.
     assert not any("thing_loader" in v for v in violations)
 
@@ -273,7 +266,7 @@ class Outer:
             return thing_loader
 """
     f = _write_module(tmp_path, src, name="nested_method.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert not any("thing_loader" in v for v in violations)
 
 
@@ -300,7 +293,7 @@ class Deps:
     write_state_fn: Callable[[], None] = field(default_factory=lambda: lambda: None)
 """
     f = _write_module(tmp_path, src, name="deps_dataclass.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert violations == []
 
 
@@ -318,7 +311,7 @@ class Deps:
     write_state_fn: Callable[..., None] | None = None
 """
     f = _write_module(tmp_path, src, name="deps_none_field.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert any("write_state_fn" in v for v in violations)
 
 
@@ -334,7 +327,7 @@ class Deps:
     thing_loader: Callable[..., None] | None = None
 """
     f = _write_module(tmp_path, src, name="deps_loader_field.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert any("thing_loader" in v for v in violations)
 
 
@@ -351,7 +344,7 @@ def normal_function(x, y=1, *, kw=None):
     return x + y
 """
     f = _write_module(tmp_path, src, name="clean.py")
-    assert file_violations(f, set()) == []
+    assert file_violations(f) == []
 
 
 @pytest.mark.unit
@@ -364,7 +357,7 @@ def _resolve_thing(*, thing_handle=None):
     return thing_handle
 """
     f = _write_module(tmp_path, src, name="non_match.py")
-    assert file_violations(f, set()) == []
+    assert file_violations(f) == []
 
 
 @pytest.mark.unit
@@ -379,7 +372,7 @@ def resolve_thing(*, thing_loader=DEFAULT_LOADER):
     return thing_loader()
 """
     f = _write_module(tmp_path, src, name="non_none_default.py")
-    assert file_violations(f, set()) == []
+    assert file_violations(f) == []
 
 
 @pytest.mark.unit
@@ -393,7 +386,7 @@ def _resolve_thing(arg, thing_loader=None):
     return thing_loader() if thing_loader else arg
 """
     f = _write_module(tmp_path, src, name="positional_default.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert any(v.endswith("::_resolve_thing::thing_loader") for v in violations)
 
 
@@ -408,7 +401,7 @@ async def _resolve_thing(*, thing_loader=None):
     return thing_loader() if thing_loader else "default"
 """
     f = _write_module(tmp_path, src, name="async_priv.py")
-    violations = file_violations(f, set())
+    violations = file_violations(f)
     assert any(v.endswith("::_resolve_thing::thing_loader") for v in violations)
 
 
@@ -426,8 +419,8 @@ def test_file_has_violation_thin_boolean_wrapper(tmp_path: Path) -> None:
     src_dirty = "def _resolve(*, thing_loader=None): return thing_loader\n"
     f_clean = _write_module(tmp_path, src_clean, name="clean_bool.py")
     f_dirty = _write_module(tmp_path, src_dirty, name="dirty_bool.py")
-    assert file_has_violation(f_clean, set()) is False
-    assert file_has_violation(f_dirty, set()) is True
+    assert file_has_violation(f_clean) is False
+    assert file_has_violation(f_dirty) is True
 
 
 @pytest.mark.unit
@@ -437,7 +430,7 @@ def test_syntax_error_returns_no_violations(tmp_path: Path) -> None:
     """
     src = "def broken(:::"
     f = _write_module(tmp_path, src, name="broken.py")
-    assert file_violations(f, set()) == []
+    assert file_violations(f) == []
 
 
 # ---------------------------------------------------------------------------

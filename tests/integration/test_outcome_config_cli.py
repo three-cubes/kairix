@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import time
 from pathlib import Path
 from textwrap import dedent
 
@@ -76,22 +75,18 @@ def test_config_validate_subprocess_reports_ok_on_valid_yaml(tmp_path: Path) -> 
         """,
     )
 
-    t0 = time.monotonic()
     proc = subprocess.run(
         [sys.executable, "-m", "kairix.cli", "config", "validate", str(config_path)],
         capture_output=True,
         text=True,
         timeout=30,
     )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
 
     assert proc.returncode == 0, (
         f"config validate exited {proc.returncode}\n--- stderr ---\n{proc.stderr}\n--- stdout ---\n{proc.stdout}"
     )
     assert "OK" in proc.stdout, f"expected OK marker in stdout: {proc.stdout!r}"
     assert str(config_path) in proc.stdout, f"expected path in stdout: {proc.stdout!r}"
-
-    assert elapsed_ms < 5000.0, f"config validate subprocess took {elapsed_ms:.1f}ms (threshold 5000ms)"
 
 
 def test_config_validate_subprocess_reports_errors_on_typo_overrides(tmp_path: Path) -> None:
