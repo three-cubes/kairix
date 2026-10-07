@@ -52,7 +52,10 @@ PLUGIN_NAME = "slide"
 
 #: Regex matching the slide-header line PptxExtractor emits per slide:
 #: ``## Slide <number>: <title>``. Capturing groups: (number, title).
-_SLIDE_HEADER_RE = re.compile(r"^##\s+Slide\s+(\d+):\s*(.*)$", re.MULTILINE)
+#: Only same-line spaces are allowed between the tokens, so an untitled slide
+#: (``## Slide 3:``) gets an empty title instead of borrowing its first body
+#: line (or the next slide's header). Linear-time: no overlapping quantifiers.
+_SLIDE_HEADER_RE = re.compile(r"^##[^\S\n]+Slide[^\S\n]+(\d+):[^\S\n]*((?:\S.*)?)$", re.MULTILINE)
 
 
 class SlideChunker:

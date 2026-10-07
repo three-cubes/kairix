@@ -61,7 +61,7 @@ def _make_link(name: str) -> str:
 # NOSONAR: each capture is bounded by a distinct literal
 # delimiter (`|` or backtick); no nested quantifiers — backtracking is
 # linear in line length. Input is the bootstrap entity-table markdown file.
-_TABLE_ROW_RE = re.compile(r"^\|\s*(?P<entity>[^|]+?)\s*\|\s*`(?P<link>\[\[[^\]]+\]\])`\s*\|\s*`(?P<path>[^`]+)`\s*\|")
+_TABLE_ROW_RE = re.compile(r"^\|(?P<entity>[^|]+)\|\s*`(?P<link>\[\[[^\]]+\]\])`\s*\|\s*`(?P<path>[^`]+)`\s*\|")
 
 
 _SECTION_TYPE_MAP = {
@@ -96,7 +96,7 @@ def _parse_bootstrap_row(line: str, current_section: str) -> WikiEntity | None:
     # Strip trailing parenthetical notes from vault_path.
     # NOSONAR: non-greedy `.*?` bounded by `)` and end-anchor; operates on
     # a single short path string (≤ a few hundred chars).
-    vault_path = re.sub(r"\s*\(.*?\)\s*$", "", m.group("path").strip()).strip()
+    vault_path = re.sub(r"\([^()]*\)\s*$", "", m.group("path").strip()).strip()
     if not vault_path or not entity_name:
         return None
     # Unescape \| inside wikilinks (markdown table escaping)

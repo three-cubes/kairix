@@ -226,8 +226,10 @@ _PROPER_NOUN_PATTERN = re.compile(
     r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,4})\b"
 )  # NOSONAR — bounded `{1,4}` repetition with word-boundary anchors; backtracking linear.
 
-# Heading extraction
-_HEADING_RE = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
+# Heading extraction. Only same-line spaces may follow the ``#`` run (an empty
+# heading must not borrow the next line as its title), and the title starts at
+# its first non-space character — linear-time, no overlapping quantifiers.
+_HEADING_RE = re.compile(r"^(#{1,3})[^\S\n]+(\S.*)$", re.MULTILINE)
 
 # Common words that are NOT entities when title-cased in headings
 _STOP_TITLE_WORDS = frozenset(

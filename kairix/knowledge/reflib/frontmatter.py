@@ -13,10 +13,11 @@ from pathlib import Path
 from kairix.knowledge.reflib.sources import SourceDef
 from kairix.text import extract_title, strip_frontmatter
 
-# YAML frontmatter block — \A anchor ensures match only at string start
-_FRONTMATTER_RE = re.compile(
-    r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL
-)  # NOSONAR — non-greedy `.*?` bounded by `\n---\s*\n`; input is file-bounded frontmatter.
+# YAML frontmatter block — \A anchor ensures match only at string start. The
+# opening fence takes only same-line trailing spaces (``[^\S\n]*``) so it can't
+# trade newlines with the block body — linear-time; any blank lines after the
+# fence stay in the block, where the line-oriented parse ignores them.
+_FRONTMATTER_RE = re.compile(r"\A---[^\S\n]*\n(.*?)\n---\s*\n", re.DOTALL)
 
 # Re-export for backwards compatibility
 __all__ = [

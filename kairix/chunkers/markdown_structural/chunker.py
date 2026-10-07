@@ -54,7 +54,10 @@ _MAX_HEADING_DEPTH = 3
 #: ATX heading regex (``#``-prefixed); we ignore setext-style
 #: underline headings (``===`` / ``---``) — they're rare in modern
 #: markdown and add edge-case complexity without measurable lift.
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+#: Group 2 is the raw heading text from its first non-space character;
+#: the optional closing ``#`` sequence is stripped in code by
+#: :func:`_strip_closing_hashes` so the pattern stays linear-time.
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*)$")
 
 #: Sentence-boundary regex for the final fallback. Conservative —
 #: requires a sentence-final punctuation mark followed by whitespace.
@@ -158,10 +161,22 @@ def _parse_heading(line: str) -> tuple[int | None, str | None]:
     if match is None:
         return None, None
     depth = len(match.group(1))
-    title = match.group(2).strip()
+    title = _strip_closing_hashes(match.group(2)).strip()
     if not title:
         return None, None
     return depth, title
+
+
+def _strip_closing_hashes(text: str) -> str:
+    """Drop an ATX closing sequence — a trailing ``#`` run preceded by a space.
+
+    Per CommonMark the run only closes the heading when whitespace precedes it
+    (``C#`` keeps its ``#``), and an all-``#`` title is an empty heading.
+    """
+    opened = text.rstrip("#")
+    if not opened:
+        return ""
+    return opened.rstrip() if opened[-1].isspace() else text
 
 
 def _emit_section_chunks(section: _Section, source_uri: str, chunker_version: str) -> tuple[Chunk, ...]:

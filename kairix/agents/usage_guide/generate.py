@@ -177,19 +177,26 @@ def _check(guide_path: Path, rendered: str) -> int:
     return 1
 
 
+def _bundled_template_text() -> str:
+    """Read the bundled guide template straight from the package data."""
+    return resources.files(_GUIDE_PACKAGE).joinpath(_TEMPLATE_RESOURCE).read_text(encoding="utf-8")
+
+
 def main(
     argv: list[str] | None = None,
     *,
-    template_path: Path | None = None,
+    template_text: str | None = None,
     guide_path: Path | None = None,
 ) -> int:
     """Regenerate (or ``--check``) the bundled guide from the catalogue.
 
-    ``template_path`` / ``guide_path`` are keyword-only test seams that default
-    to the bundled data files. They are deliberately NOT command-line flags: the
-    generator only ever reads/writes the one bundled guide, so the CLI exposes
-    no user-controllable filesystem path (an agent running this with faulty
-    arguments cannot escape to an arbitrary path).
+    ``template_text`` / ``guide_path`` are keyword-only test seams that default
+    to the bundled template contents and the bundled guide file. They are
+    deliberately NOT command-line flags: the generator only ever reads the one
+    bundled template (from package data, never a caller-supplied path) and
+    writes the one bundled guide, so the CLI exposes no user-controllable
+    filesystem path (an agent running this with faulty arguments cannot escape
+    to an arbitrary path).
     """
     parser = argparse.ArgumentParser(
         prog="python -m kairix.agents.usage_guide.generate",
@@ -198,10 +205,9 @@ def main(
     parser.add_argument("--check", action="store_true", help="Verify the committed guide is current; do not write.")
     args = parser.parse_args(argv)
 
-    tpath = template_path or _data_path(_TEMPLATE_RESOURCE)
     gpath = guide_path or _data_path(_GUIDE_RESOURCE)
 
-    rendered = render_guide(tpath.read_text(encoding="utf-8"))
+    rendered = render_guide(template_text if template_text is not None else _bundled_template_text())
 
     if args.check:
         return _check(gpath, rendered)
