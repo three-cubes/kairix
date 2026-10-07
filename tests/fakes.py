@@ -966,9 +966,11 @@ class FakeRetriever:
             results_by_query={"deploy docker": _build_retrieval_result([...])},
         )
 
-    Default empty result is a SimpleNamespace with `results=[]` and
-    `vec_failed=False` — callers that need richer surface should construct
-    a typed RetrievalResult and pass it in via `results_by_query`.
+    Default empty result is the production shape — a
+    ``RetrievalResult(paths=[], vec_failed=False)`` — so it feeds every
+    Retriever consumer (``evaluate_single_config`` reads ``.paths`` /
+    ``.vec_failed``). Callers that need richer surface construct a typed
+    RetrievalResult and pass it in via `results_by_query`.
     """
 
     def __init__(self, *, results_by_query: dict[str, Any] | None = None) -> None:
@@ -985,9 +987,9 @@ class FakeRetriever:
         self.calls.append({"query": query, "collections": collections, "cfg": cfg})
         if query in self._results_by_query:
             return self._results_by_query[query]
-        from types import SimpleNamespace
+        from kairix.quality.eval.retrieval import RetrievalResult
 
-        return SimpleNamespace(results=[], vec_failed=False)
+        return RetrievalResult(paths=[], vec_failed=False)
 
 
 class FakeProvider:

@@ -456,3 +456,128 @@ def test_sweep_hybrid_params_writes_csv(tmp_path: Path) -> None:
     assert csv_path.exists()
     lines = csv_path.read_text().splitlines()
     assert len(lines) == 2  # header + 1 data row
+
+
+# ---------------------------------------------------------------------------
+# PLA-472 — one Retriever result shape: RetrievalResult(paths, vec_failed)
+# ---------------------------------------------------------------------------
+
+_SHAPE_CASES = [
+    {
+        "query": "test query",
+        "category": "recall",
+        "score_method": "ndcg",
+        "gold_titles": [{"title": "test-doc", "relevance": 2}],
+    }
+]
+
+
+class _RetrievePathRetriever:
+    """Retriever over the REAL ``retrieve(system="hybrid")`` path.
+
+    The pipeline search is replaced through the public ``RetrievalDeps``
+    seam with a searcher returning the real ``SearchResult`` /
+    ``BudgetedResult`` / ``FusedResult`` types, so everything from
+    ``_retrieve_hybrid``'s projection onward is production code.
+    """
+
+    def __init__(self, *, vec_failed: bool) -> None:
+        self._vec_failed = vec_failed
+        self.last_result: object = None
+
+    def _search(self, **kwargs: object) -> object:
+        from kairix.core.search.budget import BudgetedResult
+        from kairix.core.search.intent import QueryIntent
+        from kairix.core.search.pipeline import SearchResult
+        from kairix.core.search.rrf import FusedResult
+
+        row = BudgetedResult(
+            result=FusedResult(path="test-doc.md", collection="shared", title="test-doc", snippet="s"),
+            tier="L2",
+            token_estimate=1,
+            content="s",
+        )
+        return SearchResult(
+            query=str(kwargs["query"]),
+            intent=QueryIntent.SEMANTIC,
+            results=[row],
+            vec_failed=self._vec_failed,
+        )
+
+    def retrieve(self, query: str, *, collections: list[str] | None = None, cfg: object = None) -> object:
+        from kairix.quality.eval.retrieval import RetrievalDeps, retrieve
+
+        self.last_result = retrieve(
+            query=query,
+            system="hybrid",
+            config=cfg,
+            collections=collections,
+            deps=RetrievalDeps(searcher=self._search),
+        )
+        return self.last_result
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("vec_failed", [True, False])
+def test_evaluate_single_config_counts_vec_failed_from_real_retrieve_path(vec_failed: bool) -> None:
+    """The real retrieve path surfaces ``vec_failed`` as a result ATTRIBUTE.
+
+    Sabotage proof: dropping ``vec_failed=`` from ``_retrieve_hybrid``'s
+    ``RetrievalResult(...)`` leaves the attribute False, so the True case
+    fails both the attribute assertion and the ``n_vec_failed`` count.
+    """
+    from kairix.quality.eval.hybrid_sweep import evaluate_single_config
+
+    retriever = _RetrievePathRetriever(vec_failed=vec_failed)
+    result = evaluate_single_config(
+        HybridSweepConfig(name="real", mode="hybrid"), _SHAPE_CASES, None, CATEGORY_WEIGHTS, retriever=retriever
+    )
+
+    assert getattr(retriever.last_result, "vec_failed", None) is vec_failed
+    assert result.n_vec_failed == (1 if vec_failed else 0)
+    assert result.ndcg_at_10 > 0.0
+
+
+@pytest.mark.unit
+def test_evaluate_single_config_counts_vec_failed_from_fake_retriever_result() -> None:
+    """A canned ``RetrievalResult(vec_failed=True)`` via FakeRetriever is counted.
+
+    Sabotage proof: reading ``meta["vec_failed"]`` instead of the
+    ``vec_failed`` attribute in ``evaluate_single_config`` leaves
+    ``n_vec_failed == 0`` and this fails.
+    """
+    from kairix.quality.eval.hybrid_sweep import evaluate_single_config
+    from kairix.quality.eval.retrieval import RetrievalResult
+    from tests.fakes import FakeRetriever
+
+    canned = RetrievalResult(paths=["test-doc.md"], vec_failed=True)
+    retriever = FakeRetriever(results_by_query={"test query": canned})
+    result = evaluate_single_config(
+        HybridSweepConfig(name="fake", mode="hybrid"), _SHAPE_CASES, None, CATEGORY_WEIGHTS, retriever=retriever
+    )
+
+    assert result.n_vec_failed == 1
+    assert result.ndcg_at_10 > 0.0
+
+
+@pytest.mark.unit
+def test_evaluate_single_config_accepts_fake_retriever_default_result() -> None:
+    """FakeRetriever's default (unknown-query) result feeds evaluate_single_config.
+
+    Regression: the default was ``SimpleNamespace(results=[], vec_failed=False)``
+    with no ``.paths``, so ``evaluate_single_config`` raised AttributeError.
+    """
+    from kairix.quality.eval.hybrid_sweep import evaluate_single_config
+    from tests.fakes import FakeRetriever
+
+    result = evaluate_single_config(
+        HybridSweepConfig(name="fake-default", mode="hybrid"),
+        _SHAPE_CASES,
+        None,
+        CATEGORY_WEIGHTS,
+        retriever=FakeRetriever(),
+    )
+
+    assert result.n_cases == 1
+    assert result.n_vec_failed == 0
+    assert result.ndcg_at_10 == 0.0

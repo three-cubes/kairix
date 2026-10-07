@@ -16,10 +16,9 @@ Failure surface:
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
+from kairix.quality.eval.retrieval import RetrievalResult
 from tests.fakes import FakeRetriever
 
 pytestmark = pytest.mark.contract
@@ -30,13 +29,13 @@ def test_retrieve_returns_empty_when_no_results_configured_for_query() -> None:
     not invent matches when the corpus has nothing.
 
     Sabotage proof: in ``FakeRetriever.retrieve`` change the default
-    branch to ``return SimpleNamespace(results=[{"phantom": True}],
+    branch to ``return RetrievalResult(paths=["phantom.md"],
     vec_failed=False)``. Re-run: the ``== []`` assertion fails because
     a phantom row leaks through. Restored.
     """
     retriever = FakeRetriever()
     out = retriever.retrieve("unseen query")
-    assert out.results == [], f"unknown query must yield results=[]; got {out.results!r}"
+    assert out.paths == [], f"unknown query must yield paths=[]; got {out.paths!r}"
     assert out.vec_failed is False, "unknown-query default must report vec backend healthy"
 
 
@@ -48,7 +47,7 @@ def test_retrieve_unavailable_when_vec_backend_failed() -> None:
     Sabotage proof: change the configured result to ``vec_failed=False``;
     the ``is True`` assertion fails. Restored.
     """
-    failed_result = SimpleNamespace(results=[], vec_failed=True)
+    failed_result = RetrievalResult(paths=[], vec_failed=True)
     retriever = FakeRetriever(results_by_query={"q": failed_result})
     out = retriever.retrieve("q")
     assert out.vec_failed is True, (

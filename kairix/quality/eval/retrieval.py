@@ -18,11 +18,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RetrievalResult:
-    """Unified result from any retrieval backend."""
+    """Unified result from any retrieval backend.
+
+    This is THE result shape of the :class:`kairix.core.protocols.Retriever`
+    Protocol: ranked ``paths`` (best first) plus a ``vec_failed`` attribute
+    so callers can tell "no results" from "vector index unavailable".
+    ``meta["vec_failed"]`` is still populated by the hybrid backend for
+    callers that serialise ``meta``; ``vec_failed`` is the field to read.
+    """
 
     paths: list[str]
     snippets: list[str] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
+    vec_failed: bool = False
 
 
 def _default_pipeline_builder(*, config: Any) -> Any:
@@ -213,7 +221,7 @@ def _retrieve_hybrid(
         "vec_failed": sr.vec_failed,
         "latency_ms": round(sr.latency_ms, 1),
     }
-    return RetrievalResult(paths=paths, snippets=snippets, meta=meta)
+    return RetrievalResult(paths=paths, snippets=snippets, meta=meta, vec_failed=bool(sr.vec_failed))
 
 
 def _retrieve_bm25(

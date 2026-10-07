@@ -59,23 +59,22 @@ def bootstrap_path(request: pytest.FixtureRequest) -> tuple[str, object]:
     return (plugin.FALLBACK_MESSAGE, _bootstrap_fails)
 
 
-def test_appendSystemContext_raises_propagates_once_without_retry(  # noqa: N802 — F68 binds the test name to openclaw's camelCase method name
+def test_appendSystemContext_raises_is_contained_after_one_attempt(  # noqa: N802 — F68 binds the test name to openclaw's camelCase method name
     bootstrap_path: tuple[str, object],
 ) -> None:
     """``raises``: when openclaw's ``appendSystemContext`` raises, the
-    plugin surfaces that exact error after ONE attempt carrying the text
-    for its path — it never retries or appends a second (fallback) copy.
+    plugin contains the error (session start is never blocked) after ONE
+    attempt carrying the text for its path — it never retries or appends a
+    second (fallback) copy.
 
-    Sabotage proof (executed): wrap the final
-    ``context.appendSystemContext(markdown)`` in ``on_session_start`` in
-    ``try/except Exception: context.appendSystemContext(FALLBACK_MESSAGE)``
-    → the ``bootstrap-ok`` case fails (two append attempts, and the
-    error is swallowed). Restored.
+    Sabotage proof (executed): call ``context.appendSystemContext`` directly
+    instead of through ``_append`` in ``on_session_start`` → the error
+    escapes and every case fails. A retry inside ``_append`` → two append
+    attempts, and the ``append_attempts`` assertion fails. Restored.
     """
     expected_text, run_bootstrap = bootstrap_path
     plugin = _load_plugin()
     context = FakeOpenclawContext(append_raises=RuntimeError("openclaw prompt assembly failed"))
-    with pytest.raises(RuntimeError, match="openclaw prompt assembly failed"):
-        plugin.on_session_start(context, deps=plugin.PluginDeps(run_bootstrap=run_bootstrap))
+    plugin.on_session_start(context, deps=plugin.PluginDeps(run_bootstrap=run_bootstrap))
     assert context.append_attempts == [expected_text]
     assert context.appended == []

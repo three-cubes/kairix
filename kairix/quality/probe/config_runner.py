@@ -583,6 +583,24 @@ def _healthcheck_ok(provider: Provider) -> tuple[bool, str | None]:
     return True, None
 
 
+def _safe_snapshot(snapshotter: TransportSnapshotter) -> tuple[TransportSnapshot, str | None]:
+    """Run ``snapshotter.snapshot()`` defensively.
+
+    Returns ``(snapshot, warning)``. A snapshotter that raises yields an
+    empty :class:`TransportSnapshot` (zeroed transport section, uniform
+    stage keys, no invented recommendations) plus a warning naming the
+    failure — never propagates, per :func:`run_probe_config`'s
+    never-raise contract.
+    """
+    try:
+        return snapshotter.snapshot(), None
+    except Exception as exc:
+        return TransportSnapshot(), (
+            f"transport snapshot failed ({type(exc).__name__}: {exc}) — "
+            f"transport stats unavailable; check the coalescer / cache wiring"
+        )
+
+
 def run_probe_config(
     provider: Provider,
     *,
@@ -597,7 +615,9 @@ def run_probe_config(
 
     Returns the :class:`ProbeConfigReport` with all fields populated.
     Never raises — every observable failure becomes a report value
-    (``status=unreachable`` or a warning entry).
+    (``status=unreachable`` or a warning entry). A raising
+    ``snapshotter.snapshot()`` yields ``status=degraded`` with a zeroed
+    transport section and a warning naming the failure.
 
     Parameters:
 
@@ -656,7 +676,7 @@ def run_probe_config(
             kairix_version=kairix_version,
         )
 
-    snapshot = snapshotter.snapshot()
+    snapshot, snapshot_warning = _safe_snapshot(snapshotter)
     timing = _summarise_timings(timings)
     transport = TransportSection(
         coalesce_ratio=snapshot.coalesce_ratio,
@@ -669,6 +689,10 @@ def run_probe_config(
         degraded_p95_ms=degraded_p95_ms,
         critical_p95_ms=critical_p95_ms,
     )
+    if snapshot_warning is not None:
+        # Transport stats are unobserved — the run cannot be called healthy.
+        warnings.append(snapshot_warning)
+        status = STATUS_DEGRADED
     recommendations = _build_recommendations(transport, snapshot)
     endpoint_url = provider.healthcheck().endpoint
 

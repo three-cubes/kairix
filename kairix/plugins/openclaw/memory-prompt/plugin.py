@@ -24,7 +24,8 @@ the agent name cannot be resolved from openclaw context), the plugin
 appends a *short* fallback message that tells the agent its context is
 degraded and points the admin at ``kairix onboard check``. The session
 starts; the agent runs reactively until the admin fixes the underlying
-issue.
+issue. If openclaw's own ``appendSystemContext`` raises, the error is
+logged at WARNING after one attempt (no retry) and the hook returns.
 
 This is the affordance contract from #246: degraded != broken.
 
@@ -143,6 +144,21 @@ def _resolve_agent_name(context: Any) -> str:
     return name.strip()
 
 
+def _append(context: OpenclawContext, text: str) -> None:
+    """Deliver ``text`` via ``appendSystemContext`` exactly once, never raising.
+
+    ``appendSystemContext`` belongs to openclaw; if its prompt assembly
+    fails, the failure is logged at WARNING and contained — consistent
+    with how bootstrap failures are handled — so session start is never
+    blocked. No retry and no second (fallback) append: re-appending
+    would double-write a half-assembled prompt.
+    """
+    try:
+        context.appendSystemContext(text)
+    except Exception as exc:
+        logger.warning("openclaw appendSystemContext failed; continuing without kairix context: %s", exc, exc_info=True)
+
+
 def on_session_start(context: OpenclawContext, *, deps: PluginDeps | None = None) -> None:
     """Openclaw plugin hook — invoked once per agent session start.
 
@@ -150,7 +166,9 @@ def on_session_start(context: OpenclawContext, *, deps: PluginDeps | None = None
     to the agent's system prompt via ``appendSystemContext``. On any
     failure (missing binary, non-zero exit, timeout, blank agent name)
     the plugin appends :data:`FALLBACK_MESSAGE` instead and returns
-    normally — session start is never blocked.
+    normally — session start is never blocked. A raising
+    ``appendSystemContext`` (openclaw's own prompt assembly failing) is
+    likewise logged at WARNING and contained after one attempt.
 
     The ``deps`` parameter is the test seam. Production callers leave
     it ``None`` and the defaults wire the real subprocess.
@@ -160,7 +178,7 @@ def on_session_start(context: OpenclawContext, *, deps: PluginDeps | None = None
     agent = _resolve_agent_name(context)
     if not agent:
         logger.warning("openclaw context did not supply agent_name; falling back")
-        context.appendSystemContext(FALLBACK_MESSAGE)
+        _append(context, FALLBACK_MESSAGE)
         return
 
     try:
@@ -169,17 +187,17 @@ def on_session_start(context: OpenclawContext, *, deps: PluginDeps | None = None
         # Swallow every exception class — the contract is "never block
         # session start". The exception is logged for operator review.
         logger.warning("kairix bootstrap failed for agent %s: %s", agent, exc, exc_info=True)
-        context.appendSystemContext(FALLBACK_MESSAGE)
+        _append(context, FALLBACK_MESSAGE)
         return
 
     if not markdown or not markdown.strip():
         # Defensive: a zero-byte stdout is functionally the same as a
         # failure for the agent reading the prompt. Use the fallback.
         logger.warning("kairix bootstrap returned empty stdout for agent %s; falling back", agent)
-        context.appendSystemContext(FALLBACK_MESSAGE)
+        _append(context, FALLBACK_MESSAGE)
         return
 
-    context.appendSystemContext(markdown)
+    _append(context, markdown)
 
 
 __all__ = [
