@@ -83,8 +83,11 @@ results print a "PARTIAL RESULT" warning instead.
   the eval run is partial. The nightly comparison skips partial earlier runs
   and compares against the newest complete one. If there is none, the current
   complete run becomes the new baseline, so one partial run can't block every
-  later nightly. The conversation-eval CI gate reports an inconclusive
-  regression check as a failure with its own message.
+  later nightly. The conversation-eval CI gate checks every corpus run,
+  including "establishing baseline" runs, and exits 3 if any result is
+  partial, so a partial result is never recorded as a candidate baseline.
+- The benchmark-gate pull-request comment checks completeness first. A
+  partial result gets only the INCONCLUSIVE message, with no score table.
 - A partial result never shows a PASS. The benchmark report shows phase
   gates, category floors and per-category notes as INCONCLUSIVE. The CI gate
   summary shows only the inconclusive message. `kairix eval tune` no longer

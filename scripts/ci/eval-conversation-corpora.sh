@@ -18,6 +18,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 CORPUS_DIR="reference-library/conversations"
 EXPECTED_DIR="$CORPUS_DIR/expected"
 OUT_DIR="${OUT_DIR:-/tmp/conversation-eval}"
@@ -60,6 +62,9 @@ if [ "${#suites[@]}" -eq 0 ]; then
 fi
 
 overall_status=0
+# Set when any corpus result is partial (LLM-judge failures): the gate then
+# exits 3 (inconclusive) unless a hard failure (1) already applies.
+inconclusive=0
 
 for suite in "${suites[@]}"; do
     suite_name="$(basename "$suite")"
@@ -86,10 +91,12 @@ for suite in "${suites[@]}"; do
     # measure recall regression — treat that as "skipped" rather than failed.
     eval_err_log="$OUT_DIR/$suite_name-eval-err.log"
 
+    eval_rc=0
     if [ "$sentinel_rc" -eq 0 ]; then
         # Sentinel — record the run, do not regression-gate.
         echo "Baseline for $suite_name is a sentinel — establishing baseline mode (no regression gate)."
-        if ! "${EVAL_ARGV[@]}" "$suite" --json > "$out_file" 2> "$eval_err_log"; then
+        "${EVAL_ARGV[@]}" "$suite" --json > "$out_file" 2> "$eval_err_log" || eval_rc=$?
+        if [ "$eval_rc" -ne 0 ]; then
             cat "$eval_err_log" >&2
             if grep -q "SecretNotFoundError\|kairix-provider-llm-api-key" "$eval_err_log"; then
                 echo "::warning::kairix eval skipped on $suite_name — LLM API key not available in this CI environment (expected on PR builds without KV access)"
@@ -103,7 +110,6 @@ for suite in "${suites[@]}"; do
     elif [ "$sentinel_rc" -eq 1 ]; then
         # Real SuiteResult baseline — enforce regression gate.
         echo "Baseline for $suite_name is pinned — regression gate enforced (>2pp = fail)."
-        eval_rc=0
         "${EVAL_ARGV[@]}" "$suite" --json --regression-against "$EXPECTED_DIR" > "$out_file" 2> "$eval_err_log" || eval_rc=$?
         if [ "$eval_rc" -ne 0 ]; then
             cat "$eval_err_log" >&2
@@ -111,7 +117,7 @@ for suite in "${suites[@]}"; do
                 echo "::error::$suite_name regression gate INCONCLUSIVE — the run or the pinned baseline is partial (LLM-judge failures)"
                 echo "fix: check the LLM provider credentials / availability; never pin a partial result as a baseline"
                 echo "next: re-run the gate once every question is judged"
-                overall_status=1
+                inconclusive=1
             elif grep -q "SecretNotFoundError\|kairix-provider-llm-api-key" "$eval_err_log"; then
                 echo "::warning::$suite_name regression gate skipped — LLM API key not available in this CI environment (expected on PR builds without KV access)"
             else
@@ -128,6 +134,19 @@ for suite in "${suites[@]}"; do
         overall_status=1
         echo "::endgroup::"
         continue
+    fi
+
+    # Shared completeness check after EVERY successful eval — sentinel mode
+    # included: a partial result is never recorded as a candidate baseline.
+    if [ "$eval_rc" -eq 0 ] && [ -s "$out_file" ]; then
+        coverage_rc=0
+        python3 "$SCRIPT_DIR/judge_coverage.py" "corpus $suite_name" "$out_file" || coverage_rc=$?
+        if [ "$coverage_rc" -eq 3 ]; then
+            echo "fix: never pin this result as a baseline; re-run once every question is judged"
+            inconclusive=1
+        elif [ "$coverage_rc" -ne 0 ]; then
+            overall_status=1
+        fi
     fi
 
     # Surface the per-corpus pass-rate + per-category breakdown in the log.
@@ -165,6 +184,14 @@ if [ "$overall_status" -ne 0 ]; then
     echo "::error::conversation-eval-gate: one or more corpora failed"
     echo "fix: see the per-corpus ::error lines above for the actionable next step"
     echo "next: re-run after the fix; results are in $OUT_DIR for download"
+    exit "$overall_status"
 fi
 
-exit "$overall_status"
+if [ "$inconclusive" -ne 0 ]; then
+    echo "::error::conversation-eval-gate: INCONCLUSIVE — one or more corpus results are partial (LLM-judge failures)"
+    echo "fix: check the LLM provider credentials / availability"
+    echo "next: re-run the gate; partial results are never compared or pinned"
+    exit 3
+fi
+
+exit 0
