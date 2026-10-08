@@ -388,6 +388,56 @@ def pytest_sessionstart() -> None:
                 path.unlink()
 
 
+# Fast-tier markers (CI Stage 2: ``-m "unit or bdd or contract"``). Tests
+# carrying any of these must never load the real cross-encoder stack.
+_FAST_TIER_MARKERS = frozenset({"unit", "bdd", "contract"})
+
+
+def _real_sentence_transformers_loaded() -> bool:
+    """True iff the real ``sentence_transformers`` package is in ``sys.modules``.
+
+    ``kairix.core.search.rerank`` is the only importer of the package, so a
+    real (on-disk, ``__file__``-carrying) module there means the production
+    cross-encoder load ran. ``tests/search/test_rerank.py`` injects stub
+    modules (no ``__file__``) and is unaffected.
+    """
+    import sys
+
+    module = sys.modules.get("sentence_transformers")
+    return module is not None and getattr(module, "__file__", None) is not None
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    """Fail any fast-tier test that loads the real cross-encoder reranker (#493).
+
+    The production reranker's first call imports torch and fetches
+    ``cross-encoder/ms-marco-MiniLM-L-6-v2`` from the Hugging Face hub into
+    the session's hermetic (empty) cache: a real network call costing
+    ~20-50s, which tripped the 30s per-test timeout on whichever fast-tier
+    test happened to search first (the entity-summary / search-logging flake
+    family). This sentinel makes that a deterministic failure on the test
+    that triggered it, instead of an intermittent timeout on a bystander.
+    """
+    loaded_before = _real_sentence_transformers_loaded()
+    result = yield
+    fast_tier = any(item.get_closest_marker(name) for name in _FAST_TIER_MARKERS)
+    if fast_tier and not loaded_before and _real_sentence_transformers_loaded():
+        pytest.fail(
+            f"Real cross-encoder reranker load found in fast-tier test {item.nodeid} "
+            "(imports torch + downloads a Hugging Face model over the network). "
+            "Refactor to build the pipeline with "
+            "FactoryDeps(reranker_override=RERANK_DISABLED) (or a fake reranker "
+            "closure) to pass.\n"
+            "Pass: build_search_pipeline(config=cfg, paths=paths, "
+            "deps=FactoryDeps(reranker_override=RERANK_DISABLED))\n"
+            "Forbidden: build_search_pipeline(config=cfg, paths=paths)  "
+            "# default deps wire the real cross-encoder",
+            pytrace=False,
+        )
+    return result
+
+
 # PVT placeholder steps — catch-all ``pytest.skip`` until #284 harness ships.
 # Gated on ``KAIRIX_PVT=1`` so the regex-catch-all parser doesn't intercept
 # every Given/When/Then across the layer-2 BDD suite when PVT is off (the

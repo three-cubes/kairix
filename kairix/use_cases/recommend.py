@@ -535,13 +535,17 @@ def _db_path_search_fn(db_path: str) -> Callable[..., Any]:
     and the embed service is overridden with
     :class:`_NullEmbeddingService` — the seam is provider-free by
     construction (no ``provider:`` field required), so the read-only path
-    runs on any host. Production callers leave ``deps`` None and reach the
-    full hybrid ``_default_search`` instead.
+    runs on any host. The cross-encoder is wired off
+    (``RERANK_DISABLED``) for the same reason: the production reranker's
+    first call imports torch and downloads its model from the Hugging Face
+    hub, so leaving it on made this "any host" seam network-bound (~20-50s
+    cold, the #493 flake class). Production callers leave ``deps`` None and
+    reach the full hybrid ``_default_search`` (rerank included) instead.
     """
     from pathlib import Path
 
     def _search(**kwargs: Any) -> Any:
-        from kairix.core.factory import FactoryDeps, build_search_pipeline
+        from kairix.core.factory import RERANK_DISABLED, FactoryDeps, build_search_pipeline
         from kairix.paths import KairixPaths
 
         cfg = read_only_db_search_config()
@@ -552,7 +556,7 @@ def _db_path_search_fn(db_path: str) -> Callable[..., Any]:
             log_dir=resolved.parent,
             workspace_root=resolved.parent,
         )
-        deps = FactoryDeps(embed_service_override=_NullEmbeddingService())
+        deps = FactoryDeps(embed_service_override=_NullEmbeddingService(), reranker_override=RERANK_DISABLED)
         pipeline = build_search_pipeline(config=cfg, paths=paths, deps=deps)
         return _pipeline_search(pipeline, **kwargs)
 

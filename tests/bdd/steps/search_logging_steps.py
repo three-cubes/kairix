@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from pytest_bdd import given, parsers, then, when
 
-from kairix.core.factory import QUERY_CACHE_DISABLED, FactoryDeps, build_search_pipeline
+from kairix.core.factory import QUERY_CACHE_DISABLED, RERANK_DISABLED, FactoryDeps, build_search_pipeline
 from kairix.core.search.config import RetrievalConfig
 from kairix.core.search.fusion import RRFFusion
 from kairix.core.search.intent import QueryIntent
@@ -78,6 +78,10 @@ def _build_pipeline(log_path: Path) -> SearchPipeline:
             logger_override=JsonlSearchLogger(search_log_path=log_path),
             resolver_override=FakeCollectionResolver(),
             query_cache_override=QUERY_CACHE_DISABLED,
+            # No assertion reads the reranked order: wire rerank off so the
+            # first search never imports torch / downloads the cross-encoder
+            # model from the Hugging Face hub (#493 flake root cause).
+            reranker_override=RERANK_DISABLED,
         ),
     )
 
