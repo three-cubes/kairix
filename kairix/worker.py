@@ -796,6 +796,23 @@ def _ignore_connector_failure(_entry: dict[str, Any], _connector: Any) -> None:
     """One-shot sync callers do not retain connector state between ticks."""
 
 
+def _close_one_shot_connector(_entry: dict[str, Any], connector: Any) -> None:
+    """Close a connector built for this tick only, once its batch is done.
+
+    The one-shot provider builds a fresh connector per entry per tick and
+    nothing else holds it, so the tick must release what it built — e.g.
+    the Obsidian connector's filesystem-watcher thread, which otherwise
+    outlives every tick.
+    """
+    close = getattr(connector, "close", None)
+    if callable(close):
+        close()
+
+
+def _keep_owned_connector(_entry: dict[str, Any], _connector: Any) -> None:
+    """Long-lived runtime connectors stay open; the runtime closes them on shutdown."""
+
+
 @dataclass
 class ConnectorSyncDeps:
     """Injectable dependencies for :func:`run_connector_sync_pipeline`.
@@ -830,6 +847,9 @@ class ConnectorSyncDeps:
         connector batch. One-shot callers retain nothing; the long-lived
         runtime evicts and closes the exact failed instance so the next tick
         resumes from the committed SQLite cursor.
+      * ``connector_release`` — runs after every batch (success or failure).
+        One-shot callers close the connector the tick built; the long-lived
+        runtime keeps its owned instance open for the next tick.
     """
 
     disabled_fn: Callable[[], bool] = field(default_factory=lambda: connector_sync_disabled)
@@ -841,6 +861,7 @@ class ConnectorSyncDeps:
     connector_failure_handler: Callable[[dict[str, Any], Any], None] = field(
         default_factory=lambda: _ignore_connector_failure
     )
+    connector_release: Callable[[dict[str, Any], Any], None] = field(default_factory=lambda: _close_one_shot_connector)
 
 
 @dataclass
@@ -922,6 +943,7 @@ class ConnectorSyncRuntime:
             deps or ConnectorSyncDeps(),
             connector_provider=self.connector_for,
             connector_failure_handler=self.connector_failed,
+            connector_release=_keep_owned_connector,
         )
 
     def connector_for(self, entry: dict[str, Any]) -> Any:
@@ -1008,19 +1030,39 @@ def _process_sync_entry(
     acc: _SyncAccumulator,
     connector_provider: Callable[[dict[str, Any]], Any],
     connector_failure_handler: Callable[[dict[str, Any], Any], None],
+    connector_release: Callable[[dict[str, Any], Any], None],
 ) -> None:
     """Run one connector batch, fold its outcome into ``acc``, stamp counters.
 
     A per-connector failure (registry miss, plugin raise, pipeline
     rollback) is logged and swallowed so a single misconfigured connector
     does not halt sibling sync work — the same isolation the inline loop
-    had before SYNC-OBS extracted it.
+    had before SYNC-OBS extracted it. ``connector_release`` runs after the
+    batch either way, so a one-shot tick never leaks the connector it built.
     """
     try:
         connector = connector_provider(entry)
     except Exception as exc:
         logger.warning("worker: connector %s failed to initialise — %s", entry.get("name"), exc)
         return
+    try:
+        _process_built_connector(db, entry, bronze_root, acc, connector, connector_failure_handler)
+    finally:
+        try:
+            connector_release(entry, connector)
+        except Exception as release_exc:
+            logger.warning("worker: connector %s release failed — %s", entry.get("name"), release_exc)
+
+
+def _process_built_connector(
+    db: sqlite3.Connection,
+    entry: dict[str, Any],
+    bronze_root: Path,
+    acc: _SyncAccumulator,
+    connector: Any,
+    connector_failure_handler: Callable[[dict[str, Any], Any], None],
+) -> None:
+    """Run the batch for an already-built connector and record its outcome."""
     try:
         outcome = _run_one_connector_batch(db, entry, bronze_root, connector)
     except Exception as exc:
@@ -1107,6 +1149,7 @@ def run_connector_sync_pipeline(deps: ConnectorSyncDeps | None = None) -> Connec
                 acc,
                 deps.connector_provider,
                 deps.connector_failure_handler,
+                deps.connector_release,
             )
         return acc.to_result()
     finally:

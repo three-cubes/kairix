@@ -25,15 +25,14 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from watchdog.observers.polling import PollingObserver
 
 # Imported from the defining module (not the package re-export) so the
 # mutation-parity import graph (scripts/checks/mutation_parity.py) selects
 # this file as connector.py's own test when mutating that module.
 from kairix.connectors.obsidian.connector import ObsidianConnector, make_connector
-from kairix.connectors.obsidian.watcher import WatchdogSource
 from kairix.core.protocols import RawArtefact
 from kairix.knowledge.reflib.dedup import hash_content
+from tests.fakes import fake_obsidian_watcher_factory
 
 
 def _seed_vault(vault: Path, payloads: dict[str, str]) -> None:
@@ -71,15 +70,16 @@ def vault(tmp_path: Path) -> Path:
 
 
 def _connector_with_known(vault: Path, known: Mapping[str, str]) -> ObsidianConnector:
-    """Construct a connector against a snapshot of ``known`` state."""
+    """Construct a connector against a snapshot of ``known`` state.
 
-    def _polling_watcher(root: Path) -> WatchdogSource:
-        return WatchdogSource(root, observer_factory=PollingObserver)
-
+    The watcher runs on the in-process fake observer (no OS thread): these
+    tests pin reconciler behaviour, and a real observer is a thread that
+    outlives any test that does not close the connector.
+    """
     return ObsidianConnector(
         vault_root=vault,
         known_state_resolver=lambda _c: known,
-        watcher_factory=_polling_watcher,
+        watcher_factory=fake_obsidian_watcher_factory(),
     )
 
 
