@@ -373,8 +373,16 @@ def impacted_tests(paths: set[Path], root: Path = REPO_ROOT) -> list[str]:
     needles.update(str(p) for p in paths)  # also match path-string references
     # A module's own test file may import it through its package's re-export
     # (``from kairix.memory_stores import KairixNativeStore``), which names no
-    # module path: count a test named after the module that imports its package.
-    reexports = {(_module_path(p.parent), f"test_{p.stem}") for p in paths}
+    # module path: count a test named after the module, or after its package
+    # (``test_secrets.py`` for ``kairix/secrets/_legacy.py``), that imports
+    # that package.
+    reexports = {(_module_path(p.parent), name) for p in paths for name in (f"test_{p.stem}", f"test_{p.parent.name}")}
+    # A module under a hyphenated directory (``openclaw/memory-prompt/plugin.py``)
+    # cannot be imported by name; its tests load it by path, so they name the
+    # directory (``memory-prompt``) or its importable spelling (``memory_prompt``).
+    needles.update(
+        spelling for p in paths for part in p.parent.parts if "-" in part for spelling in (part, part.replace("-", "_"))
+    )
     for test_file in tests_dir.rglob("test_*.py"):
         try:
             text = test_file.read_text(encoding="utf-8")

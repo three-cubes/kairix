@@ -280,9 +280,14 @@ def test_session_start_contains_raising_append_system_context(
 
     assert ctx.append_attempts == [expected_text], "exactly one append attempt, no retry"
     assert ctx.appended == []
-    assert any(
-        r.levelname == "WARNING" and "openclaw prompt assembly failed" in r.getMessage() for r in caplog.records
-    ), "the append failure must be logged at WARNING for operator review"
+    warnings = [
+        r for r in caplog.records if r.levelname == "WARNING" and "openclaw prompt assembly failed" in r.getMessage()
+    ]
+    assert warnings, "the append failure must be logged at WARNING for operator review"
+    # The traceback travels with the warning (exc_info), so an operator can see
+    # where openclaw's prompt assembly failed, not just that it did.
+    assert warnings[0].exc_info is not None, "the append-failure warning must carry the exception traceback"
+    assert "openclaw prompt assembly failed" in str(warnings[0].exc_info[1])
 
 
 # ---------------------------------------------------------------------------

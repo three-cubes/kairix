@@ -301,6 +301,31 @@ def test_a_modules_own_test_that_imports_it_through_its_package_is_impacted(tmp_
     assert impacted == ["tests/memory_stores/test_kairix_native.py"]
 
 
+def test_a_package_named_test_that_imports_the_package_is_impacted(tmp_path: Path) -> None:
+    """``kairix/secrets/_legacy.py`` is tested through ``kairix.secrets`` by
+    ``tests/test_secrets.py``: a test named after the package that imports it
+    is that module's own test."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_secrets.py").write_text("from kairix.secrets import get_secret\n", encoding="utf-8")
+    (tests / "test_other.py").write_text("from kairix.secrets import get_secret\n", encoding="utf-8")
+    impacted = mp.impacted_tests({Path("kairix/secrets/_legacy.py")}, root=tmp_path)
+    assert impacted == ["tests/test_secrets.py"]
+
+
+def test_a_module_under_a_hyphenated_directory_is_found_by_its_directory_name(tmp_path: Path) -> None:
+    """A hyphenated directory cannot be imported, so its tests load the module
+    by path and name the directory instead."""
+    tests = tmp_path / "tests" / "plugins"
+    tests.mkdir(parents=True)
+    (tests / "test_memory_prompt.py").write_text(
+        "from kairix.plugins.openclaw import memory_prompt_dir\n", encoding="utf-8"
+    )
+    (tests / "test_unrelated.py").write_text("from kairix.plugins.openclaw import other\n", encoding="utf-8")
+    impacted = mp.impacted_tests({Path("kairix/plugins/openclaw/memory-prompt/plugin.py")}, root=tmp_path)
+    assert impacted == ["tests/plugins/test_memory_prompt.py"]
+
+
 def test_the_full_scope_run_has_no_cap_or_budget_and_the_local_run_keeps_both() -> None:
     """The commit-time run defers what its budget skips to the nightly, so the
     nightly must run every mutant: an unlimited cap and no time budget."""
