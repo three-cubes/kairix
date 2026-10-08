@@ -361,22 +361,29 @@ def _prioritise(found: set[str], paths: set[Path]) -> list[str]:
     return same_module + rest[:budget]
 
 
-def impacted_tests(paths: set[Path]) -> list[str]:
+def impacted_tests(paths: set[Path], root: Path = REPO_ROOT) -> list[str]:
     """Test files that import any mutated module — the import-graph heuristic
-    ``safe-commit.sh --fast`` uses. Returns repo-relative test-file paths."""
-    tests_dir = REPO_ROOT / "tests"
+    ``safe-commit.sh --fast`` uses. Returns test-file paths relative to ``root``
+    (the repository)."""
+    tests_dir = root / "tests"
     if not tests_dir.exists():
         return []
     found: set[str] = set()
     needles = {_module_path(p) for p in paths}
     needles.update(str(p) for p in paths)  # also match path-string references
+    # A module's own test file may import it through its package's re-export
+    # (``from kairix.memory_stores import KairixNativeStore``), which names no
+    # module path: count a test named after the module that imports its package.
+    reexports = {(_module_path(p.parent), f"test_{p.stem}") for p in paths}
     for test_file in tests_dir.rglob("test_*.py"):
         try:
             text = test_file.read_text(encoding="utf-8")
         except OSError:
             continue
-        if any(needle in text for needle in needles):
-            found.add(str(test_file.relative_to(REPO_ROOT)))
+        if any(needle in text for needle in needles) or any(
+            test_file.stem.startswith(name) and f"{package} import" in text for package, name in reexports
+        ):
+            found.add(str(test_file.relative_to(root)))
     # Bound the per-mutant pytest cost: a module imported by 60+ test files
     # would make each mutant run a multi-minute suite. The first N (sorted,
     # deterministic) are a representative cover — a mutant that survives all

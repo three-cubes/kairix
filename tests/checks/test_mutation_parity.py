@@ -282,6 +282,25 @@ def test_each_mutant_runs_against_its_own_modules_importers_once() -> None:
     assert calls == [{sheet}, {cli}], "each module is searched once, on its own"
 
 
+def test_a_modules_own_test_that_imports_it_through_its_package_is_impacted(tmp_path: Path) -> None:
+    """``from kairix.memory_stores import KairixNativeMemoryStore`` names no
+    module path, yet a test named after the module is that module's own test:
+    it must run against the module's mutants. Another package's test of the
+    same name, and a same-package test with another name, are not selected."""
+    tests = tmp_path / "tests"
+    (tests / "memory_stores").mkdir(parents=True)
+    (tests / "other").mkdir()
+    (tests / "memory_stores" / "test_kairix_native.py").write_text(
+        "from kairix.memory_stores import KairixNativeMemoryStore\n", encoding="utf-8"
+    )
+    (tests / "other" / "test_kairix_native.py").write_text("from kairix.other import thing\n", encoding="utf-8")
+    (tests / "memory_stores" / "test_registry.py").write_text(
+        "from kairix.memory_stores import registry\n", encoding="utf-8"
+    )
+    impacted = mp.impacted_tests({Path("kairix/memory_stores/kairix_native.py")}, root=tmp_path)
+    assert impacted == ["tests/memory_stores/test_kairix_native.py"]
+
+
 def test_the_full_scope_run_has_no_cap_or_budget_and_the_local_run_keeps_both() -> None:
     """The commit-time run defers what its budget skips to the nightly, so the
     nightly must run every mutant: an unlimited cap and no time budget."""
