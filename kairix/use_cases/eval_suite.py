@@ -434,7 +434,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--regression-against",
         default=None,
-        help="Path to a pinned baseline directory; exit 1 if the run regresses by more than 2pp.",
+        help=(
+            "Path to a pinned baseline directory; exit 1 if the run regresses by more than 2pp, "
+            "exit 3 (inconclusive) if any LLM-judge call failed."
+        ),
     )
     parser.add_argument(
         "--json",
@@ -520,6 +523,13 @@ def pct(passed: int, total: int) -> int:
 # ---------------------------------------------------------------------------
 
 
+# Exit code for ``--regression-against`` when the run cannot be compared:
+# LLM-judge failures left questions unscored, so ``mean_score`` covers only
+# part of the suite and one good row could hide a regression. Distinct from
+# 1 (regression) and 2 (missing / invalid baseline).
+EXIT_REGRESSION_INCONCLUSIVE = 3
+
+
 def _check_regression(
     *,
     result: SuiteResult,
@@ -532,7 +542,20 @@ def _check_regression(
     previously-serialised :class:`SuiteResult`. Regression =
     ``baseline.mean_score - result.mean_score > 2pp`` (0.02 on the
     0.0-1.0 scale).
+
+    Exit codes: 0 = no regression; 1 = regression; 2 = baseline missing or
+    invalid; :data:`EXIT_REGRESSION_INCONCLUSIVE` (3) = the run had LLM-judge
+    failures, so its partial mean is not compared at all.
     """
+    if result.judge_failures:
+        err_sink.write(
+            f"{_ERROR_PREFIX}regression check INCONCLUSIVE on {result.suite_name} — "
+            f"the LLM judge failed on {result.judge_failures} question(s), so the mean score "
+            f"covers only {result.n_questions} judged question(s) and is not comparable to the baseline. "
+            f"fix: check the LLM provider credentials / availability. "
+            f"next: re-run until judge_failures is 0, then re-check the regression.\n"
+        )
+        return EXIT_REGRESSION_INCONCLUSIVE
     baseline_path = baseline_dir / f"{result.suite_name}.json"
     if not baseline_path.exists():
         err_sink.write(

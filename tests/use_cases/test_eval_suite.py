@@ -64,6 +64,7 @@ def _invoke(
     *,
     tmp_path: Path,
     chat_response: str = "1.0",
+    chat_responses: list[str] | None = None,
 ) -> tuple[int, str, str]:
     """Run the use case main and return (exit_code, stdout, stderr).
 
@@ -86,7 +87,11 @@ def _invoke(
         paths=_paths(tmp_path),
         fact_store=FakeFactStore(),
         fact_extractor=FakeFactExtractor(),
-        llm=FakeLLMBackend(chat_response=chat_response),
+        llm=(
+            FakeLLMBackend(chat_responses=chat_responses)
+            if chat_responses is not None
+            else FakeLLMBackend(chat_response=chat_response)
+        ),
     )
     return code, out.getvalue(), err.getvalue()
 
@@ -213,6 +218,40 @@ def test_main_regression_gate_fails_when_below_tolerance(tmp_path: Path) -> None
     assert "engagement-alpha" in err
     assert "fix:" in err
     assert "next:" in err
+
+
+def test_main_regression_gate_inconclusive_when_judge_failed(tmp_path: Path) -> None:
+    """One question judged 1.0 and one judge failure (backend returned
+    ``""``): the partial mean (1.0) would sail past a 1.0 baseline, so the
+    gate refuses to compare and exits 3 (inconclusive) with an affordance.
+    The same suite fully judged and not regressing still exits 0.
+
+    Sabotage-proof: drop the ``if result.judge_failures:`` early return in
+    ``_check_regression`` — the partial mean is compared, the gate exits 0,
+    and the first assertion fails. Restored.
+    """
+    suite = _make_suite_dir(tmp_path)
+    baseline_dir = _write_baseline(tmp_path, "engagement-alpha", mean=1.0)
+
+    code, _, err = _invoke(
+        [str(suite), "--regression-against", str(baseline_dir)],
+        tmp_path=tmp_path,
+        chat_responses=["1.0", ""],
+    )
+    assert code == _use_case.EXIT_REGRESSION_INCONCLUSIVE == 3
+    assert "INCONCLUSIVE" in err
+    assert "1 question(s)" in err
+    assert "fix:" in err
+    assert "next:" in err
+
+    code, _, err = _invoke(
+        [str(suite), "--regression-against", str(baseline_dir)],
+        tmp_path=tmp_path,
+        chat_responses=["1.0", "1.0"],
+    )
+    assert code == 0
+    assert "INCONCLUSIVE" not in err
+    assert "REGRESSION" not in err
 
 
 def test_main_regression_gate_missing_baseline_is_actionable(tmp_path: Path) -> None:

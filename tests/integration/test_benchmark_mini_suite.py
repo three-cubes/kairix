@@ -176,7 +176,7 @@ def test_benchmark_runs_mini_suite_and_emits_full_envelope() -> None:
     assert "weighted_total" in result.summary
     assert "category_scores" in result.summary
     assert "gates" in result.summary
-    assert set(result.summary["gates"].keys()) == {"phase1", "phase2", "phase3"}
+    assert set(result.summary["gates"].keys()) == {"phase1", "phase2", "phase3", "judge_coverage"}
     # Invariant: weighted_total in [0, 1].
     wt = result.summary["weighted_total"]
     assert 0.0 <= wt <= 1.0, f"weighted_total {wt} broke the [0,1] invariant"

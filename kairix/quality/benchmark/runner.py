@@ -59,6 +59,7 @@ _KEY_NDCG_AT_10 = "ndcg_at_10"
 # aggregates — a failed judgement is not a 0.0 "irrelevant" verdict).
 _KEY_JUDGE_FAILURE = "judge_failure"
 _KEY_JUDGE_FAILURES = "judge_failures"
+_GATE_JUDGE_COVERAGE = "judge_coverage"
 
 if TYPE_CHECKING:
     from kairix.core.protocols import ChatBackend
@@ -367,9 +368,11 @@ def llm_judge(
     verdict — the backend is not called).
 
     Raises:
-        JudgeFailedError: the backend raised (API / auth / timeout / missing
-            provider) or replied with a non-numeric / non-finite value. A
-            failure is never reported as a 0.0 score.
+        JudgeFailedError: ``backend_error`` when the backend raised (API /
+            auth / timeout / missing provider) or replied blank (the
+            provider's failure sentinel); ``unparseable_response`` when a
+            non-blank reply is non-numeric or non-finite. A failure is never
+            reported as a 0.0 score.
     """
     _ = snippets  # consumed at signature time; explicit drop documents intent
     if not paths:
@@ -390,10 +393,13 @@ def llm_judge(
     except Exception as exc:
         raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, f"{type(exc).__name__}: {exc}") from exc
 
+    if not reply or not reply.strip():
+        # Blank is the provider's failure sentinel, not an unparseable verdict.
+        raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, "empty judge reply (LLM backend failure)")
     try:
         score = float(reply)
     except (TypeError, ValueError) as exc:
-        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, f"non-numeric reply ({len(reply or '')} chars)") from exc
+        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, f"non-numeric reply ({len(reply)} chars)") from exc
     if not math.isfinite(score):
         raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, "non-finite reply")
     return max(0.0, min(1.0, score))
@@ -565,6 +571,9 @@ def format_interpretation(result: BenchmarkResult) -> str:
     for gate_name, gate_threshold in PHASE_GATES.items():
         status = "PASS ✅" if wt >= gate_threshold else f"FAIL ❌ (need +{gate_threshold - wt:.3f})"
         lines.append(f"  {gate_name.upper()} gate (≥{gate_threshold}): {status}")
+    if result.summary.get("gates", {}).get(_GATE_JUDGE_COVERAGE) is False:
+        failures = result.summary.get(_KEY_JUDGE_FAILURES, 0)
+        lines.append(f"  JUDGE COVERAGE gate (0 judge failures): FAIL ❌ ({failures} unscored)")
     lines.append("")
 
     # Per-category floor check
@@ -984,6 +993,11 @@ def run_benchmark(
     )
 
     gates = {gate: weighted_total >= threshold for gate, threshold in PHASE_GATES.items()}
+    # Incomplete judge coverage: the weighted total covers only the judged
+    # cases, so it can clear every phase gate while a whole slice went
+    # unscored. Any judge failure fails this gate (and so ``--gates``);
+    # the unscored case rows keep their judge_failure / judge_error detail.
+    gates[_GATE_JUDGE_COVERAGE] = judge_failures == 0
     ndcg_at_10, hit_rate_at_5, mrr_at_10 = aggregate_ndcg_metrics(case_results)
 
     diagnostics: dict[str, Any] = {

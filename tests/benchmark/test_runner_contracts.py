@@ -301,12 +301,13 @@ def test_run_benchmark_summary_carries_documented_fields() -> None:
 
 @pytest.mark.unit
 def test_run_benchmark_gates_dict_carries_each_phase_gate() -> None:
-    """The summary.gates dict must map every PHASE_GATES key → bool."""
+    """The summary.gates dict maps every PHASE_GATES key + judge_coverage → bool."""
     suite = _suite(BenchmarkCase(id="R1", category="recall", query="q", gold_path="x.md", score_method="exact"))
     result = run_benchmark(suite, deps=BenchmarkDeps(retrieve=_retrieve_fn_returning(["vault/x.md"])))
 
     gates = result.summary["gates"]
-    assert set(gates.keys()) == set(PHASE_GATES.keys())
+    assert set(gates.keys()) == set(PHASE_GATES.keys()) | {"judge_coverage"}
+    assert gates["judge_coverage"] is True
     assert all(isinstance(passed, bool) for passed in gates.values())
 
 

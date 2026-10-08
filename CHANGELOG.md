@@ -47,6 +47,21 @@ and `judge_error`. Note that `n_questions` now counts scored questions only.
 **Pass rates and mean scores may go up** compared with earlier runs that had
 judge failures. Check `judge_failures` before comparing against a baseline.
 
+Incomplete judge coverage now also fails the gates:
+
+- `kairix benchmark run --gates` exits 2 if the judge failed on any case.
+  The summary has a new `judge_coverage` gate, which only passes when
+  `judge_failures` is 0, so a high score from the judged cases alone can no
+  longer pass. The report shows a "JUDGE COVERAGE gate" FAIL line. The
+  unscored case rows still say why.
+- `kairix eval --regression-against` exits with the new code **3
+  (inconclusive)** if the judge failed on any question, and says why. It
+  does not compare the partial mean score, because one good answer could
+  hide a regression. Exit 1 still means a regression, and exit 2 a missing
+  or invalid baseline.
+- A blank judge reply now counts as a backend failure (`backend_error`) in
+  the benchmark judge, the same as in the other judges.
+
 The last two judges follow the same rule, so no LLM judge in kairix turns a
 failure into a score any more:
 

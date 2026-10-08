@@ -491,3 +491,48 @@ def test_kairix_eval_emits_surface_hint() -> None:
     assert "kairix benchmark run" in text
     assert "conversation-eval" in text
     assert "gold-suite" in text
+
+
+@pytest.mark.unit
+def test_cmd_run_gates_flag_fails_on_incomplete_judge_coverage(tmp_path: Path) -> None:
+    """Every judged case scores 1.0 (all phase gates pass) but one judge call
+    fails: ``--gates`` must exit 2 on the ``judge_coverage`` gate. The same
+    suite fully judged exits 0.
+
+    Drives the real ``run_benchmark`` through the CLI's ``run_benchmark``
+    seam with a FakeChatBackend + fake retrieve (no provider, no corpus).
+
+    sabotage: delete ``gates[_GATE_JUDGE_COVERAGE] = judge_failures == 0`` in
+    ``run_benchmark`` — every remaining gate passes and the partial run
+    exits 0. Restored.
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from tests.fakes import FakeChatBackend
+
+    categories = ("recall", "temporal", "entity", "conceptual", "multi_hop", "procedural", "recall")
+    suite = tmp_path / "judged.yaml"
+    suite.write_text(
+        "meta:\n  name: judged\n  version: '1.0'\ncases:\n"
+        + "".join(
+            f"  - id: C{i}\n    category: {cat}\n    query: q{i}\n    score_method: llm\n    gold_title: g{i}\n"
+            for i, cat in enumerate(categories)
+        ),
+    )
+
+    def _retrieve(**_kw: Any) -> tuple[list[str], list[str], dict[str, Any]]:
+        return ["vault/doc.md"], ["snippet"], {}
+
+    def _runner_with(n_replies: int) -> Any:
+        def _run(**kwargs: Any) -> Any:
+            backend = FakeChatBackend(responses=["1.0"] * n_replies)
+            return run_benchmark(**kwargs, deps=BenchmarkDeps(chat_backend=backend, retrieve=_retrieve))
+
+        return _run
+
+    for n_replies, expected_rc in ((len(categories) - 1, 2), (len(categories), 0)):
+        out = io.StringIO()
+        with redirect_stderr(io.StringIO()), redirect_stdout(out):
+            rc = cmd_run(_ns(str(suite), gates=True), deps=BenchmarkCLIDeps(run_benchmark=_runner_with(n_replies)))
+        assert rc == expected_rc, f"{n_replies} judge replies: expected exit {expected_rc}, got {rc}"
+        if expected_rc == 2:
+            assert "JUDGE COVERAGE gate (0 judge failures): FAIL" in out.getvalue()
