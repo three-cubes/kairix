@@ -17,7 +17,10 @@ import time
 
 import pytest
 
-from kairix.transport.coalesce import (
+# Imported from the defining module (not the package re-export) so the
+# mutation-parity import graph (scripts/checks/mutation_parity.py) selects
+# this file as embed_coalescer.py's own test when mutating that module.
+from kairix.transport.coalesce.embed_coalescer import (
     DEFAULT_COALESCE_WINDOW_MS,
     DEFAULT_MAX_BATCH_SIZE,
     CoalescerStats,
