@@ -258,7 +258,8 @@ def test_file_local_f26_forbidden_import_caught() -> None:
     cluster's only clean-arm control through the full gate (the sabotage arm
     below stages a clean probe and asserts F26 clears). The other file-local
     proofs (F8) use the cheaper single-rule :func:`_run_one_narrowed`; only this
-    one pays the whole-gate cost, by design.
+    one pays the whole-gate cost, by design, and only ONCE (the clean arm uses
+    the narrowed single-rule path).
 
     Robustness (#506): the assertions are scoped to **F26's own verdict in the
     ledger**, never the aggregate exit code. ``_run_staged`` drives the FULL
@@ -285,14 +286,13 @@ def test_file_local_f26_forbidden_import_caught() -> None:
     assert "F26" in _ran_rule_ids(out), f"F26 must run end-to-end through the real dispatch; ledger:\n{out}"
     assert "F26" in _failed_rule_ids(out), f"F26 must FAIL on the forbidden core→providers import; ledger:\n{out}"
     # Sabotage + clean-arm control (inline): the SAME probe without the import
-    # still RUNS F26 but F26 must NOT fail — the verdict flips on the one-line
-    # edit. Again scoped to F26, not the aggregate exit code.
+    # must NOT fail F26 — the verdict flips on the one-line edit. Driven through
+    # the single-rule narrowed path, not a second whole-gate dispatch: the full
+    # dispatch above already proves the wiring, and paying the ~40-rule gate
+    # twice pushed this test past the 60s per-test timeout on loaded CI shards.
     with _probe_file("kairix/core/zzz_staged_probe_f26.py", "x = 1\n") as rel:
-        _code2, out2 = _run_staged([rel])
-    assert "F26" in _ran_rule_ids(out2), f"F26 must still run on the clean probe; ledger:\n{out2}"
-    assert "F26" not in _failed_rule_ids(out2), (
-        f"removing the forbidden import must clear F26 (sabotage + clean-arm); ledger:\n{out2}"
-    )
+        rc2, out2 = _run_one_narrowed("F26", [rel])
+    assert rc2 == 0, f"removing the forbidden import must clear F26 (sabotage + clean-arm); output:\n{out2}"
 
 
 # ── file-local marker: missing test category marker (F8) ────────────────

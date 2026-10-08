@@ -7,11 +7,13 @@ Protocol assertions. F43 requires this pairing — without it the fake
 can drift away from the real wire (or vice versa) and the production
 path silently diverges from what BDD / unit tests measure.
 
-Real-impl path is driven against a ``tmp_path`` vault; the watchdog
-observer is never started by these tests (the connector starts it
-lazily on first ``list_changes`` and stops it on ``close()``, but the
-contract assertions don't depend on watchdog timing — they assert
-shape, not delivery latency).
+Real-impl path is driven against a ``tmp_path`` vault. The connector
+starts its watcher lazily on the first ``list_changes``, so the real impl
+is built with ``watcher_factory=fake_obsidian_watcher_factory()`` (the
+documented seam): the real connector, ``WatchdogSource`` and handler run,
+but no OS-level watcher thread is started — the macOS FSEvents default
+would otherwise outlive the test (it is never closed here) and replay
+pre-start events into the drain.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import pytest
 
 from kairix.connectors.obsidian import ObsidianConnector
 from kairix.core.protocols import ChangeEvent, RawArtefact, SourceConnector
-from tests.fakes import FakeObsidian
+from tests.fakes import FakeObsidian, fake_obsidian_watcher_factory
 
 # ---------------------------------------------------------------------------
 # Factories — each yields a fresh SourceConnector for one test.
@@ -54,6 +56,7 @@ def _real_factory(tmp_path: Path) -> SourceConnector:
     return ObsidianConnector(
         vault_root=vault,
         known_state_resolver=lambda _c: {},
+        watcher_factory=fake_obsidian_watcher_factory(),
     )
 
 

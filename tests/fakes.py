@@ -3213,6 +3213,97 @@ class FakeObsidian:
         return SourceMetadata()
 
 
+class FakeWatchdogObserver:
+    """In-process stand-in for :class:`watchdog.observers.Observer`.
+
+    Plugs into the documented ``WatchdogSource(observer_factory=...)`` seam
+    so a test runs the REAL :class:`ObsidianConnector` + ``WatchdogSource``
+    + ``QueueingHandler`` without starting an OS-level watcher thread.
+
+    Why not the real observer: on macOS the default ``Observer`` is the
+    FSEvents observer, which (a) delivers *historic* events for files written
+    in the moments before the stream started (fseventsd lag, worst under
+    machine load) — so a "the worker was paused" scenario can drain a
+    spurious ``created`` event that the test never asked for — and (b) leaves
+    a native emitter thread + FSEventStream behind if the connector is not
+    closed. Both made the Obsidian BDD / contract tests load-dependent.
+
+    Events only arrive when the test calls :meth:`emit` with a watchdog
+    ``FileSystemEvent``, which is dispatched synchronously to the scheduled
+    handler exactly as watchdog's dispatcher thread would — so "an event
+    fired while the watcher was running" is a deterministic test step.
+    """
+
+    def __init__(self) -> None:
+        self.handlers: list[Any] = []
+        self.started = False
+        self.stopped = False
+        self.joined = False
+
+    def schedule(self, handler: Any, path: str, *, recursive: bool = False) -> None:
+        del path, recursive
+        self.handlers.append(handler)
+
+    def start(self) -> None:
+        self.started = True
+
+    def unschedule_all(self) -> None:
+        self.handlers.clear()
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def join(self, timeout: float | None = None) -> None:
+        del timeout
+        self.joined = True
+
+    def emit(self, event: Any) -> None:
+        """Dispatch one watchdog event to every scheduled handler, synchronously."""
+        if not self.started or self.stopped:
+            return  # a stopped / never-started observer delivers nothing — same as the OS watcher
+        for handler in list(self.handlers):
+            handler.dispatch(event)
+
+
+def fake_obsidian_watcher_factory(
+    observers: list[FakeWatchdogObserver] | None = None,
+) -> Any:
+    """Return a ``watcher_factory`` for :class:`ObsidianConnector` backed by
+    :class:`FakeWatchdogObserver`.
+
+    Every observer the factory builds is appended to ``observers`` (when
+    given) so the test can :meth:`FakeWatchdogObserver.emit` events into the
+    running watcher or assert it was stopped at teardown.
+    """
+    from kairix.connectors.obsidian.watcher import WatchdogSource  # local import — optional plugin dep
+
+    sink = observers if observers is not None else []
+
+    def _observer() -> FakeWatchdogObserver:
+        observer = FakeWatchdogObserver()
+        sink.append(observer)
+        return observer
+
+    def _factory(root: Path) -> WatchdogSource:
+        return WatchdogSource(root, observer_factory=_observer)
+
+    return _factory
+
+
+def live_watchdog_threads() -> set[Any]:
+    """Every live watchdog observer / emitter thread in this process.
+
+    Snapshot before a test and diff after: a non-empty difference means
+    the test started a real OS watcher and leaked it (the leak class the
+    Obsidian BDD / contract tests had).
+    """
+    import threading
+
+    from watchdog.utils import BaseThread
+
+    return {t for t in threading.enumerate() if isinstance(t, BaseThread) and t.is_alive()}
+
+
 class FakeDexCrmConnector:
     """Scripted :class:`kairix.core.protocols.SourceConnector` for the
     Dex CRM connector plugin's contract test.
