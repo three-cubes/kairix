@@ -40,7 +40,10 @@ Pass example:
 Forbidden example:
   @patch('kairix.core.search.bm25.bm25_search')
   def test_search_returns_hits(mock_search): ...
+  with pytest.MonkeyPatch.context() as mp: mp.setattr(check_mod, 'run_all_checks', fake)
+  mock.patch.object(warm_cli, 'run_warm', return_value=result)
   sys.modules['kairix.core.search.pipeline'] = BrokenModule(...)
+  mods = sys.modules; mods.update(fakes)
   importlib.reload(kairix.core.search.rerank)
 
 Stdlib boundaries (os.*, builtins.*) and external SDK boundaries

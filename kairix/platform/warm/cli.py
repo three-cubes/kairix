@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -143,10 +145,24 @@ def _format_text(result: WarmResult) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> int:
+@dataclass(frozen=True)
+class WarmCliDeps:
+    """Injectable collaborators for :func:`main` (canonical Deps shape).
+
+    - ``run_warm``: the warm-up runner. Production default is
+      :func:`kairix.platform.warm.runner.run_warm`; tests inject a callable
+      returning a canned :class:`WarmResult` to drive the exit-code and
+      rendering logic without patching the module (F1).
+    """
+
+    run_warm: Callable[..., WarmResult] = field(default_factory=lambda: run_warm)
+
+
+def main(argv: list[str] | None = None, deps: WarmCliDeps | None = None) -> int:
+    deps = deps if deps is not None else WarmCliDeps()
     args = build_parser().parse_args(argv)
     builder = build_pipeline_builder_for_paths(args.db_path, args.document_root)
-    result = run_warm(deps=WarmDeps(build_pipeline=builder)) if builder is not None else run_warm()
+    result = deps.run_warm(deps=WarmDeps(build_pipeline=builder)) if builder is not None else deps.run_warm()
     if args.json:
         print(json.dumps(result.to_envelope(), indent=2))
     else:

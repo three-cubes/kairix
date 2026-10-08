@@ -1,22 +1,34 @@
 """F2 detector: no test writes to a KAIRIX_* process-env key.
 
 Walks every test file via AST and reports each statement that mutates a
-``KAIRIX_*`` key of the process environment. Two families of shape:
+``KAIRIX_*`` key of the process environment. The write surface is the shared
+engine ``_mapping_writes`` (also used by F1 for ``sys.modules``):
 
-1. **monkeypatch** — ``monkeypatch.setenv / delenv / setattr("KAIRIX_X", ...)``
-   and ``monkeypatch.setitem / delitem(os.environ, "KAIRIX_X", ...)``.
-2. **direct os.environ** — ``os.environ["KAIRIX_X"] = v`` (incl. ``+=``),
-   ``del os.environ["KAIRIX_X"]``, ``os.environ.pop("KAIRIX_X")``,
-   ``os.environ.setdefault("KAIRIX_X", v)``, ``os.environ.update(...)``
-   and ``patch.dict(os.environ, ...)``. These bypass ``monkeypatch``'s
-   auto-undo entirely, so a forgotten restore leaks the value into every
-   later test in the process (the pytest-bdd ``KAIRIX_DB_PATH`` leak).
+* the full ``MutableMapping`` mutation API on ``os.environ`` — subscript
+  assign / augassign / del, ``|=``, ``__setitem__`` / ``__delitem__`` /
+  ``pop`` / ``setdefault`` / ``update`` / ``__ior__``, and ``clear()`` /
+  ``popitem()`` (ALWAYS reported: they remove keys the AST cannot name, so
+  they can remove ``KAIRIX_*`` ones);
+* replacing ``os.environ`` wholesale — ``os.environ = m``,
+  ``del os.environ``, ``setattr / delattr(os, "environ")``;
+* pytest ``<monkeypatch>`` (fixture, ``pytest.MonkeyPatch()`` instance,
+  ``MonkeyPatch.context()`` target): ``setenv`` / ``delenv`` /
+  ``setitem`` / ``delitem`` and both ``setattr`` / ``delattr`` overloads;
+* ``unittest.mock``: ``patch.dict(in_dict, values, clear, **kw)``,
+  ``patch.object(os, "environ")``, ``patch("os.environ")``.
+
+Every call is bound to the callee's parameter names (positional or keyword).
+``os.environ`` resolves through ``import os as o``, ``from os import environ
+[as e]`` and local rebinding followed to a fixpoint (``a = os.environ; b = a``);
+a copy (``dict(os.environ)``) never does. These direct forms bypass
+``monkeypatch``'s auto-undo, so a forgotten restore leaks the value into every
+later test in the process (the pytest-bdd ``KAIRIX_DB_PATH`` leak).
 
 A key counts as ``KAIRIX_*`` when it is a literal, an f-string /
-concatenation with a ``KAIRIX_`` lead, or a name bound (any number of
-hops, see ``_ast_key_taint``) from such a literal. ``update`` /
-``patch.dict`` with an opaque mapping (a variable, a call) also counts —
-a bulk write can carry ``KAIRIX_*`` keys the AST cannot see.
+concatenation with a ``KAIRIX_`` lead, a name bound (any number of hops) from
+such a literal, or a call to a helper returning one (``_ast_key_taint``). An
+``update`` / ``|=`` / ``patch.dict`` payload the AST cannot see into (a
+variable, a call, a ``**`` spread) also counts.
 
 Two reviewed process-boundary shapes are recognised STRUCTURALLY (no
 allow-list, no path list, no pragma):
@@ -29,9 +41,10 @@ allow-list, no path list, no pragma):
   ``@pytest.fixture`` generator that took a copy of ``os.environ``
   (``dict(os.environ)`` / ``os.environ.copy()`` / ``{**os.environ}``)
   BEFORE the yield, and the write is a genuine restore from it:
-  ``os.environ.update(snapshot)``, ``os.environ[k] = snapshot[k]`` (same
-  key), or a ``pop`` / ``del`` of ``k`` guarded by ``k`` being absent from
-  the snapshot. It restores state a production seam legitimately wrote; it
+  ``os.environ.update(snapshot)`` (optionally preceded by
+  ``os.environ.clear()``), ``os.environ[k] = snapshot[k]`` (same key), or a
+  ``pop`` / ``del`` of ``k`` guarded by ``k`` being absent from the
+  snapshot. It restores state a production seam legitimately wrote; it
   never seeds a value for a production read. Writes BEFORE the yield, and
   post-yield writes that merely mention the snapshot, are still violations.
 
@@ -46,15 +59,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _ast_key_taint import (
-    enclosing_function,
-    from_imports,
-    is_module_attr,
-    key_is_protected,
-    module_aliases,
-    parent_map,
-    tainted_names,
-)
+from _ast_key_taint import enclosing_function, parent_map, tainted_names
+from _mapping_writes import ProcessMapping, WriteSurface
 
 # REMEDIATION text — the shell wrapper ``check-no-env-monkeypatch.sh``
 # owns the user-facing message that prints when the gate fails. This
@@ -63,11 +69,13 @@ from _ast_key_taint import (
 REMEDIATION = """KAIRIX_* process-env write found in a test. Refactor to an explicit
 ``env=`` mapping / ``paths=FakePaths(...)`` / Deps seam to pass.
 
-Covers monkeypatch.setenv / delenv / setattr / setitem / delitem AND the
-direct forms that skip monkeypatch's auto-undo: os.environ["KAIRIX_X"] = v,
-del os.environ["KAIRIX_X"], os.environ.pop / .setdefault / .update, and
-patch.dict(os.environ, ...). A key held in a variable bound from a
-KAIRIX_* literal counts too.
+Covers every MutableMapping write on os.environ (subscript assign / del,
+|=, __setitem__ / __delitem__ / pop / setdefault / update, clear / popitem),
+replacing os.environ wholesale, monkeypatch setenv / delenv / setitem /
+delitem / setattr / delattr (any MonkeyPatch instance, positional or keyword
+arguments), and patch.dict / patch.object / patch on os.environ — through
+any alias (import os as o, from os import environ, env = os.environ). A key
+held in a variable or returned by a helper counts too.
 
 fix: pass the value through the production seam instead of the process
 env — ``paths=FakePaths(...)`` from tests/fakes.py, an ``env={...}``
@@ -92,6 +100,9 @@ Forbidden example:
   os.environ['KAIRIX_DB_PATH'] = str(tmp_path / 'db.sqlite')
   os.environ.pop('KAIRIX_DB_PATH', None)
   with patch.dict(os.environ, {'KAIRIX_MAX_CONCURRENCY': '3'}): ...
+  env = os.environ; env |= {'KAIRIX_DB_PATH': '/x'}
+  monkeypatch.setenv(name='KAIRIX_DB_PATH', value='/x')
+  monkeypatch.setattr(os, 'environ', {'KAIRIX_DB_PATH': '/x'})
 
 Recognised structurally (not violations): writes inside a conftest.py
 ``@pytest.fixture(scope="session", autouse=True)`` hermetic baseline, and
@@ -103,9 +114,7 @@ KAIRIX_* env-var reads happen ONCE at the boundary inside KairixPaths
 process env to influence the production read."""
 
 _PREFIX = "KAIRIX_"
-_MONKEYPATCH_KEY_METHODS = {"setenv", "setattr", "delenv"}
-_MONKEYPATCH_ITEM_METHODS = {"setitem", "delitem"}
-_ENVIRON_KEY_METHODS = {"pop", "setdefault"}
+_MARKER = "KAIRIX_*"
 
 
 def _is_protected(value: str) -> bool:
@@ -113,141 +122,22 @@ def _is_protected(value: str) -> bool:
 
 
 class _Ctx:
-    """Per-file resolution state shared by the shape matchers."""
+    """Per-file resolution state: the shared ``os.environ`` write surface."""
 
     def __init__(self, tree: ast.AST, path: Path) -> None:
         self.path = path
         self.tainted = tainted_names(tree, _is_protected)
-        self.os_names = module_aliases(tree, "os")
-        self.environ_names = from_imports(tree, "os", "environ")
-        self._collect_environ_aliases(tree)
+        self.environ = ProcessMapping.resolve(tree, "os", "environ")
+        self.surface = WriteSurface(tree, self.environ, _is_protected, self.tainted, _MARKER)
         self.parents = parent_map(tree)
 
-    def _collect_environ_aliases(self, tree: ast.AST) -> None:
-        """Add every local name bound to the live ``os.environ`` object.
-
-        ``env = os.environ; env["KAIRIX_X"] = v`` writes the process env just
-        as directly, so plain-name rebinding (incl. chains ``a = os.environ;
-        b = a``) is followed to a fixpoint. A COPY (``dict(os.environ)``,
-        ``os.environ.copy()``, ``{**os.environ}``) is a different object and
-        never becomes an alias.
-        """
-        bindings: list[tuple[str, ast.expr]] = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign):
-                bindings.extend((t.id, node.value) for t in node.targets if isinstance(t, ast.Name))
-            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
-                if isinstance(node.target, ast.Name):
-                    bindings.append((node.target.id, node.value))
-        changed = True
-        while changed:
-            changed = False
-            for name, value in bindings:
-                if name not in self.environ_names and self.is_environ(value):
-                    self.environ_names.add(name)
-                    changed = True
-
     def is_environ(self, expr: ast.expr) -> bool:
-        return is_module_attr(expr, self.os_names, "environ", self.environ_names)
-
-    def is_kairix_key(self, expr: ast.expr) -> bool:
-        return key_is_protected(expr, _is_protected, self.tainted)
-
-    def mapping_may_carry_kairix(self, mapping: ast.expr | None, keywords: list[ast.keyword]) -> bool:
-        """An ``update`` / ``patch.dict`` payload that can write a KAIRIX_* key."""
-        if any(kw.arg is not None and _is_protected(kw.arg) for kw in keywords):
-            return True
-        if any(kw.arg is None for kw in keywords):  # **opaque
-            return True
-        if mapping is None:
-            return False
-        if isinstance(mapping, ast.Dict):
-            return any(k is None or self.is_kairix_key(k) for k in mapping.keys)
-        # A variable / call / comprehension: the AST cannot rule KAIRIX_* out.
-        return True
-
-
-# ---------------------------------------------------------------------------
-# Shape matchers — each returns a short shape label or None.
-# ---------------------------------------------------------------------------
-
-
-def _monkeypatch_shape(call: ast.Call, ctx: _Ctx) -> str | None:
-    func = call.func
-    if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "monkeypatch"):
-        return None
-    if func.attr in _MONKEYPATCH_KEY_METHODS and call.args and ctx.is_kairix_key(call.args[0]):
-        return f"monkeypatch.{func.attr}(KAIRIX_*)"
-    if (
-        func.attr in _MONKEYPATCH_ITEM_METHODS
-        and len(call.args) >= 2
-        and ctx.is_environ(call.args[0])
-        and ctx.is_kairix_key(call.args[1])
-    ):
-        return f"monkeypatch.{func.attr}(os.environ, KAIRIX_*)"
-    return None
-
-
-def _environ_method_shape(call: ast.Call, ctx: _Ctx) -> str | None:
-    func = call.func
-    if not (isinstance(func, ast.Attribute) and ctx.is_environ(func.value)):
-        return None
-    if func.attr in _ENVIRON_KEY_METHODS and call.args and ctx.is_kairix_key(call.args[0]):
-        return f"os.environ.{func.attr}(KAIRIX_*)"
-    if func.attr == "update":
-        mapping = call.args[0] if call.args else None
-        if ctx.mapping_may_carry_kairix(mapping, call.keywords):
-            return "os.environ.update(<may carry KAIRIX_*>)"
-    return None
-
-
-def _patch_dict_shape(call: ast.Call, ctx: _Ctx) -> str | None:
-    func = call.func
-    is_patch_dict = (
-        isinstance(func, ast.Attribute)
-        and func.attr == "dict"
-        and (
-            (isinstance(func.value, ast.Name) and func.value.id == "patch")
-            or (isinstance(func.value, ast.Attribute) and func.value.attr == "patch")
-        )
-    )
-    if not is_patch_dict:
-        return None
-    # patch.dict(in_dict, values=(), clear=False, **kwargs) — both the
-    # positional and the in_dict= / values= keyword spellings are resolved.
-    named = {kw.arg: kw.value for kw in call.keywords if kw.arg in {"in_dict", "values"}}
-    target = call.args[0] if call.args else named.get("in_dict")
-    if target is None or not ctx.is_environ(target):
-        return None
-    mapping = call.args[1] if len(call.args) >= 2 else named.get("values")
-    keywords = [kw for kw in call.keywords if kw.arg not in {"clear", "in_dict", "values"}]
-    if ctx.mapping_may_carry_kairix(mapping, keywords):
-        return "patch.dict(os.environ, <KAIRIX_*>)"
-    return None
-
-
-def _subscript_shape(target: ast.expr, ctx: _Ctx, verb: str) -> str | None:
-    if isinstance(target, ast.Subscript) and ctx.is_environ(target.value) and ctx.is_kairix_key(target.slice):
-        return f"{verb} os.environ[KAIRIX_*]"
-    return None
+        return self.environ.is_receiver(expr)
 
 
 def _statement_shapes(node: ast.AST, ctx: _Ctx) -> list[str]:
-    shapes: list[str] = []
-    if isinstance(node, ast.Call):
-        for matcher in (_monkeypatch_shape, _environ_method_shape, _patch_dict_shape):
-            label = matcher(node, ctx)
-            if label:
-                shapes.append(label)
-    elif isinstance(node, ast.Assign):
-        shapes.extend(s for t in node.targets if (s := _subscript_shape(t, ctx, "assign")))
-    elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
-        label = _subscript_shape(node.target, ctx, "assign")
-        if label:
-            shapes.append(label)
-    elif isinstance(node, ast.Delete):
-        shapes.extend(s for t in node.targets if (s := _subscript_shape(t, ctx, "del")))
-    return shapes
+    """Every KAIRIX_* env write ``node`` performs (see ``_mapping_writes``)."""
+    return ctx.surface.writes(node)
 
 
 # ---------------------------------------------------------------------------
@@ -355,13 +245,33 @@ def _guarded_by_key_absent(
     return False
 
 
+def _followed_by_full_restore(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, node: ast.AST, snapshots: set[str], ctx: _Ctx
+) -> bool:
+    """A teardown ``os.environ.clear()`` is restoration only when the same
+    fixture then puts the whole snapshot back with ``os.environ.update(snapshot)``."""
+    line = getattr(node, "lineno", 0)
+    return any(
+        isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "update"
+        and ctx.is_environ(n.func.value)
+        and n.lineno > line
+        and len(n.args) == 1
+        and _is_snapshot_name(n.args[0], snapshots)
+        for n in ast.walk(fn)
+    )
+
+
 def _is_genuine_restore(
     fn: ast.FunctionDef | ast.AsyncFunctionDef, node: ast.AST, snapshots: set[str], ctx: _Ctx
 ) -> bool:
     """``node`` puts ``os.environ`` back to the snapshot — nothing else.
 
-    Recognised: ``os.environ.update(snapshot)``; ``os.environ[k] = snapshot[k]``
-    (same key on both sides); and ``os.environ.pop(k, ...)`` /
+    Recognised: ``os.environ.update(snapshot)``; ``os.environ.clear()`` when
+    the fixture later calls ``os.environ.update(snapshot)``;
+    ``os.environ[k] = snapshot[k]`` (same key on both sides); and
+    ``os.environ.pop(k, ...)`` /
     ``del os.environ[k]`` guarded by ``k`` being absent from the snapshot.
     Any other post-yield write that merely mentions the snapshot (e.g.
     ``os.environ["KAIRIX_X"] = snapshot.get("PATH")``) is still reported.
@@ -370,6 +280,8 @@ def _is_genuine_restore(
         method = node.func.attr
         if method == "update":
             return len(node.args) == 1 and not node.keywords and _is_snapshot_name(node.args[0], snapshots)
+        if method == "clear" and not node.args:
+            return _followed_by_full_restore(fn, node, snapshots, ctx)
         if method == "pop" and node.args:
             return _guarded_by_key_absent(fn, node, node.args[0], snapshots, ctx)
         return False

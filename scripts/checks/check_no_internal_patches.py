@@ -3,25 +3,33 @@
 Walks every test file via AST and reports the path of any file that
 matches one of eight shapes:
 
-1. ``@patch("kairix.X.Y", ...)`` — decorator
-2. ``with patch("kairix.X.Y", ...):`` — context manager
+1. ``patch("kairix.X.Y", ...)`` — decorator, ``with``, or ``.start()``;
+   ``target`` bound by signature (``patch(target="kairix.X.Y")`` counts)
+2. ``patch.object(<kairix ref>, "attr", ...)`` — positional or keyword
 3. ``kairix.X.Y = <expr>`` — full-path attribute assignment
 4. ``<alias>.Y = <expr>`` where ``<alias>`` resolves to a kairix module
-5. ``monkeypatch.setattr("kairix.X.Y", ...)`` — string-target form
-6. ``monkeypatch.setattr(<kairix module ref>, "attr", fake)`` — ref-target form
-7. ``sys.modules`` swap of a kairix module — ``sys.modules["kairix.X"] = m``,
-   ``del sys.modules["kairix.X"]``, ``sys.modules.pop("kairix.X")``,
-   ``sys.modules.setdefault("kairix.X", m)``, ``sys.modules.update({...})``
-   and ``monkeypatch.setitem / delitem(sys.modules, "kairix.X", ...)``.
-   Replacing (or evicting, then re-importing) a module object substitutes
-   the whole kairix implementation — the same anti-pattern as ``@patch``,
-   one level up. A key held in a variable bound from a ``"kairix..."``
-   literal, or returned by a helper, counts (see ``_ast_key_taint``); an
-   ``update`` with an opaque mapping (variable / call / ``**``) counts too.
-8. ``importlib.reload(<kairix module>)`` — re-executes module-level code
-   to reset hidden singleton state, so the test passes against a module
-   object no production process ever sees. Inject the state holder
-   instead.
+5. ``<monkeypatch>.setattr / delattr("kairix.X.Y", ...)`` — string-target form
+6. ``<monkeypatch>.setattr / delattr(<kairix module ref>, "attr", ...)`` —
+   ref-target form. ``<monkeypatch>`` is the fixture, any
+   ``pytest.MonkeyPatch()`` instance, or a ``MonkeyPatch.context()`` target;
+   arguments are bound by signature (``target=`` / ``name=``).
+7. any WRITE to ``sys.modules`` that can touch a kairix module — the full
+   ``MutableMapping`` mutation surface of the shared engine
+   ``_mapping_writes`` (subscript assign / augassign / del, ``|=``,
+   ``__setitem__`` / ``__delitem__`` / ``pop`` / ``setdefault`` /
+   ``update`` / ``__ior__``, ``clear()`` / ``popitem()`` always,
+   ``<monkeypatch>.setitem / delitem``, ``patch.dict(in_dict, values,
+   clear)``, and replacing ``sys.modules`` wholesale via ``setattr`` /
+   ``patch.object`` / ``patch("sys.modules")`` / assignment), through any
+   receiver spelling (``import sys as s``, ``from sys import modules``,
+   ``mods = sys.modules; m2 = mods``). Replacing (or evicting, then
+   re-importing) a module object substitutes the whole kairix
+   implementation — the same anti-pattern as ``@patch``, one level up.
+8. ``importlib.reload(module=<kairix module>)`` — positional or keyword,
+   through ``importlib`` / ``reload`` / ``import_module`` aliases.
+   Re-executes module-level code to reset hidden singleton state, so the
+   test passes against a module object no production process ever sees.
+   Inject the state holder instead.
 
 Third-party ``sys.modules`` entries (``sys.modules["openai"] = stub``) stay
 allowed — that fakes a genuinely external import at the kairix edge.
@@ -35,8 +43,10 @@ Stdlib roots (``os``, ``time``, ``pathlib``, ``sys``, ``importlib``,
 fixturing genuinely external state at the kairix edge.
 
 To extend with a new shape: add the detection branch to
-``file_has_internal_patch`` and add the matching positive + negative
-tests to ``tests/architecture/test_check_no_internal_patches.py``.
+``file_has_internal_patch`` (or, for a new mapping-write spelling, to the
+shared ``_mapping_writes`` engine) and add the matching positive + negative
+rows to ``tests/architecture/test_check_no_internal_patches.py`` /
+``tests/checks/test_mapping_write_surface.py``.
 
 Output: one violation file path per line on stdout, sorted,
 deduplicated. Pipes into ``arch_gate`` from ``_lib.sh``, which fails on
@@ -51,6 +61,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _ast_key_taint import from_imports, is_module_attr, key_is_protected, module_aliases, tainted_names
+from _mapping_writes import (
+    IMPORT_MODULE_SIGNATURE,
+    MONKEYPATCH_SIGNATURES,
+    PATCH_OBJECT_SIGNATURE,
+    PATCH_SIGNATURE,
+    RELOAD_SIGNATURE,
+    ProcessMapping,
+    WriteSurface,
+    bind_call,
+    is_patch_ref,
+)
 
 REMEDIATION = """kairix-internal substitution found in a test (@patch / monkeypatch.setattr /
 attribute assignment on a kairix target, a sys.modules swap of a kairix
@@ -95,8 +116,11 @@ Forbidden example:
   paths_mod.provider_name = lambda: "fake"
   monkeypatch.setattr("kairix.paths.provider_name", ...)
   monkeypatch.setattr(kairix.paths, "provider_name", ...)
+  with pytest.MonkeyPatch.context() as mp: mp.setattr(check_mod, "run_all_checks", fake)
+  with mock.patch.object(warm_cli, "run_warm", return_value=result):
   sys.modules["kairix.core.search.pipeline"] = BrokenModule(...)
-  importlib.reload(kairix.core.search.rerank)
+  mods = sys.modules; mods.update(fakes)
+  importlib.reload(kairix.core.search.rerank)   # or reload(module=...)
 
 Stdlib boundaries (os.*, time.*, etc.) and external SDK boundaries
 (httpx.*, openai.*, boto3.*, etc.) remain allowed — F1 only flags
@@ -231,44 +255,6 @@ def _resolves_to_kairix(expr: ast.expr, aliases: dict[str, str]) -> bool:
     return False
 
 
-def _is_patch_call(node: ast.expr) -> bool:
-    """Return True when ``node`` is a Call to ``patch`` / ``mock.patch`` etc.
-
-    Conservative: only matches the literal name ``patch`` or attribute
-    access ending in ``.patch``. Other helpers (``patch.dict``,
-    ``patch.object``) have a different arg shape and are NOT covered by F1.
-    """
-    if not isinstance(node, ast.Call):
-        return False
-    func = node.func
-    if isinstance(func, ast.Name):
-        return func.id == "patch"
-    if isinstance(func, ast.Attribute):
-        return func.attr == "patch"
-    return False
-
-
-def _first_arg_is_kairix_string(call: ast.Call) -> bool:
-    """First positional arg of patch(...) / setattr(...) is a string starting with ``kairix.``."""
-    if not call.args:
-        return False
-    first = call.args[0]
-    if isinstance(first, ast.Constant) and isinstance(first.value, str):
-        return first.value == "kairix" or first.value.startswith("kairix.")
-    return False
-
-
-def _is_monkeypatch_setattr(node: ast.Call) -> bool:
-    """``node`` is ``monkeypatch.setattr(...)``."""
-    func = node.func
-    return (
-        isinstance(func, ast.Attribute)
-        and func.attr == "setattr"
-        and isinstance(func.value, ast.Name)
-        and func.value.id == "monkeypatch"
-    )
-
-
 def _is_inside_pytest_raises(parent_map: dict[ast.AST, ast.AST], node: ast.AST) -> bool:
     """Return True iff ``node`` is lexically inside a ``with pytest.raises(...):`` block.
 
@@ -298,98 +284,80 @@ def _is_kairix_module_name(value: str) -> bool:
     return value == "kairix" or value.startswith("kairix.")
 
 
-_SYS_MODULES_KEY_METHODS = frozenset({"pop", "setdefault"})
+class _F1Ctx:
+    """Per-file resolution state: kairix aliases + the shared ``sys.modules`` surface."""
 
-
-class _ModuleSwapCtx:
-    """Per-file resolution state for shapes 7 + 8."""
-
-    def __init__(self, tree: ast.AST, aliases: dict[str, str]) -> None:
-        self.aliases = aliases
+    def __init__(self, tree: ast.AST) -> None:
+        self.aliases = _resolve_kairix_aliases(tree)
         self.tainted = tainted_names(tree, _is_kairix_module_name)
-        self.sys_names = module_aliases(tree, "sys")
-        self.modules_names = from_imports(tree, "sys", "modules")
+        self.sys_modules = ProcessMapping.resolve(tree, "sys", "modules")
+        self.surface = WriteSurface(tree, self.sys_modules, _is_kairix_module_name, self.tainted, "kairix.*")
         self.importlib_names = module_aliases(tree, "importlib")
         self.reload_names = from_imports(tree, "importlib", "reload")
         # ``from importlib import import_module [as load]`` — tracked like reload.
         self.import_module_names = from_imports(tree, "importlib", "import_module") | {"__import__"}
 
-    def is_sys_modules(self, expr: ast.expr) -> bool:
-        return is_module_attr(expr, self.sys_names, "modules", self.modules_names)
+    def is_kairix_key(self, expr: ast.expr | None) -> bool:
+        return expr is not None and key_is_protected(expr, _is_kairix_module_name, self.tainted)
 
-    def is_kairix_key(self, expr: ast.expr) -> bool:
-        return key_is_protected(expr, _is_kairix_module_name, self.tainted)
+    def is_kairix_string(self, expr: ast.expr | None) -> bool:
+        return isinstance(expr, ast.Constant) and isinstance(expr.value, str) and _is_kairix_module_name(expr.value)
 
     def is_reload(self, func: ast.expr) -> bool:
         return is_module_attr(func, self.importlib_names, "reload", self.reload_names)
 
-    def is_kairix_module_ref(self, expr: ast.expr) -> bool:
+    def is_kairix_module_ref(self, expr: ast.expr | None) -> bool:
         """``expr`` evaluates to a kairix module object."""
+        if expr is None:
+            return False
         if _resolves_to_kairix(expr, self.aliases):
             return True
-        if isinstance(expr, ast.Subscript) and self.is_sys_modules(expr.value):
+        if isinstance(expr, ast.Subscript) and self.sys_modules.is_receiver(expr.value):
             return self.is_kairix_key(expr.slice)
-        if isinstance(expr, ast.Call) and expr.args:
+        if isinstance(expr, ast.Call):
             func = expr.func
             # importlib.import_module("kairix.X") / an aliased
             # ``from importlib import import_module as load`` / __import__("kairix.X")
             is_importer = (isinstance(func, ast.Attribute) and func.attr == "import_module") or (
                 isinstance(func, ast.Name) and func.id in self.import_module_names
             )
-            return is_importer and self.is_kairix_key(expr.args[0])
+            return is_importer and self.is_kairix_key(bind_call(expr, IMPORT_MODULE_SIGNATURE).get("name"))
         return False
 
-    def mapping_may_carry_kairix(self, call: ast.Call) -> bool:
-        """A ``sys.modules.update(...)`` payload that can install a kairix module.
 
-        Mirrors F2's treatment of an opaque ``os.environ.update``: a dict
-        literal is inspected key by key, but a variable / call / comprehension
-        (or ``**``) can carry a kairix key the AST cannot see, so it counts.
-        """
-        if any(kw.arg is None or _is_kairix_module_name(kw.arg) for kw in call.keywords):
-            return True
-        if not call.args:
-            return False
-        mapping = call.args[0]
-        if isinstance(mapping, ast.Dict):
-            return any(k is None or self.is_kairix_key(k) for k in mapping.keys)
-        return True
-
-
-def _sys_modules_call_swap(node: ast.Call, ctx: _ModuleSwapCtx) -> bool:
-    """``sys.modules.pop/setdefault/update`` or ``monkeypatch.setitem/delitem(sys.modules, ...)``."""
-    func = node.func
-    if not isinstance(func, ast.Attribute):
-        return False
-    if ctx.is_sys_modules(func.value):
-        if func.attr in _SYS_MODULES_KEY_METHODS and node.args:
-            return ctx.is_kairix_key(node.args[0])
-        if func.attr == "update":
-            return ctx.mapping_may_carry_kairix(node)
-        return False
-    is_monkeypatch_item = (
-        func.attr in {"setitem", "delitem"} and isinstance(func.value, ast.Name) and func.value.id == "monkeypatch"
-    )
-    if not is_monkeypatch_item or len(node.args) < 2:
-        return False
-    return ctx.is_sys_modules(node.args[0]) and ctx.is_kairix_key(node.args[1])
-
-
-def _sys_modules_subscript_swap(target: ast.expr, ctx: _ModuleSwapCtx) -> bool:
-    return isinstance(target, ast.Subscript) and ctx.is_sys_modules(target.value) and ctx.is_kairix_key(target.slice)
-
-
-def _is_module_swap(node: ast.AST, ctx: _ModuleSwapCtx) -> bool:
-    """Shapes 7 + 8: a sys.modules swap of, or importlib.reload on, a kairix module."""
-    if isinstance(node, ast.Call):
-        if ctx.is_reload(node.func) and node.args and ctx.is_kairix_module_ref(node.args[0]):
-            return True
-        return _sys_modules_call_swap(node, ctx)
-    if isinstance(node, (ast.Assign, ast.Delete)):
-        return any(_sys_modules_subscript_swap(t, ctx) for t in node.targets)
-    if isinstance(node, (ast.AugAssign, ast.AnnAssign)):
-        return _sys_modules_subscript_swap(node.target, ctx)
+def _patch_shapes(call: ast.Call, ctx: _F1Ctx) -> bool:
+    """Shapes 1 + 2: ``patch("kairix.X")`` (decorator, ``with``, ``.start()``) and
+    ``patch.object(<kairix ref>, "attr")`` — target bound by signature."""
+    func = ctx.surface.patch
+    if is_patch_ref(call.func, func):
+        return ctx.is_kairix_string(bind_call(call, PATCH_SIGNATURE).get("target"))
+    if isinstance(call.func, ast.Attribute) and call.func.attr == "object" and is_patch_ref(call.func.value, func):
+        return ctx.is_kairix_module_ref(bind_call(call, PATCH_OBJECT_SIGNATURE).get("target"))
     return False
+
+
+def _monkeypatch_attr_shapes(call: ast.Call, ctx: _F1Ctx) -> bool:
+    """Shapes 5 + 6: ``<monkeypatch>.setattr / delattr`` on a kairix target, either
+    overload (``("kairix.X.y", v)`` or ``(<kairix ref>, "y", v)``), any MonkeyPatch name."""
+    func = call.func
+    if not (
+        isinstance(func, ast.Attribute)
+        and func.attr in {"setattr", "delattr"}
+        and isinstance(func.value, ast.Name)
+        and func.value.id in ctx.surface.monkeypatch
+    ):
+        return False
+    target = bind_call(call, MONKEYPATCH_SIGNATURES[func.attr]).get("target")
+    return ctx.is_kairix_string(target) or ctx.is_kairix_module_ref(target)
+
+
+def _is_module_swap(node: ast.AST, ctx: _F1Ctx) -> bool:
+    """Shapes 7 + 8: any write to ``sys.modules`` that can touch a kairix module
+    (the shared ``_mapping_writes`` surface), or ``importlib.reload`` of one."""
+    if isinstance(node, ast.Call) and ctx.is_reload(node.func):
+        if ctx.is_kairix_module_ref(bind_call(node, RELOAD_SIGNATURE).get("module")):
+            return True
+    return bool(ctx.surface.writes(node))
 
 
 def file_has_internal_patch(path: Path) -> bool:
@@ -399,8 +367,7 @@ def file_has_internal_patch(path: Path) -> bool:
     except (SyntaxError, OSError):
         return False
 
-    aliases = _resolve_kairix_aliases(tree)
-    swap_ctx = _ModuleSwapCtx(tree, aliases)
+    ctx = _F1Ctx(tree)
 
     # Build a child->parent map so we can ask "is this Assign inside a
     # pytest.raises With block?" without re-traversing the whole tree.
@@ -410,18 +377,8 @@ def file_has_internal_patch(path: Path) -> bool:
             parent_map[child] = parent
 
     for node in ast.walk(tree):
-        # Shape 1: @patch decorator on kairix target
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            for deco in node.decorator_list:
-                if _is_patch_call(deco) and _first_arg_is_kairix_string(deco):
-                    return True
-
-        # Shape 2: with patch(...) on kairix target
-        if isinstance(node, ast.With):
-            for item in node.items:
-                ctx = item.context_expr
-                if _is_patch_call(ctx) and _first_arg_is_kairix_string(ctx):
-                    return True
+        if isinstance(node, ast.Call) and (_patch_shapes(node, ctx) or _monkeypatch_attr_shapes(node, ctx)):
+            return True
 
         # Shape 3 + 4: attribute assignment ``<...>.attr = expr`` where root
         # resolves to a kairix module. Skip when the assignment sits inside
@@ -429,19 +386,11 @@ def file_has_internal_patch(path: Path) -> bool:
         # contract test, not a patch.
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Attribute) and _resolves_to_kairix(target, aliases):
+                if isinstance(target, ast.Attribute) and _resolves_to_kairix(target, ctx.aliases):
                     if not _is_inside_pytest_raises(parent_map, node):
                         return True
 
-        # Shape 5 + 6: monkeypatch.setattr(...) on kairix target
-        if isinstance(node, ast.Call) and _is_monkeypatch_setattr(node):
-            if _first_arg_is_kairix_string(node):
-                return True
-            if node.args and _resolves_to_kairix(node.args[0], aliases):
-                return True
-
-        # Shape 7 + 8: sys.modules swap / importlib.reload of a kairix module
-        if _is_module_swap(node, swap_ctx):
+        if _is_module_swap(node, ctx):
             return True
 
     return False

@@ -73,7 +73,7 @@ _TEST_PY = re.compile(r"^(__init__|conftest|fakes|test_[a-z0-9_]+|_?[a-z][a-z0-9
 _SNAKE_FEATURE = re.compile(r"^[a-z][a-z0-9_]*\.feature$")
 _CHECK_SCRIPT_PY = re.compile(
     r"^(check_[a-z0-9_]+|_fitness_rule|_rule_catalogue|_integrity_invariants_registry"
-    r"|_import_boundary_engine|_location_engine|_core_bindings|_mcp_registry|_ast_key_taint"
+    r"|_import_boundary_engine|_location_engine|_core_bindings|_mcp_registry|_ast_key_taint|_mapping_writes"
     r"|merge_coverage_xml|run_checks|generate_catalogue_docs|mutation_parity"
     r"|rules)\.py$"
 )

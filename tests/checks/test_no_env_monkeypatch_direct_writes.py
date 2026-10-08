@@ -186,7 +186,7 @@ def test_local_alias_chain_of_environ_is_flagged(tmp_path: Path, statement: str,
     """Codex PR #814 thread: ``a = os.environ; b = a`` then a write through
     ``b`` mutates the live process env exactly like a direct write.
 
-    Sabotage proof (executed): make ``_collect_environ_aliases`` a no-op →
+    Sabotage proof (executed): skip the alias fixpoint in ``ProcessMapping.resolve`` →
     every parametrised case reports clean; restored.
     """
     src = f"import os\n\n\ndef test_x(monkeypatch):\n    a = os.environ\n    b = a\n    {statement}\n"

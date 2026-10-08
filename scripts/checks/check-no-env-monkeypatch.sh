@@ -18,11 +18,13 @@ cd "${SCRIPT_DIR}/../.." || exit 2
 REMEDIATION="KAIRIX_* process-env write found in a test. Refactor to an explicit
 env= mapping / paths=FakePaths(...) / Deps seam to pass.
 
-Covers monkeypatch.setenv / delenv / setattr / setitem / delitem AND the
-direct forms that skip monkeypatch's auto-undo: os.environ['KAIRIX_X'] = v,
-del os.environ['KAIRIX_X'], os.environ.pop / .setdefault / .update, and
-patch.dict(os.environ, ...). A key held in a variable bound from a
-KAIRIX_* literal counts too.
+Covers every MutableMapping write on os.environ (subscript assign / del,
+|=, __setitem__ / __delitem__ / pop / setdefault / update, clear / popitem),
+replacing os.environ wholesale, monkeypatch setenv / delenv / setitem /
+delitem / setattr / delattr (any MonkeyPatch instance, positional or keyword
+arguments), and patch.dict / patch.object / patch on os.environ — through
+any alias (import os as o, from os import environ, env = os.environ). A key
+held in a variable or returned by a helper counts too.
 
 fix: pass the value through the production seam instead of the process
 env — paths=FakePaths(...) from tests/fakes.py, an env={...} mapping on
@@ -46,6 +48,9 @@ Forbidden example:
   os.environ['KAIRIX_DB_PATH'] = str(tmp_path / 'db.sqlite')
   os.environ.pop('KAIRIX_DB_PATH', None)
   with patch.dict(os.environ, {'KAIRIX_MAX_CONCURRENCY': '3'}): ...
+  env = os.environ; env |= {'KAIRIX_DB_PATH': '/x'}
+  monkeypatch.setenv(name='KAIRIX_DB_PATH', value='/x')
+  monkeypatch.setattr(os, 'environ', {'KAIRIX_DB_PATH': '/x'})
 
 Recognised structurally (not violations): writes inside a conftest.py
 @pytest.fixture(scope='session', autouse=True) hermetic baseline, and the

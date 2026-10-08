@@ -346,18 +346,23 @@ Each rule below is described with: **statement**, **why**,
 Test files MUST NOT reach into a production kairix module's namespace
 to swap an implementation. F1 flags eight structurally-identical shapes:
 
-1. `@patch("kairix.X.Y", ...)` — decorator
-2. `with patch("kairix.X.Y", ...):` — context manager
+1. `patch("kairix.X.Y", ...)` — as a decorator, a `with`, or `.start()`;
+   the `target` is bound by signature, so `patch(target="kairix.X.Y")` counts
+2. `patch.object(<kairix ref>, "attr", ...)` — positional or keyword
 3. `kairix.X.Y = <expr>` — full-path attribute assignment
 4. `<alias>.Y = <expr>` where alias resolves via imports to a kairix module
-5. `monkeypatch.setattr("kairix.X.Y", ...)` — string-target form
-6. `monkeypatch.setattr(<kairix module ref>, "attr", fake)` — ref-target form
-7. `sys.modules` swap of a kairix module — `sys.modules["kairix.X"] = m`,
-   `del sys.modules["kairix.X"]`, `sys.modules.pop / setdefault / update`,
-   `monkeypatch.setitem / delitem(sys.modules, "kairix.X", ...)` (a key
-   held in a variable bound from a `"kairix..."` literal counts)
-8. `importlib.reload(<kairix module>)` — re-executing module code to reset
-   hidden singleton state
+5. `<monkeypatch>.setattr / delattr("kairix.X.Y", ...)` — string-target form
+6. `<monkeypatch>.setattr / delattr(<kairix module ref>, "attr", ...)` —
+   ref-target form. `<monkeypatch>` is the fixture, any
+   `pytest.MonkeyPatch()` instance (or alias of one), or a
+   `MonkeyPatch.context()` target
+7. any write to `sys.modules` that can touch a kairix module — every form in
+   the [shared mapping-write surface](#shared-mapping-write-surface-f1--f2)
+   below, with `sys.modules` as the receiver and kairix module names as the
+   protected keys
+8. `importlib.reload(module)` of a kairix module — positional or keyword,
+   through `importlib` / `reload` / `import_module` aliases — re-executing
+   module code to reset hidden singleton state
 
 Shapes 7 + 8 replace (or evict and re-import) the whole module object — the
 same substitution as `@patch`, one level up. Move the state they reset onto
@@ -408,6 +413,57 @@ each shape has a positive (kairix target → violation) and negative
 (stdlib/external target → allowed) test. To verify the gate stays
 honest: comment out the detector branch for a shape, run the matching
 positive test, confirm red, restore, confirm green.
+
+#### Shared mapping-write surface (F1 + F2)
+
+F1 (`sys.modules`, protected keys = kairix module names) and F2
+(`os.environ`, protected keys = `KAIRIX_*`) ask the same question of a
+process-global `MutableMapping`, so both use one engine,
+`scripts/checks/_mapping_writes.py`, in three layers:
+
+1. **Receiver resolution** (`ProcessMapping`). The receiver `R` is the live
+   mapping reached as `os.environ` / `sys.modules`, through an import alias
+   (`import os as o` → `o.environ`), a from-import
+   (`from os import environ as e`), or local rebinding followed to a
+   fixpoint (`a = os.environ; b = a`). The owning module `M` resolves the
+   same way (`o = os`). A copy (`dict(os.environ)`, `os.environ.copy()`,
+   `{**os.environ}`) is a different object and never resolves.
+2. **Argument binding** (`bind_call`). Every call is matched to the callee's
+   real parameter names, positional or keyword (`inspect.Signature.bind`
+   semantics; `update`'s `other` is positional-only). A `*args` / `**kw`
+   spread that could hide the key counts as possibly protected.
+3. **The mutation surface** (`WriteSurface`):
+
+| Form | Signature bound | Reported when |
+|---|---|---|
+| `R[k] = v`, `R[k] op= v`, `del R[k]` | — | `k` may be protected |
+| `R \|= other`, `R.__ior__(other)` | `(other, /)` | `other` may carry a protected key |
+| `R.__setitem__(key, value)`, `R.__delitem__(key)` | `(key, value)`, `(key)` | `key` may be protected |
+| `R.pop(key, default)`, `R.setdefault(key, default)` | `(key, default)` | `key` may be protected |
+| `R.update(other, /, **kw)` | `(other, /)` + `**kw` | `other` or a `**kw` name may be protected |
+| `R.clear()`, `R.popitem()` | `()` | **always** — they remove keys the AST cannot name, so they can remove protected ones |
+| `M.attr = v`, `del M.attr`, `setattr(M, "attr", v)`, `delattr(M, "attr")` | `(obj, name, value)` | always (wholesale replacement) |
+| `<monkeypatch>.setitem(dic, name, value)` / `.delitem(dic, name, raising)` | as pytest | `dic` is `R` and `name` may be protected |
+| `<monkeypatch>.setattr(target, name, value, raising)` / `.delattr(...)` | as pytest, both overloads | `("os.environ", v)` or `(M, "environ", v)` (resp. `sys.modules`) |
+| `<monkeypatch>.setenv(name, value, prepend)` / `.delenv(name, raising)` | as pytest | F2 only: `name` may be protected |
+| `patch.dict(in_dict, values, clear, **kw)` | as `unittest.mock` | `in_dict` is `R` or `"os.environ"` and `values` / `**kw` may carry a protected key, or `clear` is truthy |
+| `patch.object(target, attribute, new)` | as `unittest.mock` | `(M, "environ")` (resp. `(sys, "modules")`) |
+| `patch(target, new, ...)` | as `unittest.mock` | `target == "os.environ"` (resp. `"sys.modules"`) |
+
+`<monkeypatch>` is the `monkeypatch` fixture, any name bound to
+`pytest.MonkeyPatch()` (or an alias of one), or a
+`with ... MonkeyPatch.context() as m` target. A key "may be protected" when
+it is a protected literal, an f-string / `+` concatenation with a protected
+lead, a name bound from one (any number of hops), or a call to a helper
+returning one (`_ast_key_taint`). A payload "may carry" a protected key when
+it is a dict literal with such a key or a `**` spread, or anything the AST
+cannot see into (a variable, a call, a comprehension).
+
+The table is enforced row by row in
+`tests/checks/test_mapping_write_surface.py`: every form × every receiver
+spelling (direct, import alias, from-import, local alias chain) ×
+positional / keyword call style, for both receivers, plus a negative of the
+same statement on an ordinary dict / object.
 
 #### Examples
 
@@ -467,16 +523,18 @@ allowed. The check explicitly only matches `"kairix.…"` strings.
 
 #### Statement
 
-Test files MUST NOT write any process-env key starting with `KAIRIX_` —
-neither through `monkeypatch.setenv|setattr|delenv|setitem|delitem` nor
-directly: `os.environ["KAIRIX_X"] = v`, `del os.environ["KAIRIX_X"]`,
-`os.environ.pop|setdefault("KAIRIX_X", ...)`, `os.environ.update(...)`, or
-`patch.dict(os.environ, ...)`. The direct forms are the worse evasion: they
-skip monkeypatch's auto-undo, so a forgotten restore leaks the value into
-every later test in the process (a pytest-bdd step's
-`os.environ["KAIRIX_DB_PATH"] = ...` did exactly that). A key held in a
-variable bound (any number of hops) from a `KAIRIX_*` literal counts, and
-an `update` / `patch.dict` with an opaque mapping counts.
+Test files MUST NOT write any process-env key starting with `KAIRIX_`, in
+any form of the
+[shared mapping-write surface](#shared-mapping-write-surface-f1--f2) with
+`os.environ` as the receiver: `<monkeypatch>.setenv / delenv / setitem /
+delitem / setattr / delattr`, every `MutableMapping` write
+(`os.environ["KAIRIX_X"] = v`, `del`, `|=`, `pop`, `setdefault`, `update`,
+`__setitem__`, `__delitem__`, and `clear()` / `popitem()`), wholesale
+replacement of `os.environ`, and `patch.dict` / `patch.object` / `patch`
+on it — positional or keyword, through any alias. The direct forms are the
+worse evasion: they skip monkeypatch's auto-undo, so a forgotten restore
+leaks the value into every later test in the process (a pytest-bdd step's
+`os.environ["KAIRIX_DB_PATH"] = ...` did exactly that).
 
 Two reviewed process-boundary shapes are recognised **structurally** — no
 allow-list, baseline, pragma or path list:
@@ -488,9 +546,13 @@ allow-list, baseline, pragma or path list:
   kill-switch, undone at session end);
 - writes AFTER the `yield` of a `@pytest.fixture` that copied `os.environ`
   (`dict(os.environ)` / `os.environ.copy()` / `{**os.environ}`) BEFORE the
-  yield, when the write restores from that snapshot
+  yield, when the write is a genuine restore from that snapshot —
+  `os.environ.update(snapshot)` (optionally preceded by
+  `os.environ.clear()`), `os.environ[k] = snapshot[k]` for the same key, or
+  a `pop` / `del` of `k` guarded by `k` being absent from the snapshot
   (`tests/setup/test_wizard.py::_restored_environ`). Writes before the
-  yield are still violations.
+  yield, and post-yield writes that merely mention the snapshot, are still
+  violations.
 
 #### Why
 
@@ -508,10 +570,12 @@ explicitly reverted.
 
 `scripts/checks/check-no-env-monkeypatch.sh` delegates to the AST
 detector `scripts/checks/check_no_env_monkeypatch.py`, which reports
-`path:line: shape` per violation. Key resolution (variables, loop targets,
-helper return values) lives in `scripts/checks/_ast_key_taint.py`, shared
-with F1's `sys.modules` key resolution. Detector tests:
-`tests/checks/test_no_env_monkeypatch_direct_writes.py`.
+`path:line: shape` per violation. The write surface is the shared engine
+`scripts/checks/_mapping_writes.py` (see the table under F1); key resolution
+(variables, loop targets, helper return values) lives in
+`scripts/checks/_ast_key_taint.py`. Detector tests:
+`tests/checks/test_no_env_monkeypatch_direct_writes.py` and the
+table-driven `tests/checks/test_mapping_write_surface.py`.
 
 #### Examples
 

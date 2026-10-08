@@ -67,8 +67,8 @@ def test_sys_modules_swap_of_kairix_module_is_flagged(tmp_path: Path, statement:
     """Every write / eviction form on a ``kairix`` module key is a violation.
 
     Sabotage proof (executed): in ``_is_module_swap`` return ``False`` right
-    after the reload check (skipping ``_sys_modules_call_swap`` and the
-    subscript branches) → every parametrised case reports clean and fails;
+    after the reload check, i.e. stop consulting the shared ``WriteSurface``
+    → every parametrised case reports clean and fails;
     restored.
     """
     src = f"import sys\n\n\ndef test_x(monkeypatch, broken, name):\n    {statement}\n"
@@ -179,9 +179,10 @@ def test_sys_modules_update_with_opaque_mapping_is_flagged(tmp_path: Path, state
     """An opaque ``sys.modules.update`` payload can install a kairix module the
     AST cannot see — treated like F2's opaque ``os.environ.update``.
 
-    Sabotage proof (executed): make ``mapping_may_carry_kairix`` inspect only
-    dict literals (return ``False`` for anything else) → every case reports
-    clean; restored.
+    Sabotage proof (executed): make ``WriteSurface.mapping_may_carry`` inspect only
+    dict literals (return ``False`` for anything else) → the variable, call
+    and comprehension cases report clean (``**mods`` is still caught as a
+    spread); restored.
     """
     src = f"import sys\n\n\ndef test_x(mods, build_mods, names, stub):\n    {statement}\n"
     assert _flagged(tmp_path, src) is True
