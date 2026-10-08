@@ -248,7 +248,10 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         check="no_internal_patches",
         category="test-discipline",
         scope="per-file",
-        summary="no @patch / monkeypatch on kairix internals — inject Fake* through a seam",
+        summary=(
+            "no @patch / monkeypatch, sys.modules swap or importlib.reload of kairix internals"
+            " — inject Fake* through a seam"
+        ),
         script="check-no-internal-patches.sh",
         # Shell wrapper runs the AST detector over tests/ for @patch /
         # monkeypatch / sys.modules / importlib.reload on kairix.* targets. File-local
@@ -262,7 +265,10 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         check="no_env_monkeypatch",
         category="test-discipline",
         scope="per-file",
-        summary='no monkeypatch.setenv("KAIRIX_*") — pass deps as kwargs instead',
+        summary=(
+            'no monkeypatch.setenv("KAIRIX_*") or direct os.environ write of a KAIRIX_* key'
+            " — pass deps as kwargs instead"
+        ),
         script="check-no-env-monkeypatch.sh",
         # Shell wrapper runs the AST detector over tests/ for monkeypatch and
         # direct os.environ / patch.dict writes of KAIRIX_* keys.

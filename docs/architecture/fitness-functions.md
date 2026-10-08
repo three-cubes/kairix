@@ -198,8 +198,8 @@ _Generated from `scripts/checks/_rule_catalogue.py` — do not edit by hand._
 | F38 | layering | per-file | shipped | Silver processing (chunking + signal extraction) only in kairix/core/connectors/silver.py |
 | F44 | layering | per-file | shipped | engagement-scope code may not import firm-scope storage clients (psycopg etc.) |
 | F61 | layering | per-file | shipped | bare _SqliteChunkWriter(db, collection=...) construction only under kairix/core/connectors/ |
-| F1 | test-discipline | per-file | shipped | no @patch / monkeypatch on kairix internals — inject Fake* through a seam |
-| F2 | test-discipline | per-file | shipped | no monkeypatch.setenv("KAIRIX_*") — pass deps as kwargs instead |
+| F1 | test-discipline | per-file | shipped | no @patch / monkeypatch, sys.modules swap or importlib.reload of kairix internals — inject Fake* through a seam |
+| F2 | test-discipline | per-file | shipped | no monkeypatch.setenv("KAIRIX_*") or direct os.environ write of a KAIRIX_* key — pass deps as kwargs instead |
 | F5 | test-discipline | per-file | shipped | no internal-name imports in tests — use public surface only |
 | F6 | test-discipline | per-method | shipped | no *_fn=None test-only kwargs in production |
 | F7 | coverage | per-file | shipped | per-file coverage ≥ 90% (unit) — Stage 2 floor |
