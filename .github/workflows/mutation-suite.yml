@@ -116,4 +116,6 @@ jobs:
           # No survivor list, no ratchet: any surviving mutant on the
           # since-last-release diff fails the run. Fix at source by
           # strengthening the impacted test until the mutant is killed.
-          python scripts/checks/mutation_parity.py --base "${BASE}"
+          # --full-scope: no mutant cap and no time budget. The commit-time
+          # run defers what its budget skips to this run, so it must run all.
+          python scripts/checks/mutation_parity.py --base "${BASE}" --full-scope

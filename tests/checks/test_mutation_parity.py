@@ -265,6 +265,37 @@ def test_prioritise_keeps_same_module_test_even_when_cap_would_evict_it() -> Non
     assert len(result) <= mp.MAX_IMPACTED_TEST_FILES  # the long tail stays capped
 
 
+def test_each_mutant_runs_against_its_own_modules_importers_once() -> None:
+    """A wide diff must not share one capped test set across every module."""
+    calls: list[set[Path]] = []
+
+    def find(paths: set[Path]) -> list[str]:
+        calls.append(paths)
+        (only,) = paths
+        return [f"tests/unit/test_{only.stem}.py"]
+
+    cache: dict[Path, list[str]] = {}
+    sheet, cli = Path("kairix/chunkers/sheet_row.py"), Path("kairix/agents/mcp/cli.py")
+    assert mp.tests_for_mutant(sheet, cache, find) == ["tests/unit/test_sheet_row.py"]
+    assert mp.tests_for_mutant(cli, cache, find) == ["tests/unit/test_cli.py"]
+    assert mp.tests_for_mutant(sheet, cache, find) == ["tests/unit/test_sheet_row.py"]
+    assert calls == [{sheet}, {cli}], "each module is searched once, on its own"
+
+
+def test_the_full_scope_run_has_no_cap_or_budget_and_the_local_run_keeps_both() -> None:
+    """The commit-time run defers what its budget skips to the nightly, so the
+    nightly must run every mutant: an unlimited cap and no time budget."""
+    assert mp.limits(full_scope=True) == (None, None)
+    assert mp.limits(full_scope=False) == (mp.MAX_MUTANTS, mp.TOTAL_BUDGET_S)
+    assert mp.limits(full_scope=False, max_mutants=7) == (7, mp.TOTAL_BUDGET_S)
+
+
+def test_the_nightly_suite_runs_full_scope() -> None:
+    suite = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation-suite.yml"
+    workflow = suite.read_text(encoding="utf-8")
+    assert '--base "${BASE}" --full-scope' in workflow
+
+
 def test_survivor_report_carries_f21_action_markers() -> None:
     """The F21 affordance contract: fix:/next:/run: markers present."""
     report = mp._survivor_report(_result("kairix/a.py", 7, ">", ">="))

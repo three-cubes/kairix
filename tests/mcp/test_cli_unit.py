@@ -269,6 +269,27 @@ def test_serve_http_keeps_readiness_closed_when_warmup_fails(monkeypatch) -> Non
 
 
 @pytest.mark.unit
+def test_warm_failed_event_logs_its_values_as_parseable_json(monkeypatch, caplog) -> None:
+    """``event=mcp_warm_failed`` carries the warm result JSON-encoded, and a
+    spaced string quoted, so log analytics can re-parse the line; never a
+    Python repr (``{'ready': False}``) or a bare multi-word value."""
+    import json as _json
+    import logging as _logging
+
+    monkeypatch.setattr(sys, "argv", ["kairix", "mcp", "serve", "--port", "18097"])
+    warm_result = {"ready": False, "status": "error", "detail": "neo4j down"}
+    deps, _build_calls, _runner = _build_deps(warm_result=warm_result)
+
+    with caplog.at_level(_logging.INFO, logger="kairix.mcp.startup"):
+        _drive(["serve", "--transport", "http", "--port", "18097"], deps)
+
+    (line,) = [r.getMessage() for r in caplog.records if "event=mcp_warm_failed" in r.getMessage()]
+    encoded = line.split("warm_result=", 1)[1]
+    assert _json.loads(encoded) == warm_result
+    assert '"detail": "neo4j down"' in encoded
+
+
+@pytest.mark.unit
 def test_serve_sse_transport_warns_and_continues_as_http(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["kairix", "mcp", "serve", "--port", "18097"])
     deps, _calls, runner = _build_deps()

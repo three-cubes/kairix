@@ -61,6 +61,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -388,6 +389,24 @@ def impacted_tests(paths: set[Path]) -> list[str]:
     return _prioritise(found, paths)
 
 
+def tests_for_mutant(
+    path: Path,
+    cache: dict[Path, list[str]],
+    find: Callable[[set[Path]], list[str]] = impacted_tests,
+) -> list[str]:
+    """The fast-tier tests that import ``path`` — the module ONE mutant changed.
+
+    Each mutant runs against its own module's importers, never one set for the
+    whole diff: a diff-wide set is capped across every touched file, so on a
+    wide diff a module's own tests fall out of the window and its killed
+    mutants read as survivors (the 2026-10-08 nightly reported 3 such false
+    survivors over 90 touched files). ``cache`` holds each module's list, so
+    a module is searched once however many mutants it has."""
+    if path not in cache:
+        cache[path] = find({path})
+    return cache[path]
+
+
 def _run_impacted_tests(test_files: list[str], timeout_s: int) -> tuple[bool, str, float]:
     """Run ``pytest`` over ``test_files`` (fast markers, no coverage).
 
@@ -469,14 +488,28 @@ def _survivor_report(result: MutantResult) -> str:
     )
 
 
+def limits(*, full_scope: bool, max_mutants: int = MAX_MUTANTS) -> tuple[int | None, float | None]:
+    """``(mutant cap, total-time budget)`` for a run; ``None`` means unlimited.
+
+    The commit-time run is capped and budgeted to stay inside the local loop,
+    and defers the rest to the nightly full-scope run. That run therefore has
+    neither cap nor budget: otherwise the deferred mutants never run anywhere."""
+    if full_scope:
+        return None, None
+    return max_mutants, TOTAL_BUDGET_S
+
+
 def run(
     *,
     base: str | None,
     max_mutants: int = MAX_MUTANTS,
+    full_scope: bool = False,
 ) -> int:
     """Diff-scoped mutation run. Returns process exit code.
 
     * ``base`` — diff ref, or ``None`` for the staged diff.
+    * ``full_scope`` — every mutant on the diff, with no cap or time budget
+      (the nightly mutation suite).
 
     Any survivor fails — there is no survivor list to excuse one.
     """
@@ -499,9 +532,11 @@ def run(
         )
         return 0
 
-    capped = all_mutants[:max_mutants]
+    cap, budget = limits(full_scope=full_scope, max_mutants=max_mutants)
+    capped = all_mutants if cap is None else all_mutants[:cap]
     skipped = len(all_mutants) - len(capped)
     test_files = impacted_tests(set(touched))
+    per_module: dict[Path, list[str]] = {}
 
     if not test_files:
         # No fast-tier test imports the changed module(s). The diff-scoped
@@ -528,17 +563,21 @@ def run(
     total_elapsed = 0.0
     budget_skipped = 0
     for i, mutant in enumerate(capped, start=1):
-        if total_elapsed >= TOTAL_BUDGET_S:
+        if budget is not None and total_elapsed >= budget:
             # Total-time budget hit: stop launching new mutants. The
             # remainder are reported as skipped, never silently dropped —
             # the nightly full-scope run (no budget) covers them.
             budget_skipped = len(capped) - (i - 1)
             print(
-                f"  [budget] {total_elapsed:.0f}s >= {TOTAL_BUDGET_S:.0f}s cap reached — "
+                f"  [budget] {total_elapsed:.0f}s >= {budget:.0f}s cap reached — "
                 f"{budget_skipped} remaining mutant(s) deferred to nightly full-scope."
             )
             break
-        result = _apply_and_test(mutant, test_files)
+        own_tests = tests_for_mutant(mutant.path, per_module)
+        if not own_tests:
+            print(f"  [{i}/{len(capped)}] {mutant.path}:{mutant.lineno} — no fast-tier test imports it; skipped")
+            continue
+        result = _apply_and_test(mutant, own_tests)
         total_elapsed += result.elapsed_s
         marker = f"{_RED}SURVIVED{_RESET}" if result.survived else f"{_GREEN}killed{_RESET}"
         print(
@@ -579,8 +618,13 @@ def main(argv: list[str] | None = None) -> int:
         default=MAX_MUTANTS,
         help=f"hard cap on mutants generated (default {MAX_MUTANTS})",
     )
+    parser.add_argument(
+        "--full-scope",
+        action="store_true",
+        help="run every mutant on the diff, with no cap or time budget (the nightly suite)",
+    )
     args = parser.parse_args(argv)
-    return run(base=args.base, max_mutants=args.max_mutants)
+    return run(base=args.base, max_mutants=args.max_mutants, full_scope=args.full_scope)
 
 
 if __name__ == "__main__":
