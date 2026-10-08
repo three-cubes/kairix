@@ -21,7 +21,12 @@ from kairix.core.connectors.collection_router import legacy_chunk_writer
 from kairix.core.db.fts import rebuild_fts
 from kairix.core.db.scanner import CollectionConfig, DocumentScanner
 from kairix.core.db.schema import create_schema
-from kairix.core.factory import build_search_pipeline, reset_search_pipeline_cache
+from kairix.core.factory import (
+    RERANK_DISABLED,
+    FactoryDeps,
+    build_search_pipeline,
+    reset_search_pipeline_cache,
+)
 from kairix.core.search.config import RetrievalConfig
 from kairix.knowledge.entities.summary_projector import (
     EntitySummaryProjectorDeps,
@@ -185,21 +190,44 @@ def _run_tick(entity_summary_ctx: _Ctx) -> None:
     db.close()
 
 
-@when(parsers.parse("the operator searches for '{query}'"))
-def _search(entity_summary_ctx: _Ctx, query: str) -> None:
-    assert entity_summary_ctx.db_path is not None
-    assert entity_summary_ctx.document_root is not None
+def build_entity_summary_search_pipeline(ctx: _Ctx) -> Any:
+    """Compose the scenario's search pipeline through the production factory.
+
+    Rerank seam (#493 root cause): ``RetrievalConfig.rerank_intents``
+    defaults to ``("multi_hop", "semantic")`` and these description queries
+    classify SEMANTIC, so a default-``deps`` build wires the production
+    cross-encoder closure. The first search in the process then imports
+    sentence-transformers/torch AND fetches
+    ``cross-encoder/ms-marco-MiniLM-L-6-v2`` from the Hugging Face hub —
+    a real network call into the session's hermetic (empty) ``HOME`` cache,
+    ~30s on a cold run, which tripped the 30s per-test timeout under full
+    suite load. No scenario asserts the reranked order, so the rerank stage
+    is wired off through ``FactoryDeps.reranker_override`` — the existing
+    seam — and the search stays hermetic and in-process.
+    """
+    assert ctx.db_path is not None
+    assert ctx.document_root is not None
 
     paths = FakePaths(
-        document_root=entity_summary_ctx.document_root,
-        db_path=entity_summary_ctx.db_path,
-        log_dir=entity_summary_ctx.tmp_path / "logs",
-        workspace_root=entity_summary_ctx.tmp_path / "workspaces",
+        document_root=ctx.document_root,
+        db_path=ctx.db_path,
+        log_dir=ctx.tmp_path / "logs",
+        workspace_root=ctx.tmp_path / "workspaces",
     )
     cfg = RetrievalConfig(provider="fake")
     registry = FakeProviderRegistry({"fake": FakeProvider(name="fake", vector=[0.1] * 1536, dim=1536)})
     reset_search_pipeline_cache()
-    pipeline = build_search_pipeline(config=cfg, registry=registry, paths=paths)
+    return build_search_pipeline(
+        config=cfg,
+        registry=registry,
+        paths=paths,
+        deps=FactoryDeps(reranker_override=RERANK_DISABLED),
+    )
+
+
+@when(parsers.parse("the operator searches for '{query}'"))
+def _search(entity_summary_ctx: _Ctx, query: str) -> None:
+    pipeline = build_entity_summary_search_pipeline(entity_summary_ctx)
     entity_summary_ctx.search_result = pipeline.search(query=query, budget=3000)
 
 

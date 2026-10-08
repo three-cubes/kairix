@@ -26,6 +26,9 @@ import pytest
 # BDD step definition modules — registered here so pytest-bdd can discover them
 # across the entire test run.
 pytest_plugins = [
+    # Fast-tier guard: fails a unit/bdd/contract test that loads the real
+    # cross-encoder reranker (network-bound model download, #493).
+    "tests.fixtures.reranker_guard",
     "tests.bdd.steps.search_steps",
     "tests.bdd.steps.curator_steps",
     "tests.bdd.steps.reflib_steps",
