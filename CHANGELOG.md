@@ -15,6 +15,30 @@ Docker. This lets operators run native PPTX/XLSX/PDF extraction first, opt into
 DOCX-to-PDF conversion when page anchors matter, and keep MarkItDown as a
 fallback instead of losing page metadata for every indexed file.
 
+### LLM-judge failures no longer count as "irrelevant" (benchmark numbers may move)
+
+Before, when the LLM judge failed on a benchmark case scored with
+`score_method: llm` (bad credentials, a timeout, a reply that was not a
+number), the case scored 0.0. That looked the same as "the results were
+irrelevant" and quietly pulled scores down.
+
+Now a judge failure leaves the case unscored. It is left out of every
+average (category scores, weighted total, canary pass rates) instead of
+counting as 0. `kairix benchmark run` prints how many cases the judge failed
+on. The JSON output has a `judge_failures` count in `summary`, and each failed
+case has `score: null` plus `judge_failure` and `judge_error` fields that say
+why.
+
+**Your benchmark numbers may go up** compared with earlier runs, if earlier
+runs had judge failures that were counted as 0. Check `judge_failures` before
+comparing a new run against an old baseline. The eval `LLMJudgeScorer` now
+raises `JudgeFailedError` instead of returning 0.0. An empty retrieval still
+scores 0.0.
+
+The unused `kairix.quality.contracts` Protocols (`BriefingSourceProtocol`,
+`EmbedderProtocol`, `EntityResolverProtocol`, `SearchBackendProtocol`, `SearchResultProtocol`) have
+been removed. Nothing in kairix used them.
+
 ### Quality gates hold every file to the same bar (contributors)
 
 This changes how kairix is built and checked, not how it runs. Operators have

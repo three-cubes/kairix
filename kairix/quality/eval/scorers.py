@@ -81,6 +81,12 @@ class LLMJudgeScorer:
     callers leave the kwarg unset and get the live backend wired to the
     configured provider plugin.
 
+    A judge failure (backend error, unparseable reply) raises
+    :class:`~kairix.quality.benchmark.runner.JudgeFailedError` per the
+    ``ScoringStrategy`` failure contract — it is never returned as a 0.0
+    that would read as "no relevance". Callers aggregating scores must
+    exclude the failed case.
+
     Attributes:
         chat_backend: ``ChatBackend`` protocol implementation.
     """

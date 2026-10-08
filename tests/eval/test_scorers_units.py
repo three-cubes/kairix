@@ -183,6 +183,21 @@ class TestLLMJudgeScorer:
         assert score == pytest.approx(0.4)
 
     @pytest.mark.unit
+    def test_score_raises_typed_failure_instead_of_silent_zero(self) -> None:
+        """A judge failure propagates as JudgeFailedError (ScoringStrategy
+        failure contract) — never a 0.0 that reads as "no relevance".
+
+        Sabotage proof: wrap the ``llm_judge`` call in ``LLMJudgeScorer.score``
+        with ``try/except Exception: return 0.0`` — pytest.raises sees
+        nothing and the test fails. Restored.
+        """
+        from kairix.quality.benchmark.runner import JudgeFailedError
+
+        scorer = LLMJudgeScorer(chat_backend=FakeChatBackend(raise_on_call=TimeoutError("judge timed out")))
+        with pytest.raises(JudgeFailedError):
+            scorer.score(["search/pipeline.md"], [{"query": "q"}])
+
+    @pytest.mark.unit
     def test_score_with_no_retrieved_paths_returns_zero_without_calling_backend(
         self,
     ) -> None:

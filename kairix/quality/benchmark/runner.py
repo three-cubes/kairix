@@ -7,13 +7,16 @@ per-category and weighted-total scores.
 Score methods:
   exact - gold_path present in top-5 retrieved paths (case-insensitive substring)
   fuzzy - gold_path present in top-10 (relaxed, for approximate matching)
-  llm   - gpt-4o-mini rates retrieved content relevance 0.0-1.0
+  llm   - gpt-4o-mini rates retrieved content relevance 0.0-1.0; a judge failure
+          leaves the case unscored (score None, counted in summary['judge_failures'])
+          and excluded from every aggregate
   ndcg  - true NDCG@10 with graded relevance (0/1/2); also computes Hit@5 and MRR@10
 """
 
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -47,6 +50,10 @@ _KEY_ELAPSED_MS = "elapsed_ms"
 # F17 — NDCG@10 is the primary IR metric; the key appears in the summary
 # emit, the human format block, and the ADR-028 per-source-type slice.
 _KEY_NDCG_AT_10 = "ndcg_at_10"
+# Per-case reason key + summary counter for LLM-judge failures (excluded from
+# aggregates — a failed judgement is not a 0.0 "irrelevant" verdict).
+_KEY_JUDGE_FAILURE = "judge_failure"
+_KEY_JUDGE_FAILURES = "judge_failures"
 
 if TYPE_CHECKING:
     from kairix.core.protocols import ChatBackend
@@ -174,9 +181,9 @@ class _LazyDefaultChatBackend:
     backend only fails when actually used and credentials / config are
     missing) while routing the production path through the provider plugin.
 
-    The wider ``llm_judge`` try/except swallows the ValueError on
-    ``complete()`` and returns 0.0, matching the historical credential-
-    failure behaviour.
+    ``llm_judge`` converts the ValueError raised on ``complete()`` into a
+    typed :class:`JudgeFailedError`, so a credential / config failure is
+    reported as a judge failure rather than scored as "irrelevant".
     """
 
     def complete(
@@ -309,6 +316,54 @@ def fuzzy_match(paths: list[str], gold: str) -> float:
     return 0.0
 
 
+class JudgeFailedError(RuntimeError):
+    """The LLM judge could not produce a score.
+
+    Raised by :func:`llm_judge` when the chat backend fails (auth, timeout,
+    unconfigured provider) or replies with something that is not a finite
+    number. A failed judgement is NOT a relevance verdict: callers must
+    exclude it from aggregates instead of counting it as 0.0 ("irrelevant").
+
+    Attributes:
+        reason: Stable machine-readable failure class —
+                :data:`JUDGE_FAILURE_BACKEND_ERROR` or
+                :data:`JUDGE_FAILURE_UNPARSEABLE`.
+        detail: Human-readable detail (exception type + message, or the
+                length of the unparseable reply — never the reply text).
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"llm judge failed ({reason}): {detail}")
+        self.reason = reason
+        self.detail = detail
+
+
+JUDGE_FAILURE_BACKEND_ERROR = "backend_error"
+JUDGE_FAILURE_UNPARSEABLE = "unparseable_response"
+
+
+def _judge_prompt(query: str, paths: list[str]) -> str:
+    """Build the paths-only, 6-point relevance prompt.
+
+    Matches the original run-benchmark-hybrid.py scorer so scores stay
+    comparable across runs.
+    """
+    paths_text = "\n".join(f"- {p}" for p in paths[:5])
+    return (
+        f"You are evaluating memory retrieval quality for an AI agent system.\n\n"
+        f"Query: {query}\n\n"
+        f"Retrieved documents (paths):\n{paths_text}\n\n"
+        "Score the retrieval quality from 0.0 to 1.0:\n"
+        "- 1.0: Retrieved documents directly and completely answer the query\n"
+        "- 0.8: Retrieved documents mostly answer the query with minor gaps\n"
+        "- 0.6: Retrieved documents partially answer the query\n"
+        "- 0.4: Retrieved documents are tangentially related\n"
+        "- 0.2: Retrieved documents have minimal relevance\n"
+        "- 0.0: Retrieved documents are irrelevant or empty\n\n"
+        "Reply with ONLY a number between 0.0 and 1.0."
+    )
+
+
 def llm_judge(
     query: str,
     paths: list[str],
@@ -329,47 +384,40 @@ def llm_judge(
                       ``_default_chat_backend()`` constructed lazily (resolves
                       the configured provider plugin from ``kairix.config.yaml``).
 
-    Returns 0.0 on any failure (API error, parse error, timeout).
+    Returns 0.0 when nothing was retrieved (a genuine "irrelevant or empty"
+    verdict — the backend is not called).
+
+    Raises:
+        JudgeFailedError: the backend raised (API / auth / timeout / missing
+            provider) or replied with a non-numeric / non-finite value. A
+            failure is never reported as a 0.0 score.
     """
     _ = snippets  # consumed at signature time; explicit drop documents intent
+    if not paths:
+        return 0.0
+    if chat_backend is None:
+        # Lazy production default — resolves the configured provider plugin
+        # on first ``complete()``; a resolution failure surfaces as a
+        # JudgeFailedError below. Success-path tests inject FakeChatBackend.
+        chat_backend = _default_chat_backend()
+
     try:
-        if not paths:
-            return 0.0
-        if chat_backend is None:
-            # Lazy production default — covered by a unit test that drops
-            # the kwarg and asserts the wider try/except returns 0.0 on
-            # the inevitable plugin / credential resolution failure. Tests
-            # that exercise the success path inject FakeChatBackend.
-            chat_backend = _default_chat_backend()
-
-        # Match the original run-benchmark-hybrid.py scorer — paths only, 6-point scale.
-        # This ensures scores are comparable across runs.
-        snippets_text = "\n".join(f"- {p}" for p in paths[:5])
-        prompt = (
-            f"You are evaluating memory retrieval quality for an AI agent system.\n\n"
-            f"Query: {query}\n\n"
-            f"Retrieved documents (paths):\n{snippets_text}\n\n"
-            "Score the retrieval quality from 0.0 to 1.0:\n"
-            "- 1.0: Retrieved documents directly and completely answer the query\n"
-            "- 0.8: Retrieved documents mostly answer the query with minor gaps\n"
-            "- 0.6: Retrieved documents partially answer the query\n"
-            "- 0.4: Retrieved documents are tangentially related\n"
-            "- 0.2: Retrieved documents have minimal relevance\n"
-            "- 0.0: Retrieved documents are irrelevant or empty\n\n"
-            "Reply with ONLY a number between 0.0 and 1.0."
-        )
-
-        content = chat_backend.complete(
-            prompt,
+        reply = chat_backend.complete(
+            _judge_prompt(query, paths),
             api_key="",
             endpoint="",
             deployment="gpt-4o-mini",
         )
-        score = float(content)
-        return max(0.0, min(1.0, score))
+    except Exception as exc:
+        raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, f"{type(exc).__name__}: {exc}") from exc
 
-    except Exception:
-        return 0.0
+    try:
+        score = float(reply)
+    except (TypeError, ValueError) as exc:
+        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, f"non-numeric reply ({len(reply or '')} chars)") from exc
+    if not math.isfinite(score):
+        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, "non-finite reply")
+    return max(0.0, min(1.0, score))
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +538,18 @@ def _format_canary_block(canary: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _format_judge_failures_block(judge_failures: int) -> list[str]:
+    """Warn when LLM-judge failures left cases unscored (empty when none)."""
+    if not judge_failures:
+        return []
+    return [
+        "",
+        f"⚠️  LLM judge failed on {judge_failures} case(s) — excluded from all scores (not counted as 0).",
+        "   fix: check the provider credentials / 'provider:' in kairix.config.yaml.",
+        "   next: re-run; per-case 'judge_failure' / 'judge_error' fields in the JSON output name the cause.",
+    ]
+
+
 def format_interpretation(result: BenchmarkResult) -> str:
     """Return a human-readable interpretation section."""
     lines: list[str] = []
@@ -518,6 +578,7 @@ def format_interpretation(result: BenchmarkResult) -> str:
     # legacy category breakdown so existing scrapers keep their format.
     lines.extend(_format_per_source_type_block(result.summary.get("per_source_type", {})))
     lines.extend(_format_canary_block(result.summary.get("canary", {})))
+    lines.extend(_format_judge_failures_block(result.summary.get(_KEY_JUDGE_FAILURES, 0)))
 
     lines.append("")
 
@@ -591,10 +652,13 @@ def score_case(
     snippets: list[str],
     retrieval_meta: dict[str, Any],
     deps: BenchmarkDeps | None = None,
-) -> tuple[float, dict[str, Any]]:
+) -> tuple[float | None, dict[str, Any]]:
     """Dispatch to the correct score method for a single benchmark case.
 
-    Returns (score, ndcg_detail) where ndcg_detail is non-empty only for NDCG cases.
+    Returns (score, detail). ``detail`` carries the NDCG sub-metrics for NDCG
+    cases. For ``llm`` cases whose judge failed, ``score`` is ``None`` and
+    ``detail`` carries ``judge_failure`` (the :class:`JudgeFailedError`
+    reason) and ``judge_error`` — the case is unscored, not scored 0.0.
 
     ``deps`` carries the classifier (for ``classification`` cases) and the
     chat backend (for ``llm`` cases). When ``None``, production defaults are
@@ -610,7 +674,10 @@ def score_case(
     if handler is not None:
         return handler(case, paths, deps)
     # llm fallback
-    return llm_judge(query=case.query, paths=paths, snippets=snippets, chat_backend=deps.chat_backend), {}
+    try:
+        return llm_judge(query=case.query, paths=paths, snippets=snippets, chat_backend=deps.chat_backend), {}
+    except JudgeFailedError as exc:
+        return None, {_KEY_JUDGE_FAILURE: exc.reason, "judge_error": exc.detail}
 
 
 def retrieve_case(
@@ -864,6 +931,7 @@ def run_benchmark(
     case_results: list[dict[str, Any]] = []
     all_categories = set(CATEGORY_WEIGHTS.keys()) | {_CATEGORY_CLASSIFICATION}
     category_scores: dict[str, list[float]] = {cat: [] for cat in all_categories}
+    judge_failures = 0
 
     for case in suite.cases:
         t0 = time.time()
@@ -881,7 +949,10 @@ def run_benchmark(
         elapsed_ms = (time.time() - t0) * 1000
 
         cat = CATEGORY_ALIASES.get(case.category, case.category)
-        if cat in category_scores:
+        if score is None:
+            # Judge failure — excluded from every aggregate (not counted as 0).
+            judge_failures += 1
+        elif cat in category_scores:
             category_scores[cat].append(score)
 
         # Build the canonical case-result dict first, then layer ndcg_detail
@@ -911,7 +982,7 @@ def run_benchmark(
                 "query": case.query,
                 "gold_path": case.gold_path,
                 _KEY_SCORE_METHOD: case.score_method,
-                "score": round(score, 4),
+                "score": round(score, 4) if score is not None else None,
                 "retrieved_paths": paths[:10],
                 _KEY_ELAPSED_MS: round(elapsed_ms, 1),
                 **safe_extras,
@@ -973,6 +1044,7 @@ def run_benchmark(
             "mrr_at_10": mrr_at_10,
             "per_source_type": per_source_type,
             "canary": canary_summary,
+            _KEY_JUDGE_FAILURES: judge_failures,
         },
         diagnostics=diagnostics,
         cases=case_results,

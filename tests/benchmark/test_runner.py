@@ -3,7 +3,7 @@ Tests for kairix.quality.benchmark.runner. Covers:
 - exact_match(): gold path matching variants
 - fuzzy_match(): partial path matching
 - classification_score(): rule classifier integration
-- llm_judge(): API call mocked + error paths
+- llm_judge(): API call via FakeChatBackend + typed failure paths
 - score_tier(): tier labels
 - _category_diagnosis(): diagnostic strings
 - format_interpretation(): output structure
@@ -17,7 +17,10 @@ from typing import Any
 import pytest
 
 from kairix.quality.benchmark.runner import (
+    JUDGE_FAILURE_BACKEND_ERROR,
+    JUDGE_FAILURE_UNPARSEABLE,
     BenchmarkResult,
+    JudgeFailedError,
     classification_score,
     exact_match,
     format_interpretation,
@@ -207,13 +210,20 @@ def test_llm_judge_clamps_score_to_unit_interval() -> None:
 
 
 @pytest.mark.unit
-def test_llm_judge_returns_0_when_chat_backend_raises() -> None:
-    """Backend raises → returns 0.0 (never propagates)."""
+def test_llm_judge_raises_typed_failure_when_chat_backend_raises() -> None:
+    """Backend raises → JudgeFailedError(backend_error), never a silent 0.0.
+
+    Sabotage proof: restore ``except Exception: return 0.0`` around the
+    ``complete()`` call in ``llm_judge`` — pytest.raises sees no exception
+    and the test fails. Restored.
+    """
     from tests.fakes import FakeChatBackend
 
     backend = FakeChatBackend(raise_on_call=OSError("timeout"))
-    score = llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
-    assert score == pytest.approx(0.0)
+    with pytest.raises(JudgeFailedError) as excinfo:
+        llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
+    assert excinfo.value.reason == JUDGE_FAILURE_BACKEND_ERROR
+    assert "OSError: timeout" in excinfo.value.detail
 
 
 @pytest.mark.unit
@@ -228,13 +238,27 @@ def test_llm_judge_returns_0_for_empty_paths_without_calling_backend() -> None:
 
 
 @pytest.mark.unit
-def test_llm_judge_returns_0_when_response_not_parseable_as_float() -> None:
-    """Non-numeric backend response → returns 0.0 (the float() raises ValueError)."""
+@pytest.mark.parametrize("reply", ["not a number", "", "nan", "inf"])
+def test_llm_judge_raises_typed_failure_when_reply_unparseable(reply: str) -> None:
+    """Non-numeric / non-finite reply → JudgeFailedError(unparseable_response).
+
+    The reply text never appears in the failure detail (F76 — only its length).
+
+    Sabotage proof: replace the ``math.isfinite`` guard with ``pass`` — the
+    "nan"/"inf" legs return a clamped number instead of raising and fail.
+    Restored.
+    """
     from tests.fakes import FakeChatBackend
 
-    backend = FakeChatBackend(responses=["not a number"])
-    score = llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
-    assert score == pytest.approx(0.0)
+    backend = FakeChatBackend(responses=[reply])
+    with pytest.raises(JudgeFailedError) as excinfo:
+        llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
+    assert excinfo.value.reason == JUDGE_FAILURE_UNPARSEABLE
+    if reply:
+        assert reply not in excinfo.value.detail
+    if reply in ("not a number", ""):
+        # Non-numeric replies report their length (never their text).
+        assert f"({len(reply)} chars)" in excinfo.value.detail
 
 
 # ---------------------------------------------------------------------------
@@ -1037,24 +1061,22 @@ def test_default_content_classifier_classify_with_llm_fires_when_rules_return_un
 
 
 @pytest.mark.unit
-def test_llm_judge_lazy_default_chat_backend_returns_zero_on_credential_failure() -> None:
+def test_llm_judge_lazy_default_chat_backend_reports_credential_failure() -> None:
     """``llm_judge`` without ``chat_backend=`` lazily resolves the provider plugin.
 
     The test environment has no ``provider:`` field in ``kairix.config.yaml``,
-    so ``_default_chat_backend()`` raises ValueError. The wrapping try/except
-    inside ``llm_judge`` swallows it and returns 0.0. The lazy
-    default-construction branch is what's covered — the score being 0.0
-    (rather than ValueError propagating, IndexError, or NameError) is the
-    receipt that the resolution failure is handled gracefully.
+    so the lazy default backend raises ValueError on ``complete()``.
+    ``llm_judge`` converts it into a typed ``JudgeFailedError`` — a
+    credential / config failure must never read as a 0.0 "irrelevant" score.
 
-    Sabotage: remove the outer ``try/except`` in ``llm_judge`` — the
-    ValueError from the unresolved provider would propagate and the test
-    fails with an exception instead of asserting 0.0.
+    Sabotage: drop the ``except Exception`` around ``complete()`` in
+    ``llm_judge`` — the raw ValueError propagates and pytest.raises
+    (JudgeFailedError) fails. Restored.
     """
-    # No chat_backend kwarg → _default_chat_backend() factory runs and raises;
-    # llm_judge's outer try/except returns 0.0.
-    score = llm_judge(query="q", paths=["doc.md"], snippets=["snippet"])
-    assert score == pytest.approx(0.0)
+    with pytest.raises(JudgeFailedError) as excinfo:
+        llm_judge(query="q", paths=["doc.md"], snippets=["snippet"])
+    assert excinfo.value.reason == JUDGE_FAILURE_BACKEND_ERROR
+    assert "ValueError" in excinfo.value.detail
 
 
 # ---------------------------------------------------------------------------
@@ -1738,3 +1760,86 @@ def test_run_benchmark_single_shot_mode_emits_per_query_runs() -> None:
     # The legacy summary still matches — mode is additive only.
     assert "weighted_total" in result.summary
     assert result.meta["mode"] == "single-shot"
+
+
+@pytest.mark.unit
+def test_run_benchmark_excludes_judge_failures_from_aggregates() -> None:
+    """A judge failure leaves the case unscored and is counted, not averaged as 0.
+
+    Two ``llm`` cases in one category: the first judge call returns 0.9, the
+    second raises (the FakeChatBackend's responses are exhausted →
+    IndexError). The category average must be 0.9 (the one real verdict),
+    not 0.45 (the failure folded in as "irrelevant"); the failure is counted
+    in ``summary["judge_failures"]`` and named on the case row and in the
+    human-readable output.
+
+    Sabotage proof: in ``run_benchmark`` replace ``if score is None: ...``
+    with appending ``0.0`` for the failed case — the category average drops
+    to 0.45 and the first assertion fails. Restored.
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
+    from tests.fakes import FakeChatBackend
+
+    backend = FakeChatBackend(responses=["0.9"])
+    suite = BenchmarkSuite(
+        meta={"name": "judge-failure", "version": "1.0", "agent": "t"},
+        cases=[
+            BenchmarkCase(id="T01", category="temporal", query="first?", gold_path=None, score_method="llm"),
+            BenchmarkCase(id="T02", category="temporal", query="second?", gold_path=None, score_method="llm"),
+        ],
+    )
+
+    result = run_benchmark(
+        suite,
+        system="hybrid",
+        agent="t",
+        deps=BenchmarkDeps(chat_backend=backend, retrieve=_retrieve_returning(["vault/some-doc.md"])),
+    )
+
+    assert result.summary["category_scores"]["temporal"] == pytest.approx(0.9)
+    assert result.summary["judge_failures"] == 1
+    assert result.diagnostics["category_counts"]["temporal"] == 1
+    failed = result.cases[1]
+    assert failed["score"] is None
+    assert failed["judge_failure"] == JUDGE_FAILURE_BACKEND_ERROR
+    assert "IndexError" in failed["judge_error"]
+    assert result.cases[0]["score"] == pytest.approx(0.9)
+    assert "LLM judge failed on 1 case(s)" in format_interpretation(result)
+
+
+@pytest.mark.unit
+def test_format_interpretation_omits_judge_failure_block_when_none() -> None:
+    """No judge failures → no warning block (the output stays unchanged)."""
+    result = BenchmarkResult(
+        meta={},
+        summary={
+            "weighted_total": 0.5,
+            "category_scores": {},
+            "gates": {},
+            "judge_failures": 0,
+        },
+        diagnostics={},
+        cases=[],
+    )
+    assert "LLM judge failed" not in format_interpretation(result)
+
+
+@pytest.mark.unit
+def test_score_case_returns_none_with_reason_on_judge_failure() -> None:
+    """``score_case`` maps a JudgeFailedError to (None, reason detail) for ``llm`` cases."""
+    from types import SimpleNamespace
+
+    from kairix.quality.benchmark.runner import BenchmarkDeps, score_case
+    from tests.fakes import FakeChatBackend
+
+    case = SimpleNamespace(score_method="llm", query="q")
+    score, detail = score_case(
+        case,
+        ["p.md"],
+        [],
+        {},
+        BenchmarkDeps(chat_backend=FakeChatBackend(responses=["garbled"])),
+    )
+    assert score is None
+    assert detail["judge_failure"] == JUDGE_FAILURE_UNPARSEABLE

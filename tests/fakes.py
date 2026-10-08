@@ -2036,26 +2036,6 @@ class FakeSearchClient:
         return _FakeSearchResult(results=list(self._results))
 
 
-class FakeBriefingSource:
-    """In-memory ``BriefingSourceProtocol`` (``kairix.quality.contracts.briefing``).
-
-    ``fetch(agent, limit)`` returns up to ``limit`` of the configured
-    ``items``; pass ``raises=`` to make every call raise. Records every
-    ``(agent, limit)`` in ``calls``.
-    """
-
-    def __init__(self, *, items: list[dict[str, Any]] | None = None, raises: BaseException | None = None) -> None:
-        self._items = [dict(item) for item in (items or [])]
-        self._raises = raises
-        self.calls: list[tuple[str, int]] = []
-
-    def fetch(self, agent: str, limit: int = 10) -> list[dict[str, Any]]:
-        self.calls.append((agent, limit))
-        if self._raises is not None:
-            raise self._raises
-        return [dict(item) for item in self._items[:limit]]
-
-
 class FakeCrossEncoderLoader:
     """Recording stand-in for ``kairix.core.search.rerank.get_cross_encoder``.
 

@@ -401,7 +401,8 @@ def test_fuzzy_match_returns_zero_for_empty_inputs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Contract: classification_score and llm_judge return 0.0 on any failure.
+# Contract: classification_score returns 0.0 on any failure; llm_judge returns
+# 0.0 only for an empty retrieval (its failures raise JudgeFailedError).
 # ---------------------------------------------------------------------------
 
 
