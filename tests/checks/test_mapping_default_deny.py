@@ -351,3 +351,111 @@ def _restored(flag):
     path = tmp_path / "test_sample.py"
     path.write_text(source, encoding="utf-8")
     assert any(v.endswith("os.environ.clear()") for v in file_violations(path))
+
+
+# ---------------------------------------------------------------------------
+# Rule (a): the guarded MODULE objects (``os`` / ``sys``) are default-deny too.
+# ---------------------------------------------------------------------------
+
+MODULE_CASES: list[tuple[str, str, bool]] = [
+    # (detector, statement, expected flagged)
+    ("os.environ", "some_helper(os)", True),
+    ("sys.modules", "some_helper(sys)", True),
+    ("sys.modules", "names = vars(sys)", True),
+    ("os.environ", "names = vars(os)", True),
+    ("os.environ", "value = getattr(os, name)", True),
+    ("os.environ", 'value = getattr(os, "environ")', True),
+    ("sys.modules", "items = [sys]", True),
+    ("os.environ", 'path = os.path.join("a", "b")', False),
+    ("os.environ", "cwd = os.getcwd()", False),
+    ("sys.modules", "argv = sys.argv", False),
+    ("sys.modules", 'sys.argv = ["kairix", "--help"]', False),
+    ("os.environ", 'monkeypatch.setattr(os, "chown", stub)', False),
+    ("sys.modules", 'frozen = getattr(sys, "frozen", False)', False),
+    ("sys.modules", 'monkeypatch.setattr(sys, "argv", ["x"])', False),
+    ("os.environ", "alias = os\n    cwd = alias.getcwd()", False),
+]
+
+
+@pytest.mark.parametrize(
+    ("rname", "statement", "expected"),
+    [pytest.param(r, s, e, id=f"{r}-{s.splitlines()[0]}") for r, s, e in MODULE_CASES],
+)
+def test_guarded_module_object_is_default_deny(tmp_path: Path, rname: str, statement: str, expected: bool) -> None:
+    """``os`` / ``sys`` themselves are guarded: a static attribute access is
+    fine, but passing the module to ANY callable fails unless the call has no
+    spread and an attribute-name argument provably names something other than
+    ``environ`` / ``modules``.
+
+    Sabotage proof (executed): make ``MappingGuard.classify_module`` return
+    ``[]`` → every ``True`` case reports clean; restored.
+    """
+    body = "def some_helper(*args, **kwargs):\n    pass\n\n\ndef test_x(monkeypatch, stub, name):\n"
+    body += "".join(f"    {line}\n" for line in statement.splitlines())
+    assert _flagged(tmp_path, rname, body) is expected
+
+
+# ---------------------------------------------------------------------------
+# Rule (b): MonkeyPatch helper methods are matched by METHOD NAME on any receiver.
+# ---------------------------------------------------------------------------
+
+HELPER_METHOD_CASES: list[tuple[str, str, bool]] = [
+    ("os.environ", "anything.setenv(name, stub)", True),
+    ("os.environ", 'anything.setenv("KAIRIX_DB_PATH", stub)', True),
+    ("os.environ", 'anything.delenv("KAIRIX_DB_PATH")', True),
+    ("os.environ", 'anything.setenv("PATH", stub)', False),
+    ("sys.modules", 'anything.setattr("kairix.paths.provider_name", stub)', True),
+    ("sys.modules", "anything.delattr(name)", True),
+    ("sys.modules", 'anything.setattr("os.path.exists", stub)', False),
+    ("sys.modules", 'anything.setitem(sys.modules, "kairix.paths", stub)', True),
+    ("sys.modules", 'anything.setitem(sys.modules, "openai", stub)', False),
+]
+
+
+@pytest.mark.parametrize(
+    ("rname", "statement", "expected"),
+    [pytest.param(r, s, e, id=f"{r}-{s}") for r, s, e in HELPER_METHOD_CASES],
+)
+def test_helper_methods_are_classified_on_any_receiver(
+    tmp_path: Path, rname: str, statement: str, expected: bool
+) -> None:
+    """``.setenv`` / ``.delenv`` / ``.setitem`` / ``.delitem`` / ``.setattr`` /
+    ``.delattr`` are classified by method name and bound arguments whatever the
+    receiver is — an unresolved key / target fails.
+
+    Sabotage proof (executed): require the receiver to be the name
+    ``monkeypatch`` again (in ``MappingGuard._helper_writes`` /
+    ``_argument_use`` and F1 ``_monkeypatch_attr_shapes``) → the ``True``
+    cases report clean; restored.
+    """
+    body = "def test_x(anything, stub, name):\n" + f"    {statement}\n"
+    assert _flagged(tmp_path, rname, body) is expected
+
+
+# ---------------------------------------------------------------------------
+# The four spellings Codex found at 3479015.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rname", "body"),
+    [
+        (
+            "os.environ",
+            "from builtins import getattr as fetch\n\n\n"
+            + 'def test_x():\n    fetch(os, "environ")["KAIRIX_DB_PATH"] = "v"\n',
+        ),
+        ("os.environ", 'def test_x(monkeypatch, x):\n    monkeypatch.setattr(os, "environ", **{"value": x})\n'),
+        ("os.environ", 'import pytest\n\n\ndef test_x():\n    pytest.MonkeyPatch().setenv("KAIRIX_DB_PATH", "v")\n'),
+        (
+            "sys.modules",
+            "import pytest\n\n\n"
+            + 'def test_x():\n    pytest.MonkeyPatch().setattr("kairix.paths.provider_name", None)\n',
+        ),
+    ],
+    ids=["aliased-getattr", "spread-value", "inline-instance-setenv", "inline-instance-setattr"],
+)
+def test_codex_receiver_side_spellings_are_flagged(tmp_path: Path, rname: str, body: str) -> None:
+    """Closed by the two rules, not per spelling: the module object passed to
+    any callable (a), and helper methods on any receiver (b)."""
+    assert _flagged(tmp_path, rname, body) is True

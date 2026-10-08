@@ -60,19 +60,21 @@ class CrossEncoderCache:
             from sentence_transformers import (
                 CrossEncoder,  # type: ignore[import-untyped] — sentence-transformers has no upstream type stubs
             )
-
-            self._encoder = CrossEncoder(model)
-            logger.info("rerank: loaded cross-encoder model %r", model)
-            return self._encoder
         except ImportError:
             logger.warning(
                 "rerank: sentence-transformers not installed — re-ranking disabled. "
                 "Install with: pip install kairix[rerank]"
             )
             return None
+        # Guarded separately: an ImportError raised WHILE the model loads (a
+        # missing backend, say) is a load failure, not "not installed".
+        try:
+            self._encoder = CrossEncoder(model)
         except Exception as e:
             logger.warning("rerank: failed to load model %r — %s — re-ranking disabled", model, e)
             return None
+        logger.info("rerank: loaded cross-encoder model %r", model)
+        return self._encoder
 
 
 # Process-wide lazy singleton used when no ``cache=`` is supplied.

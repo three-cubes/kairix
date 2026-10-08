@@ -40,9 +40,16 @@ context, or be a write PROVEN safe — anything else is a violation.**
      ``monkeypatch.setattr`` / ``patch`` on ``os.environ`` /
      ``"os.environ"``, with dotted strings constant-folded).
 
-Helpers that write the mapping WITHOUT naming it are classified too:
-``<monkeypatch>.setenv / delenv`` (F2) are allowed only when the variable
-name is provably not protected.
+Two receiver-side rules close the remaining spellings by principle:
+
+* **Guarded module objects** — every reference to the owning module (``os`` /
+  ``sys``, any alias) is classified too: a static attribute access passes (its
+  name is provably not ``environ`` / ``modules``); passing the module to ANY
+  callable passes only with no spread and an attribute-name argument provably
+  naming something else; anything else fails.
+* **Receiver-agnostic helper methods** — ``.setenv / .delenv / .setitem /
+  .delitem / .setattr / .delattr`` are classified by METHOD NAME plus bound
+  arguments on any receiver; an unresolved key / target fails.
 """
 
 from __future__ import annotations
@@ -80,10 +87,6 @@ MAPPING_METHOD_SIGNATURES: dict[str, tuple[str, ...]] = {
 PATCH_SIGNATURE: tuple[str, ...] = ("target", "new", "spec", "create", "spec_set", "autospec", "new_callable")
 PATCH_DICT_SIGNATURE: tuple[str, ...] = ("in_dict", "values", "clear")
 PATCH_OBJECT_SIGNATURE: tuple[str, ...] = ("target", "attribute", "new")
-BUILTIN_ATTR_SIGNATURES: dict[str, tuple[str, ...]] = {
-    "setattr": ("obj", "name", "value"),
-    "delattr": ("obj", "name"),
-}
 RELOAD_SIGNATURE: tuple[str, ...] = ("module",)
 IMPORT_MODULE_SIGNATURE: tuple[str, ...] = ("name", "package")
 
@@ -160,7 +163,13 @@ class ProcessMapping:
 
     @classmethod
     def resolve(cls, index: ModuleIndex, module: str, attr: str) -> ProcessMapping:
-        mapping = cls(module, attr, index.module_aliases(module), index.from_imports(module, attr))
+        module_names = index.module_aliases(module) | {
+            a.name.split(".")[0]
+            for node in index.imports
+            for a in node.names
+            if a.asname is None and a.name.startswith(f"{module}.")
+        }
+        mapping = cls(module, attr, module_names, index.from_imports(module, attr))
         bindings = index.name_bindings
         changed = True
         while changed:  # follow local rebinding (a = os.environ; b = a; o = os) to a fixpoint
@@ -185,38 +194,6 @@ class ProcessMapping:
         if isinstance(expr, ast.Attribute) and expr.attr == self.attr:
             return self.is_module(expr.value)
         return isinstance(expr, ast.Name) and expr.id in self.names
-
-
-def monkeypatch_names(index: ModuleIndex) -> set[str]:
-    """Names bound to a pytest MonkeyPatch: the fixture, ``pytest.MonkeyPatch()``
-    instances, and ``with <mp>.context() as m`` / ``MonkeyPatch.context()`` targets."""
-
-    def is_monkeypatch_class(expr: ast.expr) -> bool:
-        return (isinstance(expr, ast.Name) and expr.id == "MonkeyPatch") or (
-            isinstance(expr, ast.Attribute) and expr.attr == "MonkeyPatch"
-        )
-
-    names = {"monkeypatch"}
-    bindings = index.name_bindings
-    with_targets = index.with_targets
-    changed = True
-    while changed:
-        changed = False
-        for name, value in bindings:
-            makes_one = isinstance(value, ast.Call) and is_monkeypatch_class(value.func)
-            if name not in names and (makes_one or (isinstance(value, ast.Name) and value.id in names)):
-                names.add(name)
-                changed = True
-        for name, ctx_expr in with_targets:
-            if name in names or not isinstance(ctx_expr, ast.Call):
-                continue
-            func = ctx_expr.func
-            if isinstance(func, ast.Attribute) and func.attr == "context":
-                owner = func.value
-                if is_monkeypatch_class(owner) or (isinstance(owner, ast.Name) and owner.id in names):
-                    names.add(name)
-                    changed = True
-    return names
 
 
 def patch_names(index: ModuleIndex) -> set[str]:
@@ -264,6 +241,8 @@ READ_ATTRIBUTES = frozenset(
 )
 #: builtins that only read the mapping when it is their first argument
 READ_BUILTINS = frozenset({"len", "dict"})
+#: keyword names that carry the attribute name when a module object is passed
+ATTRIBUTE_NAME_KEYWORDS = frozenset({"name", "attribute", "attr"})
 #: keyword names under which a process launcher reads the mapping as its environment
 ENV_KEYWORDS = frozenset({"env", "environ"})
 _SUBPROCESS_FUNCTIONS = frozenset(
@@ -291,7 +270,6 @@ class MappingGuard:
         self.constants = constants
         self.label = mapping.dotted
         self.marker = marker
-        self.monkeypatch = monkeypatch_names(index)
         self.patch = patch_names(index)
         self.mock_modules = mock_module_names(index)
         self.unittest_modules = index.module_aliases("unittest")
@@ -304,14 +282,60 @@ class MappingGuard:
     # -- public -------------------------------------------------------------
 
     def findings(self) -> list[Finding]:
-        """Every violation: unsafe uses of a reference + helper-only writes."""
+        """Every violation: unsafe uses of the mapping, unsafe uses of its owning
+        MODULE object, and helper-method writes that never name either."""
         out: list[Finding] = []
         for ref in self.references():
             out.extend(self.classify(ref))
+        for ref in self.module_references():
+            out.extend(self.classify_module(ref))
         for node in self.index.candidates:
             if isinstance(node, ast.Call):
                 out.extend(self._helper_writes(node))
         return out
+
+    def module_references(self) -> list[ast.Name]:
+        """Every load of the owning module object (``os`` / ``sys``, any alias)."""
+        refs: list[ast.Name] = []
+        for name in self.mapping.module_names:
+            refs.extend(self.index.name_loads.get(name, []))
+        return refs
+
+    def classify_module(self, ref: ast.Name) -> list[Finding]:
+        """Default-deny for the MODULE object: a static attribute access is allowed (the
+        ``environ`` / ``modules`` attribute is then classified as a mapping
+        reference); binding it to a plain name is allowed (the alias is
+        tracked); passing it to ANY callable is allowed only when the call has
+        no spread and an attribute-name argument provably names something other
+        than ``environ`` / ``modules``. Everything else fails."""
+        parent = self.index.parents.get(ref)
+        module = self.mapping.module
+        if isinstance(parent, ast.Attribute) and parent.value is ref:
+            # ``os.path`` / ``sys.argv = [...]``: the attribute name is static, so
+            # it PROVABLY is not the guarded one; ``os.environ`` itself is then
+            # classified as a mapping reference.
+            return []
+        if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and self._binding_use(parent, ref) == []:
+            return []
+        call = parent
+        if isinstance(parent, (ast.keyword, ast.Starred)):
+            call = self.index.parents.get(parent)
+        if isinstance(call, ast.Call) and call.func is not ref:
+            if self._module_argument_harmless(call, ref):
+                return []
+            return [(call, f"{module} passed to {_callee(call.func)} (could reach {self.label})")]
+        return [(self.index.statement_of(ref), f"{module} used outside the allow-list")]
+
+    def _module_argument_harmless(self, call: ast.Call, ref: ast.expr) -> bool:
+        if any(isinstance(a, ast.Starred) for a in call.args) or any(kw.arg is None for kw in call.keywords):
+            return False  # a spread may hide the attribute name or the value
+        name: ast.expr | None = None
+        positions = [i for i, arg in enumerate(call.args) if arg is ref]
+        if positions and positions[0] + 1 < len(call.args):
+            name = call.args[positions[0] + 1]
+        if name is None:
+            name = next((kw.value for kw in call.keywords if kw.arg in ATTRIBUTE_NAME_KEYWORDS), None)
+        return name is not None and not self.constants.could_be(name, self.mapping.attr)
 
     def references(self) -> list[ast.expr]:
         """Every expression that evaluates to the live mapping."""
@@ -324,8 +348,6 @@ class MappingGuard:
             if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
                 if node.target.id in self.mapping.names:
                     refs.append(node.target)
-            elif isinstance(node, ast.Call) and self._is_getattr_of_mapping(node):
-                refs.append(node)
         return refs
 
     def is_patch(self, expr: ast.expr) -> bool:
@@ -422,13 +444,12 @@ class MappingGuard:
         """``ref`` passed to a callable: only the known safe-write helpers can pass."""
         func = call.func
         if isinstance(func, ast.Attribute):
-            if isinstance(func.value, ast.Name) and func.value.id in self.monkeypatch:
-                if func.attr in {"setitem", "delitem"}:
-                    bound = bind_call(call, MONKEYPATCH_SIGNATURES[func.attr])
-                    if bound.get("dic") is ref:
-                        if self._bound_key_safe(bound, "name"):
-                            return []
-                        return [(call, f"monkeypatch.{func.attr}({self.label}, {self.marker})")]
+            if func.attr in {"setitem", "delitem"}:  # any receiver — the method name is enough
+                bound = bind_call(call, MONKEYPATCH_SIGNATURES[func.attr])
+                if bound.get("dic") is ref:
+                    if self._bound_key_safe(bound, "name"):
+                        return []
+                    return [(call, f"monkeypatch.{func.attr}({self.label}, {self.marker})")]
             if func.attr == "dict" and self.is_patch(func.value):
                 bound = bind_call(call, PATCH_DICT_SIGNATURE)
                 if bound.get("in_dict") is ref:
@@ -451,7 +472,7 @@ class MappingGuard:
     def _helper_writes(self, call: ast.Call) -> list[Finding]:
         func = call.func
         out: list[Finding] = []
-        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in self.monkeypatch:
+        if isinstance(func, ast.Attribute):  # any receiver: setenv / delenv / setitem / ... by method name
             out.extend(self._monkeypatch_helper(func.attr, call))
         if isinstance(func, ast.Attribute) and self.is_patch(func.value):
             out.extend(self._patch_helper(func.attr, call))
@@ -459,10 +480,6 @@ class MappingGuard:
             target = bind_call(call, PATCH_SIGNATURE).get("target")
             if self._names_mapping_by_string(target, call):
                 out.append((call, f"patch({self.label})"))
-        if isinstance(func, ast.Name) and func.id in BUILTIN_ATTR_SIGNATURES:
-            bound = bind_call(call, BUILTIN_ATTR_SIGNATURES[func.id])
-            if self._names_mapping_by_pair(bound, "obj", "name"):
-                out.append((call, f"replace {self.label}"))
         return out
 
     def _monkeypatch_helper(self, method: str, call: ast.Call) -> list[Finding]:
@@ -490,7 +507,7 @@ class MappingGuard:
         # overload; without it ``target`` is a dotted string (``name`` = value).
         object_overload = bound.get("value") is not None if method == "setattr" else bound.get("name") is not None
         if object_overload:
-            return self._names_mapping_by_pair(bound, "target", "name")
+            return False  # ``(os, "environ", v)`` is the module-object rule's call
         target = bound.get("target")
         if target is None:
             return bound.has_spread
@@ -509,10 +526,6 @@ class MappingGuard:
                     return [(call, f"patch.dict({self.label}, <{self.marker}>)")]
                 return self._patch_dict_use(call, bound)
             return []
-        if helper == "object":
-            bound = bind_call(call, PATCH_OBJECT_SIGNATURE)
-            if self._names_mapping_by_pair(bound, "target", "attribute"):
-                return [(call, f"patch({self.label})")]
         return []
 
     # -- predicates ---------------------------------------------------------
@@ -547,21 +560,6 @@ class MappingGuard:
         if target is None:
             return bind_call(call, PATCH_SIGNATURE).has_spread
         return self._could_be_dotted(target) and not self.mapping.is_module(target)
-
-    def _names_mapping_by_pair(self, bound: BoundCall, obj_param: str, name_param: str) -> bool:
-        """``(os, "environ")`` — the module plus a name that could be the attribute."""
-        obj = bound.get(obj_param)
-        if obj is None:
-            return bound.has_spread
-        if not self.mapping.is_module(obj):
-            return False
-        name = bound.get(name_param)
-        return bound.has_spread if name is None else self.constants.could_be(name, self.mapping.attr)
-
-    def _is_getattr_of_mapping(self, call: ast.Call) -> bool:
-        if not (isinstance(call.func, ast.Name) and call.func.id == "getattr" and len(call.args) >= 2):
-            return False
-        return self.mapping.is_module(call.args[0]) and self.constants.could_be(call.args[1], self.mapping.attr)
 
     def _is_process_launcher(self, func: ast.expr) -> bool:
         if isinstance(func, ast.Name):

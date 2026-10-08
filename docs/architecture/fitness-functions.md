@@ -484,10 +484,29 @@ is allowed only if it is an allow-listed read or a write proven safe;
    `del os.environ`, `setattr` / `delattr` / `patch.object` /
    `monkeypatch.setattr` on `(os, "environ")` or `"os.environ"`, `patch`
    / `patch.dict` on `"os.environ"` — dotted strings constant-folded).
+5. **The owning MODULE objects are guarded too** (`os` for F2, `sys` for
+   F1 — any import alias or local alias). A static attribute access
+   (`os.path`, `os.getcwd()`, `sys.argv`, `sys.argv = [...]`) is allowed —
+   its attribute name is provably not the guarded one (`os.environ` itself is
+   then classified as a mapping reference). Passing the module to ANY callable
+   — `getattr` or an alias of it, `setattr`, `delattr`, `vars`, any
+   MonkeyPatch method, `patch.object`, a helper — fails unless the call has no
+   `*` / `**` spread and an attribute-name argument (the argument after the
+   module, or `name=` / `attribute=` / `attr=`) provably names something other
+   than `environ` / `modules`; so `monkeypatch.setattr(os, "chown", f)` and
+   `getattr(sys, "frozen", False)` pass, while `fetch(os, "environ")`,
+   `vars(sys)`, `some_helper(os)` and `monkeypatch.setattr(os, "environ",
+   **kw)` fail. Any other use of the module object fails.
+6. **MonkeyPatch helper methods are matched by METHOD NAME on any receiver.**
+   `.setenv` / `.delenv` / `.setitem` / `.delitem` / `.setattr` / `.delattr`
+   are classified by name plus bound arguments whatever object they are
+   called on (the fixture, an inline `pytest.MonkeyPatch()`, a
+   `MonkeyPatch.context()` target, anything): a protected or unresolved
+   `.setenv` / `.delenv` key fails F2; a `.setattr` / `.delattr` dotted target
+   that folds to kairix (or is unresolved), or an object target resolving to
+   a kairix module, fails F1.
 
-`<monkeypatch>` is the `monkeypatch` fixture, any name bound to
-`pytest.MonkeyPatch()` (or an alias of one), or a
-`with ... MonkeyPatch.context() as m` target; `patch` is `unittest.mock.patch`
+`patch` is `unittest.mock.patch`
 (bound name, `<mock>.patch`, `unittest.mock.patch` — not an HTTP client's
 `.patch`). Calls are bound to the callee's real parameters, positional or
 keyword (`inspect.Signature.bind` semantics; `update`'s `other` is

@@ -447,12 +447,9 @@ def _monkeypatch_attr_shapes(call: ast.Call, ctx: _F1Ctx) -> bool:
     the target must fold to a PROVABLY non-kairix path. The object overload
     (``setattr(obj, "name", value)``) fails when ``obj`` is a kairix module ref."""
     func = call.func
-    if not (
-        isinstance(func, ast.Attribute)
-        and func.attr in {"setattr", "delattr"}
-        and isinstance(func.value, ast.Name)
-        and func.value.id in ctx.guard.monkeypatch
-    ):
+    # Matched by METHOD NAME on any receiver — the fixture, an inline
+    # ``pytest.MonkeyPatch()``, a ``MonkeyPatch.context()`` target, anything.
+    if not (isinstance(func, ast.Attribute) and func.attr in {"setattr", "delattr"}):
         return False
     bound = bind_call(call, MONKEYPATCH_SIGNATURES[func.attr])
     target = bound.get("target")

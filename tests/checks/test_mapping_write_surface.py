@@ -256,13 +256,13 @@ def test_monkeypatch_context_target_is_resolved(tmp_path: Path) -> None:
     [
         'monkeypatch.setenv("PATH", "v")',
         'monkeypatch.delenv(name="HOME")',
-        'other.setenv("KAIRIX_DB_PATH", "v")',
         'plain.update(other={"KAIRIX_DB_PATH": "v"})',
         'os.environ.update(other="v")',
     ],
 )
 def test_env_negatives_are_not_flagged(tmp_path: Path, template: str) -> None:
-    """Non-KAIRIX names, a non-MonkeyPatch receiver, and ``update(other=...)``
+    """Non-KAIRIX names and ``update(other=...)`` (a ``.setenv`` on ANY receiver is
+    classified by method name — see ``test_mapping_default_deny.py``)
     (``other`` is positional-only, so that writes the harmless key ``"other"``)."""
     source = _module_source("import os", "plain = {}\n    other = object()", template)
     assert _flagged(tmp_path, _ENV, source) is False

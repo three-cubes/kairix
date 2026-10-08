@@ -364,6 +364,36 @@ def test_get_cross_encoder_returns_none_on_construction_error(
 
 
 @pytest.mark.unit
+def test_import_error_during_model_load_is_reported_as_a_load_failure(
+    fresh_cache: CrossEncoderCache,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An ``ImportError`` raised WHILE the model loads (the package itself
+    imported fine) is a load failure — logged as such — not mis-reported as
+    "sentence-transformers not installed".
+
+    Sabotage proof (executed): fold the ``CrossEncoder(model)`` call back into
+    the import's ``try`` (the pre-fix shape) → the "not installed" message is
+    logged instead and the assertion fails; restored.
+    """
+    stub = ModuleType("sentence_transformers")
+
+    class _MissingBackendCrossEncoder:
+        def __init__(self, model_name: str) -> None:
+            raise ImportError("torch backend unavailable")
+
+    stub.CrossEncoder = _MissingBackendCrossEncoder  # type: ignore[attr-defined]  # dynamic stub injection on synthesised ModuleType
+    monkeypatch.setitem(sys.modules, "sentence_transformers", stub)
+
+    with caplog.at_level("WARNING", logger="kairix.core.search.rerank"):
+        assert get_cross_encoder("model-x", cache=fresh_cache) is None
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("failed to load model" in m and "torch backend unavailable" in m for m in messages), messages
+    assert not any("not installed" in m for m in messages), messages
+
+
+@pytest.mark.unit
 def test_get_cross_encoder_default_model_argument(
     fresh_cache: CrossEncoderCache,
     no_sentence_transformers: None,

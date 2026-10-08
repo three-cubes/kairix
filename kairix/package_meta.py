@@ -77,13 +77,23 @@ def bind_public_api(namespace: MutableMapping[str, Any], deps: PackageInitDeps |
     A symbol whose home module raises ``ImportError`` (or lacks the attribute)
     is skipped, so the package still loads when an optional dependency is
     missing — the symbol simply isn't bound. Returns the names that were bound.
+
+    Only those two conditions are tolerated: the import and the attribute
+    lookup are guarded separately, so any OTHER failure while a public module
+    executes (including an ``AttributeError`` raised by its own init code)
+    propagates as the real error instead of silently shrinking the API.
     """
     deps = deps if deps is not None else PackageInitDeps()
     bound: list[str] = []
     for module_name, symbol in PUBLIC_API:
         try:
-            namespace[symbol] = getattr(deps.import_module(module_name), symbol)
-        except (ImportError, AttributeError):
+            module = deps.import_module(module_name)
+        except ImportError:
             continue
+        try:
+            value = getattr(module, symbol)
+        except AttributeError:
+            continue
+        namespace[symbol] = value
         bound.append(symbol)
     return bound
