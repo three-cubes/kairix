@@ -1203,3 +1203,37 @@ def test_write_generated_suite_appends_error_when_path_unwritable(tmp_path: Path
 
     assert len(errors) == 1
     assert "Failed to write" in errors[0]
+
+
+@pytest.mark.unit
+def test_credential_failure_errors_are_class_only(tmp_path: Path) -> None:
+    """Credential-resolution failures are reported class-only in the result's
+    ``errors`` — the credential layer's exceptions can name vaults, keys or
+    endpoints.
+
+    Sabotage proof: restore ``f"Failed to fetch credentials: {e}"`` in
+    ``generate_suite`` / ``enrich_suite`` — the sentinel lands in ``errors``
+    and the assertions fail. Restored.
+    """
+
+    def _raising_resolver(*_args: object) -> tuple[str, str, str]:
+        raise RuntimeError("vault lookup failed; api-key credential-sentinel-7f3a")
+
+    suite_gen = SuiteGenerator(credentials_resolver=_raising_resolver)
+    gen = suite_gen.generate_suite(
+        output_path=str(tmp_path / "out.yaml"),
+        n_cases=1,
+        api_key=None,
+        endpoint=None,
+        calibrate_first=False,
+        db_path=str(tmp_path / "missing.sqlite"),
+    )
+    enrich = suite_gen.enrich_suite(
+        suite_path=str(tmp_path / "ignored.yaml"),
+        output_path=str(tmp_path / "out2.yaml"),
+        api_key=None,
+        endpoint=None,
+    )
+    for errors in (gen.errors, enrich.errors):
+        assert errors == ["Failed to fetch credentials: raised RuntimeError"], errors
+        assert all("credential-sentinel-7f3a" not in e for e in errors)

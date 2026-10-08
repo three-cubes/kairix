@@ -23,6 +23,7 @@ from kairix.quality.benchmark.modes.types import (
     QueryRunResult,
 )
 from kairix.quality.probe.runner import SampledQuery
+from kairix.quality.redaction import describe_exception
 
 
 def _to_sampled_query(case: object) -> SampledQuery:
@@ -72,7 +73,7 @@ def _run_one(
         outcome = request.query_executor(sampled)
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - t_start) * 1000.0
-        err_text = f"{type(exc).__name__}: {exc}"
+        err_text = f"query {describe_exception(exc)}"
         labelled = QueryRunResult(
             query_id=sampled.case_id,
             category=sampled.category,

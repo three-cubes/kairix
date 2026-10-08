@@ -98,6 +98,21 @@ judge now stores only the exception's class name (for example
 the same rule. If you shared benchmark or eval JSON produced with an earlier
 build of this branch, check its `judge_error` fields for sensitive text.
 
+The same rule now covers every other place `kairix.quality` saves an error
+from an exception. One shared helper, `kairix.quality.redaction`, writes only
+the class name (for example `"retrieval raised TimeoutError"`). This covers:
+
+- the benchmark case row's `error` field when retrieval fails;
+- single-shot per-query `error` rows;
+- probe concurrent-run rows;
+- the soak result `error`;
+- the probe config report's healthcheck error and transport-snapshot warning;
+- suite generation and enrichment credential-failure `errors`;
+- the `scripts/verify-search.py` JSON report notes.
+
+The soak runner still writes the full exception to its local log, as it
+already did.
+
 The last two judges follow the same rule, so no LLM judge in kairix turns a
 failure into a score any more:
 

@@ -20,7 +20,11 @@ set -euo pipefail
 
 CORPUS_DIR="reference-library/conversations"
 EXPECTED_DIR="$CORPUS_DIR/expected"
-OUT_DIR="/tmp/conversation-eval"
+OUT_DIR="${OUT_DIR:-/tmp/conversation-eval}"
+# EVAL_CMD overrides the eval invocation (word-split into argv). Default:
+# the real `python3 -m kairix.cli eval`. Tests point it at a stub so the
+# gate's exit-code handling is exercised without a live LLM provider.
+read -r -a EVAL_ARGV <<< "${EVAL_CMD:-python3 -m kairix.cli eval}"
 mkdir -p "$OUT_DIR"
 
 # Detect sentinel-shaped baselines so we skip --regression-against on those.
@@ -85,7 +89,7 @@ for suite in "${suites[@]}"; do
     if [ "$sentinel_rc" -eq 0 ]; then
         # Sentinel — record the run, do not regression-gate.
         echo "Baseline for $suite_name is a sentinel — establishing baseline mode (no regression gate)."
-        if ! python3 -m kairix.cli eval "$suite" --json > "$out_file" 2> "$eval_err_log"; then
+        if ! "${EVAL_ARGV[@]}" "$suite" --json > "$out_file" 2> "$eval_err_log"; then
             cat "$eval_err_log" >&2
             if grep -q "SecretNotFoundError\|kairix-provider-llm-api-key" "$eval_err_log"; then
                 echo "::warning::kairix eval skipped on $suite_name — LLM API key not available in this CI environment (expected on PR builds without KV access)"
@@ -100,7 +104,7 @@ for suite in "${suites[@]}"; do
         # Real SuiteResult baseline — enforce regression gate.
         echo "Baseline for $suite_name is pinned — regression gate enforced (>2pp = fail)."
         eval_rc=0
-        python3 -m kairix.cli eval "$suite" --json --regression-against "$EXPECTED_DIR" > "$out_file" 2> "$eval_err_log" || eval_rc=$?
+        "${EVAL_ARGV[@]}" "$suite" --json --regression-against "$EXPECTED_DIR" > "$out_file" 2> "$eval_err_log" || eval_rc=$?
         if [ "$eval_rc" -ne 0 ]; then
             cat "$eval_err_log" >&2
             if [ "$eval_rc" -eq 3 ]; then

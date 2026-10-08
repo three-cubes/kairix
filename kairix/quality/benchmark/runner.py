@@ -41,6 +41,7 @@ from kairix.quality.eval.metrics import (
     ndcg_graded,
     reciprocal_rank_graded,
 )
+from kairix.quality.redaction import describe_exception
 from kairix.quality.scoring.types import (
     JUDGE_FAILURE_BACKEND_ERROR,
     JUDGE_FAILURE_UNPARSEABLE,
@@ -698,7 +699,7 @@ def retrieve_case(
             fusion_override=fusion_override,
         )
     except Exception as exc:
-        return [], [], {"error": str(exc)}
+        return [], [], {"error": f"retrieval {describe_exception(exc)}"}
 
 
 def aggregate_scores_by_category(

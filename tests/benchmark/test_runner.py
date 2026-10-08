@@ -1344,6 +1344,11 @@ def test_retrieve_case_returns_error_meta_when_retrieve_callable_raises() -> Non
 
     The wrapper exists precisely so a single failing case doesn't kill the
     whole benchmark. The receipt is (paths=[], snippets=[], meta={"error": "..."}).
+    The error is class-only (``retrieval raised RuntimeError``): the meta lands
+    in the persisted case row, so the exception message never does.
+
+    Sabotage proof: restore ``{"error": str(exc)}`` in ``retrieve_case`` — the
+    credential sentinel appears in the meta and the test fails. Restored.
     """
     from types import SimpleNamespace
 
@@ -1352,7 +1357,7 @@ def test_retrieve_case_returns_error_meta_when_retrieve_callable_raises() -> Non
     case = SimpleNamespace(score_method="exact", query="q", agent=None)
 
     def _boom(**_kw: Any) -> tuple[list[str], list[str], dict[str, Any]]:
-        raise RuntimeError("retrieval down")
+        raise RuntimeError("retrieval down; Authorization: Bearer credential-sentinel-7f3a")
 
     paths, snippets, meta = retrieve_case(
         case,
@@ -1366,8 +1371,8 @@ def test_retrieve_case_returns_error_meta_when_retrieve_callable_raises() -> Non
 
     assert paths == []
     assert snippets == []
-    assert "error" in meta
-    assert "retrieval down" in meta["error"]
+    assert meta == {"error": "retrieval raised RuntimeError"}
+    assert "credential-sentinel-7f3a" not in str(meta)
 
 
 @pytest.mark.unit

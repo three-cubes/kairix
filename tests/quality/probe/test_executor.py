@@ -65,15 +65,16 @@ def test_task_exception_captured_not_raised() -> None:
     """
 
     def raiser() -> int:
-        raise RuntimeError("boom")
+        raise RuntimeError("boom; api-key credential-sentinel-7f3a")
 
     tasks = [raiser, lambda: 42]
     run = run_concurrent(tasks, concurrency=2)
     assert len(run.results) == 2
     assert run.errors == 1
     failed = next(r for r in run.results if not r.succeeded)
-    assert "RuntimeError" in failed.error
-    assert "boom" in failed.error
+    # Class-only — the exception message never reaches the persisted row.
+    assert failed.error == "raised RuntimeError"
+    assert "credential-sentinel-7f3a" not in failed.error
     ok = next(r for r in run.results if r.succeeded)
     assert ok.result == 42
 

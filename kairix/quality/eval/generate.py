@@ -38,6 +38,7 @@ import logging
 import random
 import re
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -51,6 +52,7 @@ from kairix.quality.eval.judge import (
     LLMJudge,
     fetch_llm_credentials,
 )
+from kairix.quality.redaction import describe_exception
 
 if TYPE_CHECKING:
     from kairix.core.protocols import ChatBackend, Retriever
@@ -800,10 +802,14 @@ class SuiteGenerator:
         query_generator: QueryGenerator | None = None,
         llm_judge: LLMJudgeProto | None = None,
         retriever: Retriever | None = None,
+        credentials_resolver: Callable[[str | None, str | None, str], tuple[str, str, str]] = resolve_credentials,
     ) -> None:
         self._query_generator = query_generator
         self._llm_judge = llm_judge
         self._retriever = retriever
+        # Same constructor-injection seam as the collaborators above; tests pass
+        # a resolver that raises to exercise the credential-failure path.
+        self._resolve_credentials = credentials_resolver
 
     # --- internal protocol-or-fallback helpers ------------------------------
 
@@ -961,9 +967,9 @@ class SuiteGenerator:
 
         if api_key is None or endpoint is None:
             try:
-                api_key, endpoint, deployment = resolve_credentials(api_key, endpoint, deployment)
+                api_key, endpoint, deployment = self._resolve_credentials(api_key, endpoint, deployment)
             except Exception as e:
-                errors.append(f"Failed to fetch credentials: {e}")
+                errors.append(f"Failed to fetch credentials: {describe_exception(e)}")
                 return empty_generation_result(output_path, False, errors)
 
         calibration_passed = False
@@ -1022,9 +1028,9 @@ class SuiteGenerator:
 
         if api_key is None or endpoint is None:
             try:
-                api_key, endpoint, deployment = resolve_credentials(api_key, endpoint, deployment)
+                api_key, endpoint, deployment = self._resolve_credentials(api_key, endpoint, deployment)
             except Exception as e:
-                errors.append(f"Failed to fetch credentials: {e}")
+                errors.append(f"Failed to fetch credentials: {describe_exception(e)}")
                 return EnrichmentResult(
                     output_path=output_path,
                     n_cases=0,

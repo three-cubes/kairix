@@ -7,7 +7,9 @@ run is partial (LLM-judge failures).
 """
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -18,13 +20,14 @@ from kairix.quality.completeness import EXIT_INCONCLUSIVE, judge_failures, parti
 FLOOR = 0.50  # Minimum weighted_total to pass
 
 
-def main() -> int:
+def main(run: Callable[..., Any] = run_benchmark) -> int:
+    """Run the contract suite; ``run`` is the benchmark runner (DI seam for tests)."""
     # #450 — the suites moved under kairix/data/suites/ (package-data), so a
     # literal "suites/..." path no longer resolves. Resolve through the
     # bundled root by name: resolve_suite_path globs <name>-gold-v*.yaml then
     # <name>.yaml in kairix.paths.bundled_suites_root().
     suite = load_suite(str(resolve_suite_path("reflib-contract-suite")))
-    result = run_benchmark(suite, system="mock-reflib", agent="shared")
+    result = run(suite, system="mock-reflib", agent="shared")
 
     failures = judge_failures(result)
     if failures:

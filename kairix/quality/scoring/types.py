@@ -13,8 +13,9 @@ runtime-checkable so contract tests can `isinstance(scorer, Scorer)` against
 fakes and concrete implementations alike.
 
 F26-clean: this module imports only from `typing` / `dataclasses` /
-`collections.abc` / stdlib — no provider, no transport, no benchmark/runner
-dependency. Other layers depend on us; we depend on nothing.
+`collections.abc` / stdlib, plus the stdlib-only :mod:`kairix.quality.redaction`
+formatter — no provider, no transport, no benchmark/runner dependency.
+Other layers depend on us.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
+
+from kairix.quality.redaction import describe_exception
 
 
 class JudgeFailedError(RuntimeError):
@@ -57,7 +60,7 @@ class JudgeFailedError(RuntimeError):
         ``detail`` is persisted into benchmark / eval JSON. The class name is
         code-defined and stays machine-readable (``backend raised TimeoutError``).
         """
-        return cls(JUDGE_FAILURE_BACKEND_ERROR, f"backend raised {type(exc).__name__}")
+        return cls(JUDGE_FAILURE_BACKEND_ERROR, f"backend {describe_exception(exc)}")
 
 
 JUDGE_FAILURE_BACKEND_ERROR = "backend_error"

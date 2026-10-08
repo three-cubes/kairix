@@ -245,13 +245,14 @@ def test_workload_exception_populates_error_envelope() -> None:
     """A raising workload doesn't crash run_soak — it surfaces in `error`."""
 
     def boom(_suite: str) -> dict[str, Any]:
-        raise RuntimeError("workload exploded")
+        raise RuntimeError("workload exploded; api-key credential-sentinel-7f3a")
 
     result = run_soak(suite="fake", repeat=3, workload_runner=boom)
 
     assert result.passed is False
-    assert result.error.startswith("RuntimeError:")
-    assert "workload exploded" in result.error
+    # Class-only in the persisted envelope (full text stays in the local log).
+    assert result.error == "workload raised RuntimeError"
+    assert "credential-sentinel-7f3a" not in result.error
     # No iterations completed before the explosion.
     assert result.iterations == []
 
@@ -269,7 +270,7 @@ def test_workload_exception_mid_run_preserves_completed_iterations() -> None:
     result = run_soak(suite="fake", repeat=4, workload_runner=flaky)
 
     assert result.passed is False
-    assert result.error.startswith("RuntimeError:")
+    assert result.error == "workload raised RuntimeError"
     # First two iterations completed.
     assert len(result.iterations) == 2
     assert [it.index for it in result.iterations] == [0, 1]

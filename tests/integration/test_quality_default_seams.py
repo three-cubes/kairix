@@ -188,7 +188,8 @@ def test_soak_default_workload_runner_resolves_the_suite() -> None:
 
     assert result.passed is False
     assert result.iterations == []
-    assert result.error.startswith("FileNotFoundError: Suite 'f86-no-such-suite' not found")
+    # Class-only in the persisted envelope; the full message stays in the local log.
+    assert result.error == "workload raised FileNotFoundError"
 
 
 # ── LLM judge chat backend default ────────────────────────────────────────

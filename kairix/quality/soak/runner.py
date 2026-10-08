@@ -27,6 +27,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from kairix.quality.redaction import describe_exception
+
 logger = logging.getLogger(__name__)
 
 
@@ -361,7 +363,7 @@ def run_soak(
             repeat=repeat,
             iterations=iterations,
             passed=False,
-            error=f"{type(exc).__name__}: {exc}",
+            error=f"workload {describe_exception(exc)}",
         )
 
     failures: list[SoakFailure] = []

@@ -76,6 +76,7 @@ from typing import Any
 import yaml
 
 from kairix.quality.completeness import judge_failures, partial_warning
+from kairix.quality.redaction import describe_exception
 from kairix.quality.scoring.types import (
     JUDGE_FAILURE_BACKEND_ERROR,
     JUDGE_FAILURE_UNPARSEABLE,
@@ -680,7 +681,7 @@ def _synthesise_answer_from_memories(
     try:
         return backend.chat([{"role": "user", "content": prompt}], max_tokens=200).strip()
     except Exception as exc:
-        return f"ERROR: synthesis failed ({type(exc).__name__})"
+        return f"ERROR: synthesis {describe_exception(exc)}"
 
 
 def _judge_response(
@@ -826,7 +827,7 @@ def _run_mem0_backend(
             mems = search_result.get("results") if isinstance(search_result, dict) else search_result
             response = _synthesise_answer_from_memories(qa["question"], mems or [])
         except Exception as exc:
-            response = f"ERROR: mem0 search failed ({type(exc).__name__})"
+            response = f"ERROR: mem0 search {describe_exception(exc)}"
         row: dict[str, Any] = {
             "question": qa["question"],
             "answer": qa["answer"],
