@@ -12,7 +12,6 @@ returned :class:`SoakResult`.
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 import pytest
@@ -20,6 +19,7 @@ from pytest_bdd import given, parsers, then, when
 
 from kairix.quality.soak import run_soak
 from kairix.quality.soak.runner import SoakFailure, SoakIteration, SoakResult
+from tests.fakes import FakeLatencyClock
 
 pytestmark = pytest.mark.bdd
 
@@ -77,19 +77,22 @@ def _given_slowing_workload(_soak_state: dict[str, Any]) -> None:
     iter-1+ sleep 600 ms, which is +200% — well over the default 20% cap.
 
     Pure workload-level injection — no internals touched, no env vars.
-    Deterministic across Python versions because ``time.sleep`` is portable.
+    The durations are spent on a ``FakeLatencyClock`` handed to ``run_soak``
+    as its ``clock`` — no real sleeps, so the drift is exact on any host.
     """
     call_index = {"i": -1}
+    latency = FakeLatencyClock()
 
     def _runner(_suite: str) -> dict[str, Any]:
         call_index["i"] += 1
         if call_index["i"] == 0:
-            time.sleep(0.2)  # 200 ms baseline (above the 100 ms drift-check floor)
+            latency.spend(0.2)  # 200 ms baseline (above the 100 ms drift-check floor)
         else:
-            time.sleep(0.6)  # 600 ms → +200% drift, gate FIRES
+            latency.spend(0.6)  # 600 ms → +200% drift, gate FIRES
         return {"summary": {"weighted_total": 0.9}, "case_count": 1}
 
     _soak_state["workload_runner"] = _runner
+    _soak_state["clock"] = latency.now
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +103,10 @@ def _given_slowing_workload(_soak_state: dict[str, Any]) -> None:
 @when(parsers.parse("the operator runs soak with repeat {n:d}"))
 def _when_run_soak(_soak_state: dict[str, Any], n: int) -> None:
     runner = _soak_state["workload_runner"]
-    _soak_state["result"] = run_soak(suite="fake", repeat=n, workload_runner=runner)
+    # A virtual-clock workload hands run_soak its clock; others use the real one.
+    clock = _soak_state.get("clock")
+    clock_kwargs = {"clock": clock} if clock is not None else {}
+    _soak_state["result"] = run_soak(suite="fake", repeat=n, workload_runner=runner, **clock_kwargs)
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ import pytest
 from pytest_bdd import given, then, when
 
 from kairix.transport.coalesce import EmbedCoalescer
+from tests.fakes import FakeCoalesceWindow
 
 pytestmark = pytest.mark.bdd
 
@@ -41,20 +42,34 @@ class _CountingBatchFn:
 def _coalescer_state() -> Any:
     """Per-scenario coalescer state.
 
-    Window=200 ms keeps the 10-thread scenario from accidentally
-    splitting into multiple batches on slow CI; max_batch_size=64 lets
-    every thread land in one batch. Each scenario gets its own
-    coalescer so state is per-scenario.
+    Each scenario builds its own coalescer (window=200 ms,
+    max_batch_size=64 so every thread fits one batch) through
+    :func:`_build_coalescer` — the concurrent scenario with a test-held
+    ``FakeCoalesceWindow`` so "all ten land in one window" is a proven
+    precondition, the single-caller scenario with the real wall-clock
+    window it measures.
     """
-    fake = _CountingBatchFn()
-    coalescer = EmbedCoalescer(embed_batch_fn=fake, coalesce_window_ms=200, max_batch_size=64)
     state: dict[str, Any] = {
-        "fake": fake,
-        "coalescer": coalescer,
+        "fake": _CountingBatchFn(),
+        "coalescer": None,
         "elapsed_ms": None,
     }
     yield state
-    coalescer.shutdown()
+    if state["coalescer"] is not None:
+        state["coalescer"].shutdown()
+
+
+def _build_coalescer(state: dict[str, Any], window: FakeCoalesceWindow | None = None) -> EmbedCoalescer:
+    """Build the scenario's coalescer; ``window`` replaces the real window timer."""
+    window_kwargs = {"window_wait": window} if window is not None else {}
+    coalescer = EmbedCoalescer(
+        embed_batch_fn=state["fake"],
+        coalesce_window_ms=200,
+        max_batch_size=64,
+        **window_kwargs,
+    )
+    state["coalescer"] = coalescer
+    return coalescer
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +89,14 @@ def _given_coalescer(_coalescer_state: dict[str, Any]) -> None:
 
 @when("ten threads each call the coalescer with their own text in the same window")
 def _when_ten_concurrent(_coalescer_state: dict[str, Any]) -> None:
-    """Spin up 10 threads that all submit within the coalesce window."""
-    coalescer: EmbedCoalescer = _coalescer_state["coalescer"]
+    """Spin up 10 threads that all submit within the coalesce window.
+
+    The window is held open until all ten are provably enqueued, then
+    closed — no real 200 ms timer for a loaded host to lose the race to.
+    """
+    window = FakeCoalesceWindow()
+    coalescer = _build_coalescer(_coalescer_state, window)
+    fake: _CountingBatchFn = _coalescer_state["fake"]
     results: list[list[float]] = [[] for _ in range(10)]
     errors: list[BaseException] = []
 
@@ -88,6 +109,9 @@ def _when_ten_concurrent(_coalescer_state: dict[str, Any]) -> None:
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
     for t in threads:
         t.start()
+    window.wait_for_requests(coalescer, 10)
+    assert fake.calls == [], f"a batch dispatched while the window was still open: {fake.calls!r}"
+    window.close()
     for t in threads:
         t.join()
     _coalescer_state["results"] = results
@@ -97,7 +121,7 @@ def _when_ten_concurrent(_coalescer_state: dict[str, Any]) -> None:
 @when("a single caller asks the coalescer to embed one text")
 def _when_single_caller(_coalescer_state: dict[str, Any]) -> None:
     """One thread — no batch ever fills, dispatcher must fire on timeout."""
-    coalescer: EmbedCoalescer = _coalescer_state["coalescer"]
+    coalescer = _build_coalescer(_coalescer_state)
     start = time.monotonic()
     out = coalescer.embed("solo")
     _coalescer_state["elapsed_ms"] = (time.monotonic() - start) * 1000
@@ -107,7 +131,7 @@ def _when_single_caller(_coalescer_state: dict[str, Any]) -> None:
 @when("some caller asks the coalescer to embed an empty text")
 def _when_empty(_coalescer_state: dict[str, Any]) -> None:
     """Empty text never reaches the queue."""
-    coalescer: EmbedCoalescer = _coalescer_state["coalescer"]
+    coalescer = _build_coalescer(_coalescer_state)
     _coalescer_state["empty_result"] = coalescer.embed("")
 
 
@@ -156,9 +180,9 @@ def _then_not_called(_coalescer_state: dict[str, Any]) -> None:
     fake.calls goes non-empty.
     """
     fake: _CountingBatchFn = _coalescer_state["fake"]
-    # Wait past the window so a sabotaged-in batch dispatch would have
-    # already fired by now.
-    time.sleep(0.25)
+    # No wait-past-the-window sleep: ``embed`` blocks on its Future, so had
+    # the empty text been queued, its batch would already have dispatched
+    # by the time the When step's call returned.
     assert fake.calls == [], f"empty input should not have reached the backend; got {fake.calls!r}"
     # And the empty caller got [].
     assert _coalescer_state["empty_result"] == []

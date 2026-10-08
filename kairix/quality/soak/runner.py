@@ -153,6 +153,7 @@ def _run_one_iteration(
     index: int,
     suite: str,
     workload_runner: Callable[[str], dict[str, Any]],
+    clock: Callable[[], float],
 ) -> SoakIteration:
     """Execute one iteration of the workload and return measurements.
 
@@ -163,10 +164,10 @@ def _run_one_iteration(
     fd_before = _sample_fd_count()
 
     captured_stderr = io.StringIO()
-    t_start = time.perf_counter()
+    t_start = clock()
     with contextlib.redirect_stderr(captured_stderr):
         envelope = workload_runner(suite)
-    duration = time.perf_counter() - t_start
+    duration = clock() - t_start
 
     mem_after = _sample_memory_mb()
     fd_after = _sample_fd_count()
@@ -319,6 +320,7 @@ def run_soak(
     max_log_volume_mb: float = DEFAULT_MAX_LOG_VOLUME_MB_PER_REPEAT,
     max_time_drift_pct: float = DEFAULT_MAX_TIME_DRIFT_PCT,
     workload_runner: Callable[[str], dict[str, Any]] | None = None,
+    clock: Callable[[], float] = time.perf_counter,
 ) -> SoakResult:
     """Run the workload `repeat` times and assert no degradation.
 
@@ -331,6 +333,10 @@ def run_soak(
         max_time_drift_pct: max % drift in per-iteration wall time vs iter-0.
         workload_runner: callable(suite) -> envelope dict. Tests inject a fake;
             production omits and gets the default benchmark runner.
+        clock: monotonic clock (seconds) each iteration's duration is measured
+            on. Defaults to :func:`time.perf_counter`; deterministic callers
+            inject a controlled virtual timeline so the time-drift gate is
+            exercised without real sleeps.
 
     Returns:
         SoakResult — never raises; top-level errors populate .error.
@@ -353,7 +359,7 @@ def run_soak(
     iterations: list[SoakIteration] = []
     try:
         for i in range(repeat):
-            iterations.append(_run_one_iteration(index=i, suite=suite, workload_runner=runner))
+            iterations.append(_run_one_iteration(index=i, suite=suite, workload_runner=runner, clock=clock))
     except Exception as exc:
         logger.warning("run_soak: workload raised at iteration %d — %s", len(iterations), exc, exc_info=True)
         return SoakResult(

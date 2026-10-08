@@ -7,19 +7,15 @@ search pipeline is constructed.
 
 from __future__ import annotations
 
-import time
+import threading
+from collections.abc import Callable
 
 import pytest
 
 from kairix.quality.probe.executor import ConcurrentRun, run_concurrent
+from tests.fakes import FakeLatencyClock
 
 pytestmark = pytest.mark.unit
-
-
-def _sleeper(seconds: float, value: int) -> int:
-    """Return a callable that sleeps then returns ``value``."""
-    time.sleep(seconds)
-    return value
 
 
 def test_zero_concurrency_rejected() -> None:
@@ -78,56 +74,94 @@ def test_task_exception_captured_not_raised() -> None:
     assert ok.result == 42
 
 
-def test_mean_concurrency_approaches_requested_when_tasks_overlap() -> None:
-    """Five 50ms sleepers at concurrency=5 → mean_concurrency near 5.
+def _overlapping_tasks(latency: FakeLatencyClock, n: int, seconds: float) -> list[Callable[[], int]]:
+    """``n`` tasks that are provably all in flight across one shared ``seconds`` span.
 
-    Sleeps release the GIL, so a ThreadPoolExecutor really does run them in
-    parallel. Little's Law: 5 tasks * 0.05s of work / ~0.05s wallclock ≈ 5.
+    Each task blocks on a barrier of ``n`` parties whose action spends
+    ``seconds`` of virtual time exactly once — so every task's start is
+    read before the span and every end after it. The overlap is a
+    synchronisation fact, not a scheduling hope. A serial executor can
+    never assemble all ``n`` parties: the barrier breaks (its timeout is a
+    liveness guard only) and the tasks surface as errors.
+    """
+    barrier = threading.Barrier(n, action=lambda: latency.spend(seconds), timeout=5.0)
+
+    def _task(v: int) -> int:
+        barrier.wait()
+        return v
+
+    return [(lambda v=i: _task(v)) for i in range(n)]
+
+
+def test_mean_concurrency_approaches_requested_when_tasks_overlap() -> None:
+    """Five fully-overlapping 50ms tasks at concurrency=5 → mean_concurrency 5.
+
+    Latency is virtual (``FakeLatencyClock`` injected as the executor clock)
+    and the overlap is enforced by a barrier, so Little's Law is exact:
+    5 tasks * 0.05s of work / 0.05s wallclock = 5.
 
     Sabotage-proof: replace ThreadPoolExecutor with a serial for-loop and
-    mean_concurrency collapses to 1.0.
+    the barrier can never fill — every task errors and mean_concurrency
+    collapses, failing both assertions.
     """
-    tasks = [(lambda v=i: _sleeper(0.05, v)) for i in range(5)]
-    run = run_concurrent(tasks, concurrency=5)
-    assert run.mean_concurrency >= 3.5, f"expected near-5, got {run.mean_concurrency}"
+    latency = FakeLatencyClock()
+    run = run_concurrent(_overlapping_tasks(latency, 5, 0.05), concurrency=5, clock=latency.now)
     assert run.errors == 0
+    assert run.mean_concurrency == pytest.approx(5.0), f"expected 5, got {run.mean_concurrency}"
 
 
 def test_mean_concurrency_is_one_when_concurrency_one() -> None:
     """concurrency=1 forces serialisation regardless of how many tasks run.
 
     Sabotage-proof: change ``max_workers=concurrency`` to a fixed >1 value
-    and parallel execution sneaks in, breaking this assertion.
+    and the tasks' virtual spans overlap on the shared clock, so the sum of
+    durations exceeds the wallclock and this exact assertion breaks.
     """
-    tasks = [(lambda v=i: _sleeper(0.02, v)) for i in range(3)]
-    run = run_concurrent(tasks, concurrency=1)
-    assert run.mean_concurrency == pytest.approx(1.0, abs=0.2)
+    latency = FakeLatencyClock()
+
+    def _task(v: int) -> int:
+        latency.spend(0.02)
+        return v
+
+    tasks = [(lambda v=i: _task(v)) for i in range(3)]
+    run = run_concurrent(tasks, concurrency=1, clock=latency.now)
+    assert run.mean_concurrency == pytest.approx(1.0)
 
 
 def test_wallclock_includes_full_run() -> None:
     """Wallclock covers from first submit to last completion.
 
     Sabotage-proof: measure wallclock around a single future and we'd
-    miss the parallelism. With 3x 50ms tasks at concurrency=3 the wallclock
-    should be near 50ms (not 150ms).
+    miss the parallelism. With 3 fully-overlapping 50ms tasks at
+    concurrency=3 the wallclock is exactly the one shared 50ms span (not
+    150ms, and not 0).
     """
-    tasks = [(lambda v=i: _sleeper(0.05, v)) for i in range(3)]
-    run = run_concurrent(tasks, concurrency=3)
-    assert run.wallclock_s < 0.12, f"expected ~0.05s, got {run.wallclock_s}s"
-    assert run.wallclock_s >= 0.04
+    latency = FakeLatencyClock()
+    run = run_concurrent(_overlapping_tasks(latency, 3, 0.05), concurrency=3, clock=latency.now)
+    assert run.errors == 0
+    assert run.wallclock_s == pytest.approx(0.05), f"expected 0.05s, got {run.wallclock_s}s"
 
 
 def test_durations_recorded_per_task() -> None:
     """Each TimedResult.duration_ms reflects only its own task body.
 
-    Sabotage-proof: capture duration outside the worker (around as_completed
-    instead) and slow tasks pull fast tasks' durations up.
+    The 60ms task runs first and the 20ms task second (concurrency=1), on
+    a virtual clock, so each duration is exact.
+
+    Sabotage-proof: capture duration outside the worker (from the run start
+    / around as_completed instead) and the fast task inherits the slow
+    task's 60ms — it reads 80ms and this assertion fails.
     """
-    tasks = [(lambda: _sleeper(0.02, 1)), (lambda: _sleeper(0.06, 2))]
-    run = run_concurrent(tasks, concurrency=2)
+    latency = FakeLatencyClock()
+
+    def _spender(seconds: float, value: int) -> int:
+        latency.spend(seconds)
+        return value
+
+    tasks = [(lambda: _spender(0.06, 2)), (lambda: _spender(0.02, 1))]
+    run = run_concurrent(tasks, concurrency=1, clock=latency.now)
     durs = sorted(r.duration_ms for r in run.results)
-    assert durs[0] < 40, f"fast task duration leaked: {durs[0]}ms"
-    assert durs[1] >= 50
+    assert durs == pytest.approx([20.0, 60.0]), f"per-task durations leaked: {durs}"
 
 
 class _StagedReturn:
