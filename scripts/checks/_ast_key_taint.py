@@ -105,6 +105,59 @@ def _target_names(target: ast.expr) -> list[str]:
     return []
 
 
+#: AST nodes that open a new lexical scope
+_SCOPE_NODES = (
+    ast.Module,
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+    ast.ClassDef,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+#: one name binding: ("import", "os.path") for ``import os.path`` (binds ``os``),
+#: ("import_as", "os") for ``import os as o``, ("from", "os", "environ"), ("other",)
+Binding = tuple[str, ...]
+
+
+@dataclass
+class ScopeInfo:
+    """The names one lexical scope binds (Python: bound anywhere ⇒ local throughout)."""
+
+    node: ast.AST
+    parent: ScopeInfo | None
+    bindings: dict[str, list[Binding]] = field(default_factory=dict)
+    globals: set[str] = field(default_factory=set)
+    nonlocals: set[str] = field(default_factory=set)
+
+    @property
+    def is_class(self) -> bool:
+        return isinstance(self.node, ast.ClassDef)
+
+    def bind(self, name: str, binding: Binding) -> None:
+        self.bindings.setdefault(name, []).append(binding)
+
+
+def _child_scope(node: ast.AST, child: ast.AST, scope: ScopeInfo, new: ScopeInfo | None) -> ScopeInfo:
+    """The scope ``child`` (a direct child of ``node``) evaluates in."""
+    if new is None:
+        return scope
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        inner = child is node.args or any(child is stmt for stmt in node.body)
+        return new if inner else scope
+    if isinstance(node, ast.Lambda):
+        return new if (child is node.args or child is node.body) else scope
+    if isinstance(node, ast.ClassDef):
+        return new if any(child is stmt for stmt in node.body) else scope
+    # comprehensions: everything is inside the new scope, except the first
+    # generator's iterable (handled at the ``comprehension`` node)
+    return new
+
+
 @dataclass
 class ModuleIndex:
     """Everything the F1 / F2 queries need, collected in one traversal."""
@@ -131,23 +184,131 @@ class ModuleIndex:
     candidates: list[ast.AST] = field(default_factory=list)
     #: every binding site (assignment, walrus, return / yield, loop / with target, defaults)
     binding_sites: list[ast.AST] = field(default_factory=list)
+    #: the lexical scope every ``Name`` node is evaluated in (by node id)
+    name_scope: dict[int, ScopeInfo] = field(default_factory=dict)
+    module_scope: ScopeInfo | None = None
 
     @classmethod
     def build(cls, tree: ast.AST) -> ModuleIndex:
         index = cls(tree)
         returns: list[ast.Return] = []
-        stack: list[ast.AST] = [tree]
+        root = ScopeInfo(tree, None)
+        index.module_scope = root
+        stack: list[tuple[ast.AST, ScopeInfo]] = [(tree, root)]
         while stack:
-            node = stack.pop()
+            node, scope = stack.pop()
+            new = ScopeInfo(node, scope) if isinstance(node, _SCOPE_NODES) and node is not tree else None
             for child in ast.iter_child_nodes(node):
                 index.parents[child] = node
-                stack.append(child)
+                stack.append((child, index._scope_for_child(node, child, scope, new)))
+            index._record_scope(node, scope)
             index._classify(node, returns)
         for ret in returns:
             fn = enclosing_function(index.parents, ret)
             if fn is not None:
                 index._bind(fn.name, RETURN if ret.value is not None else UNKNOWN, ret.value)
         return index
+
+    @staticmethod
+    def _scope_for_child(node: ast.AST, child: ast.AST, scope: ScopeInfo, new: ScopeInfo | None) -> ScopeInfo:
+        if isinstance(node, ast.arguments):
+            # parameters belong to the function; their DEFAULTS are evaluated outside it
+            outer = scope.parent if scope.parent is not None else scope
+            if any(child is d for d in (*node.defaults, *node.kw_defaults)):
+                return outer
+            return scope
+        if isinstance(node, ast.comprehension):
+            # the FIRST generator's iterable is evaluated in the enclosing scope
+            owner = scope.node
+            first = isinstance(owner, _COMPREHENSIONS) and owner.generators and owner.generators[0] is node
+            if first and child is node.iter and scope.parent is not None:
+                return scope.parent
+            return scope
+        return _child_scope(node, child, scope, new)
+
+    def _record_scope(self, node: ast.AST, scope: ScopeInfo) -> None:
+        """Record which scope binds what, and the scope every Name is read in."""
+        if isinstance(node, ast.Name):
+            self.name_scope[id(node)] = scope
+            # ``environ |= {...}`` rebinds the name to the SAME mapping (in-place
+            # ``__ior__``), so an augmented-assignment target never shadows it
+            parent = self.parents.get(node)
+            augmented = isinstance(parent, ast.AugAssign) and parent.target is node
+            if not isinstance(node.ctx, ast.Load) and not augmented:
+                scope.bind(node.id, ("other",))
+        elif isinstance(node, ast.arg):
+            scope.bind(node.arg, ("other",))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    scope.bind(alias.asname, ("import_as", alias.name))
+                else:
+                    scope.bind(alias.name.split(".")[0], ("import", alias.name))
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                scope.bind(alias.asname or alias.name, ("from", node.module or "", alias.name))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            scope.bind(node.name, ("other",))
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            scope.bind(node.name, ("other",))
+        elif isinstance(node, ast.Global):
+            scope.globals.update(node.names)
+        elif isinstance(node, ast.Nonlocal):
+            scope.nonlocals.update(node.names)
+
+    # -- scope-aware resolution -------------------------------------------
+
+    def resolve(self, name: ast.Name) -> list[Binding] | None:
+        """The bindings ``name`` resolves to under Python's scoping rules, or
+        ``None`` when nothing in the file binds it (a builtin / unbound name).
+
+        Innermost scope outward; a class scope applies only to code directly in
+        its body; ``global`` jumps to the module scope; ``nonlocal`` skips to the
+        enclosing function. A name bound anywhere in a scope is local to all of it.
+        """
+        scope = self.name_scope.get(id(name))
+        first = True
+        while scope is not None:
+            if name.id in scope.globals and scope.node is not self.tree:
+                scope = self.module_scope
+                first = False
+                continue
+            if scope.is_class and not first:
+                scope = scope.parent
+                continue
+            if name.id in scope.bindings and name.id not in scope.nonlocals:
+                return scope.bindings[name.id]
+            scope = scope.parent
+            first = False
+        return None
+
+    def resolves_to_module(self, name: ast.expr, module: str) -> bool:
+        """``name`` is the stdlib ``module`` object: EVERY binding it resolves to is
+        an import of that module (a parameter / assignment / def anywhere in the
+        resolving scope — including a later module-level rebind — shadows it)."""
+        if not isinstance(name, ast.Name):
+            return False
+        bindings = self.resolve(name)
+        if not bindings:
+            return False
+        return all(
+            (kind[0] == "import" and (kind[1] == module or kind[1].startswith(f"{module}.")))
+            or (kind[0] == "import_as" and kind[1] == module)
+            for kind in bindings
+        )
+
+    def resolves_to_from(self, name: ast.expr, module: str, attr: str) -> bool:
+        """``name`` is ``attr`` imported ``from module`` (every binding, unshadowed)."""
+        if not isinstance(name, ast.Name):
+            return False
+        bindings = self.resolve(name)
+        if not bindings:
+            return False
+        return all(kind == ("from", module, attr) for kind in bindings)
+
+    def is_builtin(self, name: ast.expr) -> bool:
+        """``name`` is an un-shadowed builtin (nothing in the file binds it)."""
+        return isinstance(name, ast.Name) and self.resolve(name) is None
 
     def _bind(self, name: str, kind: str, source: ast.expr | None) -> None:
         self.value_bindings.setdefault(name, []).append((kind, source))

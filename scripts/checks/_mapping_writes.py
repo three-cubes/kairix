@@ -160,6 +160,7 @@ class ProcessMapping:
     attr: str
     module_names: set[str]
     names: set[str]
+    index: ModuleIndex | None = None
 
     @classmethod
     def resolve(cls, index: ModuleIndex, module: str, attr: str) -> ProcessMapping:
@@ -171,19 +172,26 @@ class ProcessMapping:
         }
         # Import statements only — local rebinding of a guarded object is a
         # violation in its own right (``alias_findings``), never chased.
-        return cls(module, attr, module_names, index.from_imports(module, attr))
+        return cls(module, attr, module_names, index.from_imports(module, attr), index)
 
     @property
     def dotted(self) -> str:
         return f"{self.module}.{self.attr}"
 
     def is_module(self, expr: ast.expr | None) -> bool:
-        return isinstance(expr, ast.Name) and expr.id in self.module_names
+        """``expr`` is the ``os`` / ``sys`` module — a name whose binding, under
+        Python's scoping rules, is the import (a parameter / local / later
+        rebind of the same name shadows it)."""
+        if not (isinstance(expr, ast.Name) and expr.id in self.module_names):
+            return False
+        return self.index is None or self.index.resolves_to_module(expr, self.module)
 
     def is_receiver(self, expr: ast.expr | None) -> bool:
         if isinstance(expr, ast.Attribute) and expr.attr == self.attr:
             return self.is_module(expr.value)
-        return isinstance(expr, ast.Name) and expr.id in self.names
+        if not (isinstance(expr, ast.Name) and expr.id in self.names):
+            return False
+        return self.index is None or self.index.resolves_to_from(expr, self.module, self.attr)
 
 
 def patch_names(index: ModuleIndex) -> set[str]:
@@ -296,7 +304,7 @@ class MappingGuard:
         """Every load of the owning module object (``os`` / ``sys``, by import alias)."""
         refs: list[ast.Name] = []
         for name in self.mapping.module_names:
-            refs.extend(self.index.name_loads.get(name, []))
+            refs.extend(ref for ref in self.index.name_loads.get(name, []) if self.mapping.is_module(ref))
         return refs
 
     def classify_module(self, ref: ast.Name) -> list[Finding]:
@@ -324,7 +332,7 @@ class MappingGuard:
         if any(isinstance(a, ast.Starred) for a in call.args) or any(kw.arg is None for kw in call.keywords):
             return False  # a spread may hide the attribute name or the value
         func = call.func
-        if isinstance(func, ast.Name) and func.id in _ATTRIBUTE_READERS:
+        if isinstance(func, ast.Name) and func.id in _ATTRIBUTE_READERS and self.index.is_builtin(func):
             # builtin getattr / hasattr, called directly: (obj, name[, default])
             return len(call.args) >= 2 and call.args[0] is ref and self._statically_other_attr(call.args[1])
         if isinstance(func, ast.Attribute) and func.attr in {"setattr", "delattr"}:
@@ -362,7 +370,7 @@ class MappingGuard:
         """What guarded object ``expr`` IS (direct form), or ``None``."""
         if self.mapping.is_receiver(expr):
             return self.label
-        if isinstance(expr, ast.Name) and expr.id in self.mapping.module_names:
+        if self.mapping.is_module(expr):
             return f"the {self.mapping.module} module"
         if isinstance(expr, ast.Attribute):
             if self.mapping.is_receiver(expr.value):
@@ -370,10 +378,14 @@ class MappingGuard:
             if expr.attr in MONKEYPATCH_SIGNATURES:
                 return f"the bound .{expr.attr} helper"
             if expr.attr in {"getattr", "setattr", "delattr"} and isinstance(expr.value, ast.Name):
-                if expr.value.id in self.builtins_modules:
+                if expr.value.id in self.builtins_modules and self.index.resolves_to_module(expr.value, "builtins"):
                     return f"builtins.{expr.attr}"
         if isinstance(expr, ast.Name) and expr.id in self.builtin_attr_functions:
-            return f"builtin {expr.id}"
+            unshadowed = self.index.is_builtin(expr) or any(
+                self.index.resolves_to_from(expr, "builtins", fn) for fn in ("getattr", "setattr", "delattr")
+            )
+            if unshadowed:
+                return f"builtin {expr.id}"
         return self.extra_guarded(expr)
 
     def references(self) -> list[ast.expr]:
@@ -382,10 +394,10 @@ class MappingGuard:
             node for node in self.index.attributes.get(self.mapping.attr, []) if self.mapping.is_module(node.value)
         ]
         for name in self.mapping.names:
-            refs.extend(self.index.name_loads.get(name, []))
+            refs.extend(ref for ref in self.index.name_loads.get(name, []) if self.mapping.is_receiver(ref))
         for node in self.index.candidates:
             if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-                if node.target.id in self.mapping.names:
+                if self.mapping.is_receiver(node.target):
                     refs.append(node.target)
         return refs
 
@@ -469,7 +481,8 @@ class MappingGuard:
         if node.func is ref:
             return [(node, f"call {self.label}")]
         func = node.func
-        if isinstance(func, ast.Name) and func.id in READ_BUILTINS and node.args and node.args[0] is ref:
+        builtin_reader = isinstance(func, ast.Name) and func.id in READ_BUILTINS and self.index.is_builtin(func)
+        if builtin_reader and node.args and node.args[0] is ref:
             return []
         return self._argument_use(node, ref)
 

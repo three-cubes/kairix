@@ -29,8 +29,10 @@ plugin's tree. No plugin-private state lives here.
 from __future__ import annotations
 
 import threading
+import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 
 class MissingCredentialsError(RuntimeError):
@@ -68,10 +70,15 @@ class BearerHeaders:
 # name: instances sharing a resolver (the canonical default, or one injected
 # resolver object) share one resolution per secret name, while two distinct
 # resolvers — even ones that compare equal, or are unhashable — never share
-# an entry, so tenant B can never be served tenant A's key. Each bucket holds
-# a strong reference to its resolver, so the ``id`` it is filed under cannot
-# be recycled by another object while the entry exists.
-_CACHE: dict[int, tuple[Callable[[str], str | None], dict[str, str]]] = {}
+# an entry, so tenant B can never be served tenant A's key.
+#
+# Each bucket holds only a WEAK reference to its resolver and is evicted when the
+# resolver is garbage-collected, so per-request / per-tenant resolver closures
+# never accumulate in a long-running process. The canonical default resolver is
+# a module-level function that lives for the whole process, so its cache stays
+# process-wide. (While a resolver is alive its ``id`` cannot be reused; on its
+# death the weakref callback removes the bucket before the id can be recycled.)
+_CACHE: dict[int, tuple[weakref.ref[Any], dict[str, str]]] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -98,14 +105,42 @@ def _resolver_bucket(resolver: Callable[[str], str | None]) -> dict[str, str]:
     """The per-resolver secret cache, keyed by ``resolver`` identity.
 
     Never hashes or compares the resolver itself (an unhashable callable
-    works; two equal-but-distinct resolvers stay separate). Caller holds
+    works; two equal-but-distinct resolvers stay separate) and holds it only
+    weakly (a dropped resolver's bucket is evicted). Caller holds
     ``_CACHE_LOCK``.
     """
-    entry = _CACHE.get(id(resolver))
-    if entry is None or entry[0] is not resolver:
-        entry = (resolver, {})
-        _CACHE[id(resolver)] = entry
-    return entry[1]
+    key = id(resolver)
+    entry = _CACHE.get(key)
+    if entry is not None and entry[0]() is resolver:
+        return entry[1]
+    try:
+        ref = weakref.ref(resolver, _evict_when_collected(key))
+    except TypeError:
+        # Not weak-referenceable (rare: a ``__slots__`` callable without
+        # ``__weakref__``): resolve without process-wide caching rather than
+        # retain the resolver forever.
+        return {}
+    bucket: dict[str, str] = {}
+    _CACHE[key] = (ref, bucket)
+    return bucket
+
+
+def _evict_when_collected(key: int) -> Callable[[weakref.ref[Any]], None]:
+    """Weakref callback: drop ``key``'s bucket once ITS resolver is collected.
+
+    Runs from the garbage collector, possibly while another thread holds
+    ``_CACHE_LOCK`` — so it never takes the lock; the identity check plus a
+    single ``dict.pop`` keep it safe under the GIL.
+    """
+
+    def _callback(dead: weakref.ref[Any]) -> None:
+        entry = _CACHE.get(key)
+        if entry is None:
+            return  # already reset / evicted
+        if entry[0] is dead:  # never evict a newer resolver's bucket under the same id
+            _CACHE.pop(key, None)
+
+    return _callback
 
 
 def _default_secret_lookup(secret_name: str) -> str | None:

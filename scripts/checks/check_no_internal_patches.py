@@ -66,7 +66,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import re
 
-from _ast_key_taint import UNKNOWN, VALUE, ConstantTable, ModuleIndex, ProtectedKeys, is_module_attr, parse_index
+from _ast_key_taint import UNKNOWN, VALUE, ConstantTable, ModuleIndex, ProtectedKeys, parse_index
 from _fitness_rule import FitnessRule
 from _mapping_writes import (
     IMPORT_MODULE_SIGNATURE,
@@ -331,15 +331,30 @@ class _F1Ctx:
             self.guard.alias_findings()
         return self.guard._alias_refs
 
+    def is_importlib(self, expr: ast.expr | None) -> bool:
+        """``expr`` is the ``importlib`` module (scope-aware: a shadowing local is not)."""
+        return (
+            isinstance(expr, ast.Name)
+            and expr.id in self.importlib_names
+            and self.index.resolves_to_module(expr, "importlib")
+        )
+
+    def is_reload_name(self, expr: ast.expr | None) -> bool:
+        """``expr`` is ``reload`` imported from ``importlib`` (scope-aware)."""
+        return (
+            isinstance(expr, ast.Name)
+            and expr.id in self.reload_names
+            and self.index.resolves_to_from(expr, "importlib", "reload")
+        )
+
     def _importlib_guarded(self, expr: ast.expr) -> str | None:
         """F1's extra guarded objects: the ``importlib`` module and ``reload``."""
-        if isinstance(expr, ast.Name) and expr.id in self.importlib_names:
+        if self.is_importlib(expr):
             return "the importlib module"
-        if isinstance(expr, ast.Name) and expr.id in self.reload_names:
+        if self.is_reload_name(expr):
             return "importlib.reload"
-        if isinstance(expr, ast.Attribute) and expr.attr == "reload" and isinstance(expr.value, ast.Name):
-            if expr.value.id in self.importlib_names:
-                return "importlib.reload"
+        if isinstance(expr, ast.Attribute) and expr.attr == "reload" and self.is_importlib(expr.value):
+            return "importlib.reload"
         return None
 
     def _bind_local_module_aliases(self) -> None:
@@ -380,7 +395,9 @@ class _F1Ctx:
         return self.constants.definitely_object(expr)
 
     def is_reload(self, func: ast.expr) -> bool:
-        return is_module_attr(func, self.importlib_names, "reload", self.reload_names)
+        if isinstance(func, ast.Attribute):
+            return func.attr == "reload" and self.is_importlib(func.value)
+        return self.is_reload_name(func)
 
     def is_importer(self, func: ast.expr) -> bool:
         return (isinstance(func, ast.Attribute) and func.attr == "import_module") or (
@@ -491,13 +508,9 @@ def _reload_violation(ctx: _F1Ctx) -> bool:
     """Shape 8 (default-deny): ANY reference to ``importlib.reload`` — called or
     aliased — fails unless it is a direct call whose ``module`` argument is
     PROVABLY a non-kairix module (an unresolved argument fails)."""
-    refs: list[ast.expr] = [
-        node
-        for node in ctx.index.attributes.get("reload", [])
-        if isinstance(node.value, ast.Name) and node.value.id in ctx.importlib_names
-    ]
+    refs: list[ast.expr] = [node for node in ctx.index.attributes.get("reload", []) if ctx.is_importlib(node.value)]
     for name in ctx.reload_names:
-        refs.extend(ctx.index.name_loads.get(name, []))
+        refs.extend(ref for ref in ctx.index.name_loads.get(name, []) if ctx.is_reload_name(ref))
     for ref in refs:
         call = ctx.index.parents.get(ref)
         if not (isinstance(call, ast.Call) and call.func is ref):
@@ -515,6 +528,8 @@ def _importlib_module_misused(ctx: _F1Ctx) -> bool:
     alias) fails."""
     for name in ctx.importlib_names:
         for ref in ctx.index.name_loads.get(name, []):
+            if not ctx.is_importlib(ref):
+                continue  # a local / parameter shadows the import
             parent = ctx.index.parents.get(ref)
             if isinstance(parent, ast.Attribute) and parent.value is ref:
                 continue
@@ -534,7 +549,7 @@ def _importlib_argument_harmless(call: ast.Call, ref: ast.expr, ctx: _F1Ctx) -> 
         return False
     func = call.func
     name: ast.expr | None = None
-    if isinstance(func, ast.Name) and func.id in {"getattr", "hasattr"}:
+    if isinstance(func, ast.Name) and func.id in {"getattr", "hasattr"} and ctx.index.is_builtin(func):
         name = call.args[1] if len(call.args) >= 2 and call.args[0] is ref else None
     elif isinstance(func, ast.Attribute) and func.attr in {"setattr", "delattr"}:
         bound = bind_call(call, MONKEYPATCH_SIGNATURES[func.attr])

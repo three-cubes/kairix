@@ -20,6 +20,8 @@ Sabotage proofs:
 
 from __future__ import annotations
 
+import gc
+import weakref
 from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
 
@@ -214,3 +216,59 @@ def test_unhashable_resolver_is_supported_and_cached() -> None:
     assert auth.headers("name").mapping == {"Authorization": "Bearer first"}
     resolver.token = "rotated"
     assert ApiKeyAuth(secret_lookup=resolver).headers("name").mapping == {"Authorization": "Bearer first"}
+
+
+class _TrackedSecret(str):
+    """A resolved secret value a test can hold weakly (plain ``str`` cannot)."""
+
+
+def _register_tenant_auth(token: str) -> tuple[weakref.ref[object], weakref.ref[_TrackedSecret]]:
+    """Resolve once through a per-tenant closure resolver, then drop it.
+
+    Returns only weak references to the resolver and to the resolved secret
+    value, so the caller can observe whether anything (the auth cache) still
+    keeps either alive.
+    """
+    secret = _TrackedSecret(token)
+
+    def tenant_lookup(_name: str) -> str | None:
+        return secret
+
+    auth = ApiKeyAuth(secret_lookup=tenant_lookup)
+    assert auth.headers("tenant-secret").mapping == {"Authorization": f"Bearer {token}"}
+    return weakref.ref(tenant_lookup), weakref.ref(secret)
+
+
+def test_dropped_injected_resolver_is_not_retained_by_the_cache() -> None:
+    """Per-tenant resolvers — and the secrets cached for them — are released
+    once their auth objects are dropped: the resolved-secret cache never pins
+    either for the life of the process.
+
+    Sabotage proofs (executed, each restored):
+      * store a strong reference to the resolver in the cache entry instead of
+        a ``weakref.ref`` → the resolver refs stay alive;
+      * make the weakref callback skip eviction (``entry[0] is not dead``) →
+        the resolver dies but its bucket keeps the secret value alive.
+    """
+    reset_api_key_cache()
+    refs = [_register_tenant_auth(f"tenant-{n}") for n in range(3)]
+    gc.collect()
+
+    assert [resolver_ref() for resolver_ref, _ in refs] == [None, None, None]
+    assert [secret_ref() for _, secret_ref in refs] == [None, None, None]
+
+
+def test_default_resolver_cache_stays_process_wide(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The canonical default resolver keeps one process-wide resolution:
+    separate ``ApiKeyAuth()`` instances share it until the cache is reset."""
+    secrets_dir = _xdg_secrets_dir(tmp_path, monkeypatch)
+    reset_api_key_cache()
+    (secrets_dir / "default-shared").write_text("first")
+    assert ApiKeyAuth().headers("default-shared").mapping == {"Authorization": "Bearer first"}
+
+    (secrets_dir / "default-shared").write_text("rotated")
+    gc.collect()
+    assert ApiKeyAuth().headers("default-shared").mapping == {"Authorization": "Bearer first"}
+
+    reset_api_key_cache()
+    assert ApiKeyAuth().headers("default-shared").mapping == {"Authorization": "Bearer rotated"}

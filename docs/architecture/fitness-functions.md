@@ -424,7 +424,15 @@ by assignment, walrus, default argument, `for` / `with` target, tuple
 unpacking, `return`, `yield` or a lambda body — reads and safe writes use
 the direct form, so nothing is ever chased through an alias (and an
 unrelated `env = {}` can never be mistaken for one). Copies are fine:
-`dict(os.environ)`, `os.environ.copy()`, `{**os.environ}`. Every reference to `sys.modules` and to
+`dict(os.environ)`, `os.environ.copy()`, `{**os.environ}`. Name resolution is
+scope-aware: `os` / `sys` / `importlib` / `environ` / `reload` refer to the
+guarded import only when no enclosing function, lambda, comprehension or class
+scope rebinds the name (parameter, assignment, loop / with / except target,
+walrus, import, `def` / `class`; bound anywhere in a body means local
+throughout), so `def helper(os): ...` or a local `environ = {}` is not the
+guarded object. A module-level rebind of the imported name (`os = FakeOs()`)
+shadows it for the WHOLE module; an augmented assignment (`environ |= {...}`)
+mutates in place and does not shadow. Every reference to `sys.modules` and to
 `importlib.reload` must be an allow-listed READ, or a write PROVEN safe;
 **anything not provably a safe read or a safe write fails.** A key, module
 argument or patch target that cannot be resolved statically (a runtime value,
@@ -665,7 +673,15 @@ by assignment, walrus, default argument, `for` / `with` target, tuple
 unpacking, `return`, `yield` or a lambda body — reads and safe writes use
 the direct form, so nothing is ever chased through an alias (and an
 unrelated `env = {}` can never be mistaken for one). Copies are fine:
-`dict(os.environ)`, `os.environ.copy()`, `{**os.environ}`. Every reference to `os.environ` (and every
+`dict(os.environ)`, `os.environ.copy()`, `{**os.environ}`. Name resolution is
+scope-aware: `os` / `sys` / `importlib` / `environ` / `reload` refer to the
+guarded import only when no enclosing function, lambda, comprehension or class
+scope rebinds the name (parameter, assignment, loop / with / except target,
+walrus, import, `def` / `class`; bound anywhere in a body means local
+throughout), so `def helper(os): ...` or a local `environ = {}` is not the
+guarded object. A module-level rebind of the imported name (`os = FakeOs()`)
+shadows it for the WHOLE module; an augmented assignment (`environ |= {...}`)
+mutates in place and does not shadow. Every reference to `os.environ` (and every
 `setenv` / `delenv`) must be an allow-listed READ, or a write PROVEN safe;
 **anything not provably a safe read or a safe write fails.** A key or patch
 target that cannot be resolved statically (a runtime value,
