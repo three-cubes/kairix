@@ -107,6 +107,49 @@ def test_read_state_returns_none_on_schema_mismatch(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_read_state_coerces_float_fields_to_float(tmp_path: Path) -> None:
+    """Float timestamps written as JSON strings / ints come back as real floats.
+
+    Sabotage-prove: skipping the float coercion leaves ``"1700000000.5"``
+    a str and ``1700000000`` an int — the type assertions fail.
+    """
+    target = tmp_path / "worker-state.json"
+    target.write_text(json.dumps({"last_embed_run_at": "1700000000.5", "started_at": 1700000000}))
+
+    restored = read_state(target)
+
+    assert restored is not None
+    assert type(restored.last_embed_run_at) is float
+    assert restored.last_embed_run_at == 1700000000.5
+    assert type(restored.started_at) is float
+
+
+@pytest.mark.unit
+def test_read_state_returns_none_when_float_field_is_not_numeric(tmp_path: Path) -> None:
+    """A non-numeric timestamp is a schema mismatch, not a value to carry forward."""
+    bad = tmp_path / "worker-state.json"
+    bad.write_text('{"last_embed_run_at": "yesterday"}')
+    assert read_state(bad) is None
+
+
+@pytest.mark.unit
+def test_read_state_coerces_bool_fields_to_bool(tmp_path: Path) -> None:
+    """Bool flags persisted as 0/1 (older writers, hand-edited files) read back as bools.
+
+    Sabotage-prove: skipping the bool coercion leaves the raw ints — the
+    ``is True`` / ``is False`` identity checks fail.
+    """
+    target = tmp_path / "worker-state.json"
+    target.write_text(json.dumps({"last_embed_did_work": 1, "last_connector_tick_yielded": 0}))
+
+    restored = read_state(target)
+
+    assert restored is not None
+    assert restored.last_embed_did_work is True
+    assert restored.last_connector_tick_yielded is False
+
+
+@pytest.mark.unit
 def test_read_state_returns_none_when_root_not_a_dict(tmp_path: Path) -> None:
     """A JSON array (or scalar) at the root isn't a valid state — return None."""
     bad = tmp_path / "worker-state.json"
