@@ -19,7 +19,8 @@ engine ``_mapping_writes`` (also used by F1 for ``sys.modules``):
 
 Every call is bound to the callee's parameter names (positional or keyword).
 ``os.environ`` resolves through ``import os as o``, ``from os import environ
-[as e]`` and local rebinding followed to a fixpoint (``a = os.environ; b = a``);
+[as e]`` (import statements only); binding ``os.environ`` / ``os`` / a bound
+helper to a local name is itself a violation, never chased;
 a copy (``dict(os.environ)``) never does. These direct forms bypass
 ``monkeypatch``'s auto-undo, so a forgotten restore leaks the value into every
 later test in the process (the pytest-bdd ``KAIRIX_DB_PATH`` leak).
@@ -70,8 +71,9 @@ from tc_fitness import gate_keys
 REMEDIATION = """KAIRIX_* process-env write found in a test. Refactor to an explicit
 ``env=`` mapping / ``paths=FakePaths(...)`` / Deps seam to pass.
 
-The gate is DEFAULT-DENY: every reference to os.environ (any alias, incl.
-env = os.environ) must be an allow-listed read — R[k], R.get / copy / items /
+The gate is DEFAULT-DENY: os.environ, the os module and bound helpers may
+not be aliased (env = os.environ fails on its own); every direct reference
+must be an allow-listed read — R[k], R.get / copy / items /
 keys / values, k in R, len(R), dict(R), {**R}, iteration, env=R to
 subprocess / os.exec* — or a write PROVEN to touch only non-KAIRIX_ keys.
 Anything else fails: clear() / popitem(), passing R to any helper, returning
@@ -103,7 +105,7 @@ Forbidden example:
   os.environ['KAIRIX_DB_PATH'] = str(tmp_path / 'db.sqlite')
   os.environ.pop('KAIRIX_DB_PATH', None)
   with patch.dict(os.environ, {'KAIRIX_MAX_CONCURRENCY': '3'}): ...
-  env = os.environ; env |= {'KAIRIX_DB_PATH': '/x'}
+  env = os.environ   # aliasing a guarded object
   monkeypatch.setenv(name='KAIRIX_DB_PATH', value='/x')
   monkeypatch.setattr(os, 'environ', {'KAIRIX_DB_PATH': '/x'})
 
@@ -194,18 +196,26 @@ def _is_environ_copy(expr: ast.expr, ctx: _Ctx) -> bool:
 
 
 def _snapshot_restore_names(fn: ast.FunctionDef | ast.AsyncFunctionDef, ctx: _Ctx) -> tuple[int, set[str]] | None:
-    """For a snapshotting fixture: (first yield line, snapshot names bound before it)."""
+    """For a snapshotting fixture: (first yield line, snapshot names bound before it).
+
+    Only statements DIRECTLY in the fixture body count — the ``yield`` and the
+    ``snapshot = dict(os.environ)`` assignment — never a nested ``def`` /
+    ``lambda`` / ``class`` (consistent with the exemption scope rule)."""
     if _fixture_call(fn) is None:
         return None
-    yields = [n.lineno for n in ast.walk(fn) if isinstance(n, (ast.Yield, ast.YieldFrom))]
+    yields = [
+        stmt.lineno
+        for stmt in fn.body
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, (ast.Yield, ast.YieldFrom))
+    ]
     if not yields:
         return None
     first_yield = min(yields)
     snapshots = {
         t.id
-        for n in ast.walk(fn)
-        if isinstance(n, ast.Assign) and n.lineno < first_yield and _is_environ_copy(n.value, ctx)
-        for t in n.targets
+        for stmt in fn.body
+        if isinstance(stmt, ast.Assign) and stmt.lineno < first_yield and _is_environ_copy(stmt.value, ctx)
+        for t in stmt.targets
         if isinstance(t, ast.Name)
     }
     return (first_yield, snapshots) if snapshots else None

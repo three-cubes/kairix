@@ -7,9 +7,9 @@ inverted: **every reference to the mapping must sit in an allow-listed READ
 context, or be a write PROVEN safe — anything else is a violation.**
 
 1. **Receiver resolution** (:class:`ProcessMapping`) — the live mapping,
-   through any import alias (``import os as o``), ``from os import environ
-   [as e]``, local rebinding followed to a fixpoint (``a = os.environ; b =
-   a``), and ``getattr(os, "environ")``. A COPY (``dict(os.environ)``,
+   through any import alias (``import os as o``) or ``from os import environ
+   [as e]`` — import statements only; binding a guarded object to a local
+   name is itself a violation (never chased). A COPY (``dict(os.environ)``,
    ``os.environ.copy()``, ``{**os.environ}``) is a different object.
 2. **Argument binding** (:func:`bind_call`) — every call is matched to the
    callee's real parameter names, positional or keyword
@@ -43,7 +43,7 @@ context, or be a write PROVEN safe — anything else is a violation.**
 Two receiver-side rules close the remaining spellings by principle:
 
 * **Guarded module objects** — every reference to the owning module (``os`` /
-  ``sys``, any alias) is classified too: a static attribute access passes (its
+  ``sys``, by import alias) is classified too: a static attribute access passes (its
   name is provably not ``environ`` / ``modules``); passing the module to ANY
   callable passes only with no spread and an attribute-name argument provably
   naming something else; anything else fails.
@@ -169,19 +169,9 @@ class ProcessMapping:
             for a in node.names
             if a.asname is None and a.name.startswith(f"{module}.")
         }
-        mapping = cls(module, attr, module_names, index.from_imports(module, attr))
-        bindings = index.name_bindings
-        changed = True
-        while changed:  # follow local rebinding (a = os.environ; b = a; o = os) to a fixpoint
-            changed = False
-            for name, value in bindings:
-                if name not in mapping.names and mapping.is_receiver(value):
-                    mapping.names.add(name)
-                    changed = True
-                if name not in mapping.module_names and mapping.is_module(value):
-                    mapping.module_names.add(name)
-                    changed = True
-        return mapping
+        # Import statements only — local rebinding of a guarded object is a
+        # violation in its own right (``alias_findings``), never chased.
+        return cls(module, attr, module_names, index.from_imports(module, attr))
 
     @property
     def dotted(self) -> str:
@@ -241,8 +231,8 @@ READ_ATTRIBUTES = frozenset(
 )
 #: builtins that only read the mapping when it is their first argument
 READ_BUILTINS = frozenset({"len", "dict"})
-#: keyword names that carry the attribute name when a module object is passed
-ATTRIBUTE_NAME_KEYWORDS = frozenset({"name", "attribute", "attr"})
+#: builtins that may receive a guarded module directly with a static attribute name
+_ATTRIBUTE_READERS = frozenset({"getattr", "hasattr"})
 #: keyword names under which a process launcher reads the mapping as its environment
 ENV_KEYWORDS = frozenset({"env", "environ"})
 _SUBPROCESS_FUNCTIONS = frozenset(
@@ -278,44 +268,48 @@ class MappingGuard:
             name for fn in _SUBPROCESS_FUNCTIONS for name in index.from_imports("subprocess", fn)
         }
         self.os_modules = index.module_aliases("os")
+        self.builtin_attr_functions = {"getattr", "setattr", "delattr"} | {
+            name for fn in ("getattr", "setattr", "delattr") for name in index.from_imports("builtins", fn)
+        }
+        self.builtins_modules = index.module_aliases("builtins")
+        #: extra guarded objects a detector adds (F1: ``importlib`` / ``reload``)
+        self.extra_guarded: Callable[[ast.expr], str | None] = lambda _expr: None
 
     # -- public -------------------------------------------------------------
 
     def findings(self) -> list[Finding]:
         """Every violation: unsafe uses of the mapping, unsafe uses of its owning
         MODULE object, and helper-method writes that never name either."""
-        out: list[Finding] = []
+        out: list[Finding] = self.alias_findings()  # first: it records the alias-site refs
         for ref in self.references():
-            out.extend(self.classify(ref))
+            if id(ref) not in self._alias_refs:
+                out.extend(self.classify(ref))
         for ref in self.module_references():
-            out.extend(self.classify_module(ref))
+            if id(ref) not in self._alias_refs:
+                out.extend(self.classify_module(ref))
         for node in self.index.candidates:
             if isinstance(node, ast.Call):
                 out.extend(self._helper_writes(node))
         return out
 
     def module_references(self) -> list[ast.Name]:
-        """Every load of the owning module object (``os`` / ``sys``, any alias)."""
+        """Every load of the owning module object (``os`` / ``sys``, by import alias)."""
         refs: list[ast.Name] = []
         for name in self.mapping.module_names:
             refs.extend(self.index.name_loads.get(name, []))
         return refs
 
     def classify_module(self, ref: ast.Name) -> list[Finding]:
-        """Default-deny for the MODULE object: a static attribute access is allowed (the
-        ``environ`` / ``modules`` attribute is then classified as a mapping
-        reference); binding it to a plain name is allowed (the alias is
-        tracked); passing it to ANY callable is allowed only when the call has
-        no spread and an attribute-name argument provably names something other
-        than ``environ`` / ``modules``. Everything else fails."""
+        """Default-deny for the MODULE object (``os`` / ``sys``): a static attribute
+        access is allowed (``os.environ`` itself is then classified as a mapping
+        reference). As an argument it is allowed ONLY to builtin ``getattr`` /
+        ``hasattr`` called directly, or to ``<x>.setattr`` / ``<x>.delattr`` /
+        ``patch.object``, each with a statically named attribute that is not
+        ``environ`` / ``modules`` and no spread. Everything else — any other
+        callable, ``vars``, an aliased ``getattr``, binding it to a name — fails."""
         parent = self.index.parents.get(ref)
         module = self.mapping.module
         if isinstance(parent, ast.Attribute) and parent.value is ref:
-            # ``os.path`` / ``sys.argv = [...]``: the attribute name is static, so
-            # it PROVABLY is not the guarded one; ``os.environ`` itself is then
-            # classified as a mapping reference.
-            return []
-        if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and self._binding_use(parent, ref) == []:
             return []
         call = parent
         if isinstance(parent, (ast.keyword, ast.Starred)):
@@ -329,13 +323,58 @@ class MappingGuard:
     def _module_argument_harmless(self, call: ast.Call, ref: ast.expr) -> bool:
         if any(isinstance(a, ast.Starred) for a in call.args) or any(kw.arg is None for kw in call.keywords):
             return False  # a spread may hide the attribute name or the value
-        name: ast.expr | None = None
-        positions = [i for i, arg in enumerate(call.args) if arg is ref]
-        if positions and positions[0] + 1 < len(call.args):
-            name = call.args[positions[0] + 1]
-        if name is None:
-            name = next((kw.value for kw in call.keywords if kw.arg in ATTRIBUTE_NAME_KEYWORDS), None)
-        return name is not None and not self.constants.could_be(name, self.mapping.attr)
+        func = call.func
+        if isinstance(func, ast.Name) and func.id in _ATTRIBUTE_READERS:
+            # builtin getattr / hasattr, called directly: (obj, name[, default])
+            return len(call.args) >= 2 and call.args[0] is ref and self._statically_other_attr(call.args[1])
+        if isinstance(func, ast.Attribute) and func.attr in {"setattr", "delattr"}:
+            bound = bind_call(call, MONKEYPATCH_SIGNATURES[func.attr])
+            return bound.get("target") is ref and self._statically_other_attr(bound.get("name"))
+        if isinstance(func, ast.Attribute) and func.attr == "object" and self.is_patch(func.value):
+            bound = bind_call(call, PATCH_OBJECT_SIGNATURE)
+            return bound.get("target") is ref and self._statically_other_attr(bound.get("attribute"))
+        return False
+
+    def _statically_other_attr(self, name: ast.expr | None) -> bool:
+        """``name`` resolves statically to attribute names, none of them guarded."""
+        values = self.constants.strings(name)
+        return values is not None and self.mapping.attr not in values
+
+    # -- aliasing is itself a violation -------------------------------------
+
+    def alias_findings(self) -> list[Finding]:
+        """Binding a guarded object to a name — assignment, walrus, default
+        argument, ``for`` / ``with`` target, tuple unpacking, ``return`` /
+        ``yield``, lambda body — fails. Guarded objects are never chased through
+        aliases, so they must only ever be used in the direct form."""
+        self._alias_refs: set[int] = set()
+        out: list[Finding] = []
+        for site in self.index.binding_sites:
+            for value, form in _bound_values(site):
+                for candidate in _evaluated(value):
+                    description = self.guarded(candidate)
+                    if description is not None:
+                        self._alias_refs.add(id(candidate))
+                        out.append((site, f"aliases {description} ({form})"))
+        return out
+
+    def guarded(self, expr: ast.expr) -> str | None:
+        """What guarded object ``expr`` IS (direct form), or ``None``."""
+        if self.mapping.is_receiver(expr):
+            return self.label
+        if isinstance(expr, ast.Name) and expr.id in self.mapping.module_names:
+            return f"the {self.mapping.module} module"
+        if isinstance(expr, ast.Attribute):
+            if self.mapping.is_receiver(expr.value):
+                return f"{self.label}.{expr.attr}"
+            if expr.attr in MONKEYPATCH_SIGNATURES:
+                return f"the bound .{expr.attr} helper"
+            if expr.attr in {"getattr", "setattr", "delattr"} and isinstance(expr.value, ast.Name):
+                if expr.value.id in self.builtins_modules:
+                    return f"builtins.{expr.attr}"
+        if isinstance(expr, ast.Name) and expr.id in self.builtin_attr_functions:
+            return f"builtin {expr.id}"
+        return self.extra_guarded(expr)
 
     def references(self) -> list[ast.expr]:
         """Every expression that evaluates to the live mapping."""
@@ -417,12 +456,6 @@ class MappingGuard:
     def _dict_use(self, node: ast.Dict, ref: ast.expr) -> list[Finding] | None:
         spread = any(key is None and value is ref for key, value in zip(node.keys, node.values, strict=True))
         return [] if spread else None
-
-    def _binding_use(self, node: ast.Assign | ast.AnnAssign | ast.NamedExpr, ref: ast.expr) -> list[Finding] | None:
-        if node.value is not ref:
-            return None
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        return [] if all(isinstance(t, ast.Name) for t in targets) else None
 
     def _keyword_use(self, node: ast.keyword, ref: ast.expr) -> list[Finding] | None:
         call = self.index.parents.get(node)
@@ -580,9 +613,6 @@ _CONTEXT_HANDLERS: dict[type, Callable[[MappingGuard, Any, ast.expr], list[Findi
     ast.AsyncFor: MappingGuard._iteration_use,
     ast.comprehension: MappingGuard._iteration_use,
     ast.Dict: MappingGuard._dict_use,
-    ast.Assign: MappingGuard._binding_use,
-    ast.AnnAssign: MappingGuard._binding_use,
-    ast.NamedExpr: MappingGuard._binding_use,
     ast.keyword: MappingGuard._keyword_use,
     ast.Call: MappingGuard._call_use,
 }
@@ -594,3 +624,48 @@ def _callee(func: ast.expr) -> str:
     if isinstance(func, ast.Attribute):
         return f"{_callee(func.value)}.{func.attr}"
     return "<callable>"
+
+
+def _bound_values(site: ast.AST) -> list[tuple[ast.expr, str]]:
+    """The value expressions a binding site binds to a name, with the form."""
+    if isinstance(site, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+        return [(site.value, "assignment")] if site.value is not None else []
+    if isinstance(site, ast.Return):
+        return [(site.value, "return")] if site.value is not None else []
+    if isinstance(site, (ast.Yield, ast.YieldFrom)):
+        return [(site.value, "yield")] if site.value is not None else []
+    if isinstance(site, (ast.For, ast.AsyncFor, ast.comprehension)):
+        # ``for x in (os.environ,)`` binds the element; iterating the mapping itself
+        # (``for k in os.environ``) only yields keys and is an allowed read.
+        if isinstance(site.iter, (ast.Tuple, ast.List, ast.Set)):
+            return [(elt, "loop target") for elt in site.iter.elts]
+        return []
+    if isinstance(site, (ast.With, ast.AsyncWith)):
+        return [(item.context_expr, "with target") for item in site.items if item.optional_vars is not None]
+    if isinstance(site, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        args = site.args
+        values = [(d, "default argument") for d in (*args.defaults, *args.kw_defaults) if d is not None]
+        if isinstance(site, ast.Lambda):
+            values.append((site.body, "lambda return"))
+        return values
+    return []
+
+
+def _evaluated(expr: ast.expr) -> list[ast.expr]:
+    """``expr`` and every sub-expression it may EVALUATE TO (tuple / list / set
+    elements for unpacking, starred values, conditional branches, ``or`` /
+    ``and`` operands, walrus values)."""
+    out: list[ast.expr] = [expr]
+    if isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+        for elt in expr.elts:
+            out.extend(_evaluated(elt))
+    elif isinstance(expr, ast.Starred):
+        out.extend(_evaluated(expr.value))
+    elif isinstance(expr, ast.IfExp):
+        out.extend(_evaluated(expr.body) + _evaluated(expr.orelse))
+    elif isinstance(expr, ast.BoolOp):
+        for value in expr.values:
+            out.extend(_evaluated(value))
+    elif isinstance(expr, ast.NamedExpr):
+        out.extend(_evaluated(expr.value))
+    return out

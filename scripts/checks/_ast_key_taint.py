@@ -63,6 +63,23 @@ class ProtectedKeys:
 # ---------------------------------------------------------------------------
 
 _CANDIDATE_TYPES = (ast.Call, ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)
+#: every construct that can bind a name to a value (aliasing sites)
+BINDING_SITE_TYPES = (
+    ast.Assign,
+    ast.AnnAssign,
+    ast.NamedExpr,
+    ast.Return,
+    ast.Yield,
+    ast.YieldFrom,
+    ast.For,
+    ast.AsyncFor,
+    ast.comprehension,
+    ast.With,
+    ast.AsyncWith,
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+)
 _FUNCTION_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
 _SCOPE_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 #: attribute names whose references the detectors classify
@@ -112,6 +129,8 @@ class ModuleIndex:
     params: dict[str, list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, int | None]]] = field(default_factory=dict)
     #: statements / calls that can write a mapping or patch an attribute
     candidates: list[ast.AST] = field(default_factory=list)
+    #: every binding site (assignment, walrus, return / yield, loop / with target, defaults)
+    binding_sites: list[ast.AST] = field(default_factory=list)
 
     @classmethod
     def build(cls, tree: ast.AST) -> ModuleIndex:
@@ -166,6 +185,8 @@ class ModuleIndex:
     def _classify(self, node: ast.AST, returns: list[ast.Return]) -> None:
         if isinstance(node, _CANDIDATE_TYPES):
             self.candidates.append(node)
+        if isinstance(node, BINDING_SITE_TYPES):
+            self.binding_sites.append(node)
         handler = _CLASSIFIERS.get(type(node))
         if handler is not None:
             handler(self, node, returns)

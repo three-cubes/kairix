@@ -322,7 +322,25 @@ class _F1Ctx:
         self.reload_names = index.from_imports("importlib", "reload")
         # ``from importlib import import_module [as load]`` — tracked like reload.
         self.import_module_names = index.from_imports("importlib", "import_module") | {"__import__"}
+        self.guard.extra_guarded = self._importlib_guarded
         self._bind_local_module_aliases()
+
+    def guard_alias_refs(self) -> set[int]:
+        """Node ids the guard reported as aliased (computed by ``guard.findings``)."""
+        if not hasattr(self.guard, "_alias_refs"):
+            self.guard.alias_findings()
+        return self.guard._alias_refs
+
+    def _importlib_guarded(self, expr: ast.expr) -> str | None:
+        """F1's extra guarded objects: the ``importlib`` module and ``reload``."""
+        if isinstance(expr, ast.Name) and expr.id in self.importlib_names:
+            return "the importlib module"
+        if isinstance(expr, ast.Name) and expr.id in self.reload_names:
+            return "importlib.reload"
+        if isinstance(expr, ast.Attribute) and expr.attr == "reload" and isinstance(expr.value, ast.Name):
+            if expr.value.id in self.importlib_names:
+                return "importlib.reload"
+        return None
 
     def _bind_local_module_aliases(self) -> None:
         """Feed locally bound kairix modules into the alias table, to a fixpoint.
@@ -331,7 +349,9 @@ class _F1Ctx:
         ``module = sys.modules["kairix.paths"]`` and ``module = kairix.paths``
         (or a chain of such names) bind a kairix module object exactly like an
         ``import`` does, so ``importlib.reload(module)`` / ``module.x = fake``
-        are caught — the same fixpoint the receiver resolver uses.
+        are caught. (This tracks KAIRIX module objects for shapes 3-6; guarded
+        objects — ``sys.modules``, ``sys``, ``importlib``, ``reload`` — may not be
+        aliased at all.)
         """
         changed = True
         while changed:
@@ -481,10 +501,49 @@ def _reload_violation(ctx: _F1Ctx) -> bool:
     for ref in refs:
         call = ctx.index.parents.get(ref)
         if not (isinstance(call, ast.Call) and call.func is ref):
-            return True  # aliased / passed around — cannot be followed
+            return True  # aliased / passed around — never chased
         if not ctx.provably_external_module(bind_call(call, RELOAD_SIGNATURE).get("module")):
             return True
+    return _importlib_module_misused(ctx)
+
+
+def _importlib_module_misused(ctx: _F1Ctx) -> bool:
+    """The ``importlib`` module object is guarded like ``os`` / ``sys``: an
+    attribute access is fine; as an argument it may only go to a direct builtin
+    ``getattr`` / ``hasattr`` with a static attribute name other than
+    ``reload``. Anything else (``getattr(importlib, name)``, a helper, an
+    alias) fails."""
+    for name in ctx.importlib_names:
+        for ref in ctx.index.name_loads.get(name, []):
+            parent = ctx.index.parents.get(ref)
+            if isinstance(parent, ast.Attribute) and parent.value is ref:
+                continue
+            if id(ref) in ctx.guard_alias_refs():
+                return True
+            if isinstance(parent, ast.Call) and _importlib_argument_harmless(parent, ref, ctx):
+                continue
+            return True
     return False
+
+
+def _importlib_argument_harmless(call: ast.Call, ref: ast.expr, ctx: _F1Ctx) -> bool:
+    """The same narrow argument rule as ``os`` / ``sys``: a direct builtin
+    ``getattr`` / ``hasattr``, or ``<x>.setattr`` / ``<x>.delattr`` /
+    ``patch.object``, with a static attribute name other than ``reload``."""
+    if any(isinstance(a, ast.Starred) for a in call.args) or any(kw.arg is None for kw in call.keywords):
+        return False
+    func = call.func
+    name: ast.expr | None = None
+    if isinstance(func, ast.Name) and func.id in {"getattr", "hasattr"}:
+        name = call.args[1] if len(call.args) >= 2 and call.args[0] is ref else None
+    elif isinstance(func, ast.Attribute) and func.attr in {"setattr", "delattr"}:
+        bound = bind_call(call, MONKEYPATCH_SIGNATURES[func.attr])
+        name = bound.get("name") if bound.get("target") is ref else None
+    elif isinstance(func, ast.Attribute) and func.attr == "object" and ctx.guard.is_patch(func.value):
+        bound = bind_call(call, PATCH_OBJECT_SIGNATURE)
+        name = bound.get("attribute") if bound.get("target") is ref else None
+    values = ctx.constants.strings(name)
+    return values is not None and "reload" not in values
 
 
 def file_has_internal_patch(path: Path) -> bool:

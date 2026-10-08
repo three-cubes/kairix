@@ -185,14 +185,16 @@ def test_aliased_environ_receivers_are_flagged(tmp_path: Path, header: str) -> N
     ],
 )
 def test_local_alias_chain_of_environ_is_flagged(tmp_path: Path, statement: str, shape: str) -> None:
-    """Codex PR #814 thread: ``a = os.environ; b = a`` then a write through
-    ``b`` mutates the live process env exactly like a direct write.
+    """``a = os.environ; b = a`` then a write through ``b``: aliases are no longer
+    chased — the binding ``a = os.environ`` is itself the violation (guarded
+    objects may only be used in the direct form), whatever ``b`` does next.
 
-    Sabotage proof (executed): skip the alias fixpoint in ``ProcessMapping.resolve`` →
-    every parametrised case reports clean; restored.
+    Sabotage proof (executed): make ``MappingGuard.alias_findings`` return
+    ``[]`` → every parametrised case reports clean; restored.
     """
+    _ = shape  # the write through the alias is never reached — the alias is the finding
     src = f"import os\n\n\ndef test_x(monkeypatch):\n    a = os.environ\n    b = a\n    {statement}\n"
-    assert _violations(tmp_path, src) == [f"7: {shape}"]
+    assert _violations(tmp_path, src) == ["5: aliases os.environ (assignment)"]
 
 
 @pytest.mark.parametrize("copy_expr", ["dict(os.environ)", "os.environ.copy()", "{**os.environ}"])

@@ -124,6 +124,7 @@ def _module_source(header: str, setup: str, statement: str) -> str:
 
 def _flagged(tmp_path: Path, receiver: Receiver, source: str) -> bool:
     path = tmp_path / "test_sample.py"
+    compile(source, str(path), "exec")  # a malformed sample must fail loudly, never read as "clean"
     path.write_text(source, encoding="utf-8")
     return receiver.flagged(path)
 
@@ -414,8 +415,9 @@ def test_spread_hidden_target_or_key_is_flagged(tmp_path: Path, rname: str, setu
     non-allow-listed context (a tuple / dict literal), so these stay red even
     without the spread rule. Sabotage proof (executed): make
     ``MappingGuard.classify`` treat unknown contexts as reads AND
-    ``BoundCall.has_spread`` return ``False`` → 24 of the 26 cases report
-    clean; restored.
+    ``BoundCall.has_spread`` return ``False`` (and the alias ban off, since the
+    spread sources bind the mapping into a tuple / dict) → 18 of the 26 cases
+    report clean; restored.
     """
     receiver = RECEIVERS[rname]
     fmt = {"R": receiver.dotted, "K": receiver.key, "M": receiver.module, "A": receiver.attr}

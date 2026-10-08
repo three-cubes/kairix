@@ -415,7 +415,16 @@ alias-resolved root. Multi-line constructs, aliased imports
 (`from kairix import providers as providers_mod`), and full-path
 forms (`kairix.paths.provider_name = ...`) are all caught.
 
-**Scope — default-deny.** Every reference to `sys.modules` and to
+**Scope — default-deny.** **Guarded objects cannot be aliased:** `os.environ`, `sys.modules`, the
+`os` / `sys` / `importlib` modules, `importlib.reload`, builtin
+`getattr` / `setattr` / `delattr` and any bound helper method
+(`<x>.setenv` / `.delenv` / `.setitem` / `.delitem` / `.setattr` /
+`.delattr`, `os.environ.<m>`, `sys.modules.<m>`) may not be bound to a name
+by assignment, walrus, default argument, `for` / `with` target, tuple
+unpacking, `return`, `yield` or a lambda body — reads and safe writes use
+the direct form, so nothing is ever chased through an alias (and an
+unrelated `env = {}` can never be mistaken for one). Copies are fine:
+`dict(os.environ)`, `os.environ.copy()`, `{**os.environ}`. Every reference to `sys.modules` and to
 `importlib.reload` must be an allow-listed READ, or a write PROVEN safe;
 **anything not provably a safe read or a safe write fails.** A key, module
 argument or patch target that cannot be resolved statically (a runtime value,
@@ -446,11 +455,11 @@ is allowed only if it is an allow-listed read or a write proven safe;
 **everything else fails**.
 
 1. **References.** `R` is the live mapping reached as `os.environ` /
-   `sys.modules`, through an import alias (`import os as o`), a from-import
-   (`from os import environ as e`), local rebinding followed to a fixpoint
-   (`a = os.environ; b = a`), or `getattr(os, "environ")`. The owning module
-   `M` resolves the same way. A copy (`dict(R)`, `R.copy()`, `{**R}`) is a
-   different object.
+   `sys.modules`, through an import alias (`import os as o`) or a
+   from-import (`from os import environ as e`) — import statements only. Local
+   rebinding is NOT followed: binding a guarded object to a name is itself a
+   violation (see the aliasing rule below). The owning module `M` resolves the
+   same way. A copy (`dict(R)`, `R.copy()`, `{**R}`) is a different object.
 2. **Allowed reads.**
 
 | Context | Example |
@@ -461,7 +470,6 @@ is allowed only if it is an allow-listed read or a write proven safe;
 | read builtins (first argument) | `len(R)`, `dict(R, ...)` |
 | unpacking / iteration | `{**R}`, `for x in R`, comprehension source |
 | process environment | `env=R` / `environ=R` to `subprocess.*`, `os.exec*`, `os.spawn*` |
-| aliasing | `alias = R` (the alias's own uses are classified the same way) |
 
 3. **Writes allowed only when PROVEN safe** — every key resolves statically
    (`ConstantTable`) to a NON-protected value; an unresolved key counts as
@@ -484,19 +492,30 @@ is allowed only if it is an allow-listed read or a write proven safe;
    `del os.environ`, `setattr` / `delattr` / `patch.object` /
    `monkeypatch.setattr` on `(os, "environ")` or `"os.environ"`, `patch`
    / `patch.dict` on `"os.environ"` — dotted strings constant-folded).
-5. **The owning MODULE objects are guarded too** (`os` for F2, `sys` for
-   F1 — any import alias or local alias). A static attribute access
+5. **The owning MODULE objects are guarded too** (`os` for F2, `sys` and
+   `importlib` for F1 — import aliases only). A static attribute access
    (`os.path`, `os.getcwd()`, `sys.argv`, `sys.argv = [...]`) is allowed —
    its attribute name is provably not the guarded one (`os.environ` itself is
-   then classified as a mapping reference). Passing the module to ANY callable
-   — `getattr` or an alias of it, `setattr`, `delattr`, `vars`, any
-   MonkeyPatch method, `patch.object`, a helper — fails unless the call has no
-   `*` / `**` spread and an attribute-name argument (the argument after the
-   module, or `name=` / `attribute=` / `attr=`) provably names something other
-   than `environ` / `modules`; so `monkeypatch.setattr(os, "chown", f)` and
-   `getattr(sys, "frozen", False)` pass, while `fetch(os, "environ")`,
-   `vars(sys)`, `some_helper(os)` and `monkeypatch.setattr(os, "environ",
-   **kw)` fail. Any other use of the module object fails.
+   then classified as a mapping reference). As an ARGUMENT the module is
+   allowed only to builtin `getattr` / `hasattr` called directly, or to
+   `<x>.setattr` / `<x>.delattr` / `patch.object`, each with no `*` / `**`
+   spread and a statically named attribute that is not `environ` / `modules`
+   (`reload` for `importlib`): `monkeypatch.setattr(os, "chown", f)` and
+   `getattr(sys, "frozen", False)` pass; `mutate(os, "path")`, `vars(sys)`,
+   `fetch(os, "environ")`, `some_helper(os)` and `monkeypatch.setattr(os,
+   "environ", **kw)` fail. There is no "next argument is a harmless string"
+   exemption for any other callable.
+7. **Aliasing is forbidden.** Binding any guarded object to a name — by
+   assignment, annotated assignment, walrus, default argument, `for` target,
+   `with` target, tuple / list / starred unpacking, conditional expression,
+   `return`, `yield` or a lambda body — is a violation in its own right. The
+   guarded objects are `os.environ`, `sys.modules`, the `os` / `sys` /
+   `importlib` modules, `importlib.reload`, builtin `getattr` / `setattr` /
+   `delattr`, and every bound helper method (`<x>.setenv` / `.delenv` /
+   `.setitem` / `.delitem` / `.setattr` / `.delattr`, `os.environ.<m>`,
+   `sys.modules.<m>`). The classifier therefore never needs alias chasing; a
+   copy (`dict(os.environ)`, `os.environ.copy()`, `{**os.environ}`) is not an
+   alias.
 6. **MonkeyPatch helper methods are matched by METHOD NAME on any receiver.**
    `.setenv` / `.delenv` / `.setitem` / `.delitem` / `.setattr` / `.delattr`
    are classified by name plus bound arguments whatever object they are
@@ -602,7 +621,8 @@ allow-list, baseline, pragma or path list:
   kill-switch, undone at session end);
 - writes AFTER the `yield` of a `@pytest.fixture` that copied `os.environ`
   (`dict(os.environ)` / `os.environ.copy()` / `{**os.environ}`) BEFORE the
-  yield, when the write is a genuine restore from that snapshot —
+  yield — both the copy and the `yield` statements directly in the fixture
+  body, never inside a nested `def` / `lambda` / `class` — when the write is a genuine restore from that snapshot —
   `os.environ.update(snapshot)` (optionally preceded by
   `os.environ.clear()` in the same unconditional statement list, with no
   early `return` / `raise` in between), `os.environ[k] = snapshot[k]` for the same key, or
@@ -636,7 +656,16 @@ resolution lives in `scripts/checks/_ast_key_taint.py`. Detector tests:
 `tests/checks/test_mapping_default_deny.py` and the table-driven
 `tests/checks/test_mapping_write_surface.py`.
 
-**Scope — default-deny.** Every reference to `os.environ` (and every
+**Scope — default-deny.** **Guarded objects cannot be aliased:** `os.environ`, `sys.modules`, the
+`os` / `sys` / `importlib` modules, `importlib.reload`, builtin
+`getattr` / `setattr` / `delattr` and any bound helper method
+(`<x>.setenv` / `.delenv` / `.setitem` / `.delitem` / `.setattr` /
+`.delattr`, `os.environ.<m>`, `sys.modules.<m>`) may not be bound to a name
+by assignment, walrus, default argument, `for` / `with` target, tuple
+unpacking, `return`, `yield` or a lambda body — reads and safe writes use
+the direct form, so nothing is ever chased through an alias (and an
+unrelated `env = {}` can never be mistaken for one). Copies are fine:
+`dict(os.environ)`, `os.environ.copy()`, `{**os.environ}`. Every reference to `os.environ` (and every
 `setenv` / `delenv`) must be an allow-listed READ, or a write PROVEN safe;
 **anything not provably a safe read or a safe write fails.** A key or patch
 target that cannot be resolved statically (a runtime value,

@@ -18,7 +18,8 @@ or an unfoldable target is a violation. This module pins:
 Sabotage proofs (executed — mutate, confirm red, restore, confirm green):
   * make ``MappingGuard.classify`` treat an unknown context as a read
     (``return []`` instead of the default violation) → the cases that reach
-    the default verdict (return / yield / container / ``==`` / tuple alias) report clean;
+    the default verdict (the ``==`` comparisons; the rest are caught by the
+    alias ban or a specific handler) report clean;
   * drop the ``ast.Compare`` / ``ast.For`` read handlers from
     ``_CONTEXT_HANDLERS`` → the matching allow-listed reads are flagged.
 """
@@ -60,6 +61,7 @@ def _flagged(tmp_path: Path, rname: str, body: str, name: str = "test_sample.py"
     receiver, key, flagged = DETECTORS[rname]
     path = tmp_path / name
     source = _HEADER + re.sub(r"\bKEY\b", key, re.sub(r"\bR\b", receiver, body))
+    compile(source, str(path), "exec")  # a malformed sample must fail loudly, never read as "clean"
     path.write_text(source, encoding="utf-8")
     return flagged(path)
 
@@ -88,7 +90,6 @@ COMMON_READS = [
     "snapshot = {**R}",
     "for name in R:\n        pass",
     "names = [name for name in R]",
-    'alias = R\n    value = alias.get("PATH")',
 ]
 ENV_ONLY_READS = [
     'subprocess.run(["true"], env=R, check=False)',
@@ -198,8 +199,8 @@ def test_any_use_outside_the_allow_list_is_flagged(tmp_path: Path, rname: str, s
     detector does not need to know what the helper does.
 
     Sabotage proof (executed): make ``MappingGuard.classify`` treat an unknown
-    context as a read → the cases reaching the default verdict (return,
-    yield, container, ``==``, tuple alias) report clean; restored.
+    context as a read → the ``==`` comparison cases report clean (the others
+    are also caught by the alias ban or a specific handler); restored.
     """
     assert _flagged(tmp_path, rname, "def some_helper(*args, **kwargs):\n    pass\n\n\n" + _in_test(statement)) is True
 
@@ -213,8 +214,8 @@ def test_reload_bound_to_a_local_name_is_flagged(tmp_path: Path) -> None:
     """``r = importlib.reload; r(m)`` — any reference to ``reload`` other than a
     direct call with a provably non-kairix module fails.
 
-    Sabotage proof (executed): make ``_reload_violation`` skip references that
-    are not direct calls → reports clean; restored.
+    Sabotage proof (executed): turn off BOTH the alias ban and the reload
+    rule for non-direct references → reports clean; restored.
     """
     body = "import json\n\n\n" + _in_test("r = importlib.reload", "r(json)")
     assert _flagged(tmp_path, "sys.modules", body) is True
@@ -373,7 +374,7 @@ MODULE_CASES: list[tuple[str, str, bool]] = [
     ("os.environ", 'monkeypatch.setattr(os, "chown", stub)', False),
     ("sys.modules", 'frozen = getattr(sys, "frozen", False)', False),
     ("sys.modules", 'monkeypatch.setattr(sys, "argv", ["x"])', False),
-    ("os.environ", "alias = os\n    cwd = alias.getcwd()", False),
+    ("os.environ", 'alias = os\nvalue = alias.environ.get("PATH")', True),
 ]
 
 
@@ -388,7 +389,7 @@ def test_guarded_module_object_is_default_deny(tmp_path: Path, rname: str, state
     ``environ`` / ``modules``.
 
     Sabotage proof (executed): make ``MappingGuard.classify_module`` return
-    ``[]`` → every ``True`` case reports clean; restored.
+    ``[]`` → every ``True`` case except the alias row (the alias ban) reports clean; restored.
     """
     body = "def some_helper(*args, **kwargs):\n    pass\n\n\ndef test_x(monkeypatch, stub, name):\n"
     body += "".join(f"    {line}\n" for line in statement.splitlines())
@@ -459,3 +460,147 @@ def test_codex_receiver_side_spellings_are_flagged(tmp_path: Path, rname: str, b
     """Closed by the two rules, not per spelling: the module object passed to
     any callable (a), and helper methods on any receiver (b)."""
     assert _flagged(tmp_path, rname, body) is True
+
+
+# ---------------------------------------------------------------------------
+# Aliasing a guarded object is itself a violation (no alias chasing).
+# ---------------------------------------------------------------------------
+
+#: (detector, the guarded object as a direct expression)
+GUARDED_OBJECTS: list[tuple[str, str]] = [
+    ("os.environ", "os.environ"),
+    ("os.environ", "os"),
+    ("os.environ", "os.environ.get"),
+    ("os.environ", "monkeypatch.setenv"),
+    ("os.environ", "getattr"),
+    ("sys.modules", "sys.modules"),
+    ("sys.modules", "sys"),
+    ("sys.modules", "sys.modules.pop"),
+    ("sys.modules", "importlib"),
+    ("sys.modules", "importlib.reload"),
+    ("sys.modules", "monkeypatch.setattr"),
+]
+
+#: binding forms, ``G`` = the guarded object
+BINDING_FORMS: dict[str, str] = {
+    "assignment": "alias = G",
+    "annotated": "alias: object = G",
+    "walrus": "if (alias := G):\n        pass",
+    "default-argument": "def inner(alias=G):\n        return None",
+    "for-target": "for alias in (G,):\n        pass",
+    "with-target": "with G as alias:\n        pass",
+    "tuple-unpacking": "alias, other = G, None",
+    "conditional": "alias = G if stub else None",
+    "return": "return G",
+    "yield": "yield G",
+    "lambda": "inner = lambda: G",
+}
+
+
+@pytest.mark.parametrize(
+    ("rname", "obj", "form"),
+    [pytest.param(r, o, f, id=f"{o}-{f}") for r, o in GUARDED_OBJECTS for f in BINDING_FORMS],
+)
+def test_aliasing_a_guarded_object_is_forbidden(tmp_path: Path, rname: str, obj: str, form: str) -> None:
+    """Binding a guarded object to a name, by any binding form, fails — guarded
+    objects are only ever used in the direct form, so nothing is chased.
+
+    Sabotage proof (executed): make ``MappingGuard.alias_findings`` return
+    ``[]`` → the cases with no other violating use report clean; restored.
+    """
+    statement = BINDING_FORMS[form].replace("G", obj)
+    body = "def test_x(monkeypatch, stub):\n" + "".join(f"    {line}\n" for line in statement.splitlines())
+    path = tmp_path / "test_sample.py"
+    header = "import importlib\nimport os\nimport sys\n\n\n"
+    source = header + body + "\n# environ modules setenv setattr reload\n"
+    compile(source, str(path), "exec")  # a malformed sample must fail loudly
+    path.write_text(source, encoding="utf-8")
+    assert DETECTORS[rname][2](path) is True
+
+
+@pytest.mark.parametrize("copy_expr", ["dict(os.environ)", "os.environ.copy()", "{**os.environ}"])
+def test_binding_a_copy_is_allowed(tmp_path: Path, copy_expr: str) -> None:
+    """A COPY is a different object — binding it is fine."""
+    assert _flagged(tmp_path, "os.environ", _in_test(f"snapshot = {copy_expr}")) is False
+
+
+# ---------------------------------------------------------------------------
+# The five Codex items at a6409d6.
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_bound_in_a_nested_def_does_not_exempt_a_restore(tmp_path: Path) -> None:
+    """Snapshot discovery reads only statements DIRECTLY in the fixture body —
+    a ``snapshot`` bound inside a nested def cannot exempt a teardown write.
+
+    Sabotage proof (executed): restore ``ast.walk(fn)`` snapshot discovery →
+    reports clean; restored.
+    """
+    source = """import os
+
+import pytest
+
+
+@pytest.fixture
+def _restored():
+    def _capture():
+        snapshot = dict(os.environ)
+        return snapshot
+
+    yield
+    os.environ.update(snapshot)
+"""
+    path = tmp_path / "test_sample.py"
+    path.write_text(source, encoding="utf-8")
+    assert any("os.environ.update" in v for v in file_violations(path))
+
+
+def test_unrelated_local_named_like_an_alias_is_not_tainted(tmp_path: Path) -> None:
+    """The false positive: ``env = os.environ`` in one test must not make an
+    unrelated ``env = {}; env["KAIRIX_X"] = 1`` in another test a violation.
+    Only the aliasing line itself is reported.
+
+    Sabotage proof (executed): re-introduce the receiver alias fixpoint in
+    ``ProcessMapping.resolve`` → line 10 is reported too; restored.
+    """
+    source = """import os
+
+
+def test_a():
+    env = os.environ
+    return None
+
+
+def test_b():
+    env = {}
+    env["KAIRIX_X"] = 1
+"""
+    path = tmp_path / "test_sample.py"
+    path.write_text(source, encoding="utf-8")
+    assert file_violations(path) == ["5: aliases os.environ (assignment)"]
+
+
+def test_module_passed_to_an_arbitrary_helper_with_a_harmless_string_is_flagged(tmp_path: Path) -> None:
+    """``mutate(os, "path")`` — no "next argument is a harmless string"
+    exemption: only builtin getattr / hasattr and ``<x>.setattr`` / ``.delattr``
+    / ``patch.object`` may receive the module, with a static attribute name.
+
+    Sabotage proof (executed): accept any call whose next argument is a static
+    non-environ string (the old rule) → reports clean; restored.
+    """
+    body = "def mutate(module, name):\n    pass\n\n\n" + _in_test('mutate(os, "path")')
+    assert _flagged(tmp_path, "os.environ", body) is True
+
+
+def test_importlib_module_bound_to_a_name_is_flagged(tmp_path: Path) -> None:
+    """``loader = importlib; loader.reload(kairix.paths)`` — binding the
+    importlib module is itself a violation."""
+    body = "import kairix.paths\n\n\n" + _in_test("loader = importlib", "loader.reload(kairix.paths)")
+    assert _flagged(tmp_path, "sys.modules", body) is True
+
+
+def test_bound_setenv_helper_is_flagged(tmp_path: Path) -> None:
+    """``setter = monkeypatch.setenv; setter("KAIRIX_X", v)`` — binding the helper
+    method is itself a violation."""
+    body = _in_test("setter = monkeypatch.setenv", 'setter("KAIRIX_X", "v")')
+    assert _flagged(tmp_path, "os.environ", body) is True
