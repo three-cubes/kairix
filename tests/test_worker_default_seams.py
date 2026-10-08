@@ -91,8 +91,7 @@ pytestmark = pytest.mark.unit
 _skip_with_live_credentials = pytest.mark.skipif(
     os.environ.get("KAIRIX_E2E") == "1",
     reason=(
-        "KAIRIX_E2E=1 keeps the operator's real provider/Neo4j credentials; this test pins the "
-        "no-credential degraded path of a production _default_* seam and must not run it live"
+        "KAIRIX_E2E=1 keeps real provider/Neo4j credentials; this pins the no-credential path of a _default_* seam"
     ),
 )
 

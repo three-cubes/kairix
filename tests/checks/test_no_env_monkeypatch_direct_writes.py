@@ -491,7 +491,7 @@ def test_patch_dict_keyword_form_is_flagged(tmp_path: Path, call: str) -> None:
 def test_patch_dict_keyword_form_on_other_dicts_is_not_flagged(tmp_path: Path) -> None:
     src = (
         "from unittest.mock import patch\n\n\ndef test_x(cfg):\n"
-        '    with patch.dict(in_dict=cfg, values={"KAIRIX_DB_PATH": "x"}):\n        pass\n'
+        + '    with patch.dict(in_dict=cfg, values={"KAIRIX_DB_PATH": "x"}):\n        pass\n'
     )
     assert _violations(tmp_path, src) == []
 
@@ -572,7 +572,7 @@ def test_clear_then_unconditional_restore_is_recognised(tmp_path: Path, body: st
         "    os.environ.clear()\n\n    def _restore():\n        os.environ.update(snapshot)\n\n    _restore()",
         "    os.environ.clear()\n    restore = lambda: os.environ.update(snapshot)\n    restore()",
         "    try:\n        os.environ.clear()\n        os.environ.update(snapshot)\n"
-        "    except Exception:\n        pass",
+        + "    except Exception:\n        pass",
         "    if flag:\n        os.environ.clear()\n        os.environ.update(snapshot)",
         "    os.environ.update(snapshot)\n    os.environ.clear()",
     ],

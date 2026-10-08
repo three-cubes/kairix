@@ -203,7 +203,7 @@ def test_sys_modules_key_returned_by_a_helper_call_is_flagged(tmp_path: Path) ->
     """
     src = (
         'import sys\n\n\ndef module_key():\n    return "kairix.paths"\n\n\n'
-        "def test_x():\n    sys.modules.pop(module_key(), None)\n"
+        + "def test_x():\n    sys.modules.pop(module_key(), None)\n"
     )
     assert _flagged(tmp_path, src) is True
 

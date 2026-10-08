@@ -118,7 +118,7 @@ def _module_source(header: str, setup: str, statement: str) -> str:
     body = f"    {setup}\n" if setup else ""
     return (
         f"{header}\nfrom types import SimpleNamespace\nfrom unittest import mock\nfrom unittest.mock import patch\n\n\n"
-        f"def test_x(monkeypatch):\n{body}    {statement}\n"
+        + f"def test_x(monkeypatch):\n{body}    {statement}\n"
     )
 
 
@@ -245,8 +245,8 @@ def test_monkeypatch_context_target_is_resolved(tmp_path: Path) -> None:
     """``with pytest.MonkeyPatch.context() as mp:`` — ``mp`` is a MonkeyPatch."""
     source = (
         "import pytest\n\n\ndef test_x():\n"
-        "    with pytest.MonkeyPatch.context() as mp:\n"
-        '        mp.setenv("KAIRIX_DB_PATH", "v")\n'
+        + "    with pytest.MonkeyPatch.context() as mp:\n"
+        + '        mp.setenv("KAIRIX_DB_PATH", "v")\n'
     )
     assert _flagged(tmp_path, _ENV, source) is True
 
@@ -296,6 +296,71 @@ def test_reload_of_ordinary_module_by_keyword_is_not_flagged(tmp_path: Path) -> 
     path = tmp_path / "test_sample.py"
     path.write_text("import importlib\nimport json\nimportlib.reload(module=json)\n", encoding="utf-8")
     assert _MODS.flagged(path) is False
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import importlib\nmodule = importlib.import_module("kairix.paths")\nimportlib.reload(module)\n',
+        'import importlib\nimport sys\nmodule = sys.modules["kairix.paths"]\nimportlib.reload(module)\n',
+        "import importlib\nimport kairix.paths\nmodule = kairix.paths\nimportlib.reload(module)\n",
+        'import importlib\nfirst = importlib.import_module("kairix.paths")\nsecond = first\nimportlib.reload(second)\n',
+        'import importlib\nmodule = importlib.import_module("kairix.paths")\nmodule.provider_name = None\n',
+    ],
+    ids=["import_module", "sys_modules", "attribute", "chain", "attribute_assign"],
+)
+def test_locally_bound_kairix_module_is_resolved(tmp_path: Path, source: str) -> None:
+    """A local name bound to a kairix module (``import_module``,
+    ``sys.modules[...]``, an imported module, or a chain of names) is a kairix
+    module ref — reloading or patching it is F1.
+
+    Sabotage proof (executed): make ``_bind_local_module_aliases`` a no-op →
+    every case reports clean; restored.
+    """
+    path = tmp_path / "test_sample.py"
+    path.write_text(source, encoding="utf-8")
+    assert _MODS.flagged(path) is True
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import importlib\nmodule = importlib.import_module("json")\nimportlib.reload(module)\n',
+        'import importlib\nimport sys\nmodule = sys.modules["openai"]\nimportlib.reload(module)\n',
+    ],
+    ids=["import_module_json", "sys_modules_openai"],
+)
+def test_locally_bound_external_module_reload_is_not_flagged(tmp_path: Path, source: str) -> None:
+    """Reloading a locally bound stdlib / third-party module stays allowed."""
+    path = tmp_path / "test_sample.py"
+    path.write_text(source, encoding="utf-8")
+    assert _MODS.flagged(path) is False
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import importlib\nimportlib.reload(importlib.import_module("kai" + "rix.paths"))\n',
+        'from unittest.mock import patch\npatch("kai" + "rix.paths.provider_name").start()\n',
+        'def test_x(monkeypatch):\n    monkeypatch.setattr("kai" + "rix.paths.provider_name", None)\n',
+        'def test_x(monkeypatch):\n    monkeypatch.delattr("kai" + "rix.paths.provider_name")\n',
+    ],
+    ids=["reload", "patch", "setattr", "delattr"],
+)
+def test_folded_kairix_name_without_the_kairix_token_is_flagged(tmp_path: Path, source: str) -> None:
+    """The F1 prefilter keys on call / receiver tokens, never on the
+    ``kairix`` name alone — a file that only ASSEMBLES the name by constant
+    folding is still parsed, and its folded string targets resolve.
+
+    Sabotage proof (executed): narrow ``_PREFILTER`` back to
+    ``kairix|modules`` → every case reports clean (the file is never
+    parsed); and make ``is_kairix_string`` accept bare literals only → the
+    patch / setattr / delattr cases report clean; restored.
+    """
+    assert "kairix" not in source
+    path = tmp_path / "test_sample.py"
+    path.write_text(source, encoding="utf-8")
+    assert _MODS.flagged(path) is True
 
 
 # ---------------------------------------------------------------------------

@@ -102,7 +102,12 @@ For "importing X has no side effects", import X in a fresh interpreter
 reloading it in the shared test process.
 
 next: re-run ``python3 scripts/checks/check_no_internal_patches.py``
-to confirm the gate goes green.
+to confirm the gate goes green. The gate covers every statically resolvable
+spelling (aliases, signature binding, constant folding, spreads treated as
+possibly protected); a target computed at runtime from non-constant data is
+out of its scope by design and is a code-review concern — inject the
+dependency through a seam rather than reshaping the patch to slip past the
+gate.
 run: bash scripts/safe-commit.sh "refactor(<area>): inject Fake via DI seam"
 
 Pass example:
@@ -285,10 +290,13 @@ def _is_inside_pytest_raises(parent_map: dict[ast.AST, ast.AST], node: ast.AST) 
 
 _KAIRIX_MODULES = ProtectedKeys(prefixes=("kairix.",), exact=("kairix",))
 
-#: Cheap pre-parse filter: every F1 shape names a kairix target (``kairix``
-#: appears in the import or the string target) or writes ``sys.modules``. A file
-#: with neither token cannot violate, so it is never parsed.
-_PREFILTER = re.compile(r"kairix|modules")
+#: Cheap pre-parse filter on the CALL / RECEIVER tokens every F1 shape needs —
+#: never on the kairix NAME alone, which constant folding can assemble
+#: (``"kai" + "rix.paths"``): a ``kairix`` import or string, ``sys.modules``,
+#: ``reload`` / ``import_module``, or a ``patch`` / ``setattr`` / ``delattr``
+#: helper. A file with none of these tokens cannot violate, so it is never
+#: parsed.
+_PREFILTER = re.compile(r"kairix|modules|reload|import_module|patch|setattr|delattr")
 
 
 def _is_kairix_module_name(value: str) -> bool:
@@ -308,12 +316,34 @@ class _F1Ctx:
         self.reload_names = index.from_imports("importlib", "reload")
         # ``from importlib import import_module [as load]`` — tracked like reload.
         self.import_module_names = index.from_imports("importlib", "import_module") | {"__import__"}
+        self._bind_local_module_aliases()
+
+    def _bind_local_module_aliases(self) -> None:
+        """Feed locally bound kairix modules into the alias table, to a fixpoint.
+
+        ``module = importlib.import_module("kairix.paths")``,
+        ``module = sys.modules["kairix.paths"]`` and ``module = kairix.paths``
+        (or a chain of such names) bind a kairix module object exactly like an
+        ``import`` does, so ``importlib.reload(module)`` / ``module.x = fake``
+        are caught — the same fixpoint the receiver resolver uses.
+        """
+        changed = True
+        while changed:
+            changed = False
+            for name, value in self.index.name_bindings:
+                if name not in self.aliases and self.is_kairix_module_ref(value):
+                    self.aliases[name] = "kairix"
+                    changed = True
 
     def is_kairix_key(self, expr: ast.expr | None) -> bool:
         return expr is not None and key_is_protected(expr, _KAIRIX_MODULES, self.tainted)
 
     def is_kairix_string(self, expr: ast.expr | None) -> bool:
-        return isinstance(expr, ast.Constant) and isinstance(expr.value, str) and _is_kairix_module_name(expr.value)
+        """A dotted-path string target that resolves to kairix — a literal, a
+        constant-folded expression (``"kai" + "rix.paths.x"``) or a tainted name."""
+        if expr is None or isinstance(expr, ast.Attribute):
+            return False
+        return self.is_kairix_key(expr)
 
     def is_reload(self, func: ast.expr) -> bool:
         return is_module_attr(func, self.importlib_names, "reload", self.reload_names)

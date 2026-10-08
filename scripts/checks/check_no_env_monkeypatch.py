@@ -88,7 +88,11 @@ boundary) — the boundary-only pattern from #139. A non-KAIRIX_ test-only
 variable name is fine when the code under test hydrates arbitrary keys.
 next: re-run ``python3 scripts/checks/check_no_env_monkeypatch.py``
 (or ``python3 scripts/checks/run_checks.py --gate F2``) to confirm the
-gate goes green.
+gate goes green. The gate covers every statically resolvable spelling
+(aliases, signature binding, constant folding, spreads treated as possibly
+protected); a key computed at runtime from non-constant data is out of its
+scope by design and is a code-review concern — inject it through a seam
+rather than reshaping it to slip past the gate.
 run: bash scripts/safe-commit.sh "test(<area>): inject env via seam instead of mutating os.environ"
 
 Pass example:

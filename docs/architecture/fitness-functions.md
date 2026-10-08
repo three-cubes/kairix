@@ -400,13 +400,27 @@ the Fake* at construction.
 `scripts/checks/check_no_internal_patches.py` is an in-process
 `FitnessRule` over `tests/` (so the staged runner narrows it to the staged
 test files; `--all` / CI scan every file). The detector is AST-based,
-parses each file once (after a cheap `kairix|modules` token prefilter) into a
-single-traversal `ModuleIndex`, walks each test file's imports to resolve aliases, and
-flags any of the eight shapes against the alias-resolved root.
-Multi-line constructs, aliased imports
+parses each file once (after a cheap token prefilter on the call / receiver
+tokens every shape needs — `kairix`, `modules`, `reload`, `import_module`,
+`patch`, `setattr`, `delattr` — never on the kairix name alone, which
+folding can assemble) into a single-traversal `ModuleIndex`, walks each test
+file's imports to resolve aliases (plus local names bound to a kairix module:
+`m = importlib.import_module("kairix.paths")`, `m = sys.modules[...]`,
+`m = kairix.paths`), and flags any of the eight shapes against the
+alias-resolved root. Multi-line constructs, aliased imports
 (`import kairix.paths as paths_mod`), from-imports
 (`from kairix import providers as providers_mod`), and full-path
 forms (`kairix.paths.provider_name = ...`) are all caught.
+
+**Scope.** F1 covers every *statically resolvable* spelling: import and
+local aliases followed to a fixpoint, every call bound by signature
+(positional or keyword), constant-folded names (`+`, f-strings, `%`,
+`.format`), keys and helpers traced through the taint pass, and `*args` /
+`**kw` spreads treated as possibly protected. A name computed at runtime
+from non-constant data (read from a file, built from user input, assembled
+via `getattr` on a computed string) is out of scope by design: static
+analysis cannot decide it, so it is left to code review rather than chased
+spelling by spelling.
 
 The detector's own tests live at
 `tests/architecture/test_check_no_internal_patches.py` (shapes 1-6) and
@@ -579,6 +593,16 @@ token prefilter and one parse + one traversal per file. The write surface is the
 `scripts/checks/_ast_key_taint.py`. Detector tests:
 `tests/checks/test_no_env_monkeypatch_direct_writes.py` and the
 table-driven `tests/checks/test_mapping_write_surface.py`.
+
+**Scope.** F2 covers every *statically resolvable* spelling: import and
+local aliases followed to a fixpoint, every call bound by signature
+(positional or keyword), constant-folded names (`+`, f-strings, `%`,
+`.format`), keys and helpers traced through the taint pass, and `*args` /
+`**kw` spreads treated as possibly protected. A name computed at runtime
+from non-constant data (read from a file, built from user input, assembled
+via `getattr` on a computed string) is out of scope by design: static
+analysis cannot decide it, so it is left to code review rather than chased
+spelling by spelling.
 
 #### Examples
 
