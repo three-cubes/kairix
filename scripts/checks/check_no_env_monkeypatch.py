@@ -61,22 +61,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import re
 
-from _ast_key_taint import ModuleIndex, ProtectedKeys, enclosing_function, parse_index, tainted_names
+from _ast_key_taint import ConstantTable, ModuleIndex, ProtectedKeys, immediate_scope, parse_index
 from _fitness_rule import FitnessRule
-from _mapping_writes import ProcessMapping, WriteSurface
+from _mapping_writes import MappingGuard, ProcessMapping
 from tc_fitness import gate_keys
 
 # REMEDIATION — the user-facing F21 message the gate prints on failure.
 REMEDIATION = """KAIRIX_* process-env write found in a test. Refactor to an explicit
 ``env=`` mapping / ``paths=FakePaths(...)`` / Deps seam to pass.
 
-Covers every MutableMapping write on os.environ (subscript assign / del,
-|=, __setitem__ / __delitem__ / pop / setdefault / update, clear / popitem),
-replacing os.environ wholesale, monkeypatch setenv / delenv / setitem /
-delitem / setattr / delattr (any MonkeyPatch instance, positional or keyword
-arguments), and patch.dict / patch.object / patch on os.environ — through
-any alias (import os as o, from os import environ, env = os.environ). A key
-held in a variable or returned by a helper counts too.
+The gate is DEFAULT-DENY: every reference to os.environ (any alias, incl.
+env = os.environ) must be an allow-listed read — R[k], R.get / copy / items /
+keys / values, k in R, len(R), dict(R), {**R}, iteration, env=R to
+subprocess / os.exec* — or a write PROVEN to touch only non-KAIRIX_ keys.
+Anything else fails: clear() / popitem(), passing R to any helper, returning
+it, replacing it, monkeypatch.setenv / delenv / setitem / patch.dict with a
+key that does not resolve statically to a non-KAIRIX_ value.
 
 fix: pass the value through the production seam instead of the process
 env — ``paths=FakePaths(...)`` from tests/fakes.py, an ``env={...}``
@@ -88,11 +88,9 @@ boundary) — the boundary-only pattern from #139. A non-KAIRIX_ test-only
 variable name is fine when the code under test hydrates arbitrary keys.
 next: re-run ``python3 scripts/checks/check_no_env_monkeypatch.py``
 (or ``python3 scripts/checks/run_checks.py --gate F2``) to confirm the
-gate goes green. The gate covers every statically resolvable spelling
-(aliases, signature binding, constant folding, spreads treated as possibly
-protected); a key computed at runtime from non-constant data is out of its
-scope by design and is a code-review concern — inject it through a seam
-rather than reshaping it to slip past the gate.
+gate goes green. An unresolved key counts as protected: make a genuinely
+non-KAIRIX_ key a literal / module constant the gate can prove, or — for a
+KAIRIX_ value — inject it through a seam rather than reshaping the write.
 run: bash scripts/safe-commit.sh "test(<area>): inject env via seam instead of mutating os.environ"
 
 Pass example:
@@ -121,31 +119,32 @@ process env to influence the production read."""
 _KEYS = ProtectedKeys(prefixes=("KAIRIX_",))
 _MARKER = "KAIRIX_*"
 
-#: Cheap pre-parse filter: every F2 write names ``environ`` (any receiver
-#: spelling resolves through an ``os`` import / ``environ`` binding) or calls a
-#: ``setenv`` / ``delenv`` helper. A file with none of these tokens cannot
-#: violate, so it is never parsed.
-_PREFILTER = re.compile(r"environ|setenv|delenv")
+#: Cheap pre-parse filter on the tokens every F2 violation needs: the
+#: ``environ`` name itself, a ``setenv`` / ``delenv`` helper, or a ``patch`` /
+#: ``setattr`` / ``delattr`` / ``getattr`` that could reach ``os.environ``
+#: through a constant-folded name (``"os.en" + "viron"``). A file with none of
+#: these tokens cannot reference the mapping, so it is never parsed.
+_PREFILTER = re.compile(r"environ|setenv|delenv|patch|setattr|delattr|getattr")
 
 
 class _Ctx:
-    """Per-file resolution state: the shared ``os.environ`` write surface."""
+    """Per-file resolution state: the shared default-deny ``os.environ`` guard."""
 
     def __init__(self, index: ModuleIndex, path: Path) -> None:
         self.path = path
         self.index = index
-        self.tainted = tainted_names(index, _KEYS)
         self.environ = ProcessMapping.resolve(index, "os", "environ")
-        self.surface = WriteSurface(index, self.environ, _KEYS, self.tainted, _MARKER)
+        self.guard = MappingGuard(index, self.environ, _KEYS, ConstantTable(index), _MARKER)
         self.parents = index.parents
 
     def is_environ(self, expr: ast.expr) -> bool:
         return self.environ.is_receiver(expr)
 
 
-def _statement_shapes(node: ast.AST, ctx: _Ctx) -> list[str]:
-    """Every KAIRIX_* env write ``node`` performs (see ``_mapping_writes``)."""
-    return ctx.surface.writes(node)
+def _findings(ctx: _Ctx) -> list[tuple[ast.AST, str]]:
+    """Every reference to ``os.environ`` outside the read allow-list that is not
+    a provably safe write, plus helper-only writes (see ``_mapping_writes``)."""
+    return ctx.guard.findings()
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +293,25 @@ def _followed_by_full_restore(
     if body is None:
         return False
     position = next(i for i, s in enumerate(body) if s is stmt)
-    return any(_is_snapshot_update_stmt(later, snapshots, ctx) for later in body[position + 1 :])
+    for later in body[position + 1 :]:
+        if _is_snapshot_update_stmt(later, snapshots, ctx):
+            return True
+        if _may_exit_early(later):
+            return False  # an early ``return`` / ``raise`` before the restore voids it
+    return False
+
+
+def _may_exit_early(stmt: ast.stmt) -> bool:
+    """``stmt`` contains a ``return`` / ``raise`` outside any nested function."""
+    stack: list[ast.AST] = [stmt]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Return, ast.Raise)):
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return False
 
 
 def _is_genuine_restore(
@@ -333,12 +350,13 @@ def _is_genuine_restore(
 
 
 def _is_recognised_boundary(node: ast.AST, ctx: _Ctx) -> bool:
-    fn = enclosing_function(ctx.parents, node)
-    while fn is not None:
-        if _is_session_baseline(fn, ctx) or _is_snapshot_restore(fn, node, ctx):
-            return True
-        fn = enclosing_function(ctx.parents, fn)
-    return False
+    """Only a statement DIRECTLY in the fixture's own body is exempt: the
+    innermost ``def`` / ``lambda`` around ``node`` must be the fixture itself, so
+    a nested function, lambda or yielded / returned callback inherits nothing."""
+    scope = immediate_scope(ctx.parents, node)
+    if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    return _is_session_baseline(scope, ctx) or _is_snapshot_restore(scope, node, ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -352,12 +370,10 @@ def file_violations(path: Path) -> list[str]:
     if index is None:
         return []
     ctx = _Ctx(index, path)
-    found: list[tuple[int, str]] = []
-    for node in index.candidates:
-        shapes = _statement_shapes(node, ctx)
-        if shapes and not _is_recognised_boundary(node, ctx):
-            found.extend((getattr(node, "lineno", 0), s) for s in shapes)
-    return [f"{line}: {shape}" for line, shape in sorted(found)]
+    found = {
+        (getattr(node, "lineno", 0), label) for node, label in _findings(ctx) if not _is_recognised_boundary(node, ctx)
+    }
+    return [f"{line}: {label}" for line, label in sorted(found)]
 
 
 def file_has_env_monkeypatch(path: Path) -> bool:

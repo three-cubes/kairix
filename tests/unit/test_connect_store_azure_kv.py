@@ -318,11 +318,9 @@ def test_lazy_import_real_azure_keyvault_returns_client() -> None:
 def test_lazy_import_azure_keyvault_raises_typed(monkeypatch: Any) -> None:
     """When ``azure-keyvault-secrets`` isn't installed the client build surfaces a typed error."""
     import builtins
-    import sys
 
-    for key in list(sys.modules):
-        if key.startswith("azure"):
-            monkeypatch.delitem(sys.modules, key, raising=False)
+    # No sys.modules eviction needed: an ``import`` statement always calls
+    # ``builtins.__import__`` (patched below), cached module or not.
     original = builtins.__import__
 
     def blocked(name: str, *args: object, **kwargs: object) -> object:

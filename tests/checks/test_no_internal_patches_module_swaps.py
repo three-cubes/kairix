@@ -12,10 +12,10 @@ implementation no production process runs. This module pins shape 7 (the
 key/receiver resolution, and the third-party negatives that stay allowed.
 
 Sabotage proofs (executed — mutate the detector, confirm red, restore, green):
-  * every shape-7 positive fails when ``_is_module_swap`` skips its
-    ``sys.modules`` branches (``return False`` after the reload check);
-  * every shape-8 positive fails when the ``ctx.is_reload(...)`` condition
-    is replaced with ``False``.
+  * every shape-7 positive fails when ``file_has_internal_patch`` stops
+    consulting the shared default-deny ``MappingGuard`` (``ctx.guard``);
+  * every shape-8 positive fails when ``_reload_violation`` returns
+    ``False``.
 """
 
 from __future__ import annotations
@@ -67,10 +67,9 @@ def _flagged(tmp_path: Path, source: str) -> bool:
 def test_sys_modules_swap_of_kairix_module_is_flagged(tmp_path: Path, statement: str) -> None:
     """Every write / eviction form on a ``kairix`` module key is a violation.
 
-    Sabotage proof (executed): in ``_is_module_swap`` return ``False`` right
-    after the reload check, i.e. stop consulting the shared ``WriteSurface``
-    → every parametrised case reports clean and fails;
-    restored.
+    Sabotage proof (executed): stop consulting ``ctx.guard.findings()`` in
+    ``file_has_internal_patch`` → every parametrised case reports clean and
+    fails; restored.
     """
     src = f"import sys\n\n\ndef test_x(monkeypatch, broken, name):\n    {statement}\n"
     assert _flagged(tmp_path, src) is True
@@ -79,8 +78,9 @@ def test_sys_modules_swap_of_kairix_module_is_flagged(tmp_path: Path, statement:
 def test_sys_modules_key_held_in_a_variable_is_flagged(tmp_path: Path) -> None:
     """``name = "kairix.X"; sys.modules[name] = m`` — the literal one hop away.
 
-    Sabotage proof (executed): make ``tainted_names`` return ``set()`` →
-    the variable key no longer resolves to kairix and this fails; restored.
+    Sabotage proof (executed): make ``ConstantTable.name_strings`` claim
+    every name is the empty (provably safe) set → the variable key no longer
+    resolves to kairix and this fails; restored.
     """
     src = """
 import sys
@@ -137,9 +137,8 @@ def test_third_party_swaps_and_reads_are_not_flagged(tmp_path: Path, statement: 
 def test_reload_of_kairix_module_is_flagged(tmp_path: Path, source: str) -> None:
     """Reloading a kairix module, however it is referenced, is a violation.
 
-    Sabotage proof (executed): replace ``ctx.is_reload(node.func)`` in
-    ``_is_module_swap`` with ``False`` → every parametrised case reports
-    clean and fails; restored.
+    Sabotage proof (executed): make ``_reload_violation`` return ``False``
+    → every parametrised case reports clean and fails; restored.
     """
     assert _flagged(tmp_path, source) is True
 
@@ -180,10 +179,9 @@ def test_sys_modules_update_with_opaque_mapping_is_flagged(tmp_path: Path, state
     """An opaque ``sys.modules.update`` payload can install a kairix module the
     AST cannot see — treated like F2's opaque ``os.environ.update``.
 
-    Sabotage proof (executed): make ``WriteSurface.mapping_may_carry`` inspect only
-    dict literals (return ``False`` for anything else) → the variable, call
-    and comprehension cases report clean (``**mods`` is still caught as a
-    spread); restored.
+    Sabotage proof (executed): make ``MappingGuard.payload_safe`` accept
+    any non-dict payload → the variable, call and comprehension cases report
+    clean (``**mods`` is still caught as a spread); restored.
     """
     src = f"import sys\n\n\ndef test_x(mods, build_mods, names, stub):\n    {statement}\n"
     assert _flagged(tmp_path, src) is True
@@ -198,8 +196,8 @@ def test_sys_modules_key_returned_by_a_helper_call_is_flagged(tmp_path: Path) ->
     """``sys.modules.pop(module_key(), None)`` with a helper returning a
     ``"kairix..."`` literal.
 
-    Sabotage proof (executed): drop the ``ast.Call`` branch of
-    ``key_is_protected`` → reports clean; restored.
+    Sabotage proof (executed): make ``ConstantTable._call`` claim every
+    helper returns the empty (provably safe) set → reports clean; restored.
     """
     src = (
         'import sys\n\n\ndef module_key():\n    return "kairix.paths"\n\n\n'

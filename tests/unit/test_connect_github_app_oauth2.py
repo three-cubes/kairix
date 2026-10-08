@@ -255,12 +255,9 @@ def test_default_token_exchanger_raises_when_pyjwt_absent(
     translation honours the F21 contract.
     """
     import builtins
-    import sys
 
-    # Drop any cached jwt module so the lazy import fires.
-    for key in list(sys.modules):
-        if key == "jwt" or key.startswith("jwt."):
-            monkeypatch.delitem(sys.modules, key, raising=False)
+    # No sys.modules eviction needed: an ``import`` statement always calls
+    # ``builtins.__import__`` (patched below), cached module or not.
     original_import = builtins.__import__
 
     def blocking_import(name: str, *args: Any, **kwargs: Any) -> Any:

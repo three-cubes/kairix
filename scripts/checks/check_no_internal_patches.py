@@ -13,7 +13,9 @@ matches one of eight shapes:
    ref-target form. ``<monkeypatch>`` is the fixture, any
    ``pytest.MonkeyPatch()`` instance, or a ``MonkeyPatch.context()`` target;
    arguments are bound by signature (``target=`` / ``name=``).
-7. any WRITE to ``sys.modules`` that can touch a kairix module — the full
+7. any reference to ``sys.modules`` outside the read allow-list (DEFAULT-DENY,
+   the shared ``_mapping_writes.MappingGuard``) unless it is a write PROVEN to
+   touch only non-kairix keys. Historically enumerated as: the full
    ``MutableMapping`` mutation surface of the shared engine
    ``_mapping_writes`` (subscript assign / augassign / del, ``|=``,
    ``__setitem__`` / ``__delitem__`` / ``pop`` / ``setdefault`` /
@@ -25,8 +27,10 @@ matches one of eight shapes:
    ``mods = sys.modules; m2 = mods``). Replacing (or evicting, then
    re-importing) a module object substitutes the whole kairix
    implementation — the same anti-pattern as ``@patch``, one level up.
-8. ``importlib.reload(module=<kairix module>)`` — positional or keyword,
-   through ``importlib`` / ``reload`` / ``import_module`` aliases.
+8. any reference to ``importlib.reload`` — called or aliased — unless it is
+   a direct call whose ``module`` is PROVABLY a non-kairix module (DEFAULT-DENY:
+   an unresolved argument fails), through ``importlib`` / ``reload`` /
+   ``import_module`` aliases.
    Re-executes module-level code to reset hidden singleton state, so the
    test passes against a module object no production process ever sees.
    Inject the state holder instead.
@@ -62,7 +66,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import re
 
-from _ast_key_taint import ModuleIndex, ProtectedKeys, is_module_attr, key_is_protected, parse_index, tainted_names
+from _ast_key_taint import UNKNOWN, VALUE, ConstantTable, ModuleIndex, ProtectedKeys, is_module_attr, parse_index
 from _fitness_rule import FitnessRule
 from _mapping_writes import (
     IMPORT_MODULE_SIGNATURE,
@@ -70,10 +74,9 @@ from _mapping_writes import (
     PATCH_OBJECT_SIGNATURE,
     PATCH_SIGNATURE,
     RELOAD_SIGNATURE,
+    MappingGuard,
     ProcessMapping,
-    WriteSurface,
     bind_call,
-    is_patch_ref,
 )
 
 REMEDIATION = """kairix-internal substitution found in a test (@patch / monkeypatch.setattr /
@@ -102,12 +105,13 @@ For "importing X has no side effects", import X in a fresh interpreter
 reloading it in the shared test process.
 
 next: re-run ``python3 scripts/checks/check_no_internal_patches.py``
-to confirm the gate goes green. The gate covers every statically resolvable
-spelling (aliases, signature binding, constant folding, spreads treated as
-possibly protected); a target computed at runtime from non-constant data is
-out of its scope by design and is a code-review concern — inject the
-dependency through a seam rather than reshaping the patch to slip past the
-gate.
+to confirm the gate goes green. The gate is DEFAULT-DENY for
+``sys.modules``, ``importlib.reload`` and dotted patch targets: a reference
+must be an allow-listed read (``sys.modules.get`` / ``in`` / subscript load /
+iteration) or a write / reload / target PROVEN non-kairix; an unresolved key,
+module or target counts as kairix. Make a genuinely external name a literal /
+constant the gate can prove, or inject the dependency through a seam rather
+than reshaping the patch.
 run: bash scripts/safe-commit.sh "refactor(<area>): inject Fake via DI seam"
 
 Pass example:
@@ -304,14 +308,16 @@ def _is_kairix_module_name(value: str) -> bool:
 
 
 class _F1Ctx:
-    """Per-file resolution state: kairix aliases + the shared ``sys.modules`` surface."""
+    """Per-file resolution state: kairix aliases, constants and the shared
+    default-deny ``sys.modules`` guard."""
 
     def __init__(self, index: ModuleIndex) -> None:
         self.index = index
+        self.constants = ConstantTable(index)
         self.aliases = _resolve_kairix_aliases(index)
-        self.tainted = tainted_names(index, _KAIRIX_MODULES)
+        self.external = _external_imports(index)
         self.sys_modules = ProcessMapping.resolve(index, "sys", "modules")
-        self.surface = WriteSurface(index, self.sys_modules, _KAIRIX_MODULES, self.tainted, "kairix.*")
+        self.guard = MappingGuard(index, self.sys_modules, _KAIRIX_MODULES, self.constants, "kairix.*")
         self.importlib_names = index.module_aliases("importlib")
         self.reload_names = index.from_imports("importlib", "reload")
         # ``from importlib import import_module [as load]`` — tracked like reload.
@@ -335,81 +341,166 @@ class _F1Ctx:
                     self.aliases[name] = "kairix"
                     changed = True
 
-    def is_kairix_key(self, expr: ast.expr | None) -> bool:
-        return expr is not None and key_is_protected(expr, _KAIRIX_MODULES, self.tainted)
+    # -- string targets / keys (default-deny) ------------------------------
 
-    def is_kairix_string(self, expr: ast.expr | None) -> bool:
-        """A dotted-path string target that resolves to kairix — a literal, a
-        constant-folded expression (``"kai" + "rix.paths.x"``) or a tainted name."""
-        if expr is None or isinstance(expr, ast.Attribute):
-            return False
-        return self.is_kairix_key(expr)
+    def provably_not_kairix(self, expr: ast.expr | None) -> bool:
+        """``expr`` is PROVABLY a non-kairix name / dotted path (unknown → False)."""
+        return expr is not None and self.constants.provably_outside(expr, _KAIRIX_MODULES)
+
+    def could_be_kairix(self, expr: ast.expr | None) -> bool:
+        return expr is not None and not self.provably_not_kairix(expr)
+
+    def is_object_target(self, expr: ast.expr) -> bool:
+        """``expr`` is PROVABLY an object, not a dotted string: a module / alias
+        reference, or a name bound only to non-string expressions (a call, a
+        class) — so ``setattr`` is the object overload even with ``value``
+        hidden behind a spread."""
+        if isinstance(expr, ast.Name) and (expr.id in self.aliases or expr.id in self.external):
+            return True
+        return self.constants.definitely_object(expr)
 
     def is_reload(self, func: ast.expr) -> bool:
         return is_module_attr(func, self.importlib_names, "reload", self.reload_names)
 
+    def is_importer(self, func: ast.expr) -> bool:
+        return (isinstance(func, ast.Attribute) and func.attr == "import_module") or (
+            isinstance(func, ast.Name) and func.id in self.import_module_names
+        )
+
+    # -- module objects ----------------------------------------------------
+
     def is_kairix_module_ref(self, expr: ast.expr | None) -> bool:
-        """``expr`` evaluates to a kairix module object."""
+        """``expr`` may evaluate to a kairix module object (positive evidence)."""
         if expr is None:
             return False
         if _resolves_to_kairix(expr, self.aliases):
             return True
         if isinstance(expr, ast.Subscript) and self.sys_modules.is_receiver(expr.value):
-            return self.is_kairix_key(expr.slice)
-        if isinstance(expr, ast.Call):
-            func = expr.func
-            # importlib.import_module("kairix.X") / an aliased
-            # ``from importlib import import_module as load`` / __import__("kairix.X")
-            is_importer = (isinstance(func, ast.Attribute) and func.attr == "import_module") or (
-                isinstance(func, ast.Name) and func.id in self.import_module_names
-            )
-            return is_importer and self.is_kairix_key(bind_call(expr, IMPORT_MODULE_SIGNATURE).get("name"))
+            return self.could_be_kairix(expr.slice)
+        if isinstance(expr, ast.Call) and self.is_importer(expr.func):
+            return self.could_be_kairix(bind_call(expr, IMPORT_MODULE_SIGNATURE).get("name"))
         return False
+
+    def provably_external_module(self, expr: ast.expr | None, seen: frozenset[str] = frozenset()) -> bool:
+        """``expr`` is PROVABLY a non-kairix module object (default-deny for reload)."""
+        if expr is None or self.is_kairix_module_ref(expr):
+            return False
+        if isinstance(expr, ast.Attribute):
+            root = _attribute_root_name(expr)
+            return root is not None and root in self.external and root not in self.aliases
+        if isinstance(expr, ast.Name):
+            return self._provably_external_name(expr.id, seen)
+        if isinstance(expr, ast.Subscript) and self.sys_modules.is_receiver(expr.value):
+            return self.provably_not_kairix(expr.slice)
+        if isinstance(expr, ast.Call) and self.is_importer(expr.func):
+            return self.provably_not_kairix(bind_call(expr, IMPORT_MODULE_SIGNATURE).get("name"))
+        return False
+
+    def _provably_external_name(self, name: str, seen: frozenset[str]) -> bool:
+        """Every binding of ``name`` is a non-kairix import or a provably
+        external module expression."""
+        if name in self.aliases or name in seen:
+            return False
+        bindings = self.index.value_bindings.get(name, [])
+        if not bindings:
+            return False
+        imported = name in self.external
+        for kind, source in bindings:
+            if kind == VALUE:
+                if not self.provably_external_module(source, seen | {name}):
+                    return False
+            elif not (kind == UNKNOWN and source is None and imported):
+                return False
+        return True
+
+
+def _external_imports(index: ModuleIndex) -> set[str]:
+    """Local names bound by an ``import`` / ``from-import`` of a NON-kairix module."""
+    names: set[str] = set()
+    for node in index.imports:
+        for alias in node.names:
+            if not _is_kairix_module_name(alias.name):
+                names.add(alias.asname or alias.name.split(".")[0])
+    for imported in index.import_froms:
+        if imported.module and imported.level == 0 and not _is_kairix_module_name(imported.module):
+            names.update(alias.asname or alias.name for alias in imported.names)
+    return names
 
 
 def _patch_shapes(call: ast.Call, ctx: _F1Ctx) -> bool:
-    """Shapes 1 + 2: ``patch("kairix.X")`` (decorator, ``with``, ``.start()``) and
-    ``patch.object(<kairix ref>, "attr")`` — target bound by signature."""
-    func = ctx.surface.patch
-    if is_patch_ref(call.func, func):
-        return ctx.is_kairix_string(bind_call(call, PATCH_SIGNATURE).get("target"))
-    if isinstance(call.func, ast.Attribute) and call.func.attr == "object" and is_patch_ref(call.func.value, func):
+    """Shapes 1 + 2: ``patch(target)`` — decorator, ``with``, ``.start()`` —
+    whose dotted ``target`` is not PROVABLY a non-kairix path (default-deny:
+    an unfoldable target fails), and ``patch.object(<kairix ref>, "attr")``."""
+    if ctx.guard.is_patch(call.func):
+        bound = bind_call(call, PATCH_SIGNATURE)
+        target = bound.get("target")
+        return bound.has_spread if target is None else ctx.could_be_kairix(target)
+    func = call.func
+    if isinstance(func, ast.Attribute) and func.attr == "object" and ctx.guard.is_patch(func.value):
         return ctx.is_kairix_module_ref(bind_call(call, PATCH_OBJECT_SIGNATURE).get("target"))
     return False
 
 
 def _monkeypatch_attr_shapes(call: ast.Call, ctx: _F1Ctx) -> bool:
-    """Shapes 5 + 6: ``<monkeypatch>.setattr / delattr`` on a kairix target, either
-    overload (``("kairix.X.y", v)`` or ``(<kairix ref>, "y", v)``), any MonkeyPatch name."""
+    """Shapes 5 + 6: ``<monkeypatch>.setattr / delattr``. The dotted-string
+    overload (``setattr("a.b.c", value)`` / ``delattr("a.b.c")``) is default-deny:
+    the target must fold to a PROVABLY non-kairix path. The object overload
+    (``setattr(obj, "name", value)``) fails when ``obj`` is a kairix module ref."""
     func = call.func
     if not (
         isinstance(func, ast.Attribute)
         and func.attr in {"setattr", "delattr"}
         and isinstance(func.value, ast.Name)
-        and func.value.id in ctx.surface.monkeypatch
+        and func.value.id in ctx.guard.monkeypatch
     ):
         return False
-    target = bind_call(call, MONKEYPATCH_SIGNATURES[func.attr]).get("target")
-    return ctx.is_kairix_string(target) or ctx.is_kairix_module_ref(target)
+    bound = bind_call(call, MONKEYPATCH_SIGNATURES[func.attr])
+    target = bound.get("target")
+    if target is None:
+        return bound.has_spread
+    object_overload = bound.get("value" if func.attr == "setattr" else "name") is not None
+    if ctx.is_object_target(target) or (object_overload and not _is_string_expr(target)):
+        return ctx.is_kairix_module_ref(target)
+    return ctx.could_be_kairix(target)
 
 
-def _is_module_swap(node: ast.AST, ctx: _F1Ctx) -> bool:
-    """Shapes 7 + 8: any write to ``sys.modules`` that can touch a kairix module
-    (the shared ``_mapping_writes`` surface), or ``importlib.reload`` of one."""
-    if isinstance(node, ast.Call) and ctx.is_reload(node.func):
-        if ctx.is_kairix_module_ref(bind_call(node, RELOAD_SIGNATURE).get("module")):
+def _is_string_expr(expr: ast.expr) -> bool:
+    return isinstance(expr, (ast.JoinedStr, ast.BinOp)) or (
+        isinstance(expr, ast.Constant) and isinstance(expr.value, str)
+    )
+
+
+def _reload_violation(ctx: _F1Ctx) -> bool:
+    """Shape 8 (default-deny): ANY reference to ``importlib.reload`` — called or
+    aliased — fails unless it is a direct call whose ``module`` argument is
+    PROVABLY a non-kairix module (an unresolved argument fails)."""
+    refs: list[ast.expr] = [
+        node
+        for node in ctx.index.attributes.get("reload", [])
+        if isinstance(node.value, ast.Name) and node.value.id in ctx.importlib_names
+    ]
+    for name in ctx.reload_names:
+        refs.extend(ctx.index.name_loads.get(name, []))
+    for ref in refs:
+        call = ctx.index.parents.get(ref)
+        if not (isinstance(call, ast.Call) and call.func is ref):
+            return True  # aliased / passed around — cannot be followed
+        if not ctx.provably_external_module(bind_call(call, RELOAD_SIGNATURE).get("module")):
             return True
-    return bool(ctx.surface.writes(node))
+    return False
 
 
 def file_has_internal_patch(path: Path) -> bool:
-    """Return True iff ``path`` contains any of the eight F1 violation shapes."""
+    """Return True iff ``path`` contains any F1 violation."""
     index = parse_index(path, _PREFILTER)
     if index is None:
         return False
 
     ctx = _F1Ctx(index)
     parent_map = index.parents
+
+    if ctx.guard.findings() or _reload_violation(ctx):
+        return True
 
     for node in index.candidates:
         if isinstance(node, ast.Call) and (_patch_shapes(node, ctx) or _monkeypatch_attr_shapes(node, ctx)):
@@ -424,9 +515,6 @@ def file_has_internal_patch(path: Path) -> bool:
                 if isinstance(target, ast.Attribute) and _resolves_to_kairix(target, ctx.aliases):
                     if not _is_inside_pytest_raises(parent_map, node):
                         return True
-
-        if _is_module_swap(node, ctx):
-            return True
 
     return False
 

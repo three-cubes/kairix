@@ -1,48 +1,36 @@
-"""Shared AST helpers for the F1 / F2 detectors: index a module, resolve a KEY.
+"""Shared AST helpers for the F1 / F2 detectors: index a module, resolve constants.
 
-F1 (``sys.modules`` swaps of ``kairix.*`` modules) and F2 (``os.environ``
-writes of ``KAIRIX_*`` keys) both need to answer the same question for a
-subscript / ``.pop`` / ``.setdefault`` key expression: *can this key be one
-of the protected names?* A bare string literal is the easy case, but the
-evasions the detectors exist to close move the literal one hop away:
+F1 (``sys.modules`` / kairix internals) and F2 (``os.environ`` / ``KAIRIX_*``)
+are DEFAULT-DENY: a write is allowed only when its key (or patch target) can
+be PROVEN, statically, not to be protected. This module supplies the two
+pieces that proof needs:
 
-    var = "KAIRIX_DB_PATH"
-    os.environ.pop(var, None)
+* :class:`ModuleIndex` — one traversal per file that collects parents,
+  imports, every name binding (with its kind: a value, a loop element, a
+  helper's return, or unknown), every ``Load`` name reference, the
+  attribute references the detectors care about, and the candidate
+  statements. No query re-walks the tree.
+* :class:`ConstantTable` — the set of string values an expression can take,
+  when that set is statically known: literals, ``+`` / f-string / ``%`` /
+  ``.format`` folding, names bound only to such values (through any number
+  of hops), loop variables over constant containers, constant-container
+  indexing (``KEYS[0]`` / ``KEYS[i]``), conditional expressions, and
+  helpers that only ``return`` such values. Anything else is UNKNOWN — and
+  under default-deny an unknown key is treated as protected.
 
-    for name in ("KAIRIX_DATA_DIR", "KAIRIX_CACHE_DIR"):
-        os.environ[name] = ...
-
-    saved = {k: os.environ.pop(k, None) for k in _SECRET_VARS}
-
-    os.environ["KAIRIX" + "_DB_PATH"] = ...       # constant-folded
-
-So the key resolver (a) folds constant string expressions (``+``, f-strings,
-``%`` / ``.format`` on constants) and, for a partially constant one, tests
-the constant leading prefix of the whole value; and (b) runs a small
-module-wide *taint* pass: a name is tainted when it is bound (assignment,
-``for`` / comprehension target, or a function whose ``return`` yields one)
-from an expression that is or contains a protected key or another tainted
-name. The pass iterates to a fixpoint, so taint flows through any number of
-hops.
-
-Performance: every per-file question is answered from one :class:`ModuleIndex`
-built by a SINGLE traversal (parents, imports, bindings, ``with`` targets and
-the candidate write statements), so the detectors parse each file once and
-never re-walk the tree per query.
-
-Conservative by construction: a name reused for an unrelated value in the
-same module is still treated as tainted. That only ever produces a
-violation the author resolves by injecting the value through a seam — the
-fix the gate asks for anyway.
+:class:`ProtectedKeys` decides a known value; for a value whose constant
+LEADING prefix is all that is known (``"KAIRIX" + suffix``), it decides
+whether that prefix could still complete to a protected key.
 """
 
 from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # What counts as a protected key.
@@ -66,7 +54,7 @@ class ProtectedKeys:
 
     def could_complete(self, prefix: str) -> bool:
         if not prefix:
-            return False
+            return True
         return any(p.startswith(prefix) or prefix.startswith(p) for p in (*self.prefixes, *self.exact))
 
 
@@ -76,6 +64,14 @@ class ProtectedKeys:
 
 _CANDIDATE_TYPES = (ast.Call, ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)
 _FUNCTION_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
+_SCOPE_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+#: attribute names whose references the detectors classify
+INDEXED_ATTRIBUTES = frozenset({"environ", "modules", "reload"})
+
+#: binding kinds recorded per name
+VALUE, ELEMENT, RETURN, PARAM, UNKNOWN = "value", "element", "return", "param", "unknown"
+#: stdlib factories whose ``.name`` is their first (``name``) argument
+_SPEC_FACTORIES = frozenset({"spec_from_file_location", "spec_from_loader", "ModuleSpec"})
 
 
 def _target_names(target: ast.expr) -> list[str]:
@@ -100,12 +96,20 @@ class ModuleIndex:
     parents: dict[ast.AST, ast.AST] = field(default_factory=dict)
     imports: list[ast.Import] = field(default_factory=list)
     import_froms: list[ast.ImportFrom] = field(default_factory=list)
-    #: (bound names, source expression) for the taint pass
-    bindings: list[tuple[list[str], ast.expr]] = field(default_factory=list)
     #: plain ``name = value`` bindings (Assign / AnnAssign / walrus) for alias resolution
     name_bindings: list[tuple[str, ast.expr]] = field(default_factory=list)
+    #: every binding of every name, with its kind (VALUE / ELEMENT / RETURN / UNKNOWN)
+    value_bindings: dict[str, list[tuple[str, ast.expr | None]]] = field(default_factory=dict)
+    #: every ``Load``-context name reference, by name
+    name_loads: dict[str, list[ast.Name]] = field(default_factory=dict)
+    #: references ``<x>.environ`` / ``<x>.modules`` / ``<x>.reload``, by attribute
+    attributes: dict[str, list[ast.Attribute]] = field(default_factory=dict)
     #: ``with <ctx> as <name>`` targets
     with_targets: list[tuple[str, ast.expr]] = field(default_factory=list)
+    #: function definitions by name (for parameter propagation)
+    functions: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = field(default_factory=dict)
+    #: parameter name -> (owning function, positional index or None for keyword-only)
+    params: dict[str, list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, int | None]]] = field(default_factory=dict)
     #: statements / calls that can write a mapping or patch an attribute
     candidates: list[ast.AST] = field(default_factory=list)
 
@@ -122,34 +126,118 @@ class ModuleIndex:
             index._classify(node, returns)
         for ret in returns:
             fn = enclosing_function(index.parents, ret)
-            if fn is not None and ret.value is not None:
-                index.bindings.append(([fn.name], ret.value))
+            if fn is not None:
+                index._bind(fn.name, RETURN if ret.value is not None else UNKNOWN, ret.value)
         return index
+
+    def _bind(self, name: str, kind: str, source: ast.expr | None) -> None:
+        self.value_bindings.setdefault(name, []).append((kind, source))
+
+    def _bind_target(self, target: ast.expr, value: ast.expr | None, kind: str) -> None:
+        if isinstance(target, ast.Name):
+            self._bind(target.id, kind, value)
+            return
+        if (
+            kind == VALUE
+            and isinstance(target, (ast.Tuple, ast.List))
+            and isinstance(value, (ast.Tuple, ast.List))
+            and len(target.elts) == len(value.elts)
+            and not any(isinstance(e, ast.Starred) for e in (*target.elts, *value.elts))
+        ):
+            for sub_target, sub_value in zip(target.elts, value.elts, strict=True):
+                self._bind_target(sub_target, sub_value, VALUE)
+            return
+        if (
+            kind == ELEMENT
+            and isinstance(target, (ast.Tuple, ast.List))
+            and not any(isinstance(e, ast.Starred) for e in target.elts)
+        ):
+            # ``for name, sub in (("HOME", "home"), ...)`` — position i of each element
+            for position, sub_target in enumerate(target.elts):
+                if isinstance(sub_target, ast.Name):
+                    self._bind(sub_target.id, f"{ELEMENT}:{position}", value)
+                else:
+                    for name in _target_names(sub_target):
+                        self._bind(name, UNKNOWN, None)
+            return
+        for name in _target_names(target):
+            self._bind(name, UNKNOWN, None)
 
     def _classify(self, node: ast.AST, returns: list[ast.Return]) -> None:
         if isinstance(node, _CANDIDATE_TYPES):
             self.candidates.append(node)
-        if isinstance(node, ast.Import):
-            self.imports.append(node)
-        elif isinstance(node, ast.ImportFrom):
-            self.import_froms.append(node)
-        elif isinstance(node, ast.Assign):
-            self.bindings.append(([n for t in node.targets for n in _target_names(t)], node.value))
-            self.name_bindings.extend((t.id, node.value) for t in node.targets if isinstance(t, ast.Name))
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and node.value is not None:
-            self.bindings.append((_target_names(node.target), node.value))
-            if not isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-                self.name_bindings.append((node.target.id, node.value))
-        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
-            self.bindings.append((_target_names(node.target), node.iter))
-        elif isinstance(node, ast.Return):
-            returns.append(node)
-        elif isinstance(node, (ast.With, ast.AsyncWith)):
-            self.with_targets.extend(
-                (item.optional_vars.id, item.context_expr)
-                for item in node.items
-                if isinstance(item.optional_vars, ast.Name)
-            )
+        handler = _CLASSIFIERS.get(type(node))
+        if handler is not None:
+            handler(self, node, returns)
+
+    def _on_name(self, node: ast.Name, _returns: list[ast.Return]) -> None:
+        if isinstance(node.ctx, ast.Load):
+            self.name_loads.setdefault(node.id, []).append(node)
+
+    def _on_attribute(self, node: ast.Attribute, _returns: list[ast.Return]) -> None:
+        if node.attr in INDEXED_ATTRIBUTES:
+            self.attributes.setdefault(node.attr, []).append(node)
+
+    def _on_import(self, node: ast.Import, _returns: list[ast.Return]) -> None:
+        self.imports.append(node)
+        for alias in node.names:
+            self._bind(alias.asname or alias.name.split(".")[0], UNKNOWN, None)
+
+    def _on_import_from(self, node: ast.ImportFrom, _returns: list[ast.Return]) -> None:
+        self.import_froms.append(node)
+        for alias in node.names:
+            self._bind(alias.asname or alias.name, UNKNOWN, None)
+
+    def _on_assign(self, node: ast.Assign, _returns: list[ast.Return]) -> None:
+        for target in node.targets:
+            self._bind_target(target, node.value, VALUE)
+        self.name_bindings.extend((t.id, node.value) for t in node.targets if isinstance(t, ast.Name))
+
+    def _on_value_binding(self, node: ast.AnnAssign | ast.NamedExpr, _returns: list[ast.Return]) -> None:
+        if node.value is None:
+            return
+        self._bind_target(node.target, node.value, VALUE)
+        if isinstance(node.target, ast.Name):
+            self.name_bindings.append((node.target.id, node.value))
+
+    def _on_aug_assign(self, node: ast.AugAssign, _returns: list[ast.Return]) -> None:
+        self._bind_target(node.target, None, UNKNOWN)
+
+    def _on_loop(self, node: ast.For | ast.AsyncFor | ast.comprehension, _returns: list[ast.Return]) -> None:
+        self._bind_target(node.target, node.iter, ELEMENT)
+
+    def _on_scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, _returns: list[ast.Return]) -> None:
+        args = node.args
+        if isinstance(node, ast.Lambda):
+            for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg):
+                if arg is not None:
+                    self._bind(arg.arg, UNKNOWN, None)
+            return
+        self.functions.setdefault(node.name, []).append(node)
+        for position, arg in enumerate((*args.posonlyargs, *args.args)):
+            self._bind(arg.arg, PARAM, None)
+            self.params.setdefault(arg.arg, []).append((node, position))
+        for arg in args.kwonlyargs:
+            self._bind(arg.arg, PARAM, None)
+            self.params.setdefault(arg.arg, []).append((node, None))
+        for arg in (args.vararg, args.kwarg):
+            if arg is not None:
+                self._bind(arg.arg, UNKNOWN, None)
+
+    def _on_return(self, node: ast.Return, returns: list[ast.Return]) -> None:
+        returns.append(node)
+
+    def _on_with(self, node: ast.With | ast.AsyncWith, _returns: list[ast.Return]) -> None:
+        for item in node.items:
+            if item.optional_vars is None:
+                continue
+            self._bind_target(item.optional_vars, None, UNKNOWN)
+            if isinstance(item.optional_vars, ast.Name):
+                self.with_targets.append((item.optional_vars.id, item.context_expr))
+
+    def _on_except(self, node: ast.ExceptHandler, _returns: list[ast.Return]) -> None:
+        if node.name:
+            self._bind(node.name, UNKNOWN, None)
 
     def module_aliases(self, module: str) -> set[str]:
         """Local names bound to stdlib ``module`` (``import os`` / ``import os as _os``)."""
@@ -165,8 +253,35 @@ class ModuleIndex:
             if a.name == attr
         }
 
+    def statement_of(self, node: ast.AST) -> ast.AST:
+        """The innermost statement containing ``node`` (``node`` itself if a statement)."""
+        current: ast.AST | None = node
+        while current is not None and not isinstance(current, ast.stmt):
+            current = self.parents.get(current)
+        return current if current is not None else node
 
-# ---------------------------------------------------------------------------
+
+_CLASSIFIERS: dict[type, Callable[[ModuleIndex, Any, list[ast.Return]], None]] = {
+    ast.Name: ModuleIndex._on_name,
+    ast.Attribute: ModuleIndex._on_attribute,
+    ast.Import: ModuleIndex._on_import,
+    ast.ImportFrom: ModuleIndex._on_import_from,
+    ast.Assign: ModuleIndex._on_assign,
+    ast.AnnAssign: ModuleIndex._on_value_binding,
+    ast.NamedExpr: ModuleIndex._on_value_binding,
+    ast.AugAssign: ModuleIndex._on_aug_assign,
+    ast.For: ModuleIndex._on_loop,
+    ast.AsyncFor: ModuleIndex._on_loop,
+    ast.comprehension: ModuleIndex._on_loop,
+    ast.FunctionDef: ModuleIndex._on_scope,
+    ast.AsyncFunctionDef: ModuleIndex._on_scope,
+    ast.Lambda: ModuleIndex._on_scope,
+    ast.Return: ModuleIndex._on_return,
+    ast.With: ModuleIndex._on_with,
+    ast.AsyncWith: ModuleIndex._on_with,
+    ast.ExceptHandler: ModuleIndex._on_except,
+}
+
 # Constant folding.
 # ---------------------------------------------------------------------------
 
@@ -261,65 +376,317 @@ def _fold_format(expr: ast.Call) -> tuple[str, bool] | None:
 
 
 # ---------------------------------------------------------------------------
-# Taint + key resolution.
+# Constant table — the statically known string values of an expression.
 # ---------------------------------------------------------------------------
 
-
-def _mentions_protected(expr: ast.AST, keys: ProtectedKeys, tainted: set[str]) -> bool:
-    """``expr`` is a protected key or mentions a protected literal / tainted name anywhere."""
-    for node in ast.walk(expr):
-        if isinstance(node, ast.expr) and key_is_protected(node, keys, tainted):
-            return True
-    return False
+#: cap on a value set (a product of two large unions is "unknown", not a hang)
+_MAX_VALUES = 256
 
 
-def tainted_names(index: ModuleIndex, keys: ProtectedKeys) -> set[str]:
-    """Names that can hold a protected key, propagated to a fixpoint."""
-    tainted: set[str] = set()
-    pending = [(names, source) for names, source in index.bindings if names]
-    changed = True
-    while changed:
-        changed = False
-        still: list[tuple[list[str], ast.expr]] = []
-        for names, source in pending:
-            if _mentions_protected(source, keys, tainted):
-                tainted.update(names)
-                changed = True
+class ConstantTable:
+    """The set of string values an expression can take, when statically known."""
+
+    def __init__(self, index: ModuleIndex) -> None:
+        self.index = index
+        self._names: dict[str, frozenset[str] | None] = {}
+        self._in_progress: set[str] = set()
+
+    # -- strings ------------------------------------------------------------
+
+    def strings(self, expr: ast.expr | None) -> frozenset[str] | None:
+        """Every string ``expr`` can evaluate to, or ``None`` when unknown."""
+        if expr is None:
+            return None
+        handler = _STRING_HANDLERS.get(type(expr))
+        if handler is not None:
+            return handler(self, expr)
+        folded = fold_string(expr)
+        return frozenset({folded[0]}) if folded is not None and folded[1] else None
+
+    def _constant(self, expr: ast.Constant) -> frozenset[str] | None:
+        return frozenset({expr.value}) if isinstance(expr.value, str) else None
+
+    def _name(self, expr: ast.Name) -> frozenset[str] | None:
+        return self.name_strings(expr.id)
+
+    def _concat(self, expr: ast.BinOp) -> frozenset[str] | None:
+        if isinstance(expr.op, ast.Add):
+            return _product(self.strings(expr.left), self.strings(expr.right))
+        folded = fold_string(expr)
+        return frozenset({folded[0]}) if folded is not None and folded[1] else None
+
+    def _joined(self, expr: ast.JoinedStr) -> frozenset[str] | None:
+        values: frozenset[str] | None = frozenset({""})
+        for part in expr.values:
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                values = _product(values, frozenset({part.value}))
+            elif isinstance(part, ast.FormattedValue) and part.format_spec is None and part.conversion in (-1, 115):
+                values = _product(values, self.strings(part.value))
             else:
-                still.append((names, source))
-        pending = still
-    return tainted
+                return None
+        return values
+
+    def _if_exp(self, expr: ast.IfExp) -> frozenset[str] | None:
+        return _union(self.strings(expr.body), self.strings(expr.orelse))
+
+    def _subscript(self, expr: ast.Subscript) -> frozenset[str] | None:
+        elements = self.elements(expr.value)
+        if elements is None:
+            return None
+        index = expr.slice
+        if isinstance(index, ast.Constant) and isinstance(index.value, int) and not isinstance(index.value, bool):
+            try:
+                return self.strings(elements[index.value])
+            except IndexError:
+                return None
+        return self._union_all(elements)
+
+    def _call(self, expr: ast.Call) -> frozenset[str] | None:
+        if isinstance(expr.func, ast.Name) and not expr.args and not expr.keywords:
+            bindings = self.index.value_bindings.get(expr.func.id, [])
+            if bindings and all(kind == RETURN for kind, _ in bindings):
+                return self._union_all([source for _, source in bindings])
+        folded = fold_string(expr)
+        return frozenset({folded[0]}) if folded is not None and folded[1] else None
+
+    # -- names / containers -------------------------------------------------
+
+    def name_strings(self, name: str) -> frozenset[str] | None:
+        if name in self._names:
+            return self._names[name]
+        if name in self._in_progress:
+            return None
+        self._in_progress.add(name)
+        result = self._resolve_name(name)
+        self._in_progress.discard(name)
+        self._names[name] = result
+        return result
+
+    def _resolve_name(self, name: str) -> frozenset[str] | None:
+        bindings = self.index.value_bindings.get(name)
+        if not bindings:
+            return None
+        values: frozenset[str] | None = frozenset()
+        if any(kind == PARAM for kind, _ in bindings):
+            values = self._param_values(name)
+            if values is None:
+                return None
+        for kind, source in bindings:
+            if kind == PARAM:
+                continue
+            if kind == VALUE:
+                values = _union(values, self.strings(source))
+            elif kind == ELEMENT:
+                elements = self.elements(source)
+                values = _union(values, None if elements is None else self._union_all(elements))
+            elif kind.startswith(f"{ELEMENT}:"):
+                values = _union(values, self._positional_elements(source, int(kind.split(":", 1)[1])))
+            else:
+                return None
+            if values is None:
+                return None
+        return values
+
+    def _param_values(self, name: str) -> frozenset[str] | None:
+        """Union of the arguments every call site in this module passes for
+        parameter ``name`` (``None`` if the function escapes, is a method, is
+        defined twice, has no call site, or any argument is unknown)."""
+        values: frozenset[str] | None = frozenset()
+        for function, position in self.index.params.get(name, []):
+            values = _union(values, self._call_site_values(function, position, name))
+            if values is None:
+                return None
+        return values
+
+    def _call_site_values(
+        self, function: ast.FunctionDef | ast.AsyncFunctionDef, position: int | None, name: str
+    ) -> frozenset[str] | None:
+        if isinstance(self.index.parents.get(function), ast.ClassDef):
+            return None
+        if len(self.index.functions.get(function.name, [])) != 1:
+            return None
+        loads = self.index.name_loads.get(function.name, [])
+        if not loads:
+            return None
+        default = _parameter_default(function, position, name)
+        values: frozenset[str] | None = frozenset()
+        for load in loads:
+            call = self.index.parents.get(load)
+            if not (isinstance(call, ast.Call) and call.func is load):
+                return None  # the function escapes (callback, alias) — its args are unknowable
+            if any(isinstance(a, ast.Starred) for a in call.args) or any(kw.arg is None for kw in call.keywords):
+                return None
+            argument: ast.expr | None = None
+            if position is not None and position < len(call.args):
+                argument = call.args[position]
+            else:
+                argument = next((kw.value for kw in call.keywords if kw.arg == name), default)
+            values = _union(values, self.strings(argument))
+            if values is None:
+                return None
+        return values
+
+    def _attribute(self, expr: ast.Attribute) -> frozenset[str] | None:
+        """``spec.name`` where ``spec = importlib.util.spec_from_file_location("x", ...)``."""
+        if expr.attr != "name" or not isinstance(expr.value, ast.Name):
+            return None
+        bindings = self.index.value_bindings.get(expr.value.id, [])
+        if not bindings or any(kind != VALUE for kind, _ in bindings):
+            return None
+        names: list[ast.expr | None] = []
+        for _, source in bindings:
+            if not (isinstance(source, ast.Call) and _callee_name(source.func) in _SPEC_FACTORIES):
+                return None
+            first = source.args[0] if source.args else next((k.value for k in source.keywords if k.arg == "name"), None)
+            names.append(first)
+        return self._union_all(names)
+
+    def _positional_elements(self, container: ast.expr | None, position: int) -> frozenset[str] | None:
+        """Strings at ``position`` of every (literal tuple / list) element of ``container``."""
+        elements = self.elements(container)
+        if elements is None:
+            return None
+        picked: list[ast.expr | None] = []
+        for element in elements:
+            inner = self.elements(element) if isinstance(element, (ast.Tuple, ast.List)) else None
+            if inner is None or position >= len(inner):
+                return None
+            picked.append(inner[position])
+        return self._union_all(picked)
+
+    def elements(self, expr: ast.expr | None) -> list[ast.expr] | None:
+        """The element expressions of a constant container (literal, or a name
+        bound only to literal containers), else ``None``."""
+        if isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+            if any(isinstance(e, ast.Starred) for e in expr.elts):
+                return None
+            return list(expr.elts)
+        if isinstance(expr, ast.Name) and expr.id not in self._in_progress:
+            bindings = self.index.value_bindings.get(expr.id)
+            if not bindings or any(kind != VALUE for kind, _ in bindings):
+                return None
+            self._in_progress.add(expr.id)
+            try:
+                out: list[ast.expr] = []
+                for _, source in bindings:
+                    inner = self.elements(source)
+                    if inner is None:
+                        return None
+                    out.extend(inner)
+                return out
+            finally:
+                self._in_progress.discard(expr.id)
+        return None
+
+    def _union_all(self, exprs: Sequence[ast.expr | None]) -> frozenset[str] | None:
+        values: frozenset[str] | None = frozenset()
+        for item in exprs:
+            values = _union(values, self.strings(item))
+            if values is None:
+                return None
+        return values
+
+    # -- verdicts -----------------------------------------------------------
+
+    def provably_outside(self, expr: ast.expr | None, keys: ProtectedKeys) -> bool:
+        """``expr`` is PROVABLY not a protected key (default-deny: unknown → False).
+
+        A fully known value is tested directly; a value with a known constant
+        leading prefix (``f"tests.fake.{name}"``) is outside when no completion
+        of the prefix can be protected; a name is outside when every one of its
+        bindings is.
+        """
+        values = self.strings(expr)
+        if values is not None:
+            return not any(keys(v) for v in values)
+        folded = fold_string(expr) if expr is not None else None
+        if folded is not None and folded[0]:
+            return not keys.could_complete(folded[0])
+        if isinstance(expr, ast.Name) and expr.id not in self._in_progress:
+            bindings = self.index.value_bindings.get(expr.id, [])
+            if not bindings or any(kind != VALUE for kind, _ in bindings):
+                return False
+            self._in_progress.add(expr.id)
+            try:
+                return all(self.provably_outside(source, keys) for _, source in bindings)
+            finally:
+                self._in_progress.discard(expr.id)
+        return False
+
+    def definitely_object(self, expr: ast.expr | None) -> bool:
+        """``expr`` is PROVABLY not a string: an attribute / call / container
+        expression, or a name bound only to such (so a ``setattr`` target is an
+        object, not a dotted path)."""
+        if isinstance(expr, (ast.Attribute, ast.Call, ast.List, ast.Dict, ast.Set, ast.Lambda)):
+            return not (isinstance(expr, ast.Call) and fold_string(expr) is not None)
+        if not isinstance(expr, ast.Name):
+            return False
+        bindings = self.index.value_bindings.get(expr.id, [])
+        return bool(bindings) and all(
+            kind == VALUE and source is not None and self.definitely_object(source) for kind, source in bindings
+        )
+
+    def could_be(self, expr: ast.expr | None, target: str) -> bool:
+        """``expr`` might evaluate to ``target`` (unknown → True)."""
+        values = self.strings(expr)
+        if values is not None:
+            return target in values
+        folded = fold_string(expr) if expr is not None else None
+        if folded is not None and folded[0]:
+            return target.startswith(folded[0])
+        return True
 
 
-def key_is_protected(expr: ast.expr, keys: ProtectedKeys, tainted: set[str]) -> bool:
-    """Can the key expression ``expr`` evaluate to a protected name?
+_STRING_HANDLERS: dict[type, Callable[[ConstantTable, Any], frozenset[str] | None]] = {
+    ast.Constant: ConstantTable._constant,
+    ast.Name: ConstantTable._name,
+    ast.BinOp: ConstantTable._concat,
+    ast.JoinedStr: ConstantTable._joined,
+    ast.IfExp: ConstantTable._if_exp,
+    ast.Subscript: ConstantTable._subscript,
+    ast.Call: ConstantTable._call,
+    ast.Attribute: ConstantTable._attribute,
+}
 
-    Folds constant string expressions first: a complete value is tested
-    directly; a partially constant one is protected when its constant
-    leading prefix could complete to a protected key. Otherwise matches a
-    tainted name, a call to a tainted helper (one whose ``return`` yields a
-    protected key), or a dynamic expression whose leading part is one.
-    """
-    folded = fold_string(expr)
-    if folded is not None:
-        text, complete = folded
-        if complete:
-            return keys(text)
-        if text:
-            return keys.could_complete(text)
-    if isinstance(expr, ast.Name):
-        return expr.id in tainted
-    if isinstance(expr, ast.Call):
-        func = expr.func
-        if isinstance(func, ast.Name):
-            return func.id in tainted
-        if isinstance(func, ast.Attribute):
-            return func.attr in tainted
-    if isinstance(expr, ast.JoinedStr) and expr.values and isinstance(expr.values[0], ast.FormattedValue):
-        return key_is_protected(expr.values[0].value, keys, tainted)
-    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
-        return key_is_protected(expr.left, keys, tainted)
-    return False
+
+def _parameter_default(
+    function: ast.FunctionDef | ast.AsyncFunctionDef, position: int | None, name: str
+) -> ast.expr | None:
+    args = function.args
+    if position is None:
+        for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+            if arg.arg == name:
+                return default
+        return None
+    positional = (*args.posonlyargs, *args.args)
+    offset = len(positional) - len(args.defaults)
+    return args.defaults[position - offset] if position >= offset else None
+
+
+def _callee_name(func: ast.expr) -> str:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _union(a: frozenset[str] | None, b: frozenset[str] | None) -> frozenset[str] | None:
+    if a is None or b is None:
+        return None
+    out = a | b
+    return out if len(out) <= _MAX_VALUES else None
+
+
+def _product(a: frozenset[str] | None, b: frozenset[str] | None) -> frozenset[str] | None:
+    if a is None or b is None or len(a) * len(b) > _MAX_VALUES:
+        return None
+    return frozenset(x + y for x in a for y in b)
+
+
+# ---------------------------------------------------------------------------
+# Scope helpers.
+# ---------------------------------------------------------------------------
 
 
 def is_module_attr(expr: ast.expr, module_names: set[str], attr: str, direct_names: set[str]) -> bool:
@@ -334,6 +701,16 @@ def enclosing_function(parents: dict[ast.AST, ast.AST], node: ast.AST) -> ast.Fu
     current = parents.get(node)
     while current is not None:
         if isinstance(current, _FUNCTION_TYPES):
+            return current
+        current = parents.get(current)
+    return None
+
+
+def immediate_scope(parents: dict[ast.AST, ast.AST], node: ast.AST) -> ast.AST | None:
+    """Innermost ``def`` / ``async def`` / ``lambda`` lexically containing ``node``."""
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, _SCOPE_TYPES):
             return current
         current = parents.get(current)
     return None

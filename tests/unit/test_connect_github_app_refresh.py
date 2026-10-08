@@ -124,11 +124,9 @@ def test_default_refresh_path_raises_when_pyjwt_absent(
 ) -> None:
     """The default refresh path (no injection) wraps ImportError as RefreshUnavailableError."""
     import builtins
-    import sys
 
-    for key in list(sys.modules):
-        if key == "jwt" or key.startswith("jwt."):
-            monkeypatch.delitem(sys.modules, key, raising=False)
+    # No sys.modules eviction needed: an ``import`` statement always calls
+    # ``builtins.__import__`` (patched below), cached module or not.
     original_import = builtins.__import__
 
     def blocking_import(name: str, *args: Any, **kwargs: Any) -> Any:

@@ -346,23 +346,26 @@ Each rule below is described with: **statement**, **why**,
 Test files MUST NOT reach into a production kairix module's namespace
 to swap an implementation. F1 flags eight structurally-identical shapes:
 
-1. `patch("kairix.X.Y", ...)` — as a decorator, a `with`, or `.start()`;
-   the `target` is bound by signature, so `patch(target="kairix.X.Y")` counts
+1. `patch(target, ...)` — as a decorator, a `with`, or `.start()` — whose
+   dotted `target` is not PROVABLY a non-kairix path (default-deny: an
+   unfoldable target fails); `target` is bound by signature
 2. `patch.object(<kairix ref>, "attr", ...)` — positional or keyword
 3. `kairix.X.Y = <expr>` — full-path attribute assignment
 4. `<alias>.Y = <expr>` where alias resolves via imports to a kairix module
-5. `<monkeypatch>.setattr / delattr("kairix.X.Y", ...)` — string-target form
+5. `<monkeypatch>.setattr / delattr("a.b.c", ...)` — string-target form whose
+   dotted path is not PROVABLY non-kairix
 6. `<monkeypatch>.setattr / delattr(<kairix module ref>, "attr", ...)` —
    ref-target form. `<monkeypatch>` is the fixture, any
    `pytest.MonkeyPatch()` instance (or alias of one), or a
    `MonkeyPatch.context()` target
-7. any write to `sys.modules` that can touch a kairix module — every form in
-   the [shared mapping-write surface](#shared-mapping-write-surface-f1--f2)
-   below, with `sys.modules` as the receiver and kairix module names as the
-   protected keys
-8. `importlib.reload(module)` of a kairix module — positional or keyword,
-   through `importlib` / `reload` / `import_module` aliases — re-executing
-   module code to reset hidden singleton state
+7. any reference to `sys.modules` outside the
+   [read allow-list](#shared-mapping-guard-f1--f2-default-deny) that is not a
+   write PROVEN to touch only non-kairix keys
+8. any reference to `importlib.reload` — called or aliased
+   (`r = importlib.reload`) — unless it is a direct call whose `module`
+   argument is PROVABLY a non-kairix module (an import of an external module,
+   `import_module("json")`, `sys.modules["json"]`, or a name bound only to
+   those); an unresolved argument fails
 
 Shapes 7 + 8 replace (or evict and re-import) the whole module object — the
 same substitution as `@patch`, one level up. Move the state they reset onto
@@ -412,15 +415,16 @@ alias-resolved root. Multi-line constructs, aliased imports
 (`from kairix import providers as providers_mod`), and full-path
 forms (`kairix.paths.provider_name = ...`) are all caught.
 
-**Scope.** F1 covers every *statically resolvable* spelling: import and
-local aliases followed to a fixpoint, every call bound by signature
-(positional or keyword), constant-folded names (`+`, f-strings, `%`,
-`.format`), keys and helpers traced through the taint pass, and `*args` /
-`**kw` spreads treated as possibly protected. A name computed at runtime
-from non-constant data (read from a file, built from user input, assembled
-via `getattr` on a computed string) is out of scope by design: static
-analysis cannot decide it, so it is left to code review rather than chased
-spelling by spelling.
+**Scope — default-deny.** Every reference to `sys.modules` and to
+`importlib.reload` must be an allow-listed READ, or a write PROVEN safe;
+**anything not provably a safe read or a safe write fails.** A key, module
+argument or patch target that cannot be resolved statically (a runtime value,
+a parameter with no resolvable call site, an imported constant) is treated as
+protected — the gate never has to have seen the spelling before. Resolution
+is static constant propagation: literals, `+` / f-string / `%` / `.format`
+folding, names and loop variables over constant containers, `KEYS[0]`
+indexing, conditional expressions, constant-returning helpers, parameters
+resolved through their call sites, and `spec_from_file_location("x", ...).name`.
 
 The detector's own tests live at
 `tests/architecture/test_check_no_internal_patches.py` (shapes 1-6) and
@@ -430,56 +434,72 @@ each shape has a positive (kairix target → violation) and negative
 honest: comment out the detector branch for a shape, run the matching
 positive test, confirm red, restore, confirm green.
 
-#### Shared mapping-write surface (F1 + F2)
+#### Shared mapping guard (F1 + F2, default-deny)
 
 F1 (`sys.modules`, protected keys = kairix module names) and F2
 (`os.environ`, protected keys = `KAIRIX_*`) ask the same question of a
-process-global `MutableMapping`, so both use one engine,
-`scripts/checks/_mapping_writes.py`, in three layers:
+process-global `MutableMapping`. Enumerating write spellings (a denylist)
+kept losing to new spellings, so both use one **default-deny** engine,
+`scripts/checks/_mapping_writes.py` (`MappingGuard`): it visits EVERY
+reference `R` to the mapping once and classifies its parent context. A use
+is allowed only if it is an allow-listed read or a write proven safe;
+**everything else fails**.
 
-1. **Receiver resolution** (`ProcessMapping`). The receiver `R` is the live
-   mapping reached as `os.environ` / `sys.modules`, through an import alias
-   (`import os as o` → `o.environ`), a from-import
-   (`from os import environ as e`), or local rebinding followed to a
-   fixpoint (`a = os.environ; b = a`). The owning module `M` resolves the
-   same way (`o = os`). A copy (`dict(os.environ)`, `os.environ.copy()`,
-   `{**os.environ}`) is a different object and never resolves.
-2. **Argument binding** (`bind_call`). Every call is matched to the callee's
-   real parameter names, positional or keyword (`inspect.Signature.bind`
-   semantics; `update`'s `other` is positional-only). A `*args` / `**kw`
-   spread that could hide the key counts as possibly protected.
-3. **The mutation surface** (`WriteSurface`):
+1. **References.** `R` is the live mapping reached as `os.environ` /
+   `sys.modules`, through an import alias (`import os as o`), a from-import
+   (`from os import environ as e`), local rebinding followed to a fixpoint
+   (`a = os.environ; b = a`), or `getattr(os, "environ")`. The owning module
+   `M` resolves the same way. A copy (`dict(R)`, `R.copy()`, `{**R}`) is a
+   different object.
+2. **Allowed reads.**
 
-| Form | Signature bound | Reported when |
-|---|---|---|
-| `R[k] = v`, `R[k] op= v`, `del R[k]` | — | `k` may be protected |
-| `R \|= other`, `R.__ior__(other)` | `(other, /)` | `other` may carry a protected key |
-| `R.__setitem__(key, value)`, `R.__delitem__(key)` | `(key, value)`, `(key)` | `key` may be protected |
-| `R.pop(key, default)`, `R.setdefault(key, default)` | `(key, default)` | `key` may be protected |
-| `R.update(other, /, **kw)` | `(other, /)` + `**kw` | `other` or a `**kw` name may be protected |
-| `R.clear()`, `R.popitem()` | `()` | **always** — they remove keys the AST cannot name, so they can remove protected ones |
-| `M.attr = v`, `del M.attr`, `setattr(M, "attr", v)`, `delattr(M, "attr")` | `(obj, name, value)` | always (wholesale replacement) |
-| `<monkeypatch>.setitem(dic, name, value)` / `.delitem(dic, name, raising)` | as pytest | `dic` is `R` and `name` may be protected |
-| `<monkeypatch>.setattr(target, name, value, raising)` / `.delattr(...)` | as pytest, both overloads | `("os.environ", v)` or `(M, "environ", v)` (resp. `sys.modules`) |
-| `<monkeypatch>.setenv(name, value, prepend)` / `.delenv(name, raising)` | as pytest | F2 only: `name` may be protected |
-| `patch.dict(in_dict, values, clear, **kw)` | as `unittest.mock` | `in_dict` is `R` or `"os.environ"` and `values` / `**kw` may carry a protected key, or `clear` is truthy |
-| `patch.object(target, attribute, new)` | as `unittest.mock` | `(M, "environ")` (resp. `(sys, "modules")`) |
-| `patch(target, new, ...)` | as `unittest.mock` | `target == "os.environ"` (resp. `"sys.modules"`) |
+| Context | Example |
+|---|---|
+| subscript load | `R["PATH"]` |
+| read methods (called or not) | `R.get / copy / items / keys / values / __contains__ / __getitem__ / __len__ / __iter__` |
+| membership | `k in R`, `k not in R` |
+| read builtins (first argument) | `len(R)`, `dict(R, ...)` |
+| unpacking / iteration | `{**R}`, `for x in R`, comprehension source |
+| process environment | `env=R` / `environ=R` to `subprocess.*`, `os.exec*`, `os.spawn*` |
+| aliasing | `alias = R` (the alias's own uses are classified the same way) |
+
+3. **Writes allowed only when PROVEN safe** — every key resolves statically
+   (`ConstantTable`) to a NON-protected value; an unresolved key counts as
+   protected:
+
+| Write | Proven safe when |
+|---|---|
+| `R[k] = v`, `R[k] op= v`, `del R[k]` — incl. inside a tuple / list / starred unpack | `k` provably non-protected |
+| `R.pop / setdefault / __setitem__ / __delitem__(key, ...)` | `key` provably non-protected |
+| `R.update(other, /, **kw)`, `R.__ior__(other)`, `R \|= other` | `other` is a dict literal of provably non-protected keys; `**kw` names non-protected |
+| `<monkeypatch>.setitem(R, name, v)` / `.delitem(R, name)` | `name` provably non-protected |
+| `patch.dict(R, values, clear)` | `values` provably non-protected and `clear` falsy |
+| `<monkeypatch>.setenv(name, v)` / `.delenv(name)` (F2, never names `R`) | `name` provably non-protected |
+
+4. **Everything else fails**, for example: `R.clear()` / `R.popitem()`, any
+   other method or attribute, passing `R` to any other callable
+   (`some_helper(R)`, `print(R)`, `monkeypatch.setattr(R, ...)`), calling
+   it, comparing it other than `in`, returning / yielding it, putting it in a
+   container or tuple, and replacing the mapping (`os.environ = m`,
+   `del os.environ`, `setattr` / `delattr` / `patch.object` /
+   `monkeypatch.setattr` on `(os, "environ")` or `"os.environ"`, `patch`
+   / `patch.dict` on `"os.environ"` — dotted strings constant-folded).
 
 `<monkeypatch>` is the `monkeypatch` fixture, any name bound to
 `pytest.MonkeyPatch()` (or an alias of one), or a
-`with ... MonkeyPatch.context() as m` target. A key "may be protected" when
-it is a protected literal, an f-string / `+` concatenation with a protected
-lead, a name bound from one (any number of hops), or a call to a helper
-returning one (`_ast_key_taint`). A payload "may carry" a protected key when
-it is a dict literal with such a key or a `**` spread, or anything the AST
-cannot see into (a variable, a call, a comprehension).
+`with ... MonkeyPatch.context() as m` target; `patch` is `unittest.mock.patch`
+(bound name, `<mock>.patch`, `unittest.mock.patch` — not an HTTP client's
+`.patch`). Calls are bound to the callee's real parameters, positional or
+keyword (`inspect.Signature.bind` semantics; `update`'s `other` is
+positional-only); a `*args` / `**kw` spread that could hide an argument makes
+it unknown.
 
-The table is enforced row by row in
-`tests/checks/test_mapping_write_surface.py`: every form × every receiver
-spelling (direct, import alias, from-import, local alias chain) ×
-positional / keyword call style, for both receivers, plus a negative of the
-same statement on an ordinary dict / object.
+Tests: `tests/checks/test_mapping_default_deny.py` (allow-listed reads stay
+clean, provably safe writes stay clean, the default-deny property —
+`some_helper(R)` fails — and the spellings the denylist missed) and the
+table-driven `tests/checks/test_mapping_write_surface.py` (every write form ×
+receiver spelling × call style, for both receivers, plus negatives on an
+ordinary dict / object).
 
 #### Examples
 
@@ -539,10 +559,10 @@ allowed. The check explicitly only matches `"kairix.…"` strings.
 
 #### Statement
 
-Test files MUST NOT write any process-env key starting with `KAIRIX_`, in
-any form of the
-[shared mapping-write surface](#shared-mapping-write-surface-f1--f2) with
-`os.environ` as the receiver: `<monkeypatch>.setenv / delenv / setitem /
+Test files MUST NOT write any process-env key starting with `KAIRIX_`.
+Under the [default-deny guard](#shared-mapping-guard-f1--f2-default-deny),
+every reference to `os.environ` must be an allow-listed read or a write
+PROVEN to touch only non-`KAIRIX_*` keys. That covers `<monkeypatch>.setenv / delenv / setitem /
 delitem / setattr / delattr`, every `MutableMapping` write
 (`os.environ["KAIRIX_X"] = v`, `del`, `|=`, `pop`, `setdefault`, `update`,
 `__setitem__`, `__delitem__`, and `clear()` / `popitem()`), wholesale
@@ -555,8 +575,9 @@ leaks the value into every later test in the process (a pytest-bdd step's
 Two reviewed process-boundary shapes are recognised **structurally** — no
 allow-list, baseline, pragma or path list:
 
-- writes inside a `conftest.py` fixture declared
-  `@pytest.fixture(scope="session", autouse=True)` — the once-per-run
+- statements DIRECTLY in the body of a `conftest.py` fixture declared
+  `@pytest.fixture(scope="session", autouse=True)` — not in a nested
+  function, lambda or yielded / returned callback, which inherit nothing — the once-per-run
   hermetic baseline (`tests/conftest.py::_hermetic_data_dirs` clears the
   ambient operator variables and sets the `KAIRIX_CONNECT_DISABLE_BROWSER`
   kill-switch, undone at session end);
@@ -564,7 +585,8 @@ allow-list, baseline, pragma or path list:
   (`dict(os.environ)` / `os.environ.copy()` / `{**os.environ}`) BEFORE the
   yield, when the write is a genuine restore from that snapshot —
   `os.environ.update(snapshot)` (optionally preceded by
-  `os.environ.clear()`), `os.environ[k] = snapshot[k]` for the same key, or
+  `os.environ.clear()` in the same unconditional statement list, with no
+  early `return` / `raise` in between), `os.environ[k] = snapshot[k]` for the same key, or
   a `pop` / `del` of `k` guarded by `k` being absent from the snapshot
   (`tests/setup/test_wizard.py::_restored_environ`). Writes before the
   yield, and post-yield writes that merely mention the snapshot, are still
@@ -586,23 +608,25 @@ explicitly reverted.
 
 `scripts/checks/check_no_env_monkeypatch.py` is an in-process
 `FitnessRule` over `tests/` (staged-narrowable like F1) that reports
-`path:line: shape` per violation, after a cheap `environ|setenv|delenv`
-token prefilter and one parse + one traversal per file. The write surface is the shared engine
-`scripts/checks/_mapping_writes.py` (see the table under F1); key resolution
-(variables, loop targets, helper return values) lives in
-`scripts/checks/_ast_key_taint.py`. Detector tests:
-`tests/checks/test_no_env_monkeypatch_direct_writes.py` and the
-table-driven `tests/checks/test_mapping_write_surface.py`.
+`path:line: shape` per violation, after a cheap token prefilter
+(`environ|setenv|delenv|patch|setattr|delattr|getattr`) and one parse + one
+traversal per file. The classifier is the shared default-deny guard
+`scripts/checks/_mapping_writes.py` (see the tables under F1); constant
+resolution lives in `scripts/checks/_ast_key_taint.py`. Detector tests:
+`tests/checks/test_no_env_monkeypatch_direct_writes.py`,
+`tests/checks/test_mapping_default_deny.py` and the table-driven
+`tests/checks/test_mapping_write_surface.py`.
 
-**Scope.** F2 covers every *statically resolvable* spelling: import and
-local aliases followed to a fixpoint, every call bound by signature
-(positional or keyword), constant-folded names (`+`, f-strings, `%`,
-`.format`), keys and helpers traced through the taint pass, and `*args` /
-`**kw` spreads treated as possibly protected. A name computed at runtime
-from non-constant data (read from a file, built from user input, assembled
-via `getattr` on a computed string) is out of scope by design: static
-analysis cannot decide it, so it is left to code review rather than chased
-spelling by spelling.
+**Scope — default-deny.** Every reference to `os.environ` (and every
+`setenv` / `delenv`) must be an allow-listed READ, or a write PROVEN safe;
+**anything not provably a safe read or a safe write fails.** A key or patch
+target that cannot be resolved statically (a runtime value,
+a parameter with no resolvable call site, an imported constant) is treated as
+protected — the gate never has to have seen the spelling before. Resolution
+is static constant propagation: literals, `+` / f-string / `%` / `.format`
+folding, names and loop variables over constant containers, `KEYS[0]`
+indexing, conditional expressions, constant-returning helpers, parameters
+resolved through their call sites, and `spec_from_file_location("x", ...).name`.
 
 #### Examples
 

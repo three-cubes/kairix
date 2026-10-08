@@ -192,11 +192,8 @@ def test_default_refresh_path_handles_missing_expiry(monkeypatch: Any) -> None: 
 
 def test_default_refresh_path_raises_when_library_absent(monkeypatch: Any) -> None:  # type: ignore[name-defined]  # F3 rationale: Any imported later in the file via a deferred-import block (E402-clean)
     """ImportError on google-auth surfaces a typed RefreshUnavailableError via the public surface."""
-    import sys
-
-    for key in list(sys.modules):
-        if key == "google" or key.startswith("google."):
-            monkeypatch.delitem(sys.modules, key, raising=False)
+    # No sys.modules eviction needed: an ``import`` statement always calls
+    # ``builtins.__import__`` (patched below), cached module or not.
     import builtins
 
     original_import = builtins.__import__

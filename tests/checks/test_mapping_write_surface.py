@@ -354,8 +354,8 @@ def test_folded_kairix_name_without_the_kairix_token_is_flagged(tmp_path: Path, 
 
     Sabotage proof (executed): narrow ``_PREFILTER`` back to
     ``kairix|modules`` → every case reports clean (the file is never
-    parsed); and make ``is_kairix_string`` accept bare literals only → the
-    patch / setattr / delattr cases report clean; restored.
+    parsed); restored. (Folding itself is not what keeps these red — under
+    default-deny an unfoldable target fails too.)
     """
     assert "kairix" not in source
     path = tmp_path / "test_sample.py"
@@ -410,9 +410,12 @@ def test_spread_hidden_target_or_key_is_flagged(tmp_path: Path, rname: str, setu
     """``monkeypatch.setitem(*args)``, ``patch.dict(**kw)``, ... — the target /
     key is unbound behind a spread, so it counts as possibly protected.
 
-    Sabotage proof (executed): make ``WriteSurface._hidden`` return ``False``
-    → the target-hidden cases (setitem / delitem / patch.dict / setattr /
-    delattr / update) report clean; restored.
+    Under default-deny the spread's own source already puts the mapping in a
+    non-allow-listed context (a tuple / dict literal), so these stay red even
+    without the spread rule. Sabotage proof (executed): make
+    ``MappingGuard.classify`` treat unknown contexts as reads AND
+    ``BoundCall.has_spread`` return ``False`` → 24 of the 26 cases report
+    clean; restored.
     """
     receiver = RECEIVERS[rname]
     fmt = {"R": receiver.dotted, "K": receiver.key, "M": receiver.module, "A": receiver.attr}

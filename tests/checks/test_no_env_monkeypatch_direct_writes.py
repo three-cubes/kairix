@@ -15,7 +15,7 @@ public ``file_violations`` surface, assert on the reported shapes.
 
 Sabotage proofs (executed — mutate the detector, confirm red, restore, green;
 see the per-test docstrings for the exact mutation):
-  * every positive test fails when ``_statement_shapes`` returns ``[]``;
+  * every positive test fails when ``_findings`` returns ``[]``;
   * each structural-recognition test fails when ``_is_recognised_boundary``
     returns ``False``.
 """
@@ -74,7 +74,7 @@ def _violations(tmp_path: Path, source: str, name: str = "test_sample.py") -> li
 def test_direct_environ_write_of_kairix_key_is_flagged(tmp_path: Path, statement: str, shape: str) -> None:
     """Every direct-write shape on a KAIRIX_* key is a violation.
 
-    Sabotage proof (executed): make ``_statement_shapes`` return ``[]`` →
+    Sabotage proof (executed): make ``_findings`` return ``[]`` →
     every parametrised case reports no violation and fails; restored.
     """
     header = "import os\nfrom unittest import mock\nfrom unittest.mock import patch\n\n\n"
@@ -112,8 +112,9 @@ def test_b():
 def test_key_held_in_a_variable_is_flagged(tmp_path: Path) -> None:
     """``var = "KAIRIX_X"; os.environ.pop(var)`` — the evasion this rule closes.
 
-    Sabotage proof (executed): make ``tainted_names`` return ``set()`` →
-    the variable key resolves as non-KAIRIX and the assertion fails; restored.
+    Sabotage proof (executed): make ``ConstantTable.name_strings`` claim
+    every name is the empty (provably safe) set → the variable key resolves
+    as non-KAIRIX and the assertion fails; restored.
     """
     src = """
 import os
@@ -453,8 +454,9 @@ def test_key_returned_by_a_helper_call_is_flagged(tmp_path: Path) -> None:
     """Codex PR #814 thread: ``os.environ.pop(env_key(), None)`` — the key
     comes from a call to a helper that returns a KAIRIX_* literal.
 
-    Sabotage proof (executed): drop the ``ast.Call`` branch of
-    ``key_is_protected`` → no violation is reported; restored.
+    Sabotage proof (executed): make ``ConstantTable._call`` claim every
+    helper returns the empty (provably safe) set → no violation is
+    reported; restored.
     """
     src = """
 import os
