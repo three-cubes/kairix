@@ -52,16 +52,24 @@ concurrency:
 
 jobs:
   mutation:
-    name: "Mutation — diff-scoped vs last release (any survivor fails)"
+    name: "Mutation — diff-scoped vs last release, shard ${{ matrix.shard }}/4 (any survivor fails)"
     runs-on: ubuntu-latest
+    # The full-scope run has no mutant cap and no time budget, so it is split
+    # into disjoint shards (mutation_parity.shard: every mutant in exactly one)
+    # that run in parallel, each well under the job timeout however large the
+    # since-release diff. fail-fast off: one shard's survivors must not hide
+    # another's.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     # Only ever run on main. workflow_dispatch from a non-main branch exits
     # without work so contributors can't burn runner time on a feature branch.
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
-    # 60 min ceiling — the runner caps each module at ~2.5 min; a
-    # since-last-release delta is a bounded module set. 60 leaves headroom
-    # for slow-runner variance without hanging until the 6h default.
+    # 60 min ceiling per shard — four shards of a since-release diff each
+    # finish far below it; the ceiling only stops a hung run at the 6h default.
     timeout-minutes: 60
 
     steps:
@@ -111,6 +119,7 @@ jobs:
       - name: Mutation parity (full-scope, any survivor fails)
         env:
           BASE: ${{ steps.base.outputs.base }}
+          SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           # No survivor list, no ratchet: any surviving mutant on the
@@ -118,4 +127,6 @@ jobs:
           # strengthening the impacted test until the mutant is killed.
           # --full-scope: no mutant cap and no time budget. The commit-time
           # run defers what its budget skips to this run, so it must run all.
-          python scripts/checks/mutation_parity.py --base "${BASE}" --full-scope
+          # A mutant with no selected test fails a full-scope run, so nothing
+          # is reported killed that was never applied.
+          python scripts/checks/mutation_parity.py --base "${BASE}" --full-scope --shard-index "${SHARD}" --shard-count 4

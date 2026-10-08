@@ -334,10 +334,46 @@ def test_the_full_scope_run_has_no_cap_or_budget_and_the_local_run_keeps_both() 
     assert mp.limits(full_scope=False, max_mutants=7) == (7, mp.TOTAL_BUDGET_S)
 
 
+def _mutant(n: int) -> mp.Mutant:
+    return mp.Mutant(
+        path=Path(f"kairix/mod{n}.py"),
+        lineno=n,
+        col=0,
+        original="==",
+        mutation="!=",
+        mutated_source="",
+    )
+
+
+def test_shards_partition_every_mutant_into_exactly_one_shard() -> None:
+    mutants = [_mutant(n) for n in range(11)]
+    shards = [mp.shard(mutants, i, 4) for i in range(4)]
+    flattened = [m for one in shards for m in one]
+    assert sorted(m.lineno for m in flattened) == list(range(11)), "every mutant in exactly one shard"
+    assert len(flattened) == len(mutants)
+    assert mp.shard(mutants, 0, 1) == mutants
+
+
+@pytest.mark.parametrize(("index", "count"), [(4, 4), (-1, 4), (0, 0)])
+def test_a_shard_out_of_range_is_rejected(index: int, count: int) -> None:
+    with pytest.raises(ValueError, match="not in range"):
+        mp.shard([_mutant(1)], index, count)
+
+
+def test_a_full_scope_mutant_with_no_selected_test_fails_the_run(capsys: pytest.CaptureFixture[str]) -> None:
+    """A full-scope run must never report a mutant it could not apply as killed."""
+    assert mp._verdict([], [_mutant(3)]) == 1
+    err = capsys.readouterr().err
+    assert "1 mutant(s) with no selected test" in err
+    assert "kairix/mod3.py:3" in err and "fix:" in err and "next:" in err and "run:" in err
+    assert mp._verdict([], []) == 0
+
+
 def test_the_nightly_suite_runs_full_scope() -> None:
     suite = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation-suite.yml"
     workflow = suite.read_text(encoding="utf-8")
-    assert '--base "${BASE}" --full-scope' in workflow
+    assert '--base "${BASE}" --full-scope --shard-index "${SHARD}" --shard-count 4' in workflow
+    assert "shard: [0, 1, 2, 3]" in workflow and "fail-fast: false" in workflow
 
 
 def test_survivor_report_carries_f21_action_markers() -> None:
