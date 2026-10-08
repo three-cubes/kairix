@@ -50,6 +50,7 @@ from tests.fakes import (
     FakeResolver,
     FakeSlimConnector,
     FakeSlimConnectorWithPermSync,
+    fake_obsidian_watcher_factory,
 )
 
 pytestmark = pytest.mark.contract
@@ -296,7 +297,8 @@ def test_obsidian_list_changes_for_container_delegates_to_list_changes(tmp_path:
 
     vault = tmp_path / "agent-alpha-vault"
     vault.mkdir()
-    conn = ObsidianConnector(vault_root=vault)
+    # list_changes_for_container starts the watcher — keep it in-process (no OS thread).
+    conn = ObsidianConnector(vault_root=vault, watcher_factory=fake_obsidian_watcher_factory())
     container = Container(
         cc_pair_id=1,
         container_id="default",

@@ -254,6 +254,80 @@ def test_connector_runtime_reuses_one_instance_for_more_than_inotify_limit_and_c
     assert connector.close_calls == 1
 
 
+def _one_shot_deps(tmp_path: Path, connector: Any) -> ConnectorSyncDeps:
+    """One-shot (no runtime) deps whose provider hands back ``connector``."""
+    vault = tmp_path / "vault"
+    vault.mkdir(exist_ok=True)
+    return ConnectorSyncDeps(
+        disabled_fn=lambda: False,
+        config_mapping_fn=lambda: _obsidian_topology(vault),
+        db_factory=lambda: sqlite3.connect(str(tmp_path / "index.sqlite")),
+        bronze_root_resolver=lambda: tmp_path / "bronze",
+        connector_provider=lambda _entry: connector,
+    )
+
+
+@pytest.mark.unit
+def test_one_shot_sync_closes_the_connector_it_built(tmp_path: Path) -> None:
+    """A one-shot tick closes the connector it constructed once the batch is done.
+
+    Nothing else holds a one-shot connector, so an unclosed one leaks its
+    resources for the life of the process — for Obsidian, a live
+    filesystem-watcher thread per tick (the leak that accumulated dozens of
+    FSEvents threads across the test suite).
+
+    Sabotage proof: make ``_close_one_shot_connector`` a no-op (or drop the
+    ``connector_release`` call in ``_process_sync_entry``); ``close_calls``
+    stays 0 and this test fails.
+    """
+    connector = _CloseTrackingConnector()
+
+    result = run_connector_sync_pipeline(_one_shot_deps(tmp_path, connector))
+
+    assert result.connectors_polled == 1
+    assert connector.close_calls == 1
+
+
+@pytest.mark.unit
+def test_one_shot_sync_closes_the_connector_when_its_batch_fails(tmp_path: Path) -> None:
+    """A failed one-shot batch still releases its connector (release runs in ``finally``).
+
+    Sabotage proof: move the ``connector_release`` call out of the
+    ``finally`` onto the success path only; ``close_calls`` stays 0.
+    """
+    connector = _CloseTrackingConnector(raise_on_list_changes=RuntimeError("source unavailable"))
+
+    result = run_connector_sync_pipeline(_one_shot_deps(tmp_path, connector))
+
+    assert result.connectors_polled == 0, "a failed batch must not be folded as polled"
+    assert connector.close_calls == 1
+
+
+@pytest.mark.unit
+def test_one_shot_release_failure_is_logged_and_tick_completes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A connector whose ``close`` raises is logged; the tick's result still lands.
+
+    Sabotage proof: drop the ``except`` around ``connector_release``; the
+    close error propagates out of ``run_connector_sync_pipeline``.
+    """
+
+    class _CloseRaises(_CloseTrackingConnector):
+        def close(self) -> None:
+            super().close()
+            raise OSError("watcher already gone")
+
+    connector = _CloseRaises()
+
+    with caplog.at_level(logging.WARNING, logger="kairix.worker"):
+        result = run_connector_sync_pipeline(_one_shot_deps(tmp_path, connector))
+
+    assert result.connectors_polled == 1
+    assert connector.close_calls == 1
+    assert any("release failed" in rec.getMessage() for rec in caplog.records)
+
+
 @pytest.mark.integration
 def test_connector_runtime_recreates_failed_connector_and_replays_uncommitted_batch(tmp_path: Path) -> None:
     """A failed tick discards connector-local cursor state before retry.
