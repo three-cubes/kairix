@@ -161,6 +161,37 @@ def test_unclosed_leading_dashes_are_body_text_not_frontmatter() -> None:
 
 
 @pytest.mark.unit
+def test_frontmatter_closed_at_end_of_file_is_left_unchanged() -> None:
+    """A file that ends exactly on its closing ``---`` (no trailing newline)
+    is all frontmatter: nothing is linked and the content round-trips.
+
+    Sabotage proof: in ``_frontmatter_end`` change ``fm_end < len(content)``
+    to ``<=`` (or ``and`` to ``or``) -- indexing one past the end raises
+    IndexError instead of returning the content unchanged.
+    """
+    content = "---\ntitle: Acme Corp\n---"
+    modified, injected = inject_wikilinks(content, [ACME_CORP])
+    assert injected == []
+    assert modified == content
+
+
+@pytest.mark.unit
+def test_frontmatter_close_absorbs_only_a_trailing_newline() -> None:
+    """The closing ``---`` absorbs the newline after it, but never a body
+    character: text glued straight onto the closing fence is still body
+    text and its first mention is linked intact.
+
+    Sabotage proof: in ``_frontmatter_end`` change ``== "\\n"`` to ``!=``
+    (or ``and`` to ``or``) -- the ``A`` of ``Acme`` is swallowed into the
+    frontmatter, so the entity is no longer found in the body.
+    """
+    content = "---\ntitle: x\n---Acme Corp leads the round."
+    modified, injected = inject_wikilinks(content, [ACME_CORP])
+    assert injected == ["Acme Corp"]
+    assert modified == "---\ntitle: x\n---[[Acme-Corp]] leads the round."
+
+
+@pytest.mark.unit
 def test_frontmatter_acme_not_linked_in_yaml() -> None:
     content = "---\nclient: Acme Corp\n---\n\nAcme Corp overview."
     modified, _ = inject_wikilinks(content, [ACME_CORP])
