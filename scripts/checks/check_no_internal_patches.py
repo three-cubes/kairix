@@ -16,7 +16,8 @@ matches one of eight shapes:
    Replacing (or evicting, then re-importing) a module object substitutes
    the whole kairix implementation — the same anti-pattern as ``@patch``,
    one level up. A key held in a variable bound from a ``"kairix..."``
-   literal counts (see ``_ast_key_taint``).
+   literal, or returned by a helper, counts (see ``_ast_key_taint``); an
+   ``update`` with an opaque mapping (variable / call / ``**``) counts too.
 8. ``importlib.reload(<kairix module>)`` — re-executes module-level code
    to reset hidden singleton state, so the test passes against a module
    object no production process ever sees. Inject the state holder
@@ -310,6 +311,8 @@ class _ModuleSwapCtx:
         self.modules_names = from_imports(tree, "sys", "modules")
         self.importlib_names = module_aliases(tree, "importlib")
         self.reload_names = from_imports(tree, "importlib", "reload")
+        # ``from importlib import import_module [as load]`` — tracked like reload.
+        self.import_module_names = from_imports(tree, "importlib", "import_module") | {"__import__"}
 
     def is_sys_modules(self, expr: ast.expr) -> bool:
         return is_module_attr(expr, self.sys_names, "modules", self.modules_names)
@@ -328,12 +331,29 @@ class _ModuleSwapCtx:
             return self.is_kairix_key(expr.slice)
         if isinstance(expr, ast.Call) and expr.args:
             func = expr.func
-            # importlib.import_module("kairix.X") / __import__("kairix.X")
+            # importlib.import_module("kairix.X") / an aliased
+            # ``from importlib import import_module as load`` / __import__("kairix.X")
             is_importer = (isinstance(func, ast.Attribute) and func.attr == "import_module") or (
-                isinstance(func, ast.Name) and func.id in {"import_module", "__import__"}
+                isinstance(func, ast.Name) and func.id in self.import_module_names
             )
             return is_importer and self.is_kairix_key(expr.args[0])
         return False
+
+    def mapping_may_carry_kairix(self, call: ast.Call) -> bool:
+        """A ``sys.modules.update(...)`` payload that can install a kairix module.
+
+        Mirrors F2's treatment of an opaque ``os.environ.update``: a dict
+        literal is inspected key by key, but a variable / call / comprehension
+        (or ``**``) can carry a kairix key the AST cannot see, so it counts.
+        """
+        if any(kw.arg is None or _is_kairix_module_name(kw.arg) for kw in call.keywords):
+            return True
+        if not call.args:
+            return False
+        mapping = call.args[0]
+        if isinstance(mapping, ast.Dict):
+            return any(k is None or self.is_kairix_key(k) for k in mapping.keys)
+        return True
 
 
 def _sys_modules_call_swap(node: ast.Call, ctx: _ModuleSwapCtx) -> bool:
@@ -344,8 +364,8 @@ def _sys_modules_call_swap(node: ast.Call, ctx: _ModuleSwapCtx) -> bool:
     if ctx.is_sys_modules(func.value):
         if func.attr in _SYS_MODULES_KEY_METHODS and node.args:
             return ctx.is_kairix_key(node.args[0])
-        if func.attr == "update" and node.args and isinstance(node.args[0], ast.Dict):
-            return any(k is not None and ctx.is_kairix_key(k) for k in node.args[0].keys)
+        if func.attr == "update":
+            return ctx.mapping_may_carry_kairix(node)
         return False
     is_monkeypatch_item = (
         func.attr in {"setitem", "delitem"} and isinstance(func.value, ast.Name) and func.value.id == "monkeypatch"

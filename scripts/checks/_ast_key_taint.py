@@ -97,7 +97,8 @@ def key_is_protected(expr: ast.expr, is_protected: StringPredicate, tainted: set
     """Can the key expression ``expr`` evaluate to a protected name?
 
     Matches a protected string literal, an f-string / concatenation whose
-    leading literal is protected-prefixed, or a tainted name.
+    leading literal is protected-prefixed, a tainted name, or a call to a
+    tainted helper (one whose ``return`` yields a protected key).
     """
     if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
         return is_protected(expr.value)
@@ -107,6 +108,14 @@ def key_is_protected(expr: ast.expr, is_protected: StringPredicate, tainted: set
         return key_is_protected(expr.values[0], is_protected, tainted)
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
         return key_is_protected(expr.left, is_protected, tainted)
+    if isinstance(expr, ast.Call):
+        # ``env_key()`` / ``self.module_key()`` — a helper whose ``return``
+        # yields a protected literal is tainted by name in the binding pass.
+        func = expr.func
+        if isinstance(func, ast.Name):
+            return func.id in tainted
+        if isinstance(func, ast.Attribute):
+            return func.attr in tainted
     return False
 
 

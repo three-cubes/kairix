@@ -28,9 +28,12 @@ allow-list, no path list, no pragma):
 * **Snapshot-restore teardown** — the write sits AFTER the ``yield`` of a
   ``@pytest.fixture`` generator that took a copy of ``os.environ``
   (``dict(os.environ)`` / ``os.environ.copy()`` / ``{**os.environ}``)
-  BEFORE the yield, and the write references that snapshot. It restores
-  state a production seam legitimately wrote; it never seeds a value for a
-  production read. Writes BEFORE the yield are still violations.
+  BEFORE the yield, and the write is a genuine restore from it:
+  ``os.environ.update(snapshot)``, ``os.environ[k] = snapshot[k]`` (same
+  key), or a ``pop`` / ``del`` of ``k`` guarded by ``k`` being absent from
+  the snapshot. It restores state a production seam legitimately wrote; it
+  never seeds a value for a production read. Writes BEFORE the yield, and
+  post-yield writes that merely mention the snapshot, are still violations.
 
 Output: one ``path:line: shape`` per violation on stdout, sorted.
 Pipes into ``arch_gate`` from ``_lib.sh``, which fails on any line.
@@ -183,10 +186,16 @@ def _patch_dict_shape(call: ast.Call, ctx: _Ctx) -> str | None:
             or (isinstance(func.value, ast.Attribute) and func.value.attr == "patch")
         )
     )
-    if not is_patch_dict or not call.args or not ctx.is_environ(call.args[0]):
+    if not is_patch_dict:
         return None
-    mapping = call.args[1] if len(call.args) >= 2 else None
-    keywords = [kw for kw in call.keywords if kw.arg != "clear"]
+    # patch.dict(in_dict, values=(), clear=False, **kwargs) — both the
+    # positional and the in_dict= / values= keyword spellings are resolved.
+    named = {kw.arg: kw.value for kw in call.keywords if kw.arg in {"in_dict", "values"}}
+    target = call.args[0] if call.args else named.get("in_dict")
+    if target is None or not ctx.is_environ(target):
+        return None
+    mapping = call.args[1] if len(call.args) >= 2 else named.get("values")
+    keywords = [kw for kw in call.keywords if kw.arg not in {"clear", "in_dict", "values"}]
     if ctx.mapping_may_carry_kairix(mapping, keywords):
         return "patch.dict(os.environ, <KAIRIX_*>)"
     return None
@@ -287,7 +296,69 @@ def _is_snapshot_restore(fn: ast.FunctionDef | ast.AsyncFunctionDef, node: ast.A
     first_yield, snapshots = shape
     if getattr(node, "lineno", 0) <= first_yield:
         return False
-    return any(isinstance(n, ast.Name) and n.id in snapshots for n in ast.walk(node))
+    return _is_genuine_restore(fn, node, snapshots, ctx)
+
+
+def _is_snapshot_name(expr: ast.expr | None, snapshots: set[str]) -> bool:
+    return isinstance(expr, ast.Name) and expr.id in snapshots
+
+
+def _same_expr(a: ast.expr, b: ast.expr) -> bool:
+    return ast.dump(a) == ast.dump(b)
+
+
+def _guarded_by_key_absent(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, node: ast.AST, key: ast.expr, snapshots: set[str], ctx: _Ctx
+) -> bool:
+    """``node`` only runs when ``key`` was absent from the snapshot.
+
+    Matches ``if key not in snapshot: <node>`` and ``if key in snapshot: ...
+    else: <node>`` — the pop / del half of a per-key restore.
+    """
+    child: ast.AST = node
+    parent = ctx.parents.get(node)
+    while parent is not None and parent is not fn:
+        if isinstance(parent, ast.If) and isinstance(parent.test, ast.Compare):
+            test = parent.test
+            if len(test.ops) == 1 and _same_expr(test.left, key) and _is_snapshot_name(test.comparators[0], snapshots):
+                in_body = any(child is stmt for stmt in parent.body)
+                if isinstance(test.ops[0], ast.NotIn) and in_body:
+                    return True
+                if isinstance(test.ops[0], ast.In) and not in_body:
+                    return True
+        child, parent = parent, ctx.parents.get(parent)
+    return False
+
+
+def _is_genuine_restore(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, node: ast.AST, snapshots: set[str], ctx: _Ctx
+) -> bool:
+    """``node`` puts ``os.environ`` back to the snapshot — nothing else.
+
+    Recognised: ``os.environ.update(snapshot)``; ``os.environ[k] = snapshot[k]``
+    (same key on both sides); and ``os.environ.pop(k, ...)`` /
+    ``del os.environ[k]`` guarded by ``k`` being absent from the snapshot.
+    Any other post-yield write that merely mentions the snapshot (e.g.
+    ``os.environ["KAIRIX_X"] = snapshot.get("PATH")``) is still reported.
+    """
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        method = node.func.attr
+        if method == "update":
+            return len(node.args) == 1 and not node.keywords and _is_snapshot_name(node.args[0], snapshots)
+        if method == "pop" and node.args:
+            return _guarded_by_key_absent(fn, node, node.args[0], snapshots, ctx)
+        return False
+    if isinstance(node, ast.Assign) and len(node.targets) == 1:
+        target, value = node.targets[0], node.value
+        return (
+            isinstance(target, ast.Subscript)
+            and isinstance(value, ast.Subscript)
+            and _is_snapshot_name(value.value, snapshots)
+            and _same_expr(target.slice, value.slice)
+        )
+    if isinstance(node, ast.Delete) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript):
+        return _guarded_by_key_absent(fn, node, node.targets[0].slice, snapshots, ctx)
+    return False
 
 
 def _is_recognised_boundary(node: ast.AST, ctx: _Ctx) -> bool:

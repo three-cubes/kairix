@@ -64,9 +64,11 @@ class BearerHeaders:
 
 # Process-wide cache so repeated ``headers(...)`` calls reuse the
 # resolved secret without re-walking the resolver chain on every HTTP
-# request. Keyed on the logical secret name so an operator can declare
-# multiple API-key-backed connectors without their lookups colliding.
-_CACHE: dict[str, str] = {}
+# request. Keyed on (resolver, logical secret name): instances sharing the
+# canonical default resolver share one resolution per secret name, while an
+# injected ``secret_lookup`` (a per-tenant source) gets its own entries — so
+# tenant B can never be served tenant A's key for the same secret name.
+_CACHE: dict[tuple[Callable[[str], str | None], str], str] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -116,8 +118,9 @@ class ApiKeyAuth:
     the cached resolution.
 
     Frozen dataclass — the helper itself carries no mutable state.
-    The cache lives at module scope so multiple instances pointing at
-    the same secret-name share one resolution.
+    The cache lives at module scope, keyed on (resolver, secret-name), so
+    multiple instances using the same resolver share one resolution per
+    secret-name while distinct injected resolvers never share entries.
 
     Construction is cheap and side-effect-free, so callers can build an
     :class:`ApiKeyAuth` at module import without paying the resolver
@@ -150,8 +153,9 @@ class ApiKeyAuth:
                 this exception up to the operator surface stays F21-
                 actionable.
         """
+        cache_key = (self.secret_lookup, secret_name)
         with _CACHE_LOCK:
-            cached = _CACHE.get(secret_name)
+            cached = _CACHE.get(cache_key)
         if cached is None:
             resolved = self.secret_lookup(secret_name)
             if resolved is None or not resolved.strip():
@@ -162,6 +166,6 @@ class ApiKeyAuth:
                     f"next: see docs/operations/OPERATIONS.md for the secret-loading runbook."
                 )
             with _CACHE_LOCK:
-                _CACHE[secret_name] = resolved
+                _CACHE[cache_key] = resolved
             cached = resolved
         return BearerHeaders(mapping={"Authorization": f"Bearer {cached}"})

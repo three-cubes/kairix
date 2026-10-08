@@ -341,6 +341,131 @@ def _plain_generator():
     ]
 
 
+def test_post_yield_write_that_merely_mentions_the_snapshot_is_flagged(tmp_path: Path) -> None:
+    """Codex PR #814 thread: only GENUINE restoration is recognised. A teardown
+    write that reads some other value out of the snapshot seeds a KAIRIX_*
+    key and must still be reported.
+
+    Sabotage proof (executed): make ``_is_genuine_restore`` return ``True``
+    (back to "references the snapshot") → no violation is reported; restored.
+    """
+    src = """
+import os
+
+import pytest
+
+
+@pytest.fixture
+def _leaky():
+    snapshot = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(snapshot)
+    os.environ["KAIRIX_DB_PATH"] = snapshot.get("PATH", "/leak")
+"""
+    assert _violations(tmp_path, src) == ["13: assign os.environ[KAIRIX_*]"]
+
+
+def test_per_key_restore_from_the_snapshot_is_recognised(tmp_path: Path) -> None:
+    """``os.environ[k] = snapshot[k]`` (same key) and a ``pop`` of ``k`` only
+    when ``k`` was absent from the snapshot are genuine per-key restores.
+
+    Sabotage proof (executed): make ``_is_genuine_restore`` return ``False``
+    → both restore writes are reported; restored.
+    """
+    src = """
+import os
+
+import pytest
+
+_KEYS = ("KAIRIX_DB_PATH", "KAIRIX_DATA_DIR")
+
+
+@pytest.fixture
+def _restored():
+    snapshot = dict(os.environ)
+    yield
+    for key in _KEYS:
+        if key in snapshot:
+            os.environ[key] = snapshot[key]
+        else:
+            os.environ.pop(key, None)
+"""
+    assert _violations(tmp_path, src) == []
+
+
+def test_unguarded_or_mismatched_per_key_restore_is_flagged(tmp_path: Path) -> None:
+    """A pop not guarded by key-absence, or a restore from a DIFFERENT key,
+    is not genuine restoration."""
+    src = """
+import os
+
+import pytest
+
+_KEYS = ("KAIRIX_DB_PATH", "KAIRIX_DATA_DIR")
+
+
+@pytest.fixture
+def _restored():
+    snapshot = dict(os.environ)
+    yield
+    for key in _KEYS:
+        os.environ.pop(key, None)
+        os.environ[key] = snapshot["PATH"]
+"""
+    assert _violations(tmp_path, src) == [
+        "14: os.environ.pop(KAIRIX_*)",
+        "15: assign os.environ[KAIRIX_*]",
+    ]
+
+
+def test_key_returned_by_a_helper_call_is_flagged(tmp_path: Path) -> None:
+    """Codex PR #814 thread: ``os.environ.pop(env_key(), None)`` — the key
+    comes from a call to a helper that returns a KAIRIX_* literal.
+
+    Sabotage proof (executed): drop the ``ast.Call`` branch of
+    ``key_is_protected`` → no violation is reported; restored.
+    """
+    src = """
+import os
+
+
+def env_key():
+    return "KAIRIX_DB_PATH"
+
+
+def test_x():
+    os.environ.pop(env_key(), None)
+"""
+    assert _violations(tmp_path, src) == ["10: os.environ.pop(KAIRIX_*)"]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        'patch.dict(in_dict=os.environ, values={"KAIRIX_DB_PATH": "x"})',
+        'patch.dict(values={"KAIRIX_DB_PATH": "x"}, in_dict=os.environ)',
+        'patch.dict(os.environ, values={"KAIRIX_DB_PATH": "x"})',
+    ],
+)
+def test_patch_dict_keyword_form_is_flagged(tmp_path: Path, call: str) -> None:
+    """Codex PR #814 thread: ``in_dict=`` / ``values=`` keyword spellings.
+
+    Sabotage proof (executed): resolve only the positional ``in_dict`` /
+    ``values`` (the pre-fix code) → every case reports clean; restored.
+    """
+    src = f"import os\nfrom unittest.mock import patch\n\n\ndef test_x():\n    with {call}:\n        pass\n"
+    assert _violations(tmp_path, src) == ["6: patch.dict(os.environ, <KAIRIX_*>)"]
+
+
+def test_patch_dict_keyword_form_on_other_dicts_is_not_flagged(tmp_path: Path) -> None:
+    src = (
+        "from unittest.mock import patch\n\n\ndef test_x(cfg):\n"
+        '    with patch.dict(in_dict=cfg, values={"KAIRIX_DB_PATH": "x"}):\n        pass\n'
+    )
+    assert _violations(tmp_path, src) == []
+
+
 # ---------------------------------------------------------------------------
 # The reviewed real-tree sites + the failure message contract.
 # ---------------------------------------------------------------------------

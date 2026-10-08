@@ -126,3 +126,34 @@ def test_reset_cache_drops_resolved_values(tmp_path: Path, monkeypatch: pytest.M
     second = auth.headers("rotating-secret")
     assert first.mapping["Authorization"] == "Bearer first"
     assert second.mapping["Authorization"] == "Bearer second"
+
+
+def test_injected_resolvers_never_share_cached_secrets() -> None:
+    """Two injected resolvers asking for the SAME secret name each get their
+    own value — tenant B is never served tenant A's cached key.
+
+    Sabotage proof (executed): key ``_CACHE`` by ``secret_name`` alone →
+    the second auth returns tenant A's bearer and this fails; restored.
+    """
+    reset_api_key_cache()
+    tenant_a = ApiKeyAuth(secret_lookup=lambda _name: "tenant-a-key")
+    tenant_b = ApiKeyAuth(secret_lookup=lambda _name: "tenant-b-key")
+
+    assert tenant_a.headers("shared-secret-name").mapping == {"Authorization": "Bearer tenant-a-key"}
+    assert tenant_b.headers("shared-secret-name").mapping == {"Authorization": "Bearer tenant-b-key"}
+
+
+def test_instances_sharing_a_resolver_share_the_cached_secret() -> None:
+    """Instances built on the same resolver reuse one resolution per name —
+    the canonical default resolver's sharing behaviour is preserved."""
+    reset_api_key_cache()
+    calls: list[str] = []
+
+    def lookup(name: str) -> str:
+        calls.append(name)
+        return f"value-{len(calls)}"
+
+    first = ApiKeyAuth(secret_lookup=lookup).headers("shared")
+    second = ApiKeyAuth(secret_lookup=lookup).headers("shared")
+    assert first.mapping == second.mapping == {"Authorization": "Bearer value-1"}
+    assert calls == ["shared"]

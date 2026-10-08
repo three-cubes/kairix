@@ -149,6 +149,63 @@ def test_reload_of_non_kairix_module_is_not_flagged(tmp_path: Path) -> None:
     assert _flagged(tmp_path, src) is False
 
 
+def test_reload_through_an_aliased_import_module_is_flagged(tmp_path: Path) -> None:
+    """Codex PR #814 thread: ``from importlib import import_module as load``
+    is tracked like the ``reload`` alias.
+
+    Sabotage proof (executed): drop the ``from_imports(tree, "importlib",
+    "import_module")`` term from ``import_module_names`` → reports clean;
+    restored.
+    """
+    src = 'from importlib import import_module as load, reload\nreload(load("kairix.paths"))\n'
+    assert _flagged(tmp_path, src) is True
+
+
+# ---------------------------------------------------------------------------
+# Opaque sys.modules.update payloads + helper-returned keys (PR #814 threads).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "sys.modules.update(mods)",
+        "sys.modules.update(build_mods())",
+        "sys.modules.update({name: stub for name in names})",
+        "sys.modules.update(**mods)",
+    ],
+)
+def test_sys_modules_update_with_opaque_mapping_is_flagged(tmp_path: Path, statement: str) -> None:
+    """An opaque ``sys.modules.update`` payload can install a kairix module the
+    AST cannot see — treated like F2's opaque ``os.environ.update``.
+
+    Sabotage proof (executed): make ``mapping_may_carry_kairix`` inspect only
+    dict literals (return ``False`` for anything else) → every case reports
+    clean; restored.
+    """
+    src = f"import sys\n\n\ndef test_x(mods, build_mods, names, stub):\n    {statement}\n"
+    assert _flagged(tmp_path, src) is True
+
+
+def test_sys_modules_update_with_third_party_literal_is_not_flagged(tmp_path: Path) -> None:
+    src = 'import sys\n\n\ndef test_x(stub):\n    sys.modules.update({"openai": stub})\n'
+    assert _flagged(tmp_path, src) is False
+
+
+def test_sys_modules_key_returned_by_a_helper_call_is_flagged(tmp_path: Path) -> None:
+    """``sys.modules.pop(module_key(), None)`` with a helper returning a
+    ``"kairix..."`` literal.
+
+    Sabotage proof (executed): drop the ``ast.Call`` branch of
+    ``key_is_protected`` → reports clean; restored.
+    """
+    src = (
+        'import sys\n\n\ndef module_key():\n    return "kairix.paths"\n\n\n'
+        "def test_x():\n    sys.modules.pop(module_key(), None)\n"
+    )
+    assert _flagged(tmp_path, src) is True
+
+
 # ---------------------------------------------------------------------------
 # Failure message contract.
 # ---------------------------------------------------------------------------

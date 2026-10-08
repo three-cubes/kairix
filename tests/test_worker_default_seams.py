@@ -80,6 +80,21 @@ pytestmark = pytest.mark.unit
 # baseline in tests/conftest.py (``_hermetic_data_dirs`` /
 # ``_OPERATOR_CREDENTIAL_ENV``) — the one place F2 allows KAIRIX_* env
 # mutation. This module never writes a KAIRIX_* key itself.
+#
+# EXCEPT under ``KAIRIX_E2E=1``: the live-credential gate deliberately keeps
+# the operator's real credentials in place. The credential-dependent tests
+# below pin the NO-credential degraded path by executing the production
+# ``_default_*`` seams (deps=None) — injecting a fake through the deps seam
+# would bypass the very seam under test, and the process env must not be
+# mutated (F2). So under KAIRIX_E2E=1 they are skipped rather than run the
+# production defaults against a live provider / Neo4j account.
+_skip_with_live_credentials = pytest.mark.skipif(
+    os.environ.get("KAIRIX_E2E") == "1",
+    reason=(
+        "KAIRIX_E2E=1 keeps the operator's real provider/Neo4j credentials; this test pins the "
+        "no-credential degraded path of a production _default_* seam and must not run it live"
+    ),
+)
 
 
 @pytest.fixture
@@ -138,6 +153,7 @@ def isolated_worker_env(tmp_path: Path) -> Iterator[Path]:
         kairix.paths.clear_cache()
 
 
+@_skip_with_live_credentials
 def test_default_embed_seam_executes_and_returns_false_without_provider(
     isolated_worker_env: Path,
 ) -> None:
@@ -162,6 +178,7 @@ def test_default_embed_seam_executes_and_returns_false_without_provider(
     )
 
 
+@_skip_with_live_credentials
 def test_default_embed_seam_logs_provider_failure(isolated_worker_env: Path, caplog: pytest.LogCaptureFixture) -> None:
     """The executed ``_default_embed`` seam surfaces the REAL pipeline's
     missing-provider-secret error through the runner's warning log.
@@ -225,6 +242,7 @@ def test_default_health_check_seam_executes_and_runs_all_checks(
     assert 0 <= int(passed_str) <= int(total_str)
 
 
+@_skip_with_live_credentials
 def test_default_neo4j_drain_seam_executes_and_reports_unavailable(
     isolated_worker_env: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -382,6 +400,7 @@ def test_default_entity_seed_seam_executes_against_empty_doc_root(
     run_entity_seed()
 
 
+@_skip_with_live_credentials
 def test_default_neo4j_client_for_seed_seam_executes_when_canonicals_present(
     isolated_worker_env: Path,
 ) -> None:
