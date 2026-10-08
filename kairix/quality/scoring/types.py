@@ -23,6 +23,36 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
+
+class JudgeFailedError(RuntimeError):
+    """The LLM judge could not produce a score.
+
+    Raised by every LLM judge — the benchmark relevance judge
+    (:func:`kairix.quality.benchmark.runner.llm_judge`), the conversation
+    suite judge (``SuiteRunner._judge``) and :class:`LLMJudgeScorer` — when
+    the backend fails (auth, timeout, unconfigured provider, empty reply) or
+    replies with something that is not a finite number. A failed judgement
+    is NOT a verdict: callers must record the case as unscored and exclude
+    it from aggregates instead of counting it as 0.0.
+
+    Attributes:
+        reason: Stable machine-readable failure class —
+                :data:`JUDGE_FAILURE_BACKEND_ERROR` or
+                :data:`JUDGE_FAILURE_UNPARSEABLE`.
+        detail: Human-readable detail (exception type + message, or the
+                length of the unparseable reply — never the reply text).
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"llm judge failed ({reason}): {detail}")
+        self.reason = reason
+        self.detail = detail
+
+
+JUDGE_FAILURE_BACKEND_ERROR = "backend_error"
+JUDGE_FAILURE_UNPARSEABLE = "unparseable_response"
+
+
 LatencyPhase = Literal["cold", "warm", "load"]
 """Latency capture phase.
 

@@ -52,7 +52,7 @@ from kairix.core.search.pipeline import SearchPipeline
 from kairix.corpus.ingest import IngestRequest, SessionPayload, ingest_corpus
 from kairix.paths import KairixPaths, agent_cli_roots, confine_to_roots
 from kairix.platform.llm.protocol import LLMBackend
-from kairix.quality.benchmark.runner import (
+from kairix.quality.scoring.types import (
     JUDGE_FAILURE_BACKEND_ERROR,
     JUDGE_FAILURE_UNPARSEABLE,
     JudgeFailedError,

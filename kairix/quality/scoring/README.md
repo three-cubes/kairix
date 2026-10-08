@@ -48,7 +48,11 @@ from kairix.quality.scoring import (
 - `hit_at_k.py` — `HitAtKScorer` (binary Hit@K).
 - `mrr.py` — `MRRScorer` (Mean Reciprocal Rank).
 - `llm_judge.py` — `LLMJudgeScorer` (consumes a `LLMBackend`; extracts
-  the judge prompt previously embedded in `suite_runner._judge`).
+  the judge prompt previously embedded in `suite_runner._judge`). A judge
+  failure (backend error, empty / non-numeric / `nan` / `inf` reply)
+  raises `JudgeFailedError` (from `types.py`) instead of scoring 0.0;
+  callers record the query as unscored, so the aggregator averages the
+  judge metric over judged queries only.
 - `latency.py` — `LatencyScorer` (post-hoc percentile aggregation).
 - `registry.py` — `ScorerRegistry`, `auto_select_scorers(suite, results)`.
 - `aggregator.py` — per-category and overall aggregation (shared

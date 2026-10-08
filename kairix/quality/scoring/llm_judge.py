@@ -13,9 +13,10 @@ Score interpretation (matches the prompt instruction):
 * 0.5 — partially correct
 * 0.0 — wrong or missing
 
-Robustness: a malformed judge response (no parseable float) maps to
-0.0 rather than raising — degraded-mode fail-safe matches the existing
-suite_runner behaviour.
+Robustness: a judge failure is never a score. A backend that raises or
+returns an empty reply (``LLMBackend.chat`` returns ``""`` on failure), or
+a reply with no finite float, raises :class:`JudgeFailedError` so the
+caller records the query as unscored and excludes it from aggregates.
 
 F26-clean: imports ``LLMBackend`` Protocol from
 ``kairix.platform.llm.protocol``. No provider/transport imports here —
@@ -25,11 +26,15 @@ factory).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import Any
 
 from kairix.platform.llm.protocol import LLMBackend
 from kairix.quality.scoring.types import (
+    JUDGE_FAILURE_BACKEND_ERROR,
+    JUDGE_FAILURE_UNPARSEABLE,
+    JudgeFailedError,
     QueryRunResult,
     ScorerResult,
 )
@@ -68,32 +73,34 @@ def build_judge_prompt(
 def parse_judge_score(response: str) -> float:
     """Parse an LLM-judge response into a clamped 0.0-1.0 float.
 
-    Robust to leading/trailing whitespace, surrounding text, and
-    malformed responses (returns 0.0 rather than raising). Mirrors the
-    behaviour of :func:`kairix.quality.eval.suite_runner._parse_score`.
+    Robust to leading/trailing whitespace and surrounding text (the first
+    parseable float wins); out-of-range values are clamped.
+
+    Raises:
+        JudgeFailedError: ``unparseable_response`` when the response is
+            empty, holds no parseable float, or the float is non-finite
+            (``nan`` / ``inf``). Only the response length is reported.
     """
-    if not response:
-        return 0.0
-    stripped = response.strip()
+    stripped = (response or "").strip()
     try:
-        value = float(stripped)
+        value: float | None = float(stripped)
     except ValueError:
         value = _first_float_in(stripped)
-    if value < 0.0:
-        return 0.0
-    if value > 1.0:
-        return 1.0
-    return value
+    if value is None:
+        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, f"non-numeric reply ({len(stripped)} chars)")
+    if not math.isfinite(value):
+        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, "non-finite reply")
+    return max(0.0, min(1.0, value))
 
 
-def _first_float_in(text: str) -> float:
-    """Return the first parseable float in ``text``, or 0.0 if none."""
+def _first_float_in(text: str) -> float | None:
+    """Return the first parseable float in ``text``, or ``None`` if none."""
     for token in text.replace(",", " ").split():
         try:
             return float(token)
         except ValueError:
             continue
-    return 0.0
+    return None
 
 
 class LLMJudgeScorer:
@@ -108,6 +115,12 @@ class LLMJudgeScorer:
       ``BenchmarkCase.expected_answer``). Empty / None → returns 0.0 with
       ``details["reason"] = "no_expected_answer"``.
     * ``metric_name`` — registry key for the score (default ``"judge"``).
+
+    A judge failure (backend raised / returned ``""``, or a reply with no
+    finite float) raises :class:`JudgeFailedError` — it never returns a
+    ``ScorerResult`` with ``score=0.0``. The caller records the query as
+    unscored for this metric; :func:`aggregate_by_category` then averages
+    the judge metric over the queries that were actually judged.
     """
 
     def __init__(
@@ -155,7 +168,12 @@ class LLMJudgeScorer:
             expected=self._expected,
             context=run.synthesised_answer,
         )
-        response = self._llm.chat(prompt, max_tokens=8)
+        try:
+            response = self._llm.chat(prompt, max_tokens=8)
+        except Exception as exc:
+            raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, f"{type(exc).__name__}: {exc}") from exc
+        if not response or not response.strip():
+            raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, "empty judge reply (LLM backend failure)")
         value = parse_judge_score(response)
         return ScorerResult(
             metric_name=self._metric_name,

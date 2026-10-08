@@ -37,6 +37,7 @@ from kairix.quality.scoring.mrr import MRRScorer
 from kairix.quality.scoring.ndcg import NDCGScorer
 from kairix.quality.scoring.registry import ScorerRegistry, auto_select_scorers
 from kairix.quality.scoring.types import (
+    JudgeFailedError,
     LatencyPhase,
     QueryRunResult,
     Scorer,
@@ -46,6 +47,7 @@ from kairix.quality.scoring.types import (
 __all__ = [
     "CategoryAggregate",
     "HitAtKScorer",
+    "JudgeFailedError",
     "LLMJudgeScorer",
     "LatencyPhase",
     "LatencyScorer",

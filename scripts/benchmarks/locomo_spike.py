@@ -62,6 +62,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -73,6 +74,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from kairix.quality.scoring.types import (
+    JUDGE_FAILURE_BACKEND_ERROR,
+    JUDGE_FAILURE_UNPARSEABLE,
+    JudgeFailedError,
+)
 
 LOGGER = logging.getLogger("locomo_spike")
 
@@ -533,6 +540,7 @@ class _ConvResult:
     mean_score: float
     per_category: dict[str, dict[str, float]] = field(default_factory=dict)
     rows: list[dict[str, Any]] = field(default_factory=list)
+    judge_failures: int = 0
 
 
 def _result_to_conv(
@@ -558,6 +566,7 @@ def _result_to_conv(
         mean_score=float(result.get("mean_score", 0.0)),
         per_category=dict(result.get("per_category") or {}),
         rows=list(result.get("rows") or []),
+        judge_failures=int(result.get("judge_failures", 0) or 0),
     )
 
 
@@ -677,10 +686,21 @@ def _judge_response(
     question: str,
     ground_truth: str,
     response: str,
+    *,
+    backend: Any,
 ) -> tuple[float, bool, str]:
-    """Use kairix's configured LLM backend to score a single mem0 response."""
-    from kairix.platform.llm import get_default_backend
+    """Score a single mem0 response with the LLM judge.
 
+    ``backend`` is an ``LLMBackend`` (``chat(messages, max_tokens) -> str``);
+    the mem0 runner passes kairix's configured default backend.
+
+    Raises:
+        JudgeFailedError: the backend raised or returned an empty reply
+            (``backend_error``), or the reply is not a JSON object carrying
+            a finite numeric ``score`` (``unparseable_response``). A judge
+            failure is never scored 0.0 — the caller records the question
+            as unscored and excludes it from the aggregates.
+    """
     prompt = (
         "You are evaluating whether a memory system's response correctly "
         "answers a question based on prior conversation context.\n\n"
@@ -690,24 +710,61 @@ def _judge_response(
         '{"correct": true|false, "score": 0.0-1.0, "reasoning": "one-sentence rationale"}'
     )
     try:
-        raw = get_default_backend().chat([{"role": "user", "content": prompt}], max_tokens=300)
+        raw = backend.chat([{"role": "user", "content": prompt}], max_tokens=300)
     except Exception as exc:
-        return 0.0, False, f"judge call failed: {type(exc).__name__}: {exc!s}"
+        raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, f"{type(exc).__name__}: {exc!s}") from exc
 
-    raw = raw.strip()
+    raw = (raw or "").strip()
+    if not raw:
+        raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, "empty judge reply (LLM backend failure)")
     start = raw.find("{")
     end = raw.rfind("}")
+    parsed: Any = None
     if 0 <= start < end:
         try:
             parsed = json.loads(raw[start : end + 1])
-            if isinstance(parsed, dict):
-                score = float(parsed.get("score", 0.0))
-                correct = bool(parsed.get("correct", score >= _PASS_THRESHOLD))
-                reasoning = str(parsed.get("reasoning", ""))[:300]
-                return score, correct, reasoning
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
-    return 0.0, False, f"judge returned non-JSON: {raw[:200]}"
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+    if not isinstance(parsed, dict):
+        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, f"no JSON object in reply ({len(raw)} chars)")
+    try:
+        score = float(parsed["score"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, "reply has no numeric 'score'") from exc
+    if not math.isfinite(score):
+        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, "non-finite score")
+    score = max(0.0, min(1.0, score))
+    correct = bool(parsed.get("correct", score >= _PASS_THRESHOLD))
+    reasoning = str(parsed.get("reasoning", ""))[:300]
+    return score, correct, reasoning
+
+
+def _aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate per-question rows into the ``SuiteResult``-shaped summary.
+
+    Rows whose ``score`` is ``None`` (judge failures) are excluded from
+    ``n_questions`` / ``n_passed`` / ``mean_score`` / ``per_category`` and
+    counted in ``judge_failures`` — matching ``SuiteRunner.run``.
+    """
+    scored = [r for r in rows if r["score"] is not None]
+    per_cat_scores: dict[str, list[float]] = {}
+    for r in scored:
+        per_cat_scores.setdefault(r["category"], []).append(r["score"])
+    n_questions = len(scored)
+    return {
+        "n_questions": n_questions,
+        "n_passed": sum(1 for r in scored if r["pass"]),
+        "mean_score": (sum(r["score"] for r in scored) / n_questions) if n_questions else 0.0,
+        "per_category": {
+            cat: {
+                "n": float(len(scores)),
+                "passed": float(sum(1 for sc in scores if sc >= _PASS_THRESHOLD)),
+                "mean": sum(scores) / len(scores),
+            }
+            for cat, scores in per_cat_scores.items()
+        },
+        "judge_failures": len(rows) - n_questions,
+    }
 
 
 def _run_mem0_backend(
@@ -757,8 +814,10 @@ def _run_mem0_backend(
     queries_path = suite_dir / "ground-truth-queries.json"
     queries = json.loads(queries_path.read_text(encoding="utf-8"))
 
+    from kairix.platform.llm import get_default_backend
+
+    judge_backend = get_default_backend()
     rows: list[dict[str, Any]] = []
-    per_cat_scores: dict[str, list[float]] = {}
     for i, qa in enumerate(queries, start=1):
         LOGGER.info("[Q %d/%d] %s", i, len(queries), str(qa["question"])[:80])
         try:
@@ -767,49 +826,32 @@ def _run_mem0_backend(
             response = _synthesise_answer_from_memories(qa["question"], mems or [])
         except Exception as exc:
             response = f"ERROR: mem0 search failed: {type(exc).__name__}: {exc!s}"
-        score, passed, reasoning = _judge_response(qa["question"], qa["answer"], response)
-        category = str(qa.get("category", "open-domain"))
-        rows.append(
-            {
-                "question": qa["question"],
-                "answer": qa["answer"],
-                "category": category,
-                "score": score,
-                "pass": passed,
-                "response": response,
-                "reasoning": reasoning,
-            }
-        )
-        per_cat_scores.setdefault(category, []).append(score)
-
-    n_questions = len(rows)
-    n_passed = sum(1 for r in rows if r["pass"])
-    mean_score = (sum(r["score"] for r in rows) / n_questions) if n_questions else 0.0
-    per_category = {
-        cat: {
-            "n": float(len(scores)),
-            "passed": float(sum(1 for s in scores if s >= _PASS_THRESHOLD)),
-            "mean": (sum(scores) / len(scores)) if scores else 0.0,
+        row: dict[str, Any] = {
+            "question": qa["question"],
+            "answer": qa["answer"],
+            "category": str(qa.get("category", "open-domain")),
+            "response": response,
         }
-        for cat, scores in per_cat_scores.items()
-    }
-    suite_result_payload = {
-        "suite_name": conv_id,
-        "n_questions": n_questions,
-        "n_passed": n_passed,
-        "mean_score": mean_score,
-        "per_category": per_category,
-        "rows": rows,
-    }
+        try:
+            score, passed, reasoning = _judge_response(qa["question"], qa["answer"], response, backend=judge_backend)
+            row.update({"score": score, "pass": passed, "reasoning": reasoning})
+        except JudgeFailedError as exc:
+            # Unscored — never folded into the aggregates as a 0.0 "wrong".
+            row.update({"score": None, "pass": None, "judge_failure": exc.reason, "judge_error": exc.detail})
+        rows.append(row)
+
+    summary = _aggregate_rows(rows)
+    suite_result_payload = {"suite_name": conv_id, **summary, "rows": rows}
     (suite_dir / "result.json").write_text(json.dumps(suite_result_payload, indent=2), encoding="utf-8")
     return _ConvResult(
         backend=_MEM0_BACKEND,
         conv_id=conv_id,
-        n_questions=n_questions,
-        n_passed=n_passed,
-        mean_score=mean_score,
-        per_category=per_category,
+        n_questions=summary["n_questions"],
+        n_passed=summary["n_passed"],
+        mean_score=summary["mean_score"],
+        per_category=summary["per_category"],
         rows=rows,
+        judge_failures=summary["judge_failures"],
     )
 
 
@@ -846,6 +888,9 @@ def _print_summary(conv_results: list[_ConvResult]) -> None:
     else:
         print("Passes          : 0/0")
     print(f"Mean score      : {overall_mean:.3f}")
+    judge_failures = sum(c.judge_failures for c in conv_results)
+    if judge_failures:
+        print(f"Judge failures  : {judge_failures} question(s) unscored — excluded from the numbers above")
     print()
     print(f"  {'conv':<14}  {'backend':<12}  {'passed':>6}  {'questions':>9}  {'mean':>6}")
     print(f"  {'-' * 14}  {'-' * 12}  {'-' * 6}  {'-' * 9}  {'-' * 6}")
@@ -867,6 +912,7 @@ def _write_aggregate_json(conv_results: list[_ConvResult], output_json: Path) ->
                 "mean_score": c.mean_score,
                 "per_category": c.per_category,
                 "rows": c.rows,
+                "judge_failures": c.judge_failures,
             }
             for c in conv_results
         ],
@@ -874,6 +920,7 @@ def _write_aggregate_json(conv_results: list[_ConvResult], output_json: Path) ->
             "n_conversations": len(conv_results),
             "n_questions": sum(c.n_questions for c in conv_results),
             "n_passed": sum(c.n_passed for c in conv_results),
+            "judge_failures": sum(c.judge_failures for c in conv_results),
         },
     }
     output_json.parent.mkdir(parents=True, exist_ok=True)

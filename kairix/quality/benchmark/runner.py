@@ -40,6 +40,11 @@ from kairix.quality.eval.metrics import (
     ndcg_graded,
     reciprocal_rank_graded,
 )
+from kairix.quality.scoring.types import (
+    JUDGE_FAILURE_BACKEND_ERROR,
+    JUDGE_FAILURE_UNPARSEABLE,
+    JudgeFailedError,
+)
 
 # F17 — category names + per-case fields repeated across scorer dispatch, summary
 # emit, and CSV header / row paths; extract so a key rename hits a single edit site.
@@ -314,32 +319,6 @@ def fuzzy_match(paths: list[str], gold: str) -> float:
             if suffix and suffix in path_lower:
                 return 1.0
     return 0.0
-
-
-class JudgeFailedError(RuntimeError):
-    """The LLM judge could not produce a score.
-
-    Raised by :func:`llm_judge` when the chat backend fails (auth, timeout,
-    unconfigured provider) or replies with something that is not a finite
-    number. A failed judgement is NOT a relevance verdict: callers must
-    exclude it from aggregates instead of counting it as 0.0 ("irrelevant").
-
-    Attributes:
-        reason: Stable machine-readable failure class —
-                :data:`JUDGE_FAILURE_BACKEND_ERROR` or
-                :data:`JUDGE_FAILURE_UNPARSEABLE`.
-        detail: Human-readable detail (exception type + message, or the
-                length of the unparseable reply — never the reply text).
-    """
-
-    def __init__(self, reason: str, detail: str) -> None:
-        super().__init__(f"llm judge failed ({reason}): {detail}")
-        self.reason = reason
-        self.detail = detail
-
-
-JUDGE_FAILURE_BACKEND_ERROR = "backend_error"
-JUDGE_FAILURE_UNPARSEABLE = "unparseable_response"
 
 
 def _judge_prompt(query: str, paths: list[str]) -> str:

@@ -47,6 +47,20 @@ and `judge_error`. Note that `n_questions` now counts scored questions only.
 **Pass rates and mean scores may go up** compared with earlier runs that had
 judge failures. Check `judge_failures` before comparing against a baseline.
 
+The last two judges follow the same rule, so no LLM judge in kairix turns a
+failure into a score any more:
+
+- `kairix.quality.scoring.LLMJudgeScorer` (the unified scorer) now raises
+  `JudgeFailedError` on a backend error or an empty, non-numeric, `nan` or
+  `inf` reply, instead of returning a 0.0 result. `parse_judge_score` raises
+  too. The failed query gets no judge result, so the per-category judge mean
+  covers only the queries that were actually judged. `JudgeFailedError` now
+  lives in `kairix.quality.scoring.types` (still importable from
+  `kairix.quality.benchmark.runner`).
+- The LoCoMo spike's mem0 backend (`scripts/benchmarks/locomo_spike.py`)
+  records judge failures as unscored rows, leaves them out of its numbers,
+  and reports a `judge_failures` count per conversation and in the totals.
+
 The unused `kairix.quality.contracts` Protocols (`BriefingSourceProtocol`,
 `EmbedderProtocol`, `EntityResolverProtocol`, `SearchBackendProtocol`, `SearchResultProtocol`) have
 been removed. Nothing in kairix used them.
