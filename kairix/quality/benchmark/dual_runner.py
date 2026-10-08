@@ -64,7 +64,7 @@ def run_dual_benchmark(
     comparison: BenchmarkResult | None = None
     deltas: dict[str, float] = {}
     regression_detected = False
-    inconclusive = False
+    inconclusive = not is_complete(baseline)
 
     if comparison_db is not None:
         comparison = run_benchmark(suite, system=system, db_path=comparison_db, deps=deps)
@@ -85,7 +85,7 @@ def run_dual_benchmark(
         )
 
         # Regression detected if comparison weighted total drops below baseline by threshold
-        inconclusive = not (is_complete(baseline) and is_complete(comparison))
+        inconclusive = inconclusive or not is_complete(comparison)
         regression_detected = not inconclusive and deltas[_KEY_WEIGHTED_TOTAL] < -REGRESSION_THRESHOLD
 
     return DualBenchmarkResult(

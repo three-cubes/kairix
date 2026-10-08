@@ -110,6 +110,16 @@ def _build_summary_lines(
     return lines
 
 
+def _inconclusive_summary_lines(current_failures: int, baseline_failures: int) -> list[str]:
+    """Partial on either side: no score table, no PASS / regression verdict —
+    only the inconclusive summary."""
+    lines = ["Benchmark Gate — Contract Suite", "=" * 45]
+    for label, failures in (("the current result", current_failures), ("the baseline", baseline_failures)):
+        if failures:
+            lines.append("❌ " + partial_diagnostic(label, failures))
+    return lines
+
+
 def compare(baseline: dict, current: dict) -> dict:
     """
     Compare current benchmark result to baseline.
@@ -157,21 +167,21 @@ def compare(baseline: dict, current: dict) -> dict:
     inconclusive = judge_failures > 0 or baseline_judge_failures > 0
     passed = not regression and not category_fails and not inconclusive
 
-    lines = _build_summary_lines(
-        baseline_total,
-        current_total,
-        overall_delta,
-        baseline_cats,
-        current_cats,
-        all_cats,
-        category_deltas,
-        category_warns,
-        category_fails,
-        regression,
-    )
-    for label, failures in (("the current result", judge_failures), ("the baseline", baseline_judge_failures)):
-        if failures:
-            lines.append("❌ " + partial_diagnostic(label, failures))
+    if inconclusive:
+        lines = _inconclusive_summary_lines(judge_failures, baseline_judge_failures)
+    else:
+        lines = _build_summary_lines(
+            baseline_total,
+            current_total,
+            overall_delta,
+            baseline_cats,
+            current_cats,
+            all_cats,
+            category_deltas,
+            category_warns,
+            category_fails,
+            regression,
+        )
 
     return {
         "passed": passed,

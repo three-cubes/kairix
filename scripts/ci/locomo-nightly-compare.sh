@@ -11,8 +11,9 @@
 #   JSON_PATH    — path to today's SuiteResult JSON (set by run.sh)
 #
 # Partial results (LLM-judge failures) are never compared: a partial
-# current result fails the step; a partial prior artifact fails too, rather
-# than silently becoming the comparison baseline.
+# current result fails the step (exit 3). Partial prior artifacts are skipped
+# while walking back to the newest COMPLETE prior; with none, the current
+# complete run establishes the baseline (exit 0).
 #
 # F21 markers (fix:/next:) on every actionable failure path.
 
@@ -44,41 +45,59 @@ fi
 WORKFLOW_FILE="eval-locomo-nightly.yml"
 TMP_PRIOR_DIR="$(mktemp -d)"
 
-# Most recent successful run that is NOT the current one.
-PRIOR_RUN_ID="$(
+# Recent successful runs that are NOT the current one, newest first.
+PRIOR_RUN_IDS="$(
     gh run list \
         --workflow="$WORKFLOW_FILE" \
         --status=success \
         --limit=10 \
         --json databaseId,headSha \
-        --jq ".[] | select(.databaseId != ${GITHUB_RUN_ID:-0}) | .databaseId" \
-        | head -n 1
-)"
+        --jq ".[] | select(.databaseId != ${GITHUB_RUN_ID:-0}) | .databaseId"
+)" || PRIOR_RUN_IDS=""
 
-if [ -z "$PRIOR_RUN_ID" ]; then
+if [ -z "$PRIOR_RUN_IDS" ]; then
     echo "No prior successful nightly run found — recording baseline only (no comment posted)."
     exit 0
 fi
 
-# Artifacts are named locomo-nightly-<run_id>; download and locate the JSON.
-if ! gh run download "$PRIOR_RUN_ID" \
-    --name "locomo-nightly-${PRIOR_RUN_ID}" \
-    --dir "$TMP_PRIOR_DIR" 2>/dev/null; then
-    echo "::warning::could not download prior nightly artifact (run $PRIOR_RUN_ID); skipping comparison"
-    echo "next: this is non-fatal — the comparison will resume once an artifact downloads cleanly"
-    exit 0
-fi
+# Walk back from the newest successful run to the newest COMPLETE one. A partial
+# prior (LLM-judge failures) is never a comparator — and must not block every
+# later nightly — so it is skipped, as is a prior whose artifact cannot be read.
+PRIOR_RUN_ID=""
+PRIOR_JSON=""
+while read -r candidate_id; do
+    [ -n "$candidate_id" ] || continue
+    candidate_dir="$TMP_PRIOR_DIR/$candidate_id"
+    mkdir -p "$candidate_dir"
+    # Artifacts are named locomo-nightly-<run_id>; download and locate the JSON.
+    if ! gh run download "$candidate_id" \
+        --name "locomo-nightly-${candidate_id}" \
+        --dir "$candidate_dir" 2>/dev/null; then
+        echo "::warning::could not download nightly artifact for run $candidate_id; trying an older run"
+        continue
+    fi
+    candidate_json="$(find "$candidate_dir" -name 'locomo-nightly-*.json' -type f | head -n 1)" || candidate_json=""
+    if [ -z "$candidate_json" ]; then
+        echo "::warning::no JSON file inside the artifact for run $candidate_id; trying an older run"
+        continue
+    fi
+    candidate_rc=0
+    python3 "$SCRIPT_DIR/judge_coverage.py" "prior LoCoMo nightly (run $candidate_id)" "$candidate_json" \
+        > "$candidate_dir/coverage.log" || candidate_rc=$?
+    if [ "$candidate_rc" -ne 0 ]; then
+        echo "::notice::skipping prior nightly run $candidate_id — not a complete result (exit $candidate_rc); trying an older run"
+        continue
+    fi
+    PRIOR_RUN_ID="$candidate_id"
+    PRIOR_JSON="$candidate_json"
+    break
+done <<< "$PRIOR_RUN_IDS"
 
-PRIOR_JSON="$(find "$TMP_PRIOR_DIR" -name 'locomo-nightly-*.json' -type f | head -n 1)"
 if [ -z "$PRIOR_JSON" ]; then
-    echo "::warning::no JSON file inside prior artifact; skipping comparison"
+    echo "::notice::no complete prior nightly — establishing baseline: this complete run becomes the comparison point (no comment posted)."
     exit 0
 fi
-
-python3 "$SCRIPT_DIR/judge_coverage.py" "prior LoCoMo nightly (run $PRIOR_RUN_ID)" "$PRIOR_JSON" || coverage_rc=$?
-if [ "$coverage_rc" -ne 0 ]; then
-    exit "$coverage_rc"
-fi
+echo "Comparing against prior nightly run $PRIOR_RUN_ID."
 
 # Compute pass-rate delta in percentage points.
 DELTA_PP="$(

@@ -231,3 +231,27 @@ def test_dual_benchmark_drop_exactly_at_threshold_is_not_a_regression(tmp_path: 
 
     beyond = _dual(["1.0", "0.8"])
     assert beyond.regression_detected is True
+
+
+@pytest.mark.unit
+def test_dual_benchmark_baseline_only_partial_run_is_inconclusive(tmp_path: Path) -> None:
+    """With ``comparison_db=None`` a partial baseline run is still flagged
+    inconclusive (and a complete one is not — see
+    ``test_dual_benchmark_complete_runs_are_not_inconclusive``).
+
+    Sabotage proof: initialise ``inconclusive = False`` instead of
+    ``not is_complete(baseline)`` in ``run_dual_benchmark`` — the partial
+    baseline-only result reports complete and the assertion fails. Restored.
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps
+    from tests.fakes import FakeChatBackend
+
+    suite_path = _single_llm_case_suite(tmp_path)
+    # No canned replies: the only judge call exhausts the fake → judge failure.
+    partial = run_dual_benchmark(
+        str(suite_path),
+        deps=BenchmarkDeps(chat_backend=FakeChatBackend(responses=[]), retrieve=_doc_retrieve),
+    )
+    assert partial.comparison is None
+    assert partial.inconclusive is True
+    assert partial.regression_detected is False

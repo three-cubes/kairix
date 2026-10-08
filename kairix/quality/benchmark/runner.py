@@ -29,6 +29,7 @@ from kairix.quality.benchmark.per_type_slicing import (
     aggregate_per_source_type,
 )
 from kairix.quality.benchmark.suite import BenchmarkSuite
+from kairix.quality.completeness import judge_failures as _count_judge_failures
 from kairix.quality.completeness import partial_warning
 from kairix.quality.eval.constants import (
     CATEGORY_ALIASES,
@@ -557,10 +558,13 @@ def format_interpretation(result: BenchmarkResult) -> str:
     lines.append("")
     lines.append("Category breakdown:")
     cat_scores = result.summary["category_scores"]
+    # A partial run gets no per-category verdicts (its scores cover only the
+    # judged cases) — never a "✅ above floor".
+    partial = _count_judge_failures(result) > 0
     for cat, weight in CATEGORY_WEIGHTS.items():
         score = cat_scores.get(cat, 0.0)
         n = result.diagnostics.get("category_counts", {}).get(cat, 0)
-        diagnosis = _category_diagnosis(cat, score)
+        diagnosis = "(partial — not evaluated)" if partial else _category_diagnosis(cat, score)
         lines.append(f"  {cat:12} {score:.3f}  (weight {weight:.0%}, n={n})  {diagnosis}")
 
     # ADR-028 — per-source-type + canary slices, layered below the
@@ -571,26 +575,37 @@ def format_interpretation(result: BenchmarkResult) -> str:
 
     lines.append("")
 
-    # Gate check
+    lines.extend(_format_verdict_block(result, wt, cat_scores))
+    lines.append("=" * 60)
+    return "\n".join(lines)
+
+
+def _format_verdict_block(result: BenchmarkResult, wt: float, cat_scores: dict[str, float]) -> list[str]:
+    """Phase-gate + category-floor verdict lines.
+
+    A partial result (LLM-judge failures) gets NO pass / fail verdicts — its
+    scores cover only the judged cases — just the failed judge-coverage gate
+    and an INCONCLUSIVE line.
+    """
+    failures = _count_judge_failures(result)
+    if failures:
+        return [
+            f"  JUDGE COVERAGE gate (0 judge failures): FAIL ❌ ({failures} unscored)",
+            "  Phase gates / category floors: INCONCLUSIVE — partial result, not evaluated.",
+            "",
+        ]
+    lines: list[str] = []
     for gate_name, gate_threshold in PHASE_GATES.items():
         status = "PASS ✅" if wt >= gate_threshold else f"FAIL ❌ (need +{gate_threshold - wt:.3f})"
         lines.append(f"  {gate_name.upper()} gate (≥{gate_threshold}): {status}")
-    if result.summary.get("gates", {}).get(_GATE_JUDGE_COVERAGE) is False:
-        failures = result.summary.get(_KEY_JUDGE_FAILURES, 0)
-        lines.append(f"  JUDGE COVERAGE gate (0 judge failures): FAIL ❌ ({failures} unscored)")
     lines.append("")
-
-    # Per-category floor check
     floors_failed = [cat for cat, score in cat_scores.items() if score < CATEGORY_FLOOR]
     if floors_failed:
         lines.append(f"Categories below floor ({CATEGORY_FLOOR}):")
-        for cat in floors_failed:
-            lines.append(f"  {cat}: {cat_scores[cat]:.3f}")
+        lines.extend(f"  {cat}: {cat_scores[cat]:.3f}" for cat in floors_failed)
     else:
         lines.append("All categories above floor ✅")
-
-    lines.append("=" * 60)
-    return "\n".join(lines)
+    return lines
 
 
 # ---------------------------------------------------------------------------

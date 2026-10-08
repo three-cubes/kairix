@@ -80,9 +80,15 @@ results print a "PARTIAL RESULT" warning instead.
   a partial suite as a `partial` marker rather than its scores.
   `diff_baseline.py --strict` then exits 3.
 - The LoCoMo nightly exits 3, and publishes no JSON or CSV artifact, when
-  the eval run is partial. The nightly comparison also refuses a partial
-  current result or a partial prior artifact. The conversation-eval CI gate
-  reports an inconclusive regression check as a failure with its own message.
+  the eval run is partial. The nightly comparison skips partial earlier runs
+  and compares against the newest complete one. If there is none, the current
+  complete run becomes the new baseline, so one partial run can't block every
+  later nightly. The conversation-eval CI gate reports an inconclusive
+  regression check as a failure with its own message.
+- A partial result never shows a PASS. The benchmark report shows phase
+  gates, category floors and per-category notes as INCONCLUSIVE. The CI gate
+  summary shows only the inconclusive message. `kairix eval tune` no longer
+  says "No tuning needed" for a partial result.
 - A blank judge reply now counts as a backend failure (`backend_error`) in
   the benchmark judge, the same as in the other judges.
 - Retrieval metadata can no longer overwrite or fake a case's

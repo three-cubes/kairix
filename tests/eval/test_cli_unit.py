@@ -625,14 +625,19 @@ def test_tune_warns_on_partial_result(tmp_path: Path) -> None:
     """``kairix eval tune`` is advisory: a partial result still gets advice,
     but with a PARTIAL warning.
 
-    Sabotage: drop the partial warning in ``_cmd_tune`` — no PARTIAL line.
-    Restored.
+    Sabotage: drop the partial warning in ``_cmd_tune`` — no PARTIAL line;
+    or drop the ``if failures:`` branch before "No tuning needed" — the
+    partial result gets the above-floor verdict. Restored.
     """
     result_file = tmp_path / "r.json"
     result_file.write_text(json.dumps(_PARTIAL_RESULT), encoding="utf-8")
     stdout, _stderr, code = _drive(["tune", "--result", str(result_file)])
     assert code == 0
     assert "PARTIAL RESULT" in stdout
+    # The only category scored above the floor, but a partial result never
+    # gets the "above floor / no tuning needed" verdict.
+    assert "No tuning needed" not in stdout
+    assert "INCONCLUSIVE" in stdout
 
 
 def test_monitor_partial_run_returns_inconclusive(tmp_path: Path) -> None:

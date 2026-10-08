@@ -328,3 +328,32 @@ def test_partial_baseline_is_inconclusive(tmp_path):
     bp.write_text(json.dumps(baseline))
     cp.write_text(json.dumps(current))
     assert run_gate(str(bp), str(cp)) == EXIT_INCONCLUSIVE
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("partial_side", ["current", "baseline"])
+def test_partial_comparison_prints_only_the_inconclusive_summary(partial_side):
+    """When either side is partial, the summary carries ONLY the inconclusive
+    diagnostic: no PASS line, no "no regression" verdict, no score table.
+
+    Sabotage-proof: always build the normal ``_build_summary_lines`` table and
+    append the diagnostic after it (the previous behaviour) — "✅ PASS: no
+    regression detected" appears and both legs fail. Restored.
+    """
+    baseline = _make_result(0.90)
+    current = _make_result(0.91)
+    (current if partial_side == "current" else baseline)["summary"]["judge_failures"] = 1
+
+    lines = compare(baseline, current)["summary_lines"]
+    text = "\n".join(lines)
+    assert "INCONCLUSIVE" in text
+    assert "PASS" not in text
+    assert "no regression" not in text.lower()
+    assert "Category breakdown" not in text
+
+
+@pytest.mark.unit
+def test_complete_non_regressing_comparison_keeps_pass_line():
+    """A complete, non-regressing comparison still prints the PASS verdict."""
+    lines = compare(_make_result(0.90), _make_result(0.91))["summary_lines"]
+    assert "✅ PASS: no regression detected" in lines

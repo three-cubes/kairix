@@ -1960,3 +1960,31 @@ def test_run_benchmark_json_never_contains_backend_exception_text(tmp_path: Any)
     [written] = list(tmp_path.glob("B-*.json"))
     assert _SENTINEL not in written.read_text(encoding="utf-8")
     assert "backend raised RuntimeError" in written.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_format_interpretation_prints_no_pass_verdict_for_partial_run() -> None:
+    """``cmd_run`` prints the report before any ``--gates`` decision, so the
+    report itself must not claim PASS for a partial run: phase gates and
+    category floors are shown as INCONCLUSIVE instead.
+
+    Sabotage proof: make ``_format_verdict_block`` ignore judge failures —
+    the phase-gate "PASS ✅" lines and "All categories above floor ✅" are
+    printed for the partial run and the assertions fail. Restored.
+    """
+    result = BenchmarkResult(
+        meta={},
+        summary={
+            "weighted_total": 0.95,
+            "category_scores": {"recall": 0.95},
+            "gates": {"phase1": True, "phase2": True, "phase3": True, "judge_coverage": False},
+            "judge_failures": 2,
+        },
+        diagnostics={},
+        cases=[],
+    )
+    text = format_interpretation(result)
+    assert "PASS" not in text
+    assert "above floor" not in text
+    assert "INCONCLUSIVE" in text
+    assert "JUDGE COVERAGE gate (0 judge failures): FAIL" in text

@@ -474,6 +474,17 @@ def _corpus_hints(deps: EvalCliDeps) -> Any:
     )
 
 
+def _no_weak_categories_verdict(judge_failure_count: int) -> str:
+    """Verdict line when no category is below the floor.
+
+    Never claims "above floor" for a partial result — its scores cover only
+    the judged cases.
+    """
+    if judge_failure_count:
+        return "\nNo weak categories among the judged cases — INCONCLUSIVE (partial result); re-run before tuning."
+    return "\nAll categories above floor. No tuning needed."
+
+
 def _cmd_tune(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     import json
 
@@ -504,7 +515,7 @@ def _cmd_tune(args: argparse.Namespace, deps: EvalCliDeps) -> int:
         print(f"  {marker} {cat:12s} {score:.3f}")
 
     if not analysis.weak_categories:
-        print("\nAll categories above floor. No tuning needed.")
+        print(_no_weak_categories_verdict(failures))
         return 0
 
     print(f"\nWeak categories: {', '.join(analysis.weak_categories)}")
