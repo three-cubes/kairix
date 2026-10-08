@@ -111,3 +111,28 @@ def test_default_chat_seam_without_a_provider_degrades_to_rule_based_advice() ->
     assert rec is not None
     assert rec["temporal_boost"] is True
     assert "llm_advice" not in rec
+
+
+def test_boost_thresholds_are_strict_at_the_exact_boundary() -> None:
+    """Each boost fires only when its share is strictly ABOVE the threshold
+    (date 15%, procedural 5%, entity 3%). A corpus sitting exactly on every
+    threshold enables no boost and explains none — the reasoning falls back
+    to the default-settings line.
+
+    Sabotage-proof (executed): changed each ``_boost_reasoning`` comparison
+    from ``>`` to ``>=`` in turn — the matching boost sentence appears in
+    ``reasoning`` and this test fails. Restored.
+    """
+    rec = recommend_from_profile(
+        total_docs=100,
+        format_counts={"md": 100},
+        date_file_pct=0.15,
+        procedural_pct=0.05,
+        entity_pct=0.03,
+    )
+
+    assert rec is not None
+    assert rec["temporal_boost"] is False
+    assert rec["procedural_boost"] is False
+    assert rec["entity_boost"] is False
+    assert rec["reasoning"] == ["Using default settings — your corpus looks standard."]
