@@ -64,11 +64,14 @@ class BearerHeaders:
 
 # Process-wide cache so repeated ``headers(...)`` calls reuse the
 # resolved secret without re-walking the resolver chain on every HTTP
-# request. Keyed on (resolver, logical secret name): instances sharing the
-# canonical default resolver share one resolution per secret name, while an
-# injected ``secret_lookup`` (a per-tenant source) gets its own entries — so
-# tenant B can never be served tenant A's key for the same secret name.
-_CACHE: dict[tuple[Callable[[str], str | None], str], str] = {}
+# request. Partitioned by resolver OBJECT IDENTITY, then by logical secret
+# name: instances sharing a resolver (the canonical default, or one injected
+# resolver object) share one resolution per secret name, while two distinct
+# resolvers — even ones that compare equal, or are unhashable — never share
+# an entry, so tenant B can never be served tenant A's key. Each bucket holds
+# a strong reference to its resolver, so the ``id`` it is filed under cannot
+# be recycled by another object while the entry exists.
+_CACHE: dict[int, tuple[Callable[[str], str | None], dict[str, str]]] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -89,6 +92,20 @@ def reset_api_key_cache() -> None:
     """
     with _CACHE_LOCK:
         _CACHE.clear()
+
+
+def _resolver_bucket(resolver: Callable[[str], str | None]) -> dict[str, str]:
+    """The per-resolver secret cache, keyed by ``resolver`` identity.
+
+    Never hashes or compares the resolver itself (an unhashable callable
+    works; two equal-but-distinct resolvers stay separate). Caller holds
+    ``_CACHE_LOCK``.
+    """
+    entry = _CACHE.get(id(resolver))
+    if entry is None or entry[0] is not resolver:
+        entry = (resolver, {})
+        _CACHE[id(resolver)] = entry
+    return entry[1]
 
 
 def _default_secret_lookup(secret_name: str) -> str | None:
@@ -118,7 +135,7 @@ class ApiKeyAuth:
     the cached resolution.
 
     Frozen dataclass — the helper itself carries no mutable state.
-    The cache lives at module scope, keyed on (resolver, secret-name), so
+    The cache lives at module scope, keyed on (resolver identity, secret-name), so
     multiple instances using the same resolver share one resolution per
     secret-name while distinct injected resolvers never share entries.
 
@@ -153,9 +170,8 @@ class ApiKeyAuth:
                 this exception up to the operator surface stays F21-
                 actionable.
         """
-        cache_key = (self.secret_lookup, secret_name)
         with _CACHE_LOCK:
-            cached = _CACHE.get(cache_key)
+            cached = _resolver_bucket(self.secret_lookup).get(secret_name)
         if cached is None:
             resolved = self.secret_lookup(secret_name)
             if resolved is None or not resolved.strip():
@@ -166,6 +182,6 @@ class ApiKeyAuth:
                     f"next: see docs/operations/OPERATIONS.md for the secret-loading runbook."
                 )
             with _CACHE_LOCK:
-                _CACHE[cache_key] = resolved
+                _resolver_bucket(self.secret_lookup)[secret_name] = resolved
             cached = resolved
         return BearerHeaders(mapping={"Authorization": f"Bearer {cached}"})

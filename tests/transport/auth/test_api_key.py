@@ -20,7 +20,7 @@ Sabotage proofs:
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
 
 import pytest
@@ -157,3 +157,60 @@ def test_instances_sharing_a_resolver_share_the_cached_secret() -> None:
     second = ApiKeyAuth(secret_lookup=lookup).headers("shared")
     assert first.mapping == second.mapping == {"Authorization": "Bearer value-1"}
     assert calls == ["shared"]
+
+
+class _EqualResolver:
+    """A resolver whose ``__eq__`` / ``__hash__`` make every instance equal."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    def __call__(self, _name: str) -> str:
+        return self.token
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _EqualResolver)
+
+    def __hash__(self) -> int:
+        return 0
+
+
+@dataclass
+class _UnhashableResolver:
+    """A mutable dataclass with ``__call__`` — ``__hash__`` is ``None``."""
+
+    token: str
+
+    def __call__(self, _name: str) -> str:
+        return self.token
+
+
+def test_equal_but_distinct_resolvers_get_their_own_tokens() -> None:
+    """Two resolver OBJECTS that compare equal still never share a cached token
+    — the cache is keyed by identity, not ``__eq__`` / ``__hash__``.
+
+    Sabotage proof (executed): key the cache by ``(resolver, secret_name)``
+    (equality-based dict key) → tenant B is served tenant A's token; restored.
+    """
+    reset_api_key_cache()
+    tenant_a = ApiKeyAuth(secret_lookup=_EqualResolver("tenant-a-key"))
+    tenant_b = ApiKeyAuth(secret_lookup=_EqualResolver("tenant-b-key"))
+
+    assert tenant_a.headers("same-name").mapping == {"Authorization": "Bearer tenant-a-key"}
+    assert tenant_b.headers("same-name").mapping == {"Authorization": "Bearer tenant-b-key"}
+
+
+def test_unhashable_resolver_is_supported_and_cached() -> None:
+    """An unhashable callable resolver works (no ``TypeError``) and its
+    resolution is still cached for the same resolver object.
+
+    Sabotage proof (executed): key the cache by ``(resolver, secret_name)``
+    → ``TypeError: unhashable type`` on the first call; restored.
+    """
+    reset_api_key_cache()
+    resolver = _UnhashableResolver("first")
+    auth = ApiKeyAuth(secret_lookup=resolver)
+
+    assert auth.headers("name").mapping == {"Authorization": "Bearer first"}
+    resolver.token = "rotated"
+    assert ApiKeyAuth(secret_lookup=resolver).headers("name").mapping == {"Authorization": "Bearer first"}

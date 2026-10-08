@@ -120,7 +120,32 @@ class _Ctx:
         self.tainted = tainted_names(tree, _is_protected)
         self.os_names = module_aliases(tree, "os")
         self.environ_names = from_imports(tree, "os", "environ")
+        self._collect_environ_aliases(tree)
         self.parents = parent_map(tree)
+
+    def _collect_environ_aliases(self, tree: ast.AST) -> None:
+        """Add every local name bound to the live ``os.environ`` object.
+
+        ``env = os.environ; env["KAIRIX_X"] = v`` writes the process env just
+        as directly, so plain-name rebinding (incl. chains ``a = os.environ;
+        b = a``) is followed to a fixpoint. A COPY (``dict(os.environ)``,
+        ``os.environ.copy()``, ``{**os.environ}``) is a different object and
+        never becomes an alias.
+        """
+        bindings: list[tuple[str, ast.expr]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                bindings.extend((t.id, node.value) for t in node.targets if isinstance(t, ast.Name))
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+                if isinstance(node.target, ast.Name):
+                    bindings.append((node.target.id, node.value))
+        changed = True
+        while changed:
+            changed = False
+            for name, value in bindings:
+                if name not in self.environ_names and self.is_environ(value):
+                    self.environ_names.add(name)
+                    changed = True
 
     def is_environ(self, expr: ast.expr) -> bool:
         return is_module_attr(expr, self.os_names, "environ", self.environ_names)

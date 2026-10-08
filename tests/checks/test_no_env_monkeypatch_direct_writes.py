@@ -171,6 +171,35 @@ def test_aliased_environ_receivers_are_flagged(tmp_path: Path, header: str) -> N
     assert violations[0].endswith("assign os.environ[KAIRIX_*]")
 
 
+@pytest.mark.parametrize(
+    ("statement", "shape"),
+    [
+        ('b["KAIRIX_DB_PATH"] = "x"', "assign os.environ[KAIRIX_*]"),
+        ('del b["KAIRIX_DB_PATH"]', "del os.environ[KAIRIX_*]"),
+        ('b.pop("KAIRIX_DB_PATH", None)', "os.environ.pop(KAIRIX_*)"),
+        ('b.setdefault("KAIRIX_DB_PATH", "x")', "os.environ.setdefault(KAIRIX_*)"),
+        ('b.update({"KAIRIX_DB_PATH": "x"})', "os.environ.update(<may carry KAIRIX_*>)"),
+        ('monkeypatch.setitem(b, "KAIRIX_DB_PATH", "x")', "monkeypatch.setitem(os.environ, KAIRIX_*)"),
+    ],
+)
+def test_local_alias_chain_of_environ_is_flagged(tmp_path: Path, statement: str, shape: str) -> None:
+    """Codex PR #814 thread: ``a = os.environ; b = a`` then a write through
+    ``b`` mutates the live process env exactly like a direct write.
+
+    Sabotage proof (executed): make ``_collect_environ_aliases`` a no-op →
+    every parametrised case reports clean; restored.
+    """
+    src = f"import os\n\n\ndef test_x(monkeypatch):\n    a = os.environ\n    b = a\n    {statement}\n"
+    assert _violations(tmp_path, src) == [f"7: {shape}"]
+
+
+@pytest.mark.parametrize("copy_expr", ["dict(os.environ)", "os.environ.copy()", "{**os.environ}"])
+def test_write_to_a_copy_of_environ_is_not_flagged(tmp_path: Path, copy_expr: str) -> None:
+    """A copied dict is a different object — writing it never touches the env."""
+    src = f'import os\n\n\ndef test_x():\n    env = {copy_expr}\n    alias = env\n    alias["KAIRIX_DB_PATH"] = "x"\n'
+    assert _violations(tmp_path, src) == []
+
+
 # ---------------------------------------------------------------------------
 # Negatives.
 # ---------------------------------------------------------------------------
