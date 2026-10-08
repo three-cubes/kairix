@@ -3,11 +3,10 @@
 Steps live in :mod:`tests.bdd.steps.connector_obsidian_steps`.
 
 The scenarios exercise the real :class:`kairix.connectors.obsidian.ObsidianConnector`
-against a ``tmp_path`` vault — no monkey-patching, no internal-substitution
-fakes. The watchdog observer is started for the happy_path scenario and
-stopped at scenario teardown via the connector's context-manager protocol;
-the reconciliation scenarios drive the full-scan path directly so they
-don't depend on watchdog timing.
+against a ``tmp_path`` vault — no monkey-patching. The connector's watcher
+runs on the in-process ``FakeWatchdogObserver`` (injected through the
+documented ``watcher_factory`` seam) and is closed at scenario teardown, so
+no scenario depends on OS filesystem-event timing.
 """
 
 from pathlib import Path
