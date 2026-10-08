@@ -11,7 +11,7 @@ Reference pattern: ``tests/quality/probe/test_runner.py::FakeFastSearchClient``.
 
 from __future__ import annotations
 
-import time
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +25,7 @@ from kairix.quality.probe.runner import (
     SampledQuery,
     run_probe_search,
 )
+from tests.fakes import FakeClock
 
 pytestmark = pytest.mark.bdd
 
@@ -66,10 +67,29 @@ class _FakeFastSearchClient:
 
 
 class _FakeSlowSearchClient:
-    """Implements SearchClient — sleeps just above the 500ms p95 threshold."""
+    """Implements SearchClient — each search costs 550ms of VIRTUAL time.
+
+    Latency is driven from a :class:`FakeClock` (pass ``clock=client.now``
+    to ``run_probe_search``), never a real sleep: each search advances the
+    shared clock by 550ms — just above the 500ms default p95 threshold —
+    under a lock, so concurrent workers can only ever see a per-query
+    duration of at least 550ms. Deterministic and instant on any host.
+    """
+
+    _LATENCY_S = 0.55  # 550ms — above the 500ms default p95 threshold
+
+    def __init__(self) -> None:
+        self._clock = FakeClock(start=1_000.0)
+        self._lock = threading.Lock()
+
+    def now(self) -> float:
+        """The virtual clock the probe must measure latency on."""
+        with self._lock:
+            return self._clock.now()
 
     def search(self, _q: SampledQuery) -> dict[str, str]:
-        time.sleep(0.55)  # 550ms — above the 500ms default p95 threshold
+        with self._lock:
+            self._clock.advance(self._LATENCY_S)
         return {"results": "slow"}
 
 
@@ -104,9 +124,11 @@ def _given_fast_client(_probe_state: dict[str, Any]) -> None:
 
 @given("a fake search client returning results in 600ms (above threshold)")
 def _given_slow_client(_probe_state: dict[str, Any]) -> None:
-    # The slow client sleeps 550ms — above the 500ms default threshold.
-    # Gherkin phrasing rounds to 600ms for operator readability.
-    _probe_state["searcher"] = _FakeSlowSearchClient().search
+    # The slow client costs 550ms of virtual time — above the 500ms default
+    # threshold. Gherkin phrasing rounds to 600ms for operator readability.
+    client = _FakeSlowSearchClient()
+    _probe_state["searcher"] = client.search
+    _probe_state["clock"] = client.now
 
 
 @given("a fake search client returning results in under 20ms")
@@ -127,11 +149,16 @@ def _given_two_seeded_runs(_probe_state: dict[str, Any]) -> None:
 
 @when(parsers.parse("the operator runs probe search with {n:d} queries at concurrency {c:d}"))
 def _when_run_probe_search(_probe_state: dict[str, Any], n: int, c: int) -> None:
+    # A virtual-clock client (the slow one) hands the probe its clock so
+    # latency is measured on that timeline; others use the real clock.
+    clock = _probe_state.get("clock")
+    clock_kwargs = {"clock": clock} if clock is not None else {}
     _probe_state["result"] = run_probe_search(
         suite="fake",
         queries=n,
         concurrency=c,
         deps=ProbeDeps(load_suite=_suite_loader, search=_probe_state["searcher"]),
+        **clock_kwargs,
     )
 
 

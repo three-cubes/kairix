@@ -1474,6 +1474,122 @@ class FakeClock:
         self._now += float(seconds)
 
 
+class FakeLatencyClock:
+    """Thread-safe virtual clock that a fake dependency "spends" latency on.
+
+    For components that measure latency through an injected monotonic
+    ``clock`` (``run_probe_search(clock=...)``, ``run_probe_burst(clock=...)``,
+    ``run_concurrent(clock=...)``): pass ``clock=latency.now`` and have the
+    fake call :meth:`spend` instead of ``time.sleep``. Each ``spend`` advances
+    the shared timeline under a lock, so concurrent workers see consistent,
+    monotonic readings and a per-call latency of at least what was spent —
+    deterministic on any host, with zero real wall-clock cost.
+
+    Usage:
+        latency = FakeLatencyClock()
+
+        def slow_search(_q):
+            latency.spend(0.55)
+            return {"results": "slow"}
+
+        run_probe_search(..., deps=ProbeDeps(search=slow_search), clock=latency.now)
+    """
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        import threading
+
+        self._clock = FakeClock(start=start)
+        self._lock = threading.Lock()
+
+    def now(self) -> float:
+        """Read the virtual clock (seconds)."""
+        with self._lock:
+            return self._clock.now()
+
+    def spend(self, seconds: float) -> None:
+        """Advance the virtual clock by ``seconds`` (the fake's simulated latency)."""
+        with self._lock:
+            self._clock.sleep(seconds)
+
+    @property
+    def spent(self) -> list[float]:
+        """Every latency spent, in order."""
+        with self._lock:
+            return list(self._clock.waits)
+
+
+class FakeCoalesceWindow:
+    """Test-controlled coalesce window for ``EmbedCoalescer(window_wait=...)``.
+
+    Replaces the real wall-clock ``Condition.wait_for(ready, timeout)``
+    with a window that stays OPEN until the test calls :meth:`close` (or
+    the coalescer's own ``ready()`` predicate fires — stop / batch-full).
+    The timeout argument is recorded but never honoured, so a test can
+    enqueue every concurrent caller, prove they are all buffered, and only
+    then close the window — "all callers landed inside one window" becomes
+    a precondition instead of a race against a 200 ms timer.
+
+    Usage:
+        window = FakeCoalesceWindow()
+        coalescer = EmbedCoalescer(embed_batch_fn=fake, coalesce_window_ms=200,
+                                   max_batch_size=64, window_wait=window)
+        ... start callers; wait until coalescer.stats().requests == N ...
+        window.close()
+
+    Every later window also returns immediately once closed (the flag is
+    sticky), so the dispatcher never parks on a window the test forgot.
+    """
+
+    def __init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+        self._cv: threading.Condition | None = None
+        self._closed = False
+        self.timeouts: list[float] = []
+
+    def __call__(self, cv: Any, ready: Any, timeout_s: float) -> bool:
+        """Block (lock released) until ``ready()`` or :meth:`close`; caller holds ``cv``."""
+        with self._lock:
+            self._cv = cv
+            self.timeouts.append(float(timeout_s))
+        return bool(cv.wait_for(lambda: self._closed or ready()))
+
+    def close(self) -> None:
+        """Close the window: the dispatcher drains whatever is buffered."""
+        with self._lock:
+            self._closed = True
+            cv = self._cv
+        if cv is not None:
+            with cv:
+                cv.notify_all()
+
+    def reopen(self) -> None:
+        """Open a fresh window for the next wave (call once the last wave dispatched)."""
+        with self._lock:
+            self._closed = False
+
+    @staticmethod
+    def wait_for_requests(coalescer: Any, n: int) -> None:
+        """Block until ``coalescer.stats().requests >= n`` (callers provably enqueued).
+
+        A readiness barrier, not a timing bet: while the window is held open
+        nothing dispatches, so how long enqueueing takes never changes the
+        outcome. A count that never arrives is caught by the suite-level
+        ``--timeout``.
+        """
+        import threading
+
+        idle = threading.Event()
+        while coalescer.stats().requests < n:
+            idle.wait(0.001)
+
+    def close_after(self, coalescer: Any, n: int) -> None:
+        """Close the window once ``n`` requests (cumulative) are enqueued."""
+        self.wait_for_requests(coalescer, n)
+        self.close()
+
+
 class FakeProviderRegistry:
     """In-memory ``ProviderRegistry`` for tests.
 

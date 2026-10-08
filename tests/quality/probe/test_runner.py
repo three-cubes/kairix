@@ -20,6 +20,7 @@ from kairix.quality.probe.runner import (
     SampledQuery,
     run_probe_search,
 )
+from tests.fakes import FakeLatencyClock
 
 pytestmark = pytest.mark.unit
 
@@ -62,17 +63,22 @@ class FakeFastSearchClient:
 class FakeSlowSearchClient:
     """Implements the :class:`SearchClient` Protocol; always exceeds p95 threshold.
 
-    Used to verify the failure path of the gate. The 0.55s sleep is just
-    above the 0.5s default threshold so the assertion fires deterministically.
+    Used to verify the failure path of the gate. Each search spends 0.55s of
+    VIRTUAL time on a :class:`FakeLatencyClock` — just above the 0.5s default
+    threshold — so pass ``clock=client.now`` to ``run_probe_search``. No real
+    sleep: deterministic and instant on any host.
     """
 
+    def __init__(self) -> None:
+        self._latency = FakeLatencyClock()
+        self.now = self._latency.now
+
     def search(self, _q: SampledQuery) -> dict[str, str]:
-        time.sleep(0.55)  # > 500ms threshold
+        self._latency.spend(0.55)  # > 500ms threshold
         return {"results": "slow"}
 
 
 _fast_client = FakeFastSearchClient()
-_slow_client = FakeSlowSearchClient()
 
 
 def test_queries_less_than_one_rejected() -> None:
@@ -122,11 +128,13 @@ def test_fails_when_p95_exceeds_threshold() -> None:
 
     Sabotage-proof: drop the bottleneck call and result.bottleneck stays None.
     """
+    slow_client = FakeSlowSearchClient()
     result = run_probe_search(
         suite="x",
         queries=4,
         concurrency=4,
-        deps=ProbeDeps(load_suite=_suite_loader, search=_slow_client.search),
+        deps=ProbeDeps(load_suite=_suite_loader, search=slow_client.search),
+        clock=slow_client.now,
     )
     assert result.passed is False
     assert result.overall.p95_ms >= DEFAULT_P95_THRESHOLD_MS
@@ -217,11 +225,13 @@ def test_envelope_serialises_bottleneck_as_dict_when_present() -> None:
     Sabotage-proof: leave bottleneck as the bare tuple and JSON serialisation
     in the CLI fails (tuples become arrays and the agent loses the field names).
     """
+    slow_client = FakeSlowSearchClient()
     result = run_probe_search(
         suite="x",
         queries=4,
         concurrency=4,
-        deps=ProbeDeps(load_suite=_suite_loader, search=_slow_client.search),
+        deps=ProbeDeps(load_suite=_suite_loader, search=slow_client.search),
+        clock=slow_client.now,
     )
     env = result.to_envelope()
     assert env["bottleneck"] is not None

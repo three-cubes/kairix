@@ -22,7 +22,7 @@ KAIRIX_* env-var manipulation.
 from __future__ import annotations
 
 import sqlite3
-import time
+import threading
 from pathlib import Path
 
 import pytest
@@ -81,75 +81,98 @@ def test_handler_within_budget_returns_real_value(queue_db: sqlite3.Connection) 
     assert rows[0][0] == "delivered"
 
 
+def _row_statuses(conn: sqlite3.Connection, agent_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT status FROM pending_queries WHERE agent_id = ?",
+        (agent_id,),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def _wait_for_status(conn: sqlite3.Connection, agent_id: str, status: str) -> None:
+    """Liveness poll until the background finaliser records ``status``.
+
+    Not a timing bet: the handler is held on an Event until the test
+    releases it, so the only wait left is "the worker thread finishes";
+    a status that never lands is caught by the suite-level ``--timeout``.
+    """
+    idle = threading.Event()
+    while _row_statuses(conn, agent_id) != [status]:
+        idle.wait(0.005)
+
+
 def test_handler_exceeds_budget_returns_processing_text(queue_db: sqlite3.Connection) -> None:
-    """A slow handler returns plain-text 'Processing your request...' (NOT an error envelope)."""
-    started = []
-    release = []
+    """A slow handler returns plain-text 'Processing your request...' (NOT an error envelope).
+
+    The handler blocks on ``release`` (not a fixed sleep), so it is provably
+    still running when the 0.2s budget expires and provably finished before
+    the completion assertion -- no 0.5s-sleep-vs-0.6s-wait race.
+    """
+    release = threading.Event()
 
     @dispatch_or_queue(budget_seconds=0.2)
     def slow_handler(*, agent_id: str) -> dict[str, str]:
-        started.append(time.time())
-        # Sleep past the budget. The decorator will time out the wait
-        # but the background thread keeps running.
-        time.sleep(0.5)
-        release.append(time.time())
+        # Held past the budget until the test releases it. The decorator
+        # times out the wait but the background thread keeps running.
+        release.wait(timeout=30.0)
         return {"answer": "slow"}
 
-    result = slow_handler(agent_id="agent-beta")
+    try:
+        result = slow_handler(agent_id="agent-beta")
 
-    assert isinstance(result, str), "queued path must return plain text"
-    assert result.startswith("Processing your request (id: q_"), f"got: {result!r}"
-    assert "Your answer will be delivered when ready." in result
-    # The result string MUST NOT be a JSON error envelope — that
-    # would trigger the agent's fault-tolerance heuristic.
-    assert not result.startswith("{"), "queued response must be plain text, not JSON"
+        assert isinstance(result, str), "queued path must return plain text"
+        assert result.startswith("Processing your request (id: q_"), f"got: {result!r}"
+        assert "Your answer will be delivered when ready." in result
+        # The result string MUST NOT be a JSON error envelope -- that
+        # would trigger the agent's fault-tolerance heuristic.
+        assert not result.startswith("{"), "queued response must be plain text, not JSON"
 
-    # Row exists in in_progress immediately.
-    rows = queue_db.execute(
-        "SELECT status FROM pending_queries WHERE agent_id = ?",
-        ("agent-beta",),
-    ).fetchall()
-    assert len(rows) == 1
-    assert rows[0][0] == "in_progress"
+        # Row exists in in_progress while the handler is still held.
+        assert _row_statuses(queue_db, "agent-beta") == ["in_progress"]
+    finally:
+        release.set()
 
-    # Give the background thread time to complete.
-    time.sleep(0.6)
-
-    # Re-read — the row should now be 'completed' (worker thread
-    # finalisation callback fired).
-    rows = queue_db.execute(
-        "SELECT status FROM pending_queries WHERE agent_id = ?",
-        ("agent-beta",),
-    ).fetchall()
-    assert rows[0][0] == "completed"
+    # The row moves to 'completed' (worker thread finalisation callback fired).
+    _wait_for_status(queue_db, "agent-beta", "completed")
 
 
 def test_dedup_within_window_returns_existing_processing_text(queue_db: sqlite3.Connection) -> None:
-    """A second identical call within 60s reuses the in-flight row's id."""
+    """A second identical call within 60s reuses the in-flight row's id.
+
+    The handler is held on ``release`` until both calls have returned, so
+    the first job is provably still in flight when the second arrives --
+    a stalled host can no longer let it finish (and defeat dedup) between
+    the two calls.
+    """
+    release = threading.Event()
 
     @dispatch_or_queue(budget_seconds=0.1)
     def repeat_handler(*, agent_id: str) -> dict[str, str]:
-        time.sleep(0.4)
+        release.wait(timeout=30.0)
         return {"answer": "slow"}
 
-    first = repeat_handler(agent_id="agent-gamma")
-    second = repeat_handler(agent_id="agent-gamma")
+    try:
+        first = repeat_handler(agent_id="agent-gamma")
+        second = repeat_handler(agent_id="agent-gamma")
 
-    assert isinstance(first, str)
-    assert isinstance(second, str)
-    # Both reference the same query id within the dedup window.
-    first_id = first.split("(id: ")[1].split(")")[0]
-    second_id = second.split("(id: ")[1].split(")")[0]
-    assert first_id == second_id, "dedup must reuse the in-flight row id"
+        assert isinstance(first, str)
+        assert isinstance(second, str)
+        # Both reference the same query id within the dedup window.
+        first_id = first.split("(id: ")[1].split(")")[0]
+        second_id = second.split("(id: ")[1].split(")")[0]
+        assert first_id == second_id, "dedup must reuse the in-flight row id"
 
-    # Exactly one row exists for the agent_id within the window.
-    count = queue_db.execute(
-        "SELECT COUNT(*) FROM pending_queries WHERE agent_id = ?",
-        ("agent-gamma",),
-    ).fetchone()[0]
-    assert count == 1
+        # Exactly one row exists for the agent_id within the window.
+        count = queue_db.execute(
+            "SELECT COUNT(*) FROM pending_queries WHERE agent_id = ?",
+            ("agent-gamma",),
+        ).fetchone()[0]
+        assert count == 1
+    finally:
+        release.set()
 
-    time.sleep(0.5)  # Let the background handler complete.
+    # Let the background handler finish before the fixture tears the DB down.
+    _wait_for_status(queue_db, "agent-gamma", "completed")
 
 
 def test_handler_raises_within_budget_marks_failed(queue_db: sqlite3.Connection) -> None:
