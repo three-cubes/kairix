@@ -94,9 +94,30 @@ class _FakeSlowSearchClient:
 
 
 class _FakeBurstFastClient:
-    """Implements SearchClient — under-20ms response for burst-bucket coverage."""
+    """Implements SearchClient — each search costs 20ms of VIRTUAL time.
+
+    The burst probe buckets completions by its injected clock. Driving it from
+    the real clock made the scenario timing-dependent: a fast run finished in
+    one or two 100ms buckets, the warm-up and partial-final auto-skip removed
+    all of them, and ``peak_qps`` came out 0.0 on a loaded CI runner. Each
+    search here advances a shared :class:`FakeClock` by 20ms (under a lock, as
+    the probe calls it from a thread pool), so 30 queries always span 0.6s of
+    virtual time — six 100ms buckets, at least one of them headline-eligible.
+    """
+
+    _LATENCY_S = 0.02
+
+    def __init__(self) -> None:
+        self.clock = FakeClock()
+        self._lock = threading.Lock()
+
+    def now(self) -> float:
+        with self._lock:
+            return self.clock.now()
 
     def search(self, _q: SampledQuery) -> dict[str, str]:
+        with self._lock:
+            self.clock.advance(self._LATENCY_S)
         return {"results": "burst"}
 
 
@@ -107,6 +128,7 @@ def _probe_state() -> dict[str, Any]:
         "searcher": None,
         "result": None,
         "burst_result": None,
+        "clock": None,
         "case_ids_a": [],
         "case_ids_b": [],
     }
@@ -133,7 +155,9 @@ def _given_slow_client(_probe_state: dict[str, Any]) -> None:
 
 @given("a fake search client returning results in under 20ms")
 def _given_burst_fast_client(_probe_state: dict[str, Any]) -> None:
-    _probe_state["searcher"] = _FakeBurstFastClient().search
+    client = _FakeBurstFastClient()
+    _probe_state["searcher"] = client.search
+    _probe_state["clock"] = client.now
 
 
 @given("two probe search runs with the same seed")
@@ -202,6 +226,7 @@ def _when_run_probe_burst(_probe_state: dict[str, Any], n: int, c: int) -> None:
         peak_concurrency=c,
         bucket_ms=100,  # tight bucket so a fast workload still produces buckets
         deps=ProbeDeps(load_suite=_suite_loader, search=_probe_state["searcher"]),
+        clock=_probe_state["clock"],
     )
 
 
