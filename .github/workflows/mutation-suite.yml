@@ -51,25 +51,77 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Counts the since-release mutants and sizes the shard matrix so no shard
+  # holds more than MAX_MUTANTS_PER_SHARD (50): at the 60s per-mutant ceiling
+  # each shard finishes inside its 60-minute job timeout, however large the
+  # diff. Needs only the standard library and full history.
+  plan:
+    name: "Mutation — plan the shards"
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      base: ${{ steps.base.outputs.base }}
+      shards: ${{ steps.plan.outputs.shards }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Resolve diff base (last release tag)
+        id: base
+        env:
+          INPUT_BASE: ${{ github.event.inputs.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_BASE}" ]; then
+            base="${INPUT_BASE}"
+          else
+            # Most recent vYYYY.M.D[-...] tag reachable from HEAD; fall back
+            # to the previous commit if no tag exists yet (bootstrap).
+            base="$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || echo 'HEAD~1')"
+          fi
+          echo "Resolved mutation diff base: ${base}"
+          echo "base=${base}" >> "${GITHUB_OUTPUT}"
+
+
+      - name: Plan the shards
+        id: plan
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          set -euo pipefail
+          plan="$(python scripts/checks/mutation_parity.py --base "${BASE}" --plan)"
+          echo "Mutation plan: ${plan}"
+          echo "shards=$(python -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["shards"]))' <<<"${plan}")" >> "${GITHUB_OUTPUT}"
+          echo "shard_count=$(python -c 'import json,sys; print(json.load(sys.stdin)["shard_count"])' <<<"${plan}")" >> "${GITHUB_OUTPUT}"
+
   mutation:
-    name: "Mutation — diff-scoped vs last release, shard ${{ matrix.shard }}/4 (any survivor fails)"
+    name: "Mutation — diff-scoped vs last release, shard ${{ matrix.shard }} (any survivor fails)"
+    needs: [plan]
     runs-on: ubuntu-latest
     # The full-scope run has no mutant cap and no time budget, so it is split
     # into disjoint shards (mutation_parity.shard: every mutant in exactly one)
-    # that run in parallel, each well under the job timeout however large the
-    # since-release diff. fail-fast off: one shard's survivors must not hide
-    # another's.
+    # sized by the plan job, each inside its job timeout. fail-fast off: one
+    # shard's survivors must not hide another's.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     # Only ever run on main. workflow_dispatch from a non-main branch exits
     # without work so contributors can't burn runner time on a feature branch.
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
-    # 60 min ceiling per shard — four shards of a since-release diff each
-    # finish far below it; the ceiling only stops a hung run at the 6h default.
+    # 60 min ceiling per shard: the plan caps a shard at 50 mutants of at most
+    # 60s each, so a shard always finishes inside it.
     timeout-minutes: 60
 
     steps:
@@ -100,26 +152,11 @@ jobs:
           pip install -e ".[dev,agents,markitdown,pdf_fallback,ocr,pptx,docx,xlsx]"
           pip install --group fitness  # tc-fitness engine — moved out of the dev extra (PLA-286); mutation_parity's impacted-test set can include kairix-importing tests/architecture files, so the fitness dir must collect (parity with local safe-commit mutation run)
 
-      - name: Resolve diff base (last release tag)
-        id: base
-        env:
-          INPUT_BASE: ${{ github.event.inputs.base_ref }}
-        run: |
-          set -euo pipefail
-          if [ -n "${INPUT_BASE}" ]; then
-            base="${INPUT_BASE}"
-          else
-            # Most recent vYYYY.M.D[-...] tag reachable from HEAD; fall back
-            # to the previous commit if no tag exists yet (bootstrap).
-            base="$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || echo 'HEAD~1')"
-          fi
-          echo "Resolved mutation diff base: ${base}"
-          echo "base=${base}" >> "${GITHUB_OUTPUT}"
-
       - name: Mutation parity (full-scope, any survivor fails)
         env:
-          BASE: ${{ steps.base.outputs.base }}
+          BASE: ${{ needs.plan.outputs.base }}
           SHARD: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ needs.plan.outputs.shard_count }}
         run: |
           set -euo pipefail
           # No survivor list, no ratchet: any surviving mutant on the
@@ -129,4 +166,4 @@ jobs:
           # run defers what its budget skips to this run, so it must run all.
           # A mutant with no selected test fails a full-scope run, so nothing
           # is reported killed that was never applied.
-          python scripts/checks/mutation_parity.py --base "${BASE}" --full-scope --shard-index "${SHARD}" --shard-count 4
+          python scripts/checks/mutation_parity.py --base "${BASE}" --full-scope --shard-index "${SHARD}" --shard-count "${SHARD_COUNT}"

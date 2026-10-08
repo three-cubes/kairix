@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 import subprocess
 import sys
@@ -84,6 +85,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 #     how many impacted test files each mutant runs against.
 MAX_MUTANTS = 20
 PER_MUTANT_TIMEOUT_S = 60
+# The most mutants one nightly shard may hold: at the per-mutant ceiling
+# (PER_MUTANT_TIMEOUT_S) a full shard takes at most 50 minutes, under the
+# workflow's 60-minute job timeout, so no shard is cut off before its last
+# mutant whatever the size of the since-release diff.
+MAX_MUTANTS_PER_SHARD = 50
+# pytest's exit code when the marker filter leaves no test to run.
+_PYTEST_NO_TESTS_COLLECTED = 5
+NO_TESTS_SELECTED = "no fast-tier test selected"
 TOTAL_BUDGET_S = 150.0
 MAX_IMPACTED_TEST_FILES = 40
 
@@ -457,9 +466,22 @@ def _run_impacted_tests(test_files: list[str], timeout_s: int) -> tuple[bool, st
     except subprocess.TimeoutExpired:
         return False, f"timeout >{timeout_s}s (treated as killed)", float(timeout_s)
     elapsed = time.monotonic() - start
-    passed = result.returncode == 0
-    detail = "survived" if passed else "killed"
+    passed, detail = classify_exit(result.returncode)
     return passed, detail, elapsed
+
+
+def classify_exit(returncode: int) -> tuple[bool, str]:
+    """``(survived, detail)`` for a pytest exit code over a mutant's tests.
+
+    0 is a survivor. Exit 5 means the marker filter selected no test (an
+    integration-only file, say): the mutant was never exercised, so it is
+    reported as ``NO_TESTS_SELECTED``, never as killed. Anything else (a
+    failure, an error) kills it."""
+    if returncode == 0:
+        return True, "survived"
+    if returncode == _PYTEST_NO_TESTS_COLLECTED:
+        return False, NO_TESTS_SELECTED
+    return False, "killed"
 
 
 # ── orchestration ───────────────────────────────────────────────────────
@@ -527,6 +549,23 @@ def shard(mutants: list[Mutant], index: int, count: int) -> list[Mutant]:
     return mutants[index::count]
 
 
+def plan_shard_count(mutant_count: int, max_per_shard: int = MAX_MUTANTS_PER_SHARD) -> int:
+    """How many nightly shards ``mutant_count`` mutants need so none holds
+    more than ``max_per_shard`` (at least one)."""
+    return max(1, -(-mutant_count // max_per_shard))
+
+
+def diff_mutants(base: str | None) -> tuple[dict[Path, set[int]], list[Mutant]]:
+    """The changed lines and every mutant generated from them, in order."""
+    touched = changed_lines(base)
+    all_mutants: list[Mutant] = []
+    for rel, lines_changed in sorted(touched.items()):
+        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        scope = _enclosing_function_lines(source, lines_changed)
+        all_mutants.extend(generate_mutants(source, rel, scope))
+    return touched, all_mutants
+
+
 def run(
     *,
     base: str | None,
@@ -545,17 +584,10 @@ def run(
 
     Any survivor fails — there is no survivor list to excuse one.
     """
-    touched = changed_lines(base)
+    touched, all_mutants = diff_mutants(base)
     if not touched:
         print(f"{_GREEN}PASS mutation_parity{_RESET} — no mutable production-code diff (0 mutants).")
         return 0
-
-    # Build the in-scope mutant set across all touched files.
-    all_mutants: list[Mutant] = []
-    for rel, lines_changed in sorted(touched.items()):
-        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        scope = _enclosing_function_lines(source, lines_changed)
-        all_mutants.extend(generate_mutants(source, rel, scope))
 
     if not all_mutants:
         print(
@@ -614,6 +646,10 @@ def run(
             continue
         result = _apply_and_test(mutant, own_tests)
         total_elapsed += result.elapsed_s
+        if result.detail == NO_TESTS_SELECTED:
+            print(f"  [{i}/{len(capped)}] {mutant.path}:{mutant.lineno} — {NO_TESTS_SELECTED}; not applied")
+            uncovered.append(mutant)
+            continue
         marker = f"{_RED}SURVIVED{_RESET}" if result.survived else f"{_GREEN}killed{_RESET}"
         print(
             f"  [{i}/{len(capped)}] {mutant.path}:{mutant.lineno} "
@@ -684,7 +720,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--shard-index", type=int, default=0, help="run only this shard (0-based)")
     parser.add_argument("--shard-count", type=int, default=1, help="split the mutants into this many shards")
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        help="print the diff's mutant count and the shard indices for the nightly matrix (JSON), then exit",
+    )
     args = parser.parse_args(argv)
+    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
+        parser.error(
+            f"--shard-index {args.shard_index} is not in range for --shard-count {args.shard_count}; "
+            "use 0 <= index < count and count >= 1"
+        )
+    if args.plan:
+        _touched, all_mutants = diff_mutants(args.base)
+        count = plan_shard_count(len(all_mutants))
+        print(json.dumps({"mutants": len(all_mutants), "shard_count": count, "shards": list(range(count))}))
+        return 0
     return run(
         base=args.base,
         max_mutants=args.max_mutants,

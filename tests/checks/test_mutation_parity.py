@@ -369,11 +369,46 @@ def test_a_full_scope_mutant_with_no_selected_test_fails_the_run(capsys: pytest.
     assert mp._verdict([], []) == 0
 
 
+def test_the_plan_bounds_every_shard_and_covers_every_mutant() -> None:
+    """More mutants than four shards could run inside the job timeout: the plan
+    adds shards so none exceeds the bound, and the shards still partition all."""
+    mutants = [_mutant(n) for n in range(237)]
+    count = mp.plan_shard_count(len(mutants))
+    shards = [mp.shard(mutants, i, count) for i in range(count)]
+    assert all(len(one) <= mp.MAX_MUTANTS_PER_SHARD for one in shards)
+    assert sorted(m.lineno for one in shards for m in one) == list(range(237))
+    assert mp.MAX_MUTANTS_PER_SHARD * mp.PER_MUTANT_TIMEOUT_S <= 60 * 60, "a full shard fits the job timeout"
+    assert mp.plan_shard_count(0) == 1 and mp.plan_shard_count(50) == 1 and mp.plan_shard_count(51) == 2
+
+
+def test_a_mutant_whose_tests_the_marker_filter_deselects_is_not_killed() -> None:
+    """pytest exits 5 when the marker filter leaves no test (an integration-only
+    file): the mutant was never exercised, so it is reported as not selected."""
+    assert mp.classify_exit(0) == (True, "survived")
+    assert mp.classify_exit(5) == (False, mp.NO_TESTS_SELECTED)
+    assert mp.classify_exit(1) == (False, "killed")
+
+
+@pytest.mark.parametrize(
+    "argv", [["--shard-count", "0"], ["--shard-index", "4", "--shard-count", "4"], ["--shard-index", "-1"]]
+)
+def test_invalid_shard_flags_are_a_usage_error_before_the_diff_is_read(argv: list[str]) -> None:
+    import subprocess as _subprocess
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "checks" / "mutation_parity.py"
+    result = _subprocess.run(
+        [sys.executable, str(script), "--base", "no-such-ref", *argv], capture_output=True, text=True
+    )
+    assert result.returncode == 2
+    assert "is not in range" in result.stderr
+
+
 def test_the_nightly_suite_runs_full_scope() -> None:
     suite = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation-suite.yml"
     workflow = suite.read_text(encoding="utf-8")
-    assert '--base "${BASE}" --full-scope --shard-index "${SHARD}" --shard-count 4' in workflow
-    assert "shard: [0, 1, 2, 3]" in workflow and "fail-fast: false" in workflow
+    assert '--base "${BASE}" --full-scope --shard-index "${SHARD}" --shard-count "${SHARD_COUNT}"' in workflow
+    assert "shard: ${{ fromJSON(needs.plan.outputs.shards) }}" in workflow and "fail-fast: false" in workflow
+    assert '--base "${BASE}" --plan' in workflow
 
 
 def test_survivor_report_carries_f21_action_markers() -> None:
