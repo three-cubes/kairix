@@ -53,7 +53,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 
-from _ast_key_taint import StringPredicate, from_imports, key_is_protected, module_aliases
+from _ast_key_taint import ModuleIndex, ProtectedKeys, key_is_protected
 
 # ---------------------------------------------------------------------------
 # Signatures — parameter names in positional order, as the callees declare
@@ -151,18 +151,6 @@ def bind_call(call: ast.Call, params: tuple[str, ...], positional_only: frozense
 # ---------------------------------------------------------------------------
 
 
-def _name_bindings(tree: ast.AST) -> list[tuple[str, ast.expr]]:
-    """Every ``name = value`` plain-name binding (Assign / AnnAssign / walrus)."""
-    bindings: list[tuple[str, ast.expr]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            bindings.extend((t.id, node.value) for t in node.targets if isinstance(t, ast.Name))
-        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
-            if isinstance(node.target, ast.Name):
-                bindings.append((node.target.id, node.value))
-    return bindings
-
-
 @dataclass
 class ProcessMapping:
     """Resolves expressions that ARE the live ``<module>.<attr>`` mapping."""
@@ -173,9 +161,9 @@ class ProcessMapping:
     names: set[str]
 
     @classmethod
-    def resolve(cls, tree: ast.AST, module: str, attr: str) -> ProcessMapping:
-        mapping = cls(module, attr, module_aliases(tree, module), from_imports(tree, module, attr))
-        bindings = _name_bindings(tree)
+    def resolve(cls, index: ModuleIndex, module: str, attr: str) -> ProcessMapping:
+        mapping = cls(module, attr, index.module_aliases(module), index.from_imports(module, attr))
+        bindings = index.name_bindings
         changed = True
         while changed:  # follow local rebinding (a = os.environ; b = a; o = os) to a fixpoint
             changed = False
@@ -208,7 +196,7 @@ class ProcessMapping:
         return self.is_module(obj) and isinstance(name, ast.Constant) and name.value == self.attr
 
 
-def monkeypatch_names(tree: ast.AST) -> set[str]:
+def monkeypatch_names(index: ModuleIndex) -> set[str]:
     """Names bound to a pytest MonkeyPatch: the fixture, ``pytest.MonkeyPatch()``
     instances, and ``with <mp>.context() as m`` / ``MonkeyPatch.context()`` targets."""
 
@@ -218,14 +206,8 @@ def monkeypatch_names(tree: ast.AST) -> set[str]:
         )
 
     names = {"monkeypatch"}
-    bindings = _name_bindings(tree)
-    with_targets = [
-        (item.optional_vars.id, item.context_expr)
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.With, ast.AsyncWith))
-        for item in node.items
-        if isinstance(item.optional_vars, ast.Name)
-    ]
+    bindings = index.name_bindings
+    with_targets = index.with_targets
     changed = True
     while changed:
         changed = False
@@ -246,9 +228,9 @@ def monkeypatch_names(tree: ast.AST) -> set[str]:
     return names
 
 
-def patch_names(tree: ast.AST) -> set[str]:
+def patch_names(index: ModuleIndex) -> set[str]:
     """Local names bound to ``unittest.mock.patch`` / ``mock.patch``."""
-    return {"patch"} | from_imports(tree, "unittest.mock", "patch") | from_imports(tree, "mock", "patch")
+    return {"patch"} | index.from_imports("unittest.mock", "patch") | index.from_imports("mock", "patch")
 
 
 def is_patch_ref(expr: ast.expr, names: set[str]) -> bool:
@@ -267,19 +249,19 @@ class WriteSurface:
 
     def __init__(
         self,
-        tree: ast.AST,
+        index: ModuleIndex,
         mapping: ProcessMapping,
-        is_protected: StringPredicate,
+        keys: ProtectedKeys,
         tainted: set[str],
         marker: str,
     ) -> None:
         self.mapping = mapping
-        self.is_protected = is_protected
+        self.keys = keys
         self.tainted = tainted
         self.label = mapping.dotted
         self.marker = marker
-        self.monkeypatch = monkeypatch_names(tree)
-        self.patch = patch_names(tree)
+        self.monkeypatch = monkeypatch_names(index)
+        self.patch = patch_names(index)
 
     # -- predicates -------------------------------------------------------
 
@@ -287,16 +269,35 @@ class WriteSurface:
         expr = bound.get(param)
         if expr is None:
             return bound.has_spread
-        return key_is_protected(expr, self.is_protected, self.tainted)
+        return key_is_protected(expr, self.keys, self.tainted)
+
+    @staticmethod
+    def _hidden(bound: BoundCall, param: str) -> bool:
+        """``param`` is unbound and a ``*args`` / ``**kw`` spread may supply it."""
+        return bound.get(param) is None and bound.has_spread
+
+    def _is_receiver_param(self, bound: BoundCall, param: str) -> bool:
+        """The bound argument is the mapping — or a spread may be hiding it."""
+        return self.mapping.is_receiver(bound.get(param)) or self._hidden(bound, param)
+
+    def _replaces_mapping(self, bound: BoundCall, target: str, name: str) -> bool:
+        """``(target, name)`` names the mapping: ``("os.environ", ...)``,
+        ``(os, "environ")``, or a spread hiding either half."""
+        obj = bound.get(target)
+        if self.mapping.is_dotted_string(obj) or self.mapping.is_module_attr_pair(obj, bound.get(name)):
+            return True
+        if self._hidden(bound, target):
+            return True
+        return self.mapping.is_module(obj) and self._hidden(bound, name)
 
     def mapping_may_carry(self, payload: ast.expr | None, keywords: tuple[ast.keyword, ...]) -> bool:
         """An ``update`` / ``|=`` / ``patch.dict`` payload that can write a protected key."""
-        if any(kw.arg is None or self.is_protected(kw.arg) for kw in keywords):
+        if any(kw.arg is None or self.keys(kw.arg) for kw in keywords):
             return True
         if payload is None:
             return False
         if isinstance(payload, ast.Dict):
-            return any(k is None or key_is_protected(k, self.is_protected, self.tainted) for k in payload.keys)
+            return any(k is None or key_is_protected(k, self.keys, self.tainted) for k in payload.keys)
         if isinstance(payload, (ast.List, ast.Tuple)) and not payload.elts:
             return False
         return True  # a variable / call / comprehension: the AST cannot rule it out
@@ -305,7 +306,7 @@ class WriteSurface:
         return (
             isinstance(target, ast.Subscript)
             and self.mapping.is_receiver(target.value)
-            and key_is_protected(target.slice, self.is_protected, self.tainted)
+            and key_is_protected(target.slice, self.keys, self.tainted)
         )
 
     # -- statement shapes -------------------------------------------------
@@ -354,11 +355,12 @@ class WriteSurface:
             if is_patch_ref(func.value, self.patch):
                 labels.extend(self._patch_helper_writes(func.attr, call))
         if is_patch_ref(func, self.patch):
-            if self.mapping.is_dotted_string(bind_call(call, PATCH_SIGNATURE).get("target")):
+            bound = bind_call(call, PATCH_SIGNATURE)
+            if self.mapping.is_dotted_string(bound.get("target")) or self._hidden(bound, "target"):
                 labels.append(f"patch({self.label})")
         if isinstance(func, ast.Name) and func.id in BUILTIN_ATTR_SIGNATURES:
             bound = bind_call(call, BUILTIN_ATTR_SIGNATURES[func.id])
-            if self.mapping.is_module_attr_pair(bound.get("obj"), bound.get("name")):
+            if self._replaces_mapping(bound, "obj", "name"):
                 labels.append(f"replace {self.label}")
         return labels
 
@@ -368,7 +370,9 @@ class WriteSurface:
         bound = bind_call(call, MAPPING_METHOD_SIGNATURES[method], _POSITIONAL_ONLY.get(method, frozenset()))
         if method in _KEYED_METHODS and self.key_may_be_protected(bound, "key"):
             return [f"{self.label}.{method}({self.marker})"]
-        if method in _BULK_METHODS and self.mapping_may_carry(bound.get("other"), bound.extra_keywords):
+        if method in _BULK_METHODS and (
+            self._hidden(bound, "other") or self.mapping_may_carry(bound.get("other"), bound.extra_keywords)
+        ):
             return [f"{self.label}.{method}(<may carry {self.marker}>)"]
         if method in _CLEARING_METHODS:
             return [f"{self.label}.{method}()"]
@@ -383,30 +387,29 @@ class WriteSurface:
                 return [f"monkeypatch.{method}({self.marker})"]
             return []
         if method in {"setitem", "delitem"}:
-            if self.mapping.is_receiver(bound.get("dic")) and self.key_may_be_protected(bound, "name"):
+            if self._is_receiver_param(bound, "dic") and self.key_may_be_protected(bound, "name"):
                 return [f"monkeypatch.{method}({self.label}, {self.marker})"]
             return []
         # setattr / delattr — both overloads: ("os.environ", value) and (os, "environ", value).
-        target = bound.get("target")
-        if self.mapping.is_dotted_string(target) or self.mapping.is_module_attr_pair(target, bound.get("name")):
+        if self._replaces_mapping(bound, "target", "name"):
             return [f"monkeypatch.{method}({self.label})"]
         return []
 
     def _patch_helper_writes(self, helper: str, call: ast.Call) -> list[str]:
         if helper == "dict":
             bound = bind_call(call, PATCH_DICT_SIGNATURE)
-            in_dict = bound.get("in_dict")
-            if not (self.mapping.is_receiver(in_dict) or self.mapping.is_dotted_string(in_dict)):
+            if not (self._is_receiver_param(bound, "in_dict") or self.mapping.is_dotted_string(bound.get("in_dict"))):
                 return []
             labels = []
-            if self.mapping_may_carry(bound.get("values"), bound.extra_keywords):
+            if self._hidden(bound, "values") or self.mapping_may_carry(bound.get("values"), bound.extra_keywords):
                 labels.append(f"patch.dict({self.label}, <{self.marker}>)")
             clear = bound.get("clear")
-            if clear is not None and not (isinstance(clear, ast.Constant) and not clear.value):
+            truthy = clear is not None and not (isinstance(clear, ast.Constant) and not clear.value)
+            if truthy or self._hidden(bound, "clear"):
                 labels.append(f"patch.dict({self.label}, clear=True)")
             return labels
         if helper == "object":
             bound = bind_call(call, PATCH_OBJECT_SIGNATURE)
-            if self.mapping.is_module_attr_pair(bound.get("target"), bound.get("attribute")):
+            if self._replaces_mapping(bound, "target", "attribute"):
                 return [f"patch({self.label})"]
         return []

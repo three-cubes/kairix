@@ -296,3 +296,122 @@ def test_reload_of_ordinary_module_by_keyword_is_not_flagged(tmp_path: Path) -> 
     path = tmp_path / "test_sample.py"
     path.write_text("import importlib\nimport json\nimportlib.reload(module=json)\n", encoding="utf-8")
     assert _MODS.flagged(path) is False
+
+
+# ---------------------------------------------------------------------------
+# Spread-hidden targets / keys (PR #814 thread): an argument a ``*args`` /
+# ``**kw`` spread leaves unbound counts as possibly the guarded mapping / a
+# protected key — the documented binding contract.
+# ---------------------------------------------------------------------------
+
+# (form, setup building the spread from the receiver R / module M, call)
+SPREAD_FORMS: list[tuple[str, str, str]] = [
+    ("setitem_args", 'args = ({R}, {K}, "v")', "monkeypatch.setitem(*args)"),
+    ("setitem_kwargs", 'kw = {{"dic": {R}, "name": {K}, "value": "v"}}', "monkeypatch.setitem(**kw)"),
+    ("delitem_args", "args = ({R}, {K})", "monkeypatch.delitem(*args)"),
+    ("delitem_kwargs", 'kw = {{"dic": {R}, "name": {K}}}', "monkeypatch.delitem(**kw)"),
+    ("patch_dict_args", 'args = ({R}, {{{K}: "v"}})', "patch.dict(*args)"),
+    ("patch_dict_kwargs", 'kw = {{"in_dict": {R}, "values": {{{K}: "v"}}}}', "patch.dict(**kw)"),
+    ("setattr_args", 'args = ({M}, "{A}", {{}})', "monkeypatch.setattr(*args)"),
+    ("setattr_kwargs", 'kw = {{"target": {M}, "name": "{A}", "value": {{}}}}', "monkeypatch.setattr(**kw)"),
+    ("delattr_args", 'args = ({M}, "{A}")', "monkeypatch.delattr(*args)"),
+    ("update_args", 'args = ({{{K}: "v"}},)', "{R}.update(*args)"),
+    ("pop_args", "args = ({K},)", "{R}.pop(*args)"),
+]
+
+# setenv / delenv only exist for os.environ.
+ENV_SPREAD_FORMS: list[tuple[str, str, str]] = [
+    ("setenv_args", 'args = ({K}, "v")', "monkeypatch.setenv(*args)"),
+    ("setenv_kwargs", 'kw = {{"name": {K}, "value": "v"}}', "monkeypatch.setenv(**kw)"),
+    ("delenv_args", "args = ({K},)", "monkeypatch.delenv(*args)"),
+    ("delenv_kwargs", 'kw = {{"name": {K}}}', "monkeypatch.delenv(**kw)"),
+]
+
+
+def _spread_cases() -> list[object]:
+    cases = [
+        pytest.param(rname, setup, call, id=f"{rname}-{form}")
+        for rname in RECEIVERS
+        for form, setup, call in SPREAD_FORMS
+    ]
+    cases += [
+        pytest.param("os.environ", setup, call, id=f"os.environ-{form}") for form, setup, call in ENV_SPREAD_FORMS
+    ]
+    return cases
+
+
+@pytest.mark.parametrize(("rname", "setup", "call"), _spread_cases())
+def test_spread_hidden_target_or_key_is_flagged(tmp_path: Path, rname: str, setup: str, call: str) -> None:
+    """``monkeypatch.setitem(*args)``, ``patch.dict(**kw)``, ... — the target /
+    key is unbound behind a spread, so it counts as possibly protected.
+
+    Sabotage proof (executed): make ``WriteSurface._hidden`` return ``False``
+    → the target-hidden cases (setitem / delitem / patch.dict / setattr /
+    delattr / update) report clean; restored.
+    """
+    receiver = RECEIVERS[rname]
+    fmt = {"R": receiver.dotted, "K": receiver.key, "M": receiver.module, "A": receiver.attr}
+    source = _module_source(f"import {receiver.module}", setup.format(**fmt), call.format(**fmt))
+    assert _flagged(tmp_path, receiver, source) is True
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "monkeypatch.setitem(plain, *rest)",
+        "monkeypatch.delitem(plain, **kw)",
+        "patch.dict(plain, *rest)",
+        "monkeypatch.setattr(holder, *rest)",
+    ],
+)
+@pytest.mark.parametrize("rname", list(RECEIVERS))
+def test_spread_with_an_ordinary_target_bound_is_not_flagged(tmp_path: Path, rname: str, call: str) -> None:
+    """When the target IS bound (to an ordinary dict / object), a spread
+    supplying the remaining arguments cannot make it the guarded mapping."""
+    receiver = RECEIVERS[rname]
+    setup = 'plain = {}\n    holder = SimpleNamespace()\n    rest = ("x", "y")\n    kw = {"name": "x"}'
+    source = _module_source(f"import {receiver.module}", setup, call)
+    assert _flagged(tmp_path, receiver, source) is False
+
+
+# ---------------------------------------------------------------------------
+# Constant folding of keys (PR #814 thread).
+# ---------------------------------------------------------------------------
+
+FOLDING_CASES: list[tuple[str, str, bool]] = [
+    ("os.environ", '"KAIRIX" + "_DB_PATH"', True),
+    ("os.environ", "f\"KAIRIX{'_X'}\"", True),
+    ("os.environ", '"KAIRIX_%s" % "DB_PATH"', True),
+    ("os.environ", '"{}_DB_PATH".format("KAIRIX")', True),
+    ("os.environ", '"KAIRIX" + suffix', True),
+    ("os.environ", 'f"KAIRIX{suffix}"', True),
+    ("os.environ", '"KAIRIX" + "DB_PATH"', False),
+    ("os.environ", '"X" + "KAIRIX_A"', False),
+    ("os.environ", "f\"{'PATH'}\"", False),
+    ("os.environ", '"PATH" + suffix', False),
+    ("os.environ", '"%s_DB" % "OTHER"', False),
+    ("sys.modules", '"kai" + "rix.paths"', True),
+    ("sys.modules", '"kairix" + "." + "paths"', True),
+    ("sys.modules", '"kairix" + suffix', True),
+    ("sys.modules", '"kairixish" + ".paths"', False),
+    ("sys.modules", '"open" + "ai"', False),
+]
+
+
+@pytest.mark.parametrize(
+    ("rname", "key_expr", "expected"),
+    [pytest.param(r, k, e, id=f"{r}-{k}") for r, k, e in FOLDING_CASES],
+)
+def test_constant_folded_keys(tmp_path: Path, rname: str, key_expr: str, expected: bool) -> None:
+    """Constant string expressions are folded before the protected-prefix
+    test; a partially constant one is judged by its constant leading prefix.
+
+    Sabotage proof (executed): make ``fold_string`` fold bare literals only
+    (``None`` for ``+`` / f-strings / ``%`` / ``.format``) → the
+    seven folded positives (``"KAIRIX" + "_DB_PATH"``, the f-string, ``%``,
+    ``.format``, ``"kai" + "rix.paths"``, ...) report clean; restored.
+    """
+    receiver = RECEIVERS[rname]
+    statement = f'{receiver.dotted}[{key_expr}] = "v"'
+    source = _module_source(f"import {receiver.module}", "suffix = input()", statement)
+    assert _flagged(tmp_path, receiver, source) is expected

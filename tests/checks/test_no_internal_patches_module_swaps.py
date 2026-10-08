@@ -31,6 +31,7 @@ if str(_CHECKS_DIR) not in sys.path:
     sys.path.insert(0, str(_CHECKS_DIR))
 
 from check_no_internal_patches import (  # noqa: E402 — see _CHECKS_DIR sys.path insert above
+    F1,
     REMEDIATION,
     file_has_internal_patch,
 )
@@ -221,3 +222,17 @@ def test_remediation_names_the_new_shapes_and_is_f21_actionable() -> None:
         assert marker in REMEDIATION
     assert 'sys.modules["kairix.core.search.pipeline"]' in REMEDIATION
     assert "importlib.reload(kairix.core.search.rerank)" in REMEDIATION
+
+
+def test_rule_gate_scans_tests_and_fails_on_a_violation(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """``F1(repo_root=...).run()`` — the in-process, staged-narrowable gate —
+    scans ``tests/`` under the root, names the violating file, returns 1; a
+    clean tree returns 0."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    bad = tests_dir / "test_bad.py"
+    bad.write_text('import sys\nsys.modules["kairix.paths"] = object()\n', encoding="utf-8")
+    assert F1(repo_root=tmp_path).run() == 1
+    assert "tests/test_bad.py" in capsys.readouterr().out
+    bad.write_text('import sys\nsys.modules["openai"] = object()\n', encoding="utf-8")
+    assert F1(repo_root=tmp_path).run() == 0

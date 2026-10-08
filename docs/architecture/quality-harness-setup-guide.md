@@ -62,8 +62,8 @@ scripts/checks/
 ├── run_checks.py                                      # Thin tc_fitness.runner consumer (catalogue dispatch + seams)
 ├── _rule_catalogue.py                                 # Your RuleEntry rows (schema from tc_fitness.catalogue)
 ├── _lib.sh                                            # Shell helper (arch_gate)
-├── check-no-internal-patches.sh                       # F1
-├── check-no-env-monkeypatch.sh                        # F2
+├── check_no_internal_patches.py                       # F1
+├── check_no_env_monkeypatch.py                        # F2
 ├── check-suppressions-have-rationale.sh               # F3 (extended)
 ├── check-env-reads-stay-in-paths.sh                   # F4
 ├── check_no_internal_imports.py                       # F5

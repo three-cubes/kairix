@@ -60,7 +60,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _ast_key_taint import from_imports, is_module_attr, key_is_protected, module_aliases, tainted_names
+import re
+
+from _ast_key_taint import ModuleIndex, ProtectedKeys, is_module_attr, key_is_protected, parse_index, tainted_names
+from _fitness_rule import FitnessRule
 from _mapping_writes import (
     IMPORT_MODULE_SIGNATURE,
     MONKEYPATCH_SIGNATURES,
@@ -184,7 +187,7 @@ _EXEMPT_ROOTS = frozenset(
 )
 
 
-def _resolve_kairix_aliases(tree: ast.AST) -> dict[str, str]:
+def _resolve_kairix_aliases(index: ModuleIndex) -> dict[str, str]:
     """Map local name -> fully-qualified kairix path from the file's imports.
 
     Examples:
@@ -194,7 +197,7 @@ def _resolve_kairix_aliases(tree: ast.AST) -> dict[str, str]:
       ``import kairix.paths`` -> {"kairix": "kairix"}  (root binding only)
     """
     aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
+    for node in [*index.imports, *index.import_froms]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if not alias.name.startswith("kairix"):
@@ -280,25 +283,34 @@ def _is_inside_pytest_raises(parent_map: dict[ast.AST, ast.AST], node: ast.AST) 
     return False
 
 
+_KAIRIX_MODULES = ProtectedKeys(prefixes=("kairix.",), exact=("kairix",))
+
+#: Cheap pre-parse filter: every F1 shape names a kairix target (``kairix``
+#: appears in the import or the string target) or writes ``sys.modules``. A file
+#: with neither token cannot violate, so it is never parsed.
+_PREFILTER = re.compile(r"kairix|modules")
+
+
 def _is_kairix_module_name(value: str) -> bool:
-    return value == "kairix" or value.startswith("kairix.")
+    return _KAIRIX_MODULES(value)
 
 
 class _F1Ctx:
     """Per-file resolution state: kairix aliases + the shared ``sys.modules`` surface."""
 
-    def __init__(self, tree: ast.AST) -> None:
-        self.aliases = _resolve_kairix_aliases(tree)
-        self.tainted = tainted_names(tree, _is_kairix_module_name)
-        self.sys_modules = ProcessMapping.resolve(tree, "sys", "modules")
-        self.surface = WriteSurface(tree, self.sys_modules, _is_kairix_module_name, self.tainted, "kairix.*")
-        self.importlib_names = module_aliases(tree, "importlib")
-        self.reload_names = from_imports(tree, "importlib", "reload")
+    def __init__(self, index: ModuleIndex) -> None:
+        self.index = index
+        self.aliases = _resolve_kairix_aliases(index)
+        self.tainted = tainted_names(index, _KAIRIX_MODULES)
+        self.sys_modules = ProcessMapping.resolve(index, "sys", "modules")
+        self.surface = WriteSurface(index, self.sys_modules, _KAIRIX_MODULES, self.tainted, "kairix.*")
+        self.importlib_names = index.module_aliases("importlib")
+        self.reload_names = index.from_imports("importlib", "reload")
         # ``from importlib import import_module [as load]`` — tracked like reload.
-        self.import_module_names = from_imports(tree, "importlib", "import_module") | {"__import__"}
+        self.import_module_names = index.from_imports("importlib", "import_module") | {"__import__"}
 
     def is_kairix_key(self, expr: ast.expr | None) -> bool:
-        return expr is not None and key_is_protected(expr, _is_kairix_module_name, self.tainted)
+        return expr is not None and key_is_protected(expr, _KAIRIX_MODULES, self.tainted)
 
     def is_kairix_string(self, expr: ast.expr | None) -> bool:
         return isinstance(expr, ast.Constant) and isinstance(expr.value, str) and _is_kairix_module_name(expr.value)
@@ -362,21 +374,14 @@ def _is_module_swap(node: ast.AST, ctx: _F1Ctx) -> bool:
 
 def file_has_internal_patch(path: Path) -> bool:
     """Return True iff ``path`` contains any of the eight F1 violation shapes."""
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except (SyntaxError, OSError):
+    index = parse_index(path, _PREFILTER)
+    if index is None:
         return False
 
-    ctx = _F1Ctx(tree)
+    ctx = _F1Ctx(index)
+    parent_map = index.parents
 
-    # Build a child->parent map so we can ask "is this Assign inside a
-    # pytest.raises With block?" without re-traversing the whole tree.
-    parent_map: dict[ast.AST, ast.AST] = {}
-    for parent in ast.walk(tree):
-        for child in ast.iter_child_nodes(parent):
-            parent_map[child] = parent
-
-    for node in ast.walk(tree):
+    for node in index.candidates:
         if isinstance(node, ast.Call) and (_patch_shapes(node, ctx) or _monkeypatch_attr_shapes(node, ctx)):
             return True
 
@@ -396,19 +401,24 @@ def file_has_internal_patch(path: Path) -> bool:
     return False
 
 
+class F1(FitnessRule):
+    """F1 as an in-process :class:`FitnessRule` over ``tests/``.
+
+    In-process (not a shell subprocess) so the shared runner's staged mode
+    narrows :meth:`enumerate_files` to the staged test files — ``safe-commit.sh
+    --check`` scans only what changed, while ``--all`` / CI scan every file.
+    """
+
+    name = "no-internal-patches"
+    remediation = REMEDIATION
+    roots = ("tests",)
+
+    def file_has_violation(self, path: Path) -> bool:
+        return file_has_internal_patch(path)
+
+
 def main() -> int:
-    root = Path("tests")
-    if not root.is_dir():
-        return 0
-
-    violators: list[str] = []
-    for path in sorted(root.rglob("*.py")):
-        if file_has_internal_patch(path):
-            violators.append(str(path))
-
-    for v in violators:
-        print(v)
-    return 0
+    return F1().run()
 
 
 if __name__ == "__main__":

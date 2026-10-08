@@ -33,6 +33,7 @@ if str(_CHECKS_DIR) not in sys.path:
     sys.path.insert(0, str(_CHECKS_DIR))
 
 from check_no_env_monkeypatch import (  # noqa: E402 — see _CHECKS_DIR sys.path insert above
+    F2,
     REMEDIATION,
     file_has_env_monkeypatch,
     file_violations,
@@ -522,3 +523,86 @@ def test_remediation_is_f21_actionable() -> None:
     for marker in ("fix:", "next:", "run:", "Pass example:", "Forbidden example:"):
         assert marker in REMEDIATION
     assert "os.environ['KAIRIX_DB_PATH']" in REMEDIATION
+
+
+# ---------------------------------------------------------------------------
+# clear() + restore: only on the same unconditional straight-line path
+# (PR #814 thread).
+# ---------------------------------------------------------------------------
+
+_CLEAR_FIXTURE = """
+import os
+
+import pytest
+
+
+@pytest.fixture
+def _restored(flag):
+    snapshot = dict(os.environ)
+    yield
+{body}
+"""
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "    os.environ.clear()\n    os.environ.update(snapshot)",
+        "    try:\n        pass\n    finally:\n        os.environ.clear()\n        os.environ.update(snapshot)",
+        "    os.environ.clear()\n    note = 1\n    os.environ.update(snapshot)",
+    ],
+    ids=["sibling", "finally-body", "later-sibling"],
+)
+def test_clear_then_unconditional_restore_is_recognised(tmp_path: Path, body: str) -> None:
+    """``clear()`` followed by ``update(snapshot)`` as a later sibling in the
+    same unconditional statement list (the fixture body, or a ``finally`` on
+    that path) is genuine restoration.
+
+    Sabotage proof (executed): make ``_followed_by_full_restore`` return
+    ``False`` → every case reports the ``clear()``; restored.
+    """
+    assert _violations(tmp_path, _CLEAR_FIXTURE.format(body=body)) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "    os.environ.clear()\n    if flag:\n        os.environ.update(snapshot)",
+        "    os.environ.clear()\n    for _ in range(1):\n        os.environ.update(snapshot)",
+        "    os.environ.clear()\n\n    def _restore():\n        os.environ.update(snapshot)\n\n    _restore()",
+        "    os.environ.clear()\n    restore = lambda: os.environ.update(snapshot)\n    restore()",
+        "    try:\n        os.environ.clear()\n        os.environ.update(snapshot)\n"
+        "    except Exception:\n        pass",
+        "    if flag:\n        os.environ.clear()\n        os.environ.update(snapshot)",
+        "    os.environ.update(snapshot)\n    os.environ.clear()",
+    ],
+    ids=["conditional", "loop", "nested-def", "lambda", "try-body", "clear-in-if", "update-before"],
+)
+def test_clear_without_an_unconditional_restore_is_flagged(tmp_path: Path, body: str) -> None:
+    """A restore that is conditional, looped, inside a nested function /
+    lambda, in a ``try`` body, or before the ``clear()`` leaves the env
+    cleared on some path — the ``clear()`` is reported.
+
+    Sabotage proof (executed): revert ``_followed_by_full_restore`` to "any
+    later ``update(snapshot)`` anywhere in the fixture" → every case except
+    ``update-before`` passes clean (6 of 7 red); restored.
+    """
+    violations = _violations(tmp_path, _CLEAR_FIXTURE.format(body=body))
+    assert any(v.endswith("os.environ.clear()") for v in violations), violations
+
+
+# ---------------------------------------------------------------------------
+# The in-process FitnessRule gate (staged-narrowable) reports path:line keys.
+# ---------------------------------------------------------------------------
+
+
+def test_rule_gate_reports_line_keys_and_fails(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """``F2(repo_root=...).run()`` scans ``tests/`` under the root, prints each
+    ``path:line: shape`` and returns 1; a clean tree returns 0."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_bad.py").write_text('import os\nos.environ["KAIRIX_DB_PATH"] = "x"\n', encoding="utf-8")
+    assert F2(repo_root=tmp_path).run() == 1
+    assert "tests/test_bad.py:2: assign os.environ[KAIRIX_*]" in capsys.readouterr().out
+    (tests_dir / "test_bad.py").write_text('import os\nos.environ["PATH"] = "x"\n', encoding="utf-8")
+    assert F2(repo_root=tmp_path).run() == 0

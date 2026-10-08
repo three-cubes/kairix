@@ -181,8 +181,9 @@ def test_only_shell_detectors_and_coverage_stay_subprocess() -> None:
     detectors (a ``check-*.sh`` ``script`` override) and the coverage check.
     Every other ``--all`` rule runs in-process — the perf win's surface."""
     subprocess_rules = {e.id for e in run_checks._select_all() if not run_checks._dispatches_in_process(e)}
-    # F1/F2/F3/F4/F10 carry a check-*.sh override; F7 is the coverage check.
-    assert subprocess_rules == {"F1", "F2", "F3", "F4", "F10", "F7"}
+    # F3/F4/F10 carry a check-*.sh override; F7 is the coverage check. (F1/F2
+    # retired their .sh delegators for in-process, staged-narrowable rules.)
+    assert subprocess_rules == {"F3", "F4", "F10", "F7"}
 
 
 def test_retired_delegators_dispatch_in_process() -> None:
@@ -190,7 +191,7 @@ def test_retired_delegators_dispatch_in_process() -> None:
     now resolve to a ``check_<x>.py`` and dispatch in-process — proving the
     retirement actually moved them onto the in-process path, not into a
     silent skip."""
-    retired = {"F44", "F45", "F46", "F48", "F54", "F36", "F56", "F51", "F52", "F53"}
+    retired = {"F1", "F2", "F44", "F45", "F46", "F48", "F54", "F36", "F56", "F51", "F52", "F53"}
     by_id = {e.id: e for e in run_checks._select_all()}
     for rid in retired:
         entry = by_id[rid]

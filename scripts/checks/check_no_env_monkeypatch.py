@@ -59,13 +59,14 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _ast_key_taint import enclosing_function, parent_map, tainted_names
-from _mapping_writes import ProcessMapping, WriteSurface
+import re
 
-# REMEDIATION text — the shell wrapper ``check-no-env-monkeypatch.sh``
-# owns the user-facing message that prints when the gate fails. This
-# constant exists for F21 (actionable-feedback) compliance and is
-# semantically equivalent to the shell wrapper's REMEDIATION.
+from _ast_key_taint import ModuleIndex, ProtectedKeys, enclosing_function, parse_index, tainted_names
+from _fitness_rule import FitnessRule
+from _mapping_writes import ProcessMapping, WriteSurface
+from tc_fitness import gate_keys
+
+# REMEDIATION — the user-facing F21 message the gate prints on failure.
 REMEDIATION = """KAIRIX_* process-env write found in a test. Refactor to an explicit
 ``env=`` mapping / ``paths=FakePaths(...)`` / Deps seam to pass.
 
@@ -86,8 +87,8 @@ production leaves as ``None`` (reads os.environ at the kairix.paths
 boundary) — the boundary-only pattern from #139. A non-KAIRIX_ test-only
 variable name is fine when the code under test hydrates arbitrary keys.
 next: re-run ``python3 scripts/checks/check_no_env_monkeypatch.py``
-(or ``bash scripts/checks/check-no-env-monkeypatch.sh``) to confirm
-the gate goes green.
+(or ``python3 scripts/checks/run_checks.py --gate F2``) to confirm the
+gate goes green.
 run: bash scripts/safe-commit.sh "test(<area>): inject env via seam instead of mutating os.environ"
 
 Pass example:
@@ -113,23 +114,26 @@ KAIRIX_* env-var reads happen ONCE at the boundary inside KairixPaths
 (kairix/paths.py). Tests construct paths directly; they never mutate
 process env to influence the production read."""
 
-_PREFIX = "KAIRIX_"
+_KEYS = ProtectedKeys(prefixes=("KAIRIX_",))
 _MARKER = "KAIRIX_*"
 
-
-def _is_protected(value: str) -> bool:
-    return value.startswith(_PREFIX)
+#: Cheap pre-parse filter: every F2 write names ``environ`` (any receiver
+#: spelling resolves through an ``os`` import / ``environ`` binding) or calls a
+#: ``setenv`` / ``delenv`` helper. A file with none of these tokens cannot
+#: violate, so it is never parsed.
+_PREFILTER = re.compile(r"environ|setenv|delenv")
 
 
 class _Ctx:
     """Per-file resolution state: the shared ``os.environ`` write surface."""
 
-    def __init__(self, tree: ast.AST, path: Path) -> None:
+    def __init__(self, index: ModuleIndex, path: Path) -> None:
         self.path = path
-        self.tainted = tainted_names(tree, _is_protected)
-        self.environ = ProcessMapping.resolve(tree, "os", "environ")
-        self.surface = WriteSurface(tree, self.environ, _is_protected, self.tainted, _MARKER)
-        self.parents = parent_map(tree)
+        self.index = index
+        self.tainted = tainted_names(index, _KEYS)
+        self.environ = ProcessMapping.resolve(index, "os", "environ")
+        self.surface = WriteSurface(index, self.environ, _KEYS, self.tainted, _MARKER)
+        self.parents = index.parents
 
     def is_environ(self, expr: ast.expr) -> bool:
         return self.environ.is_receiver(expr)
@@ -245,22 +249,48 @@ def _guarded_by_key_absent(
     return False
 
 
+def _straight_line_body(fn: ast.FunctionDef | ast.AsyncFunctionDef, stmt: ast.stmt, ctx: _Ctx) -> list[ast.stmt] | None:
+    """The statement list ``stmt`` sits in, when that list runs unconditionally
+    on ``fn``'s straight-line path: ``fn``'s own body, or the ``finally`` body
+    of a ``try`` that is itself on that path. ``None`` under an ``if`` / loop /
+    ``try`` body or handler / ``with`` / nested ``def`` / ``lambda``."""
+    parent = ctx.parents.get(stmt)
+    if parent is fn:
+        return fn.body if any(stmt is s for s in fn.body) else None
+    if isinstance(parent, ast.Try) and any(stmt is s for s in parent.finalbody):
+        return parent.finalbody if _straight_line_body(fn, parent, ctx) is not None else None
+    return None
+
+
+def _is_snapshot_update_stmt(stmt: ast.stmt, snapshots: set[str], ctx: _Ctx) -> bool:
+    call = stmt.value if isinstance(stmt, ast.Expr) else None
+    return (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "update"
+        and ctx.is_environ(call.func.value)
+        and len(call.args) == 1
+        and not call.keywords
+        and _is_snapshot_name(call.args[0], snapshots)
+    )
+
+
 def _followed_by_full_restore(
     fn: ast.FunctionDef | ast.AsyncFunctionDef, node: ast.AST, snapshots: set[str], ctx: _Ctx
 ) -> bool:
-    """A teardown ``os.environ.clear()`` is restoration only when the same
-    fixture then puts the whole snapshot back with ``os.environ.update(snapshot)``."""
-    line = getattr(node, "lineno", 0)
-    return any(
-        isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Attribute)
-        and n.func.attr == "update"
-        and ctx.is_environ(n.func.value)
-        and n.lineno > line
-        and len(n.args) == 1
-        and _is_snapshot_name(n.args[0], snapshots)
-        for n in ast.walk(fn)
-    )
+    """A teardown ``os.environ.clear()`` is restoration only when
+    ``os.environ.update(snapshot)`` follows it on the SAME unconditional
+    straight-line path: both are statements of one list (the fixture body or a
+    ``finally`` body on that path), the update a later sibling. A conditional,
+    looped, ``try``-body / ``except``, or nested-function restore does not count."""
+    stmt = ctx.parents.get(node)
+    if not isinstance(stmt, ast.Expr) or stmt.value is not node:
+        return False
+    body = _straight_line_body(fn, stmt, ctx)
+    if body is None:
+        return False
+    position = next(i for i, s in enumerate(body) if s is stmt)
+    return any(_is_snapshot_update_stmt(later, snapshots, ctx) for later in body[position + 1 :])
 
 
 def _is_genuine_restore(
@@ -314,13 +344,12 @@ def _is_recognised_boundary(node: ast.AST, ctx: _Ctx) -> bool:
 
 def file_violations(path: Path) -> list[str]:
     """Every ``line: shape`` KAIRIX_* env write in ``path`` (sorted by line)."""
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except (SyntaxError, OSError):
+    index = parse_index(path, _PREFILTER)
+    if index is None:
         return []
-    ctx = _Ctx(tree, path)
+    ctx = _Ctx(index, path)
     found: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
+    for node in index.candidates:
         shapes = _statement_shapes(node, ctx)
         if shapes and not _is_recognised_boundary(node, ctx):
             found.extend((getattr(node, "lineno", 0), s) for s in shapes)
@@ -332,15 +361,33 @@ def file_has_env_monkeypatch(path: Path) -> bool:
     return bool(file_violations(path))
 
 
-def main() -> int:
-    root = Path("tests")
-    if not root.is_dir():
-        return 0
+class F2(FitnessRule):
+    """F2 as an in-process :class:`FitnessRule` over ``tests/``.
 
-    for path in sorted(root.rglob("*.py")):
-        for violation in file_violations(path):
-            print(f"{path}:{violation}")
-    return 0
+    In-process (not a shell subprocess) so the shared runner's staged mode
+    narrows :meth:`enumerate_files` to the staged test files — ``safe-commit.sh
+    --check`` scans only what changed, while ``--all`` / CI scan every file.
+    Reports ``path:line: shape`` keys rather than bare paths.
+    """
+
+    name = "no-env-monkeypatch"
+    remediation = REMEDIATION
+    roots = ("tests",)
+
+    def file_has_violation(self, path: Path) -> bool:
+        return file_has_env_monkeypatch(path)
+
+    def run(self) -> int:
+        found: set[str] = set()
+        for path in self.enumerate_files():
+            rel = str(self._repo_relative(path))
+            if self.is_in_scope(rel):
+                found.update(f"{rel}:{violation}" for violation in file_violations(path))
+        return int(gate_keys(self.name, found, self.remediation))
+
+
+def main() -> int:
+    return F2().run()
 
 
 if __name__ == "__main__":

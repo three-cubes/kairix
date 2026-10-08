@@ -397,9 +397,11 @@ the Fake* at construction.
 
 #### Detection
 
-`scripts/checks/check-no-internal-patches.sh` delegates to
-`scripts/checks/check_no_internal_patches.py`. The detector is
-AST-based, walks each test file's imports to resolve aliases, and
+`scripts/checks/check_no_internal_patches.py` is an in-process
+`FitnessRule` over `tests/` (so the staged runner narrows it to the staged
+test files; `--all` / CI scan every file). The detector is AST-based,
+parses each file once (after a cheap `kairix|modules` token prefilter) into a
+single-traversal `ModuleIndex`, walks each test file's imports to resolve aliases, and
 flags any of the eight shapes against the alias-resolved root.
 Multi-line constructs, aliased imports
 (`import kairix.paths as paths_mod`), from-imports
@@ -568,9 +570,10 @@ explicitly reverted.
 
 #### Detection
 
-`scripts/checks/check-no-env-monkeypatch.sh` delegates to the AST
-detector `scripts/checks/check_no_env_monkeypatch.py`, which reports
-`path:line: shape` per violation. The write surface is the shared engine
+`scripts/checks/check_no_env_monkeypatch.py` is an in-process
+`FitnessRule` over `tests/` (staged-narrowable like F1) that reports
+`path:line: shape` per violation, after a cheap `environ|setenv|delenv`
+token prefilter and one parse + one traversal per file. The write surface is the shared engine
 `scripts/checks/_mapping_writes.py` (see the table under F1); key resolution
 (variables, loop targets, helper return values) lives in
 `scripts/checks/_ast_key_taint.py`. Detector tests:
@@ -2933,8 +2936,8 @@ scripts/checks/
 ├── _fitness_rule.py                      # FitnessRule ABC — 3-line check subclasses over tc_fitness.gate()
 ├── generate_catalogue_docs.py            # Regenerates the F-CATALOGUE doc regions (F92 currency gate)
 ├── _lib.sh                               # Shell helper: arch_gate() function
-├── check-no-internal-patches.sh                       # F1
-├── check-no-env-monkeypatch.sh                        # F2
+├── check_no_internal_patches.py                       # F1
+├── check_no_env_monkeypatch.py                        # F2
 ├── check-suppressions-have-rationale.sh               # F3 (extended: covers # type: ignore + # nosec)
 ├── check-env-reads-stay-in-paths.sh                   # F4
 ├── check_no_internal_imports.py                       # F5 (AST)
@@ -2977,10 +2980,10 @@ enumerate / scope / gate inherited from `tc_fitness.gate`.
 
 For each rule, I chose the simplest tool that gives correct detection:
 
-- **Shell + grep** for line-pattern rules (F1, F2, F3) where the
+- **Shell + grep** for line-pattern rules (F3) where the
   trigger is an unambiguous string at the line level. AST adds no
   precision; the grep regex is short, readable, and fast.
-- **Python AST** for structural rules (F5, F6, F8) where the trigger
+- **Python AST** for structural rules (F1, F2, F5, F6, F8) where the trigger
   depends on import structure (rejected `from kairix.x import _y`
   vs. allowed `from kairix.x import y as _alias`), function
   signatures (`*_fn=None` requires inspecting `args.args` /
@@ -3020,9 +3023,9 @@ def test_x(monkeypatch):
     monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/tmp/x")
 EOF
 cp /tmp/sabotage.py tests/_sabotage.py
-bash scripts/checks/check-no-env-monkeypatch.sh  # expect FAIL
+python3 scripts/checks/check_no_env_monkeypatch.py  # expect FAIL
 rm tests/_sabotage.py
-bash scripts/checks/check-no-env-monkeypatch.sh  # expect ok
+python3 scripts/checks/check_no_env_monkeypatch.py  # expect ok
 ```
 
 If a check passes the sabotage test on the first commit but starts
@@ -3172,7 +3175,7 @@ Refactor: pass paths as a constructor argument or use FakePaths
 from tests/fakes.py. The production code must not require process-env
 mutation to be testable — that's the test-shaped-API smell #139 reverted.
 
-next: re-run bash scripts/checks/check-no-env-monkeypatch.sh until clean.
+next: re-run python3 scripts/checks/check_no_env_monkeypatch.py until clean.
 
 === Architecture fitness functions FAILED ===
 ```
@@ -3194,7 +3197,7 @@ bash scripts/checks/run-all.sh
 bash scripts/checks/run-all.sh --skip-coverage
 
 # Run one check only
-bash scripts/checks/check-no-env-monkeypatch.sh
+python3 scripts/checks/check_no_env_monkeypatch.py
 python3 scripts/checks/check_no_internal_imports.py
 python3 scripts/checks/check_per_file_coverage.py coverage.xml
 ```
@@ -3390,13 +3393,13 @@ violation blocks.
 fitness_functions:
   - id: F1
     name: no-internal-patches
-    script: scripts/checks/check-no-internal-patches.sh
+    script: scripts/checks/check_no_internal_patches.py
     precommit_hook: arch-no-internal-patches
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F2
     name: no-env-monkeypatch
-    script: scripts/checks/check-no-env-monkeypatch.sh
+    script: scripts/checks/check_no_env_monkeypatch.py
     precommit_hook: arch-no-env-monkeypatch
     layer: [pre-commit, safe-commit, ci-stage0]
 

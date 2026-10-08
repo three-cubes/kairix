@@ -252,12 +252,7 @@ _ENTRIES: tuple[RuleEntry, ...] = (
             "no @patch / monkeypatch, sys.modules swap or importlib.reload of kairix internals"
             " — inject Fake* through a seam"
         ),
-        script="check-no-internal-patches.sh",
-        # Shell wrapper runs the AST detector over tests/ for @patch /
-        # monkeypatch / sys.modules / importlib.reload on kairix.* targets. File-local
-        # (per-test-file), but runs as a subprocess so it can't narrow to staged
-        # files — it runs its full tests/ grep when a tests/ path is staged.
-        staged_scope=("tests",),
+        # In-process FitnessRule over tests/ — the staged runner narrows it to staged files.
     ),
     RuleEntry(
         id="F2",
@@ -269,10 +264,7 @@ _ENTRIES: tuple[RuleEntry, ...] = (
             'no monkeypatch.setenv("KAIRIX_*") or direct os.environ write of a KAIRIX_* key'
             " — pass deps as kwargs instead"
         ),
-        script="check-no-env-monkeypatch.sh",
-        # Shell wrapper runs the AST detector over tests/ for monkeypatch and
-        # direct os.environ / patch.dict writes of KAIRIX_* keys.
-        staged_scope=("tests",),
+        # In-process FitnessRule over tests/ — the staged runner narrows it to staged files.
     ),
     RuleEntry(
         id="F5",
