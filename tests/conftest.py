@@ -400,16 +400,6 @@ import os as _os  # noqa: E402 — keep pytest_plugins assembly above other impo
 if _os.environ.get("KAIRIX_PVT") == "1":
     pytest_plugins.append("tests.pvt.steps.pvt_placeholder_steps")
 
-# Hard kill-switch on the kairix.connect.oauth2.* default browser path.
-# 2026-06-01 incident: a stream of real Slack "client_id not valid" approval
-# popups appeared on the operator's desktop during agent test runs — root
-# cause was the per-flow ``_DefaultBrowser`` fallback firing real
-# ``webbrowser.open`` when a test path escaped the FakeBrowserLauncher
-# injection seam. Setting the env var here at conftest import time means
-# every test runs with the kill-switch ON; production leaves it unset.
-# F4-clean: kairix-side read lives in kairix/paths.py::connect_browser_disabled.
-_os.environ.setdefault("KAIRIX_CONNECT_DISABLE_BROWSER", "1")
-
 from tests.fixtures.embeddings import fake_embedding  # noqa: E402
 from tests.fixtures.neo4j_mock import FakeNeo4jClient  # noqa: E402
 
@@ -421,7 +411,7 @@ from tests.fixtures.neo4j_mock import FakeNeo4jClient  # noqa: E402
 # sibling ``KairixPaths.resolve`` reads for the log dir. Clearing
 # ``KAIRIX_DOCUMENT_ROOT`` lets the document root fall through to its
 # platform default ``$HOME/Documents`` — which the session fixture points at
-# a clean dir — so no KAIRIX_* value is ever SET for the run (F2).
+# a clean dir — so no KAIRIX_* data-path value is SET for the run (F2).
 _HERMETIC_DATA_ENV_OVERRIDES = (
     "KAIRIX_DATA_DIR",
     "KAIRIX_CACHE_DIR",
@@ -443,6 +433,9 @@ _OPERATOR_CREDENTIAL_ENV = (
     # Canonical names the SecretsLoader resolves (``kairix.secrets.loader``).
     "KAIRIX_PROVIDER_LLM_API_KEY",
     "KAIRIX_PROVIDER_EMBED_API_KEY",
+    # Graph credential — an ambient value would let a unit test reach the
+    # developer's live Neo4j instead of taking the "backend unavailable" path.
+    "KAIRIX_NEO4J_PASSWORD",
 )
 
 
@@ -477,7 +470,9 @@ def _hermetic_data_dirs(tmp_path_factory):
     document root's platform default ``$HOME/Documents`` is clean too), and
     the operator vars in :func:`_ambient_env_to_clear` (data-dir overrides +
     real credentials) are cleared so a dev's shell export can't shadow those
-    defaults or reach a live account. No ``KAIRIX_*`` value is set (F2). It
+    defaults or reach a live account. The only ``KAIRIX_*`` value set is the
+    ``KAIRIX_CONNECT_DISABLE_BROWSER`` safety kill-switch — F2 recognises
+    this session-scoped autouse conftest fixture as the env baseline. It
     is only the BASELINE — a test that needs specific data injects it
     explicitly (``tmp_path`` / ``FakePaths`` / an ``env=`` mapping).
 
@@ -524,6 +519,19 @@ def _hermetic_data_dirs(tmp_path_factory):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
     for name in _ambient_env_to_clear():
         monkeypatch.delenv(name, raising=False)
+    # Hard kill-switch on the kairix.connect.oauth2.* default browser path.
+    # 2026-06-01 incident: a stream of real Slack "client_id not valid"
+    # approval popups appeared on the operator's desktop during agent test
+    # runs — root cause was the per-flow ``_DefaultBrowser`` fallback firing
+    # real ``webbrowser.open`` when a test path escaped the
+    # FakeBrowserLauncher injection seam. Set here, in the session baseline
+    # (which runs before any test), every test runs with the kill-switch ON
+    # and session teardown removes it; production leaves it unset.
+    # F4-clean: the kairix-side read lives in
+    # kairix/paths.py::connect_browser_disabled. F2 recognises this
+    # session-scoped autouse conftest fixture structurally as the one
+    # process-env baseline.
+    monkeypatch.setenv("KAIRIX_CONNECT_DISABLE_BROWSER", "1")
 
     # Drop any path resolution cached before the env was redirected so the
     # first resolve() in the run sees the clean dirs (mirrors the

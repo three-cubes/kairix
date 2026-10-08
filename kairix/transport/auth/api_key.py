@@ -29,8 +29,8 @@ plugin's tree. No plugin-private state lives here.
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 
 
 class MissingCredentialsError(RuntimeError):
@@ -89,6 +89,22 @@ def reset_api_key_cache() -> None:
         _CACHE.clear()
 
 
+def _default_secret_lookup(secret_name: str) -> str | None:
+    """Production default — walk the canonical :func:`kairix.secrets.get_secret` chain.
+
+    ``required=False`` so a missing secret returns control to
+    :meth:`ApiKeyAuth.headers` for the typed
+    :class:`MissingCredentialsError` rather than an :class:`OSError` from
+    deep inside ``secrets.py``. Lazy import so the helper itself doesn't
+    pull in the secrets module at construction time — keeps module import
+    cheap and avoids the circular-import shape between transport/auth and
+    the secrets resolver.
+    """
+    from kairix.secrets import get_secret
+
+    return get_secret(secret_name, required=False)
+
+
 @dataclass(frozen=True)
 class ApiKeyAuth:
     """Static-API-key Bearer auth helper.
@@ -109,7 +125,14 @@ class ApiKeyAuth:
     happens on first :meth:`headers` call, and a missing secret raises
     :class:`MissingCredentialsError` with an actionable message — not
     the raw :func:`get_secret` stack trace.
+
+    ``secret_lookup`` is the resolver seam: ``(secret_name) -> value | None``.
+    Production leaves it at the default (the :func:`kairix.secrets.get_secret`
+    chain); a caller holding its own secret source — or a test proving the
+    missing-secret path without touching the process env — injects one.
     """
+
+    secret_lookup: Callable[[str], str | None] = field(default=_default_secret_lookup, repr=False)
 
     def headers(self, secret_name: str) -> BearerHeaders:
         """Return the Bearer header mapping for ``secret_name``.
@@ -130,13 +153,7 @@ class ApiKeyAuth:
         with _CACHE_LOCK:
             cached = _CACHE.get(secret_name)
         if cached is None:
-            # Lazy import so the helper itself doesn't pull in the
-            # secrets module at construction time — keeps module import
-            # cheap and avoids the circular-import shape between
-            # transport/auth and the secrets resolver.
-            from kairix.secrets import get_secret
-
-            resolved = get_secret(secret_name, required=False)
+            resolved = self.secret_lookup(secret_name)
             if resolved is None or not resolved.strip():
                 raise MissingCredentialsError(
                     f"api_key_auth: secret {secret_name!r} is not configured. "

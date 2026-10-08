@@ -36,7 +36,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -459,9 +458,8 @@ def test_explicit_env_override_is_authoritative_over_cpu_aware_default() -> None
     pinned in ``tests/test_paths.py::TestReadIntEnv``; this pins that the
     resolver actually wires the env in front of the derived default.
 
-    F2/F1-clean: the env is set via ``patch.dict(os.environ, ...)`` (a scoped,
-    auto-restored stdlib-boundary edit — not ``monkeypatch.setenv`` and not an
-    ``@patch`` on a kairix target).
+    F2/F1-clean: the operator env is injected through the resolver's ``env=``
+    mapping seam — the process env is never mutated.
 
     Sabotage-proof (executed): in ``kairix/core/search/pipeline.py`` make
     ``resolve_dispatch_concurrency`` return
@@ -475,15 +473,13 @@ def test_explicit_env_override_is_authoritative_over_cpu_aware_default() -> None
     # env override — proving the operator value wins over the derived default.
     assert default_for_host > 3
 
-    with patch.dict(os.environ, {env_var: "3"}):
-        assert resolve_dispatch_concurrency() == 3, "explicit override must win over the CPU-aware default"
-        # read_int_env is the sanctioned seam that delivers that precedence.
-        assert read_int_env(env_var, default=default_for_host) == 3
+    operator_env = {env_var: "3"}
+    assert resolve_dispatch_concurrency(env=operator_env) == 3, "explicit override must win over the CPU-aware default"
+    # read_int_env is the sanctioned seam that delivers that precedence.
+    assert read_int_env(env_var, default=default_for_host, env=operator_env) == 3
 
     # Env unset -> the resolver falls back to the CPU-aware default for the host.
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop(env_var, None)
-        assert resolve_dispatch_concurrency() == default_for_host
+    assert resolve_dispatch_concurrency(env={}) == default_for_host
 
 
 @pytest.mark.unit

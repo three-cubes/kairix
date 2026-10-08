@@ -3,42 +3,50 @@
 Covers:
   - happy path: __version__ is a non-empty string and the public API
     symbols are importable
-  - fallback path: when importlib.metadata.version raises, __version__
-    falls back to "0.0.0"
+  - fallback path: when the distribution-metadata lookup raises,
+    __version__ falls back to "0.0.0"
   - guarded imports: when an optional submodule fails to import, the
     package still loads (the symbols just aren't exposed)
 
-Each reload test snapshots sys.modules before and restores it after to
-avoid leaking poisoned modules into sibling tests.
+The fallback and guarded-import paths are driven through the
+``PackageInitDeps`` seam in ``kairix.package_meta`` (the code
+``kairix/__init__.py`` runs at import time) with a failing lookup /
+importer — never by poisoning ``sys.modules`` and re-importing the
+package (F1).
 """
 
 from __future__ import annotations
 
 import importlib
-import sys
+import importlib.metadata
 from types import ModuleType
+from typing import Any
 
 import pytest
 
+from kairix.package_meta import (
+    DISTRIBUTION_NAME,
+    FALLBACK_VERSION,
+    PUBLIC_API,
+    PackageInitDeps,
+    bind_public_api,
+    resolve_version,
+)
 
-def _snapshot_kairix_modules() -> dict[str, ModuleType | None]:
-    """Capture every kairix submodule currently in sys.modules."""
-    return {name: sys.modules[name] for name in sys.modules if name == "kairix" or name.startswith("kairix.")}
-
-
-def _restore_kairix_modules(snapshot: dict[str, ModuleType | None]) -> None:
-    """Restore the snapshot of kairix modules to sys.modules."""
-    # Remove any kairix modules added during the test
-    for name in list(sys.modules):
-        if (name == "kairix" or name.startswith("kairix.")) and name not in snapshot:
-            sys.modules.pop(name, None)
-    # Put back the originals
-    for name, mod in snapshot.items():
-        if mod is not None:
-            sys.modules[name] = mod
+pytestmark = pytest.mark.unit
 
 
-@pytest.mark.unit
+def _importer_failing_for(broken_module: str) -> Any:
+    """An importer that raises ImportError for ``broken_module`` only."""
+
+    def _import(name: str) -> ModuleType:
+        if name == broken_module:
+            raise ImportError(f"simulated import failure for {name}")
+        return importlib.import_module(name)
+
+    return _import
+
+
 def test_kairix_version_is_non_empty_string() -> None:
     import kairix
 
@@ -46,7 +54,6 @@ def test_kairix_version_is_non_empty_string() -> None:
     assert kairix.__version__  # non-empty
 
 
-@pytest.mark.unit
 def test_public_api_symbols_available() -> None:
     """SearchResult, RetrievalConfig, QueryIntent are importable from kairix."""
     import kairix
@@ -56,91 +63,74 @@ def test_public_api_symbols_available() -> None:
     assert hasattr(kairix, "QueryIntent")
 
 
-@pytest.mark.unit
-def test_version_fallback_when_metadata_missing(monkeypatch) -> None:
-    """When importlib.metadata.version raises, __version__ falls back to '0.0.0'.
+def test_version_reads_the_distribution_metadata_name() -> None:
+    """The lookup is asked for the real distribution name, not "kairix" (#267).
 
-    We install a fake importlib.metadata.version that always raises, then
-    reload the kairix package. No @patch on kairix internals; the fake is
-    placed on the standard-library importlib.metadata module.
+    Sabotage proof (executed): change ``DISTRIBUTION_NAME`` lookup in
+    ``resolve_version`` to ``deps.version_lookup("kairix")`` → the
+    recorded name no longer matches; restored.
     """
-    import importlib.metadata as _metadata
+    asked: list[str] = []
 
-    def _raise(_name):
-        raise _metadata.PackageNotFoundError("not installed")
+    def _lookup(name: str) -> str:
+        asked.append(name)
+        return "2026.10.9"
 
-    monkeypatch.setattr(_metadata, "version", _raise)
-
-    snapshot = _snapshot_kairix_modules()
-    try:
-        sys.modules.pop("kairix", None)
-        kairix_reloaded = importlib.import_module("kairix")
-        assert kairix_reloaded.__version__ == "0.0.0"
-    finally:
-        _restore_kairix_modules(snapshot)
+    assert resolve_version(PackageInitDeps(version_lookup=_lookup)) == "2026.10.9"
+    assert asked == [DISTRIBUTION_NAME] == ["Kairix-agentic-knowledge-mgt"]
 
 
-@pytest.mark.unit
-def test_search_result_import_failure_swallowed() -> None:
-    """When kairix.core.search.pipeline cannot be imported, kairix still loads.
+def test_version_fallback_when_metadata_missing() -> None:
+    """When the metadata lookup raises, __version__ falls back to '0.0.0'.
 
-    We pre-poison sys.modules with a sentinel that raises on attribute access,
-    then reload kairix. The guarded try/except catches ImportError and
-    continues; the SearchResult symbol simply isn't bound.
+    Sabotage proof (executed): drop the ``except`` arm in
+    ``resolve_version`` → ``PackageNotFoundError`` propagates; restored.
     """
 
-    class _BrokenModule(ModuleType):
-        def __getattr__(self, name):
-            raise ImportError(f"simulated import failure for {name}")
+    def _raise(_name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError("not installed")
 
-    snapshot = _snapshot_kairix_modules()
-    try:
-        # Remove pipeline + kairix from sys.modules, install poisoned pipeline
-        sys.modules.pop("kairix.core.search.pipeline", None)
-        sys.modules.pop("kairix", None)
-        sys.modules["kairix.core.search.pipeline"] = _BrokenModule("kairix.core.search.pipeline")
-
-        kairix_reloaded = importlib.import_module("kairix")
-        assert kairix_reloaded.__name__ == "kairix"
-    finally:
-        _restore_kairix_modules(snapshot)
+    assert resolve_version(PackageInitDeps(version_lookup=_raise)) == FALLBACK_VERSION == "0.0.0"
 
 
-@pytest.mark.unit
-def test_retrieval_config_import_failure_swallowed() -> None:
-    """When kairix.core.search.config cannot be imported, kairix still loads."""
+def test_default_deps_resolve_the_installed_version() -> None:
+    """With no deps injected the production stdlib lookup runs and matches
+    the version the package exposed at import time."""
+    import kairix
 
-    class _BrokenModule(ModuleType):
-        def __getattr__(self, name):
-            raise ImportError(f"simulated import failure for {name}")
-
-    snapshot = _snapshot_kairix_modules()
-    try:
-        sys.modules.pop("kairix.core.search.config", None)
-        sys.modules.pop("kairix", None)
-        sys.modules["kairix.core.search.config"] = _BrokenModule("kairix.core.search.config")
-
-        kairix_reloaded = importlib.import_module("kairix")
-        assert kairix_reloaded.__name__ == "kairix"
-    finally:
-        _restore_kairix_modules(snapshot)
+    assert resolve_version() == kairix.__version__
 
 
-@pytest.mark.unit
-def test_query_intent_import_failure_swallowed() -> None:
-    """When kairix.core.search.intent cannot be imported, kairix still loads."""
+def test_bind_public_api_binds_every_symbol_by_default() -> None:
+    """The production importer binds all three public symbols."""
+    namespace: dict[str, Any] = {}
+    bound = bind_public_api(namespace)
+    assert bound == ["SearchResult", "RetrievalConfig", "QueryIntent"]
+    import kairix
 
-    class _BrokenModule(ModuleType):
-        def __getattr__(self, name):
-            raise ImportError(f"simulated import failure for {name}")
+    for _module, symbol in PUBLIC_API:
+        assert namespace[symbol] is getattr(kairix, symbol)
 
-    snapshot = _snapshot_kairix_modules()
-    try:
-        sys.modules.pop("kairix.core.search.intent", None)
-        sys.modules.pop("kairix", None)
-        sys.modules["kairix.core.search.intent"] = _BrokenModule("kairix.core.search.intent")
 
-        kairix_reloaded = importlib.import_module("kairix")
-        assert kairix_reloaded.__name__ == "kairix"
-    finally:
-        _restore_kairix_modules(snapshot)
+@pytest.mark.parametrize(("broken_module", "missing_symbol"), PUBLIC_API)
+def test_import_failure_of_one_public_module_is_swallowed(broken_module: str, missing_symbol: str) -> None:
+    """When one home module cannot be imported, binding still succeeds for
+    the others and the failing symbol is simply not bound.
+
+    Covers the three guarded imports (pipeline / config / intent) that the
+    old tests exercised by poisoning ``sys.modules``.
+
+    Sabotage proof (executed): remove the ``except (ImportError, ...)``
+    arm in ``bind_public_api`` → the simulated ImportError propagates and
+    every parametrised case fails; restored.
+    """
+    namespace: dict[str, Any] = {}
+    deps = PackageInitDeps(import_module=_importer_failing_for(broken_module))
+
+    bound = bind_public_api(namespace, deps)
+
+    assert missing_symbol not in namespace
+    assert missing_symbol not in bound
+    expected = [symbol for _module, symbol in PUBLIC_API if symbol != missing_symbol]
+    assert bound == expected
+    assert sorted(namespace) == sorted(expected)

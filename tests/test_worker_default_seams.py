@@ -33,8 +33,8 @@ Guardrails honoured (non-negotiable, see SGO-109):
     ``KairixPaths`` + ``kairix.paths.clear_cache``) under a tmp
     ``XDG_CONFIG_HOME`` — ``XDG_*`` is not a KAIRIX_* var, the same
     F2-clean redirect conftest's ``_hermetic_user_config`` uses. The two
-    ambient provider/graph secrets are scrubbed with a raw ``os.environ``
-    pop+restore at the process boundary, not ``monkeypatch.delenv``.
+    ambient provider/graph secrets are cleared by the conftest session
+    baseline, so this module never writes a KAIRIX_* env key.
   * **F5** — no import of any ``_default_*`` private name. Every seam is
     reached through its public caller (``run_embed``, ``run_health_check``,
     ``run_neo4j_drain``, ``run_wal_checkpoint``, ``run_connector_sync``,
@@ -74,12 +74,12 @@ from kairix.worker import (
 
 pytestmark = pytest.mark.unit
 
-# Provider / graph secret env vars whose ambient presence on a developer
-# machine would flip the degraded outcomes these tests pin. We scrub them
-# at the process boundary (raw ``os.environ`` pop + restore) rather than
-# via ``monkeypatch.delenv("KAIRIX_*")`` — F2 reserves KAIRIX_* env-var
-# mutation for the canonical boundary in tests/conftest.py.
-_SECRET_ENV_VARS = ("KAIRIX_PROVIDER_LLM_API_KEY", "KAIRIX_NEO4J_PASSWORD")
+# Provider / graph secrets (KAIRIX_PROVIDER_LLM_API_KEY, KAIRIX_NEO4J_PASSWORD)
+# whose ambient presence on a developer machine would flip the degraded
+# outcomes these tests pin are cleared for the whole run by the session
+# baseline in tests/conftest.py (``_hermetic_data_dirs`` /
+# ``_OPERATOR_CREDENTIAL_ENV``) — the one place F2 allows KAIRIX_* env
+# mutation. This module never writes a KAIRIX_* key itself.
 
 
 @pytest.fixture
@@ -125,12 +125,6 @@ def isolated_worker_env(tmp_path: Path) -> Iterator[Path]:
     prev_xdg = os.environ.get("XDG_CONFIG_HOME")
     os.environ["XDG_CONFIG_HOME"] = str(tmp_path / "xdg-config")
 
-    # Guarantee no ambient provider / graph secret leaks in and flips the
-    # degraded outcome these tests pin. Raw os.environ scrub at the process
-    # boundary (not monkeypatch.delenv("KAIRIX_*"), which F2 forbids), with
-    # restore on teardown so isolation matches monkeypatch's semantics.
-    saved_secrets = {k: os.environ.pop(k, None) for k in _SECRET_ENV_VARS}
-
     # Invalidate the cached path resolution so the test config is read.
     kairix.paths.clear_cache()
     try:
@@ -141,9 +135,6 @@ def isolated_worker_env(tmp_path: Path) -> Iterator[Path]:
             os.environ.pop("XDG_CONFIG_HOME", None)
         else:
             os.environ["XDG_CONFIG_HOME"] = prev_xdg
-        for key, value in saved_secrets.items():
-            if value is not None:
-                os.environ[key] = value
         kairix.paths.clear_cache()
 
 

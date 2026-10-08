@@ -105,14 +105,15 @@ def test_bootstrap_absent_bundle_does_not_latch_so_later_write_recovers(tmp_path
     lookup), so the fix is to latch only once hydration has SETTLED — when the
     bundle is still absent we stay un-latched and the next build recovers.
 
-    F2-clean: injected ``bundle_path``; the env var is a unique test-only slot,
-    popped either side so the real ``os.environ`` is left untouched.
+    F2-clean: injected ``bundle_path``; the env var is a unique, deliberately
+    non-``KAIRIX_`` test-only slot (the bundle hydrates any key), popped
+    either side so the real ``os.environ`` is left untouched.
     """
     import os
 
     from kairix.secrets.bootstrap import bootstrap_secrets
 
-    var = "KAIRIX_BOOTSTRAP_RACE_RECOVERY_VAR"
+    var = "BOOTSTRAP_RACE_RECOVERY_TEST_VAR"
     os.environ.pop(var, None)
     try:
         bundle = tmp_path / "kairix.env"

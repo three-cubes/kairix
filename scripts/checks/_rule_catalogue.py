@@ -250,7 +250,8 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         scope="per-file",
         summary="no @patch / monkeypatch on kairix internals — inject Fake* through a seam",
         script="check-no-internal-patches.sh",
-        # Shell detector greps tests/ for @patch on kairix.* targets. File-local
+        # Shell wrapper runs the AST detector over tests/ for @patch /
+        # monkeypatch / sys.modules / importlib.reload on kairix.* targets. File-local
         # (per-test-file), but runs as a subprocess so it can't narrow to staged
         # files — it runs its full tests/ grep when a tests/ path is staged.
         staged_scope=("tests",),
@@ -263,7 +264,8 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         scope="per-file",
         summary='no monkeypatch.setenv("KAIRIX_*") — pass deps as kwargs instead',
         script="check-no-env-monkeypatch.sh",
-        # Shell detector greps tests/ for monkeypatch.setenv("KAIRIX_*").
+        # Shell wrapper runs the AST detector over tests/ for monkeypatch and
+        # direct os.environ / patch.dict writes of KAIRIX_* keys.
         staged_scope=("tests",),
     ),
     RuleEntry(

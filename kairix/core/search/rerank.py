@@ -25,7 +25,7 @@ Optional dependency — install via:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kairix.core.search.rrf import FusedResult
@@ -35,45 +35,57 @@ logger = logging.getLogger(__name__)
 RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 RERANK_CANDIDATE_LIMIT: int = 20
 
-_cross_encoder = None  # lazy singleton
-_cross_encoder_checked = False  # True once we've tried to load (even if it failed)
+
+class CrossEncoderCache:
+    """Load-once holder for the cross-encoder model.
+
+    The model is loaded on the first :meth:`get` and reused for every later
+    call; a failed load (sentence-transformers missing, corrupt weights, bad
+    model name) is remembered too, so a broken install never retries the
+    ≈300ms load on every query. Production shares the process-wide
+    :data:`_DEFAULT_CACHE`; a caller wanting isolated state (a test, or a
+    second model) constructs its own instance and passes it as ``cache=``.
+    """
+
+    def __init__(self) -> None:
+        self._encoder: Any = None
+        self._checked = False  # True once we've tried to load (even if it failed)
+
+    def get(self, model: str = RERANK_MODEL) -> Any:
+        """Return the cached encoder, loading it on first call. ``None`` on any failure."""
+        if self._checked:
+            return self._encoder
+        self._checked = True
+        try:
+            from sentence_transformers import (
+                CrossEncoder,  # type: ignore[import-untyped] — sentence-transformers has no upstream type stubs
+            )
+
+            self._encoder = CrossEncoder(model)
+            logger.info("rerank: loaded cross-encoder model %r", model)
+            return self._encoder
+        except ImportError:
+            logger.warning(
+                "rerank: sentence-transformers not installed — re-ranking disabled. "
+                "Install with: pip install kairix[rerank]"
+            )
+            return None
+        except Exception as e:
+            logger.warning("rerank: failed to load model %r — %s — re-ranking disabled", model, e)
+            return None
 
 
-def _get_cross_encoder(model: str):
-    """Load and cache the cross-encoder model. Returns None on any import/load failure."""
-    global _cross_encoder, _cross_encoder_checked
-    if _cross_encoder_checked:
-        return _cross_encoder
-    _cross_encoder_checked = True
-    try:
-        from sentence_transformers import (
-            CrossEncoder,  # type: ignore[import-untyped] — sentence-transformers has no upstream type stubs
-        )
-
-        _cross_encoder = CrossEncoder(model)
-        logger.info("rerank: loaded cross-encoder model %r", model)
-        return _cross_encoder
-    except ImportError:
-        logger.warning(
-            "rerank: sentence-transformers not installed — re-ranking disabled. "
-            "Install with: pip install kairix[rerank]"
-        )
-        return None
-    except Exception as e:
-        logger.warning("rerank: failed to load model %r — %s — re-ranking disabled", model, e)
-        return None
+# Process-wide lazy singleton used when no ``cache=`` is supplied.
+_DEFAULT_CACHE = CrossEncoderCache()
 
 
-def get_cross_encoder(model: str = RERANK_MODEL):
+def get_cross_encoder(model: str = RERANK_MODEL, *, cache: CrossEncoderCache | None = None):
     """Load and cache the cross-encoder model.
 
     Public API for dependency injection. Returns None on any import/load failure.
-
-    .. deprecated:: 2025.04
-        ``_get_cross_encoder`` is now ``get_cross_encoder``. The private name
-        remains as an alias.
+    ``cache`` defaults to the process-wide singleton.
     """
-    return _get_cross_encoder(model)
+    return (cache if cache is not None else _DEFAULT_CACHE).get(model)
 
 
 def rerank(
@@ -82,6 +94,7 @@ def rerank(
     model: str = RERANK_MODEL,
     candidate_limit: int = RERANK_CANDIDATE_LIMIT,
     encoder=None,
+    cache: CrossEncoderCache | None = None,
 ) -> list[FusedResult]:
     """
     Re-sort results by cross-encoder relevance score (post-RRF semantic pass).
@@ -101,6 +114,8 @@ def rerank(
         candidate_limit: Number of top candidates to pass to the cross-encoder.
         encoder:         Optional pre-loaded cross-encoder instance for
                          dependency injection. Defaults to lazy-loaded singleton.
+        cache:           Where the lazy loader keeps the model when ``encoder``
+                         is omitted. Defaults to the process-wide singleton.
 
     Returns:
         Results re-sorted by re-rank score. Returns ``results`` unchanged on any
@@ -110,7 +125,7 @@ def rerank(
         return results
 
     if encoder is None:
-        encoder = _get_cross_encoder(model)
+        encoder = get_cross_encoder(model, cache=cache)
     if encoder is None:
         return results
 

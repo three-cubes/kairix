@@ -344,7 +344,7 @@ Each rule below is described with: **statement**, **why**,
 #### Statement
 
 Test files MUST NOT reach into a production kairix module's namespace
-to swap an implementation. F1 flags six structurally-identical shapes:
+to swap an implementation. F1 flags eight structurally-identical shapes:
 
 1. `@patch("kairix.X.Y", ...)` — decorator
 2. `with patch("kairix.X.Y", ...):` — context manager
@@ -352,6 +352,21 @@ to swap an implementation. F1 flags six structurally-identical shapes:
 4. `<alias>.Y = <expr>` where alias resolves via imports to a kairix module
 5. `monkeypatch.setattr("kairix.X.Y", ...)` — string-target form
 6. `monkeypatch.setattr(<kairix module ref>, "attr", fake)` — ref-target form
+7. `sys.modules` swap of a kairix module — `sys.modules["kairix.X"] = m`,
+   `del sys.modules["kairix.X"]`, `sys.modules.pop / setdefault / update`,
+   `monkeypatch.setitem / delitem(sys.modules, "kairix.X", ...)` (a key
+   held in a variable bound from a `"kairix..."` literal counts)
+8. `importlib.reload(<kairix module>)` — re-executing module code to reset
+   hidden singleton state
+
+Shapes 7 + 8 replace (or evict and re-import) the whole module object — the
+same substitution as `@patch`, one level up. Move the state they reset onto
+an injectable holder (`CrossEncoderCache` in `kairix/core/search/rerank.py`)
+or the import onto a Deps seam (`PackageInitDeps` in
+`kairix/package_meta.py`); prove "importing X has no side effects" in a
+fresh interpreter (`subprocess.run([sys.executable, "-c", "import X"])`).
+Third-party `sys.modules` entries (`sys.modules["openai"] = stub`) stay
+allowed.
 
 Stdlib (`os`, `time`, `pathlib`, `sys`, `importlib`, ...) and external
 SDKs (`httpx`, `openai`, `boto3`, `anthropic`, `requests`, `numpy`,
@@ -380,15 +395,16 @@ the Fake* at construction.
 `scripts/checks/check-no-internal-patches.sh` delegates to
 `scripts/checks/check_no_internal_patches.py`. The detector is
 AST-based, walks each test file's imports to resolve aliases, and
-flags any of the six shapes against the alias-resolved root.
+flags any of the eight shapes against the alias-resolved root.
 Multi-line constructs, aliased imports
 (`import kairix.paths as paths_mod`), from-imports
 (`from kairix import providers as providers_mod`), and full-path
 forms (`kairix.paths.provider_name = ...`) are all caught.
 
 The detector's own tests live at
-`tests/architecture/test_check_no_internal_patches.py` — each of the
-six shapes has a positive (kairix target → violation) and negative
+`tests/architecture/test_check_no_internal_patches.py` (shapes 1-6) and
+`tests/checks/test_no_internal_patches_module_swaps.py` (shapes 7-8) —
+each shape has a positive (kairix target → violation) and negative
 (stdlib/external target → allowed) test. To verify the gate stays
 honest: comment out the detector branch for a shape, run the matching
 positive test, confirm red, restore, confirm green.
@@ -451,8 +467,30 @@ allowed. The check explicitly only matches `"kairix.…"` strings.
 
 #### Statement
 
-Test files MUST NOT call `monkeypatch.setenv|setattr|delenv` on any
-key starting with `KAIRIX_`.
+Test files MUST NOT write any process-env key starting with `KAIRIX_` —
+neither through `monkeypatch.setenv|setattr|delenv|setitem|delitem` nor
+directly: `os.environ["KAIRIX_X"] = v`, `del os.environ["KAIRIX_X"]`,
+`os.environ.pop|setdefault("KAIRIX_X", ...)`, `os.environ.update(...)`, or
+`patch.dict(os.environ, ...)`. The direct forms are the worse evasion: they
+skip monkeypatch's auto-undo, so a forgotten restore leaks the value into
+every later test in the process (a pytest-bdd step's
+`os.environ["KAIRIX_DB_PATH"] = ...` did exactly that). A key held in a
+variable bound (any number of hops) from a `KAIRIX_*` literal counts, and
+an `update` / `patch.dict` with an opaque mapping counts.
+
+Two reviewed process-boundary shapes are recognised **structurally** — no
+allow-list, baseline, pragma or path list:
+
+- writes inside a `conftest.py` fixture declared
+  `@pytest.fixture(scope="session", autouse=True)` — the once-per-run
+  hermetic baseline (`tests/conftest.py::_hermetic_data_dirs` clears the
+  ambient operator variables and sets the `KAIRIX_CONNECT_DISABLE_BROWSER`
+  kill-switch, undone at session end);
+- writes AFTER the `yield` of a `@pytest.fixture` that copied `os.environ`
+  (`dict(os.environ)` / `os.environ.copy()` / `{**os.environ}`) BEFORE the
+  yield, when the write restores from that snapshot
+  (`tests/setup/test_wizard.py::_restored_environ`). Writes before the
+  yield are still violations.
 
 #### Why
 
@@ -468,11 +506,12 @@ explicitly reverted.
 
 #### Detection
 
-`scripts/checks/check-no-env-monkeypatch.sh`:
-
-```bash
-grep -rEl 'monkeypatch\.(setenv|setattr|delenv).*KAIRIX_' tests/ --include='*.py'
-```
+`scripts/checks/check-no-env-monkeypatch.sh` delegates to the AST
+detector `scripts/checks/check_no_env_monkeypatch.py`, which reports
+`path:line: shape` per violation. Key resolution (variables, loop targets,
+helper return values) lives in `scripts/checks/_ast_key_taint.py`, shared
+with F1's `sys.modules` key resolution. Detector tests:
+`tests/checks/test_no_env_monkeypatch_direct_writes.py`.
 
 #### Examples
 
@@ -484,6 +523,14 @@ def test_brief(monkeypatch, tmp_path):
 
 # REJECTED — even setattr on os.environ
 monkeypatch.setattr("os.environ", {"KAIRIX_DB_PATH": "/x"})
+
+# REJECTED — direct writes (no auto-undo; leak into later tests)
+os.environ["KAIRIX_DB_PATH"] = str(tmp_path / "db.sqlite")
+os.environ.pop("KAIRIX_DB_PATH", None)
+with patch.dict(os.environ, {"KAIRIX_MAX_CONCURRENCY": "3"}): ...
+
+# ALLOWED — the reader's env= mapping seam
+assert resolve_dispatch_concurrency(env={"KAIRIX_MAX_CONCURRENCY": "3"}) == 3
 
 # ALLOWED — non-KAIRIX env (e.g. PATH for subprocess tests)
 monkeypatch.setenv("PATH", "/usr/local/bin")
