@@ -157,6 +157,8 @@ def test_dual_benchmark_with_partial_run_is_inconclusive(tmp_path: Path) -> None
     )
     assert dual.inconclusive is True
     assert dual.regression_detected is False
+    # Partial scores are never compared: no deltas are reported.
+    assert dual.deltas == {}
 
 
 def _single_llm_case_suite(tmp_path: Path) -> Path:

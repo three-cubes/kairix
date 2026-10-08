@@ -29,8 +29,9 @@ class DualBenchmarkResult:
     deltas: dict[str, float] = field(default_factory=dict)
     regression_detected: bool = False
     inconclusive: bool = False
-    """True when either run is partial (LLM-judge failures): the deltas are
-    still reported for inspection, but ``regression_detected`` is never set."""
+    """True when either run is partial (LLM-judge failures): no deltas are
+    reported (partial scores are never compared) and ``regression_detected``
+    is never set."""
 
 
 def run_dual_benchmark(
@@ -87,6 +88,8 @@ def run_dual_benchmark(
         # Regression detected if comparison weighted total drops below baseline by threshold
         inconclusive = inconclusive or not is_complete(comparison)
         regression_detected = not inconclusive and deltas[_KEY_WEIGHTED_TOTAL] < -REGRESSION_THRESHOLD
+        if inconclusive:
+            deltas = {}
 
     return DualBenchmarkResult(
         baseline=baseline,

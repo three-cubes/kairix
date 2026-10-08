@@ -406,10 +406,13 @@ def _emit_baseline_compare(result: Any, baseline_path: str) -> None:
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         print(f"  baseline compare skipped: {exc}")
         return
-    for label, side in (("baseline", baseline), ("this run", result)):
-        failures = judge_failures(side)
-        if failures:
-            print("  " + partial_warning(f"{label} (baseline compare not meaningful)", failures))
+    partial = [(label, judge_failures(side)) for label, side in (("baseline", baseline), ("this run", result))]
+    partial = [(label, failures) for label, failures in partial if failures]
+    if partial:
+        # Partial on either side: warn and stop — never print a delta after the warning.
+        for label, failures in partial:
+            print("  " + partial_warning(f"{label} (baseline compare skipped)", failures))
+        return
     a = baseline.get("summary", {}).get(_KEY_WEIGHTED_TOTAL, 0.0)
     b = result.summary.get(_KEY_WEIGHTED_TOTAL, 0.0)
     delta = b - a

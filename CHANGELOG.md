@@ -61,7 +61,8 @@ results print a "PARTIAL RESULT" warning instead.
   `judge_failures` is 0, and the report shows a "JUDGE COVERAGE gate" FAIL
   line. The unscored case rows still say why.
 - `kairix benchmark compare` exits 3 if either result is partial.
-  `kairix benchmark run --baseline` prints a PARTIAL warning.
+  `kairix benchmark run --baseline` prints a PARTIAL warning and skips the
+  comparison line. `run_dual_benchmark` reports no deltas for a partial run.
 - `kairix eval --regression-against` exits 3 if the run or the pinned
   baseline is partial. It does not compare the partial mean score, because
   one good answer could hide a regression. Exit 1 still means a regression,

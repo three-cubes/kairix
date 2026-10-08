@@ -541,21 +541,42 @@ def test_cmd_run_gates_flag_fails_on_incomplete_judge_coverage(tmp_path: Path) -
 
 
 @pytest.mark.unit
-def test_cmd_run_baseline_compare_warns_when_baseline_is_partial(bundled_suites: Path, tmp_path: Path) -> None:
-    """The informational ``--baseline`` header prints a PARTIAL warning when
-    the stored baseline had judge failures (display-only: exit stays 0).
+@pytest.mark.parametrize("partial_side", ["baseline", "this run"])
+def test_cmd_run_baseline_compare_skipped_when_either_side_is_partial(
+    bundled_suites: Path, tmp_path: Path, partial_side: str
+) -> None:
+    """The informational ``--baseline`` header prints the PARTIAL warning and
+    then NO delta line when either side had judge failures (display-only:
+    exit stays 0). Two complete results keep the comparison line — see
+    ``test_cmd_run_baseline_emits_compare_line``.
 
-    sabotage: drop the partial-warning loop in ``_emit_baseline_compare`` —
-    no PARTIAL line is printed. Restored.
+    sabotage: drop the ``return`` after the warning in
+    ``_emit_baseline_compare`` — the "baseline compare: 0.900 → 0.500" delta
+    is printed after the warning and the assertions fail. Restored.
     """
+
+    class _PartialRunner(_CapturingRunner):
+        def __call__(self, **kwargs: Any) -> Any:
+            result = super().__call__(**kwargs)
+            result.summary["judge_failures"] = 1
+            return result
+
+    baseline_summary: dict[str, Any] = {"weighted_total": 0.9}
+    if partial_side == "baseline":
+        baseline_summary["judge_failures"] = 2
     baseline = tmp_path / "baseline.json"
-    baseline.write_text(json.dumps({"summary": {"weighted_total": 0.9, "judge_failures": 2}}), encoding="utf-8")
+    baseline.write_text(json.dumps({"summary": baseline_summary}), encoding="utf-8")
+    runner = _PartialRunner() if partial_side == "this run" else _CapturingRunner()
+
     args = _ns(str(bundled_suites / "unified.yaml"), baseline=str(baseline))
     out = io.StringIO()
     with redirect_stderr(io.StringIO()), redirect_stdout(out):
-        rc = cmd_run(args, deps=BenchmarkCLIDeps(run_benchmark=_CapturingRunner()))
+        rc = cmd_run(args, deps=BenchmarkCLIDeps(run_benchmark=runner))
+    text = out.getvalue()
     assert rc == 0
-    assert "PARTIAL RESULT: baseline" in out.getvalue()
+    assert f"PARTIAL RESULT: {partial_side} (baseline compare skipped)" in text
+    assert "baseline compare:" not in text
+    assert "0.900 →" not in text
 
 
 @pytest.mark.unit
