@@ -14,7 +14,8 @@ Coverage:
 - ``run`` scores each query, emits per-category breakdown
 - ``run`` computes extractor F1 against ground truth
 - ``run`` tolerates ground-truth-facts.json absent (skip F1)
-- Score parser handles malformed LLM judge responses
+- Judge failures (backend error, malformed / non-finite reply) are
+  recorded and excluded from aggregates, never scored 0.0
 - F1 calculation is correct (precision/recall/F1)
 - Substring matching on values is case-insensitive
 """
@@ -448,18 +449,112 @@ def test_run_extractor_f1_substring_match_is_case_insensitive(tmp_path: Path) ->
 # ---------------------------------------------------------------------------
 
 
-def test_run_tolerates_malformed_judge_response(tmp_path: Path) -> None:
-    """Sabotage-proof: replace the parse-fail fallback with a raise and
-    this test crashes instead of degrading to score=0.0."""
+@pytest.mark.parametrize("reply", ["not a number", "nan", "inf", "-inf"])
+def test_run_records_unparseable_judge_reply_as_failure_not_zero(tmp_path: Path, reply: str) -> None:
+    """A non-numeric or non-finite judge reply leaves the question unscored:
+    excluded from n_questions / mean / per_category, counted in
+    ``judge_failures``, and the row names the cause.
+
+    Sabotage-proof: restore ``_parse_score``'s old fallbacks (``return 0.0``
+    when no float is found, no ``math.isfinite`` guard) — "not a number"
+    scores 0.0, "nan" poisons the mean, "inf" clamps to a 1.0 pass, and
+    every leg fails. Restored.
+    """
     suite_dir = tmp_path / "scenario"
     _lay_out_minimal_suite(suite_dir)
 
-    runner, _, _, _ = _make_runner(tmp_path=tmp_path, chat_response="not a number")
-    spec = runner.discover_suite(suite_dir)
-    result = runner.run(spec)
+    runner, _, _, _ = _make_runner(tmp_path=tmp_path, chat_response=reply)
+    result = runner.run(runner.discover_suite(suite_dir))
 
-    assert result.mean_score == pytest.approx(0.0)
+    assert result.judge_failures == 1
+    assert result.n_questions == 0
     assert result.n_passed == 0
+    assert result.mean_score == pytest.approx(0.0)
+    assert result.per_category == {}
+    row = result.rows[0]
+    assert row["score"] is None
+    assert row["pass"] is None
+    assert row["judge_failure"] == "unparseable_response"
+    assert reply not in row["judge_error"]
+
+
+def test_run_excludes_backend_failure_from_aggregates(tmp_path: Path) -> None:
+    """``LLMBackend.chat`` returns ``""`` on failure. With one question
+    judged 1.0 and one hitting a backend failure, the mean is 1.0 over one
+    scored question — not 0.5 over two.
+
+    Sabotage-proof: drop the empty-reply ``JudgeFailedError`` in
+    ``SuiteRunner._judge`` (and let ``_parse_score("")`` fall back to 0.0)
+    — the mean drops to 0.5 and n_questions is 2. Restored.
+    """
+    suite_dir = tmp_path / "scenario"
+    _lay_out_minimal_suite(suite_dir)
+    _write_json(
+        suite_dir / "ground-truth-queries.json",
+        [
+            {"question": "q1", "answer": "a1", "category": "single-hop"},
+            {"question": "q2", "answer": "a2", "category": "single-hop"},
+        ],
+    )
+
+    runner = SuiteRunner(
+        fact_store=FakeFactStore(),
+        fact_extractor=FakeFactExtractor(scripted_facts=[]),
+        llm=FakeLLMBackend(chat_responses=["1.0", ""]),
+        paths=_paths(tmp_path),
+    )
+    result = runner.run(runner.discover_suite(suite_dir))
+
+    assert result.mean_score == pytest.approx(1.0)
+    assert result.n_questions == 1
+    assert result.n_passed == 1
+    assert result.judge_failures == 1
+    assert result.per_category["single-hop"]["n"] == pytest.approx(1.0)
+    assert result.rows[1]["judge_failure"] == "backend_error"
+
+
+@pytest.mark.parametrize("reply", ["", "   \n"])
+def test_run_classifies_blank_judge_reply_as_backend_error(tmp_path: Path, reply: str) -> None:
+    """An empty or whitespace-only reply is the backend's failure shape
+    (``LLMBackend.chat`` returns ``""``), so it is reported as
+    ``backend_error`` — not as an unparseable answer.
+
+    Sabotage-proof: change ``if not response or not response.strip()`` to
+    ``and`` in ``SuiteRunner._judge`` — the whitespace leg falls through to
+    ``_parse_score`` and is reported as ``unparseable_response``. Restored.
+    """
+    suite_dir = tmp_path / "scenario"
+    _lay_out_minimal_suite(suite_dir)
+
+    runner, _, _, _ = _make_runner(tmp_path=tmp_path, chat_response=reply)
+    result = runner.run(runner.discover_suite(suite_dir))
+
+    assert result.judge_failures == 1
+    assert result.rows[0]["judge_failure"] == "backend_error"
+
+
+def test_run_records_raising_backend_as_judge_failure(tmp_path: Path) -> None:
+    """A backend that raises (despite the Protocol's never-raises contract)
+    is recorded as a judge failure instead of aborting the whole suite.
+
+    Sabotage-proof: drop the ``except Exception`` around ``self._llm.chat``
+    in ``SuiteRunner._judge`` — the TimeoutError aborts ``run`` and the
+    test fails. Restored.
+    """
+    suite_dir = tmp_path / "scenario"
+    _lay_out_minimal_suite(suite_dir)
+
+    runner = SuiteRunner(
+        fact_store=FakeFactStore(),
+        fact_extractor=FakeFactExtractor(scripted_facts=[]),
+        llm=FakeLLMBackend(chat_raises=TimeoutError("judge timed out")),
+        paths=_paths(tmp_path),
+    )
+    result = runner.run(runner.discover_suite(suite_dir))
+
+    assert result.judge_failures == 1
+    assert result.rows[0]["judge_failure"] == "backend_error"
+    assert "TimeoutError: judge timed out" in result.rows[0]["judge_error"]
 
 
 def test_run_clamps_judge_response_to_unit_interval(tmp_path: Path) -> None:

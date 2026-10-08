@@ -35,6 +35,18 @@ comparing a new run against an old baseline. The eval `LLMJudgeScorer` now
 raises `JudgeFailedError` instead of returning 0.0. An empty retrieval still
 scores 0.0.
 
+`kairix eval <suite>` (conversation suites) works the same way now. Before, a
+judge failure (the LLM backend was down, or the reply was empty or not a
+number) scored the question 0.0 and counted it as wrong. A `nan` reply made
+the mean score `nan`, and an `inf` reply counted as a pass. Now those
+questions are unscored. They are left out of `n_questions`, `n_passed`,
+`mean_score` and the per-category numbers, and counted in a new
+`judge_failures` field. The text output prints a "Judge failures" line, and
+in `--json` each failed row has `score: null`, `pass: null`, `judge_failure`
+and `judge_error`. Note that `n_questions` now counts scored questions only.
+**Pass rates and mean scores may go up** compared with earlier runs that had
+judge failures. Check `judge_failures` before comparing against a baseline.
+
 The unused `kairix.quality.contracts` Protocols (`BriefingSourceProtocol`,
 `EmbedderProtocol`, `EntityResolverProtocol`, `SearchBackendProtocol`, `SearchResultProtocol`) have
 been removed. Nothing in kairix used them.

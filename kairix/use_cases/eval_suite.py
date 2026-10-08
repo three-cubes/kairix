@@ -493,6 +493,12 @@ def _format_human(result: SuiteResult, *, suite_path: Path) -> str:
         mean = stats["mean"]
         cat_pct = pct(passed, n)
         lines.append(f"    {cat:<14} {passed}/{n} ({cat_pct}%) mean={mean:.3f}")
+    if result.judge_failures:
+        lines.append(
+            f"  Judge failures: {result.judge_failures} question(s) unscored — excluded from the "
+            "scores above (not counted as wrong). fix: check the LLM provider credentials; "
+            "next: per-row 'judge_failure' / 'judge_error' in --json output name the cause."
+        )
     if result.per_extraction_f1 is not None:
         lines.append(
             f"  Extractor F1: {result.per_extraction_f1:.2f} "

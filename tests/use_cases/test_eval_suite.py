@@ -564,6 +564,28 @@ def test_main_extractor_f1_reported_when_ground_truth_facts_present(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_main_reports_judge_failures_instead_of_wrong_answers(tmp_path: Path) -> None:
+    """An LLM backend failure (``chat`` returns ``""``) is reported as judge
+    failures in the human output and in ``--json`` — not as 0/2 wrong.
+
+    Sabotage-proof: drop the ``if result.judge_failures:`` block in
+    ``_format_human`` — the "Judge failures: 2" line disappears and the
+    first assertion fails. Restored.
+    """
+    suite = _make_suite_dir(tmp_path)
+    code, out, _ = _invoke([str(suite)], tmp_path=tmp_path, chat_response="")
+    assert code == 0
+    assert "Judge failures: 2 question(s) unscored" in out
+    assert "0/0" in out
+
+    code, out, _ = _invoke([str(suite), "--json"], tmp_path=tmp_path, chat_response="")
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["judge_failures"] == 2
+    assert payload["n_questions"] == 0
+
+
+@pytest.mark.unit
 def test_pct_returns_zero_on_zero_total() -> None:
     """``pct(passed, total=0)`` returns 0 — guards divide-by-zero in
     the human-readable category breakdown.
