@@ -9,6 +9,7 @@ import pytest
 from kairix.paths import bundled_suites_root
 from kairix.quality.benchmark.baseline import (
     CATEGORY_FLOOR,
+    EXIT_INCONCLUSIVE,
     compare,
     load_result,
     run_gate,
@@ -255,3 +256,53 @@ class TestMockContractSuite:
             if cat != "classification" and score < CATEGORY_FLOOR
         ]
         assert not failing, f"Categories below floor {CATEGORY_FLOOR}: {failing}"
+
+
+@pytest.mark.unit
+class TestJudgeCoverage:
+    """A partial current result (LLM-judge failures) never passes the CI gate."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "summary_extra",
+        [{"judge_failures": 2}, {"gates": {"phase1": True, "judge_coverage": False}}],
+        ids=["judge_failures_count", "judge_coverage_gate"],
+    )
+    def test_partial_current_result_is_inconclusive(self, tmp_path, summary_extra):
+        """Same totals as the baseline (no regression), but the current run had
+        judge failures: compare reports inconclusive and run_gate exits 3.
+
+        Sabotage-proof: make ``_judge_failures`` return 0 — the partial result
+        passes and both assertions fail. Restored.
+        """
+        baseline = _make_result(0.90)
+        current = _make_result(0.90)
+        current["summary"].update(summary_extra)
+
+        result = compare(baseline, current)
+        assert result["passed"] is False
+        assert result["inconclusive"] is True
+        assert any("INCONCLUSIVE" in line for line in result["summary_lines"])
+
+        bp = tmp_path / "baseline.json"
+        cp = tmp_path / "current.json"
+        bp.write_text(json.dumps(baseline))
+        cp.write_text(json.dumps(current))
+        assert run_gate(str(bp), str(cp)) == EXIT_INCONCLUSIVE == 3
+
+    @pytest.mark.unit
+    def test_fully_judged_non_regressing_result_passes(self, tmp_path):
+        """judge_failures == 0 and judge_coverage True → the gate still passes."""
+        baseline = _make_result(0.90)
+        current = _make_result(0.91)
+        current["summary"].update({"judge_failures": 0, "gates": {"judge_coverage": True}})
+
+        result = compare(baseline, current)
+        assert result["passed"] is True
+        assert result["inconclusive"] is False
+
+        bp = tmp_path / "baseline.json"
+        cp = tmp_path / "current.json"
+        bp.write_text(json.dumps(baseline))
+        cp.write_text(json.dumps(current))
+        assert run_gate(str(bp), str(cp)) == 0

@@ -58,6 +58,7 @@ _KEY_NDCG_AT_10 = "ndcg_at_10"
 # Per-case reason key + summary counter for LLM-judge failures (excluded from
 # aggregates — a failed judgement is not a 0.0 "irrelevant" verdict).
 _KEY_JUDGE_FAILURE = "judge_failure"
+_KEY_JUDGE_ERROR = "judge_error"
 _KEY_JUDGE_FAILURES = "judge_failures"
 _GATE_JUDGE_COVERAGE = "judge_coverage"
 
@@ -665,7 +666,7 @@ def score_case(
     try:
         return llm_judge(query=case.query, paths=paths, snippets=snippets, chat_backend=deps.chat_backend), {}
     except JudgeFailedError as exc:
-        return None, {_KEY_JUDGE_FAILURE: exc.reason, "judge_error": exc.detail}
+        return None, {_KEY_JUDGE_FAILURE: exc.reason, _KEY_JUDGE_ERROR: exc.detail}
 
 
 def retrieve_case(
@@ -958,10 +959,15 @@ def run_benchmark(
             "score",
             "retrieved_paths",
             _KEY_ELAPSED_MS,
+            # Judge diagnostics come only from score_case's detail — never
+            # from retrieval metadata, which could fake or erase a failure.
+            _KEY_JUDGE_FAILURE,
+            _KEY_JUDGE_ERROR,
         }
         safe_extras: dict[str, Any] = {
             k: v for k, v in {**ndcg_detail, **retrieval_meta}.items() if k not in canonical_keys
         }
+        judge_diagnostics = {k: ndcg_detail[k] for k in (_KEY_JUDGE_FAILURE, _KEY_JUDGE_ERROR) if k in ndcg_detail}
         case_results.append(
             {
                 "id": case.id,
@@ -973,6 +979,7 @@ def run_benchmark(
                 "score": round(score, 4) if score is not None else None,
                 "retrieved_paths": paths[:10],
                 _KEY_ELAPSED_MS: round(elapsed_ms, 1),
+                **judge_diagnostics,
                 **safe_extras,
             }
         )

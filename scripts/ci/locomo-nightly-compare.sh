@@ -10,15 +10,25 @@
 #   GH_TOKEN     — token for the `gh` CLI (workflow injects github.token)
 #   JSON_PATH    — path to today's SuiteResult JSON (set by run.sh)
 #
+# Partial results (LLM-judge failures) are never compared: a partial
+# current result fails the step; a partial prior artifact fails too, rather
+# than silently becoming the comparison baseline.
+#
 # F21 markers (fix:/next:) on every actionable failure path.
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CURRENT_JSON="${JSON_PATH:-}"
 if [ -z "$CURRENT_JSON" ] || [ ! -f "$CURRENT_JSON" ]; then
     echo "::error::expected current SuiteResult at JSON_PATH (got '$CURRENT_JSON')"
     echo "fix: ensure scripts/ci/locomo-nightly-run.sh ran first and set JSON_PATH"
     echo "next: re-run the workflow"
+    exit 1
+fi
+
+if ! python3 "$SCRIPT_DIR/judge_coverage.py" "current LoCoMo nightly" "$CURRENT_JSON"; then
     exit 1
 fi
 
@@ -61,6 +71,10 @@ PRIOR_JSON="$(find "$TMP_PRIOR_DIR" -name 'locomo-nightly-*.json' -type f | head
 if [ -z "$PRIOR_JSON" ]; then
     echo "::warning::no JSON file inside prior artifact; skipping comparison"
     exit 0
+fi
+
+if ! python3 "$SCRIPT_DIR/judge_coverage.py" "prior LoCoMo nightly (run $PRIOR_RUN_ID)" "$PRIOR_JSON"; then
+    exit 1
 fi
 
 # Compute pass-rate delta in percentage points.

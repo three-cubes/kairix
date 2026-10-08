@@ -61,6 +61,15 @@ Incomplete judge coverage now also fails the gates:
   or invalid baseline.
 - A blank judge reply now counts as a backend failure (`backend_error`) in
   the benchmark judge, the same as in the other judges.
+- The CI benchmark gate (`python -m kairix.quality.benchmark.baseline`, used
+  by `benchmark-gate.yml`) reports a run with any judge failure as
+  **inconclusive** and exits 3, instead of comparing its partial totals.
+  A fully judged run that hasn't regressed still passes.
+- The LoCoMo nightly fails, and publishes no JSON or CSV artifact, when the
+  eval run had any judge failure. The nightly comparison also refuses a
+  partial current result or a partial prior artifact.
+- Retrieval metadata can no longer overwrite or fake a case's
+  `judge_failure` / `judge_error` fields in the benchmark output.
 
 The last two judges follow the same rule, so no LLM judge in kairix turns a
 failure into a score any more:
@@ -76,9 +85,15 @@ failure into a score any more:
   records judge failures as unscored rows, leaves them out of its numbers,
   and reports a `judge_failures` count per conversation and in the totals.
 
-The unused `kairix.quality.contracts` Protocols (`BriefingSourceProtocol`,
-`EmbedderProtocol`, `EntityResolverProtocol`, `SearchBackendProtocol`, `SearchResultProtocol`) have
-been removed. Nothing in kairix used them.
+**Removed:** the `kairix.quality.contracts` package and its five Protocols:
+`BriefingSourceProtocol`, `EmbedderProtocol`, `EntityResolverProtocol`,
+`SearchBackendProtocol` and `SearchResultProtocol`. There is no replacement,
+because they had no implementation: nothing in kairix implemented or used
+them, no doc listed them, and no plugin entry-point group pointed at them.
+kairix's real boundary and plugin contracts are unchanged. They live in
+`kairix.core.protocols`, plus the plugin Protocols described in
+`docs/architecture/provider-plugin-architecture.md` and
+`docs/architecture/connector-ingestion-architecture.md`.
 
 ### Quality gates hold every file to the same bar (contributors)
 
