@@ -19,9 +19,9 @@ Gate rules:
   FAIL if overall weighted_total drops by > REGRESSION_THRESHOLD (default 0.02)
   FAIL if any category score drops below CATEGORY_FLOOR (default 0.50)
   WARN (non-failing) if any category delta < -0.01 but overall within threshold
-  INCONCLUSIVE (exit 3) if the current run had any LLM-judge failure
-    (``summary.judge_failures > 0`` or ``summary.gates.judge_coverage`` False):
-    its totals cover only the judged cases, so they are not compared at all.
+  INCONCLUSIVE (exit 3) if the current run OR the baseline is partial
+    (``kairix.quality.completeness``: any LLM-judge failure): its totals cover
+    only the judged cases, so they are not compared at all.
 """
 
 from __future__ import annotations
@@ -32,24 +32,19 @@ import sys
 from pathlib import Path
 
 from kairix.paths import agent_cli_roots, confine_to_roots
+from kairix.quality.completeness import EXIT_INCONCLUSIVE as _EXIT_INCONCLUSIVE
+from kairix.quality.completeness import judge_failures as _judge_failures
+from kairix.quality.completeness import partial_diagnostic
 
 logger = logging.getLogger(__name__)
 
 REGRESSION_THRESHOLD: float = 0.02  # fail if weighted_total drops more than this
 CATEGORY_FLOOR: float = 0.50  # fail if any category drops below this
 CATEGORY_WARN_THRESHOLD: float = 0.01  # warn if any category drops more than this
-# Exit code when the current result is partial (LLM-judge failures) — distinct
-# from 1 (regression / load failure); matches ``kairix eval --regression-against``.
-EXIT_INCONCLUSIVE: int = 3
-
-
-def _judge_failures(result: dict) -> int:
-    """Judge failures recorded in a result; a failed judge_coverage gate counts as ≥1."""
-    summary = result.get("summary", {})
-    failures = int(summary.get("judge_failures", 0) or 0)
-    if failures == 0 and summary.get("gates", {}).get("judge_coverage") is False:
-        return 1
-    return failures
+# Exit code when either result is partial (LLM-judge failures) — the shared
+# ``kairix.quality.completeness.EXIT_INCONCLUSIVE``, distinct from 1 (regression /
+# load failure).
+EXIT_INCONCLUSIVE: int = _EXIT_INCONCLUSIVE
 
 
 def load_result(path: str | Path) -> dict:
@@ -129,7 +124,7 @@ def compare(baseline: dict, current: dict) -> dict:
       baseline_score:  float
       current_score:   float
       judge_failures:  int — LLM-judge failures in the current result
-      inconclusive:    bool — True when judge_failures > 0; ``passed`` is then False
+      inconclusive:    bool — True when either result is partial; ``passed`` is then False
       summary_lines:   list[str] — human-readable lines for CI output
     """
     baseline_total = baseline["summary"]["weighted_total"]
@@ -158,7 +153,8 @@ def compare(baseline: dict, current: dict) -> dict:
 
     regression = overall_delta < -REGRESSION_THRESHOLD
     judge_failures = _judge_failures(current)
-    inconclusive = judge_failures > 0
+    baseline_judge_failures = _judge_failures(baseline)
+    inconclusive = judge_failures > 0 or baseline_judge_failures > 0
     passed = not regression and not category_fails and not inconclusive
 
     lines = _build_summary_lines(
@@ -173,13 +169,9 @@ def compare(baseline: dict, current: dict) -> dict:
         category_fails,
         regression,
     )
-    if inconclusive:
-        lines.append(
-            f"❌ INCONCLUSIVE: the LLM judge failed on {judge_failures} case(s); the current totals "
-            "cover only the judged cases and are not comparable to the baseline. "
-            "fix: check the LLM provider credentials / availability. "
-            "next: re-run the benchmark until judge_failures is 0."
-        )
+    for label, failures in (("the current result", judge_failures), ("the baseline", baseline_judge_failures)):
+        if failures:
+            lines.append("❌ " + partial_diagnostic(label, failures))
 
     return {
         "passed": passed,
@@ -201,7 +193,7 @@ def run_gate(baseline_path: str, current_path: str) -> int:
     Load baseline and current results, compare, print summary, return exit code.
 
     Returns 0 (pass), 1 (fail / unreadable input) or :data:`EXIT_INCONCLUSIVE`
-    (3) when the current result has LLM-judge failures. Suitable for direct
+    (3) when the current result or the baseline is partial. Suitable for direct
     invocation from CI.
     """
     try:

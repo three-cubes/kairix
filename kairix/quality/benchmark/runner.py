@@ -29,6 +29,7 @@ from kairix.quality.benchmark.per_type_slicing import (
     aggregate_per_source_type,
 )
 from kairix.quality.benchmark.suite import BenchmarkSuite
+from kairix.quality.completeness import partial_warning
 from kairix.quality.eval.constants import (
     CATEGORY_ALIASES,
     CATEGORY_WEIGHTS,
@@ -392,7 +393,7 @@ def llm_judge(
             deployment="gpt-4o-mini",
         )
     except Exception as exc:
-        raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, f"{type(exc).__name__}: {exc}") from exc
+        raise JudgeFailedError.from_backend_exception(exc) from exc
 
     if not reply or not reply.strip():
         # Blank is the provider's failure sentinel, not an unparseable verdict.
@@ -530,7 +531,8 @@ def _format_judge_failures_block(judge_failures: int) -> list[str]:
         return []
     return [
         "",
-        f"⚠️  LLM judge failed on {judge_failures} case(s) — excluded from all scores (not counted as 0).",
+        partial_warning("this benchmark run", judge_failures),
+        "   Unscored cases are excluded from every score (not counted as 0).",
         "   fix: check the provider credentials / 'provider:' in kairix.config.yaml.",
         "   next: re-run; per-case 'judge_failure' / 'judge_error' fields in the JSON output name the cause.",
     ]

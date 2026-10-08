@@ -547,14 +547,16 @@ def test_run_records_raising_backend_as_judge_failure(tmp_path: Path) -> None:
     runner = SuiteRunner(
         fact_store=FakeFactStore(),
         fact_extractor=FakeFactExtractor(scripted_facts=[]),
-        llm=FakeLLMBackend(chat_raises=TimeoutError("judge timed out")),
+        llm=FakeLLMBackend(chat_raises=TimeoutError("timed out; api-key credential-sentinel-7f3a")),
         paths=_paths(tmp_path),
     )
     result = runner.run(runner.discover_suite(suite_dir))
 
     assert result.judge_failures == 1
     assert result.rows[0]["judge_failure"] == "backend_error"
-    assert "TimeoutError: judge timed out" in result.rows[0]["judge_error"]
+    # Only the class name is kept — the message could carry a credential.
+    assert result.rows[0]["judge_error"] == "backend raised TimeoutError"
+    assert "credential-sentinel-7f3a" not in str(result)
 
 
 def test_run_clamps_judge_response_to_unit_interval(tmp_path: Path) -> None:

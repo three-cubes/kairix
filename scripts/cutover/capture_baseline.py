@@ -88,6 +88,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from kairix.quality.completeness import judge_failures, partial_warning
+
 logger = logging.getLogger("cutover.capture_baseline")
 
 ALL_SURFACES = ("state", "eval", "latency", "sample-journey")
@@ -356,6 +358,12 @@ def _capture_one_benchmark_suite(suite: str, runner: _CLIRunner) -> dict[str, An
         report = _load_benchmark_report(out_dir, suite)
         if report is None:
             return None
+        failures = judge_failures(report)
+        if failures:
+            # Never record a partial run's scores as a baseline value; the
+            # marker makes diff_baseline report the eval gate INCONCLUSIVE.
+            logger.warning("eval: %s", partial_warning(f"suite {suite} (not captured)", failures))
+            return {"partial": True, "judge_failures": failures}
         payload = _project_eval_payload(report)
         return payload or None
 

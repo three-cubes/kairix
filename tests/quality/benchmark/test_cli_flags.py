@@ -496,15 +496,15 @@ def test_kairix_eval_emits_surface_hint() -> None:
 @pytest.mark.unit
 def test_cmd_run_gates_flag_fails_on_incomplete_judge_coverage(tmp_path: Path) -> None:
     """Every judged case scores 1.0 (all phase gates pass) but one judge call
-    fails: ``--gates`` must exit 2 on the ``judge_coverage`` gate. The same
-    suite fully judged exits 0.
+    fails: ``--gates`` exits 3 (inconclusive, the shared completeness exit)
+    with a PARTIAL diagnostic. The same suite fully judged exits 0.
 
     Drives the real ``run_benchmark`` through the CLI's ``run_benchmark``
     seam with a FakeChatBackend + fake retrieve (no provider, no corpus).
 
-    sabotage: delete ``gates[_GATE_JUDGE_COVERAGE] = judge_failures == 0`` in
-    ``run_benchmark`` — every remaining gate passes and the partial run
-    exits 0. Restored.
+    sabotage: drop the ``judge_failures(result)`` check in ``cmd_run`` — the
+    partial run falls through to the gates and exits 2 (or 0 without the
+    judge_coverage gate) instead of 3. Restored.
     """
     from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
     from tests.fakes import FakeChatBackend
@@ -529,10 +529,52 @@ def test_cmd_run_gates_flag_fails_on_incomplete_judge_coverage(tmp_path: Path) -
 
         return _run
 
-    for n_replies, expected_rc in ((len(categories) - 1, 2), (len(categories), 0)):
+    for n_replies, expected_rc in ((len(categories) - 1, 3), (len(categories), 0)):
         out = io.StringIO()
-        with redirect_stderr(io.StringIO()), redirect_stdout(out):
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(out):
             rc = cmd_run(_ns(str(suite), gates=True), deps=BenchmarkCLIDeps(run_benchmark=_runner_with(n_replies)))
         assert rc == expected_rc, f"{n_replies} judge replies: expected exit {expected_rc}, got {rc}"
-        if expected_rc == 2:
+        if expected_rc == 3:
             assert "JUDGE COVERAGE gate (0 judge failures): FAIL" in out.getvalue()
+            assert "PARTIAL" in err.getvalue()
+
+
+@pytest.mark.unit
+def test_cmd_run_baseline_compare_warns_when_baseline_is_partial(bundled_suites: Path, tmp_path: Path) -> None:
+    """The informational ``--baseline`` header prints a PARTIAL warning when
+    the stored baseline had judge failures (display-only: exit stays 0).
+
+    sabotage: drop the partial-warning loop in ``_emit_baseline_compare`` —
+    no PARTIAL line is printed. Restored.
+    """
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"summary": {"weighted_total": 0.9, "judge_failures": 2}}), encoding="utf-8")
+    args = _ns(str(bundled_suites / "unified.yaml"), baseline=str(baseline))
+    out = io.StringIO()
+    with redirect_stderr(io.StringIO()), redirect_stdout(out):
+        rc = cmd_run(args, deps=BenchmarkCLIDeps(run_benchmark=_CapturingRunner()))
+    assert rc == 0
+    assert "PARTIAL RESULT: baseline" in out.getvalue()
+
+
+@pytest.mark.unit
+def test_cmd_run_partial_result_is_informational_without_gates(bundled_suites: Path) -> None:
+    """Without ``--gates`` (here: no ``gates`` attribute at all, as from an
+    older caller's Namespace) a partial run is informational: exit 0.
+
+    sabotage: change ``getattr(args, "gates", False)`` to default ``True`` —
+    the partial run exits 3 without the flag. Restored.
+    """
+
+    class _PartialRunner(_CapturingRunner):
+        def __call__(self, **kwargs: Any) -> Any:
+            result = super().__call__(**kwargs)
+            result.summary["judge_failures"] = 1
+            return result
+
+    args = _ns(str(bundled_suites / "unified.yaml"))
+    del args.gates
+    with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+        rc = cmd_run(args, deps=BenchmarkCLIDeps(run_benchmark=_PartialRunner()))
+    assert rc == 0

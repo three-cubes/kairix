@@ -455,9 +455,15 @@ def test_judge_response_reports_raising_backend() -> None:
     ``backend.chat`` — no exception is raised and the test fails. Restored.
     """
     with pytest.raises(JudgeFailedError) as excinfo:
-        judge_response("q", "a", "resp", backend=FakeLLMBackend(chat_raises=TimeoutError("judge timed out")))
+        judge_response(
+            "q",
+            "a",
+            "resp",
+            backend=FakeLLMBackend(chat_raises=TimeoutError("timed out; api-key credential-sentinel-7f3a")),
+        )
     assert excinfo.value.reason == "backend_error"
-    assert "TimeoutError" in excinfo.value.detail
+    assert excinfo.value.detail == "backend raised TimeoutError"
+    assert "credential-sentinel-7f3a" not in str(excinfo.value)
 
 
 def test_aggregate_rows_excludes_judge_failures() -> None:

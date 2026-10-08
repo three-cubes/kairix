@@ -306,3 +306,25 @@ class TestJudgeCoverage:
         bp.write_text(json.dumps(baseline))
         cp.write_text(json.dumps(current))
         assert run_gate(str(bp), str(cp)) == 0
+
+
+@pytest.mark.unit
+def test_partial_baseline_is_inconclusive(tmp_path):
+    """A partial *baseline* (judge failures) is not compared either: exit 3.
+
+    Sabotage-proof: compute ``inconclusive`` from the current side only —
+    the partial baseline is compared and the gate passes. Restored.
+    """
+    baseline = _make_result(0.90)
+    baseline["summary"]["judge_failures"] = 1
+    current = _make_result(0.91)
+
+    result = compare(baseline, current)
+    assert result["inconclusive"] is True
+    assert any("the baseline" in line for line in result["summary_lines"])
+
+    bp = tmp_path / "baseline.json"
+    cp = tmp_path / "current.json"
+    bp.write_text(json.dumps(baseline))
+    cp.write_text(json.dumps(current))
+    assert run_gate(str(bp), str(cp)) == EXIT_INCONCLUSIVE

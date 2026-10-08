@@ -219,11 +219,13 @@ def test_llm_judge_raises_typed_failure_when_chat_backend_raises() -> None:
     """
     from tests.fakes import FakeChatBackend
 
-    backend = FakeChatBackend(raise_on_call=OSError("timeout"))
+    backend = FakeChatBackend(raise_on_call=OSError("timeout talking to provider"))
     with pytest.raises(JudgeFailedError) as excinfo:
         llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
     assert excinfo.value.reason == JUDGE_FAILURE_BACKEND_ERROR
-    assert "OSError: timeout" in excinfo.value.detail
+    # Only the class name survives — never the exception message.
+    assert excinfo.value.detail == "backend raised OSError"
+    assert "timeout talking to provider" not in str(excinfo.value)
 
 
 @pytest.mark.unit
@@ -1076,7 +1078,7 @@ def test_llm_judge_lazy_default_chat_backend_reports_credential_failure() -> Non
     with pytest.raises(JudgeFailedError) as excinfo:
         llm_judge(query="q", paths=["doc.md"], snippets=["snippet"])
     assert excinfo.value.reason == JUDGE_FAILURE_BACKEND_ERROR
-    assert "ValueError" in excinfo.value.detail
+    assert excinfo.value.detail == "backend raised ValueError"
 
 
 # ---------------------------------------------------------------------------
@@ -1803,7 +1805,7 @@ def test_run_benchmark_excludes_judge_failures_from_aggregates() -> None:
     failed = result.cases[1]
     assert failed["score"] is None
     assert failed["judge_failure"] == JUDGE_FAILURE_BACKEND_ERROR
-    assert "IndexError" in failed["judge_error"]
+    assert failed["judge_error"] == "backend raised IndexError"
     assert result.cases[0]["score"] == pytest.approx(0.9)
     assert "LLM judge failed on 1 case(s)" in format_interpretation(result)
 
@@ -1913,3 +1915,43 @@ def test_llm_judge_classifies_blank_reply_as_backend_error(reply: str) -> None:
     with pytest.raises(JudgeFailedError) as excinfo:
         llm_judge("q", ["p.md"], ["s"], chat_backend=FakeChatBackend(responses=[reply]))
     assert excinfo.value.reason == JUDGE_FAILURE_BACKEND_ERROR
+
+
+_SENTINEL = "credential-sentinel-7f3a"  # stand-in for a secret a provider error could echo
+
+
+@pytest.mark.unit
+def test_run_benchmark_json_never_contains_backend_exception_text(tmp_path: Any) -> None:
+    """A judge backend exception whose message carries a credential never
+    reaches a case row, the summary, or the persisted benchmark JSON; the
+    failure class stays machine-readable.
+
+    Sabotage proof: in ``JudgeFailedError.from_backend_exception`` put the
+    message back (``f"backend raised {type(exc).__name__}: {exc}"``) — the
+    sentinel lands in ``judge_error`` and the written JSON, and the
+    assertions fail. Restored.
+    """
+    import json
+
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
+    from tests.fakes import FakeChatBackend
+
+    suite = BenchmarkSuite(
+        meta={"name": "redaction", "version": "1.0", "agent": "t"},
+        cases=[BenchmarkCase(id="T1", category="temporal", query="q?", gold_path=None, score_method="llm")],
+    )
+    backend = FakeChatBackend(raise_on_call=RuntimeError(f"401 Unauthorized: Authorization: Bearer {_SENTINEL}"))
+    result = run_benchmark(
+        suite,
+        output_dir=str(tmp_path),
+        deps=BenchmarkDeps(chat_backend=backend, retrieve=_retrieve_returning(["vault/doc.md"])),
+    )
+
+    [case] = result.cases
+    assert case["judge_failure"] == JUDGE_FAILURE_BACKEND_ERROR
+    assert case["judge_error"] == "backend raised RuntimeError"
+    assert _SENTINEL not in json.dumps(result.summary)
+    [written] = list(tmp_path.glob("B-*.json"))
+    assert _SENTINEL not in written.read_text(encoding="utf-8")
+    assert "backend raised RuntimeError" in written.read_text(encoding="utf-8")

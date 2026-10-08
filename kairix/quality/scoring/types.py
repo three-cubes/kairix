@@ -48,6 +48,17 @@ class JudgeFailedError(RuntimeError):
         self.reason = reason
         self.detail = detail
 
+    @classmethod
+    def from_backend_exception(cls, exc: BaseException) -> JudgeFailedError:
+        """``backend_error`` carrying only the exception's class name.
+
+        The exception *message* is never copied: provider errors can carry API
+        keys, auth headers, request payloads or retrieved content, and
+        ``detail`` is persisted into benchmark / eval JSON. The class name is
+        code-defined and stays machine-readable (``backend raised TimeoutError``).
+        """
+        return cls(JUDGE_FAILURE_BACKEND_ERROR, f"backend raised {type(exc).__name__}")
+
 
 JUDGE_FAILURE_BACKEND_ERROR = "backend_error"
 JUDGE_FAILURE_UNPARSEABLE = "unparseable_response"

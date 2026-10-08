@@ -33,8 +33,10 @@ if ! python3 -m kairix.cli eval "$SUITE_PATH" --json > "$RAW_JSON"; then
 fi
 
 # Partial results (judge failures) are rejected before any artifact is written.
-if ! python3 "$SCRIPT_DIR/judge_coverage.py" "LoCoMo nightly" "$RAW_JSON"; then
-    exit 1
+coverage_rc=0
+python3 "$SCRIPT_DIR/judge_coverage.py" "LoCoMo nightly" "$RAW_JSON" || coverage_rc=$?
+if [ "$coverage_rc" -ne 0 ]; then
+    exit "$coverage_rc"
 fi
 cp "$RAW_JSON" "$OUT_JSON"
 

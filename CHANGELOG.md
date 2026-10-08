@@ -47,29 +47,56 @@ and `judge_error`. Note that `n_questions` now counts scored questions only.
 **Pass rates and mean scores may go up** compared with earlier runs that had
 judge failures. Check `judge_failures` before comparing against a baseline.
 
-Incomplete judge coverage now also fails the gates:
+**Partial results are never gated, compared, trended or published.** A
+result is *partial* when the LLM judge failed on any case or question. Its
+scores then cover only the judged cases. Every tool that gates, compares,
+trends or publishes results now checks for this with one shared rule
+(`kairix.quality.completeness`). Results saved before this release don't
+record judge failures, so they count as complete. The gate and compare tools
+stop with exit code **3 (inconclusive)** and say why. Tools that only display
+results print a "PARTIAL RESULT" warning instead.
 
-- `kairix benchmark run --gates` exits 2 if the judge failed on any case.
-  The summary has a new `judge_coverage` gate, which only passes when
-  `judge_failures` is 0, so a high score from the judged cases alone can no
-  longer pass. The report shows a "JUDGE COVERAGE gate" FAIL line. The
-  unscored case rows still say why.
-- `kairix eval --regression-against` exits with the new code **3
-  (inconclusive)** if the judge failed on any question, and says why. It
-  does not compare the partial mean score, because one good answer could
-  hide a regression. Exit 1 still means a regression, and exit 2 a missing
-  or invalid baseline.
+- `kairix benchmark run --gates` exits 3 if the judge failed on any case.
+  The summary also has a new `judge_coverage` gate that only passes when
+  `judge_failures` is 0, and the report shows a "JUDGE COVERAGE gate" FAIL
+  line. The unscored case rows still say why.
+- `kairix benchmark compare` exits 3 if either result is partial.
+  `kairix benchmark run --baseline` prints a PARTIAL warning.
+- `kairix eval --regression-against` exits 3 if the run or the pinned
+  baseline is partial. It does not compare the partial mean score, because
+  one good answer could hide a regression. Exit 1 still means a regression,
+  and exit 2 a missing or invalid baseline.
+- `kairix eval gate` exits 3 on a partial result and does not run the gate.
+  `kairix eval tune` still gives advice but prints a PARTIAL warning.
+  `kairix eval monitor` exits 3 on a partial canary run and keeps it out of
+  the trend log, so it can never cause or hide a regression alert.
+- The CI benchmark gate (`python -m kairix.quality.benchmark.baseline`, used
+  by `benchmark-gate.yml`) exits 3 if the current result or the baseline is
+  partial. The pull-request comment says "INCONCLUSIVE". A fully judged run
+  that hasn't regressed still passes.
+- `scripts/run-reflib-contract.py` and `scripts/compare-reflib-baseline.py`
+  exit 3 on a partial run or baseline. `scripts/update_reflib_history.py`
+  exits 3 and archives nothing, and the cutover `capture_baseline.py` records
+  a partial suite as a `partial` marker rather than its scores.
+  `diff_baseline.py --strict` then exits 3.
+- The LoCoMo nightly exits 3, and publishes no JSON or CSV artifact, when
+  the eval run is partial. The nightly comparison also refuses a partial
+  current result or a partial prior artifact. The conversation-eval CI gate
+  reports an inconclusive regression check as a failure with its own message.
 - A blank judge reply now counts as a backend failure (`backend_error`) in
   the benchmark judge, the same as in the other judges.
-- The CI benchmark gate (`python -m kairix.quality.benchmark.baseline`, used
-  by `benchmark-gate.yml`) reports a run with any judge failure as
-  **inconclusive** and exits 3, instead of comparing its partial totals.
-  A fully judged run that hasn't regressed still passes.
-- The LoCoMo nightly fails, and publishes no JSON or CSV artifact, when the
-  eval run had any judge failure. The nightly comparison also refuses a
-  partial current result or a partial prior artifact.
 - Retrieval metadata can no longer overwrite or fake a case's
   `judge_failure` / `judge_error` fields in the benchmark output.
+
+**Security: judge errors no longer copy exception text.** When a judge's
+backend raised an exception, the exception's message was stored in
+`judge_error` and saved in the benchmark and eval JSON. Provider errors can
+include API keys, auth headers, request payloads or retrieved content. Every
+judge now stores only the exception's class name (for example
+`judge_error: "backend raised TimeoutError"`, `judge_failure:
+"backend_error"`). The LoCoMo spike's synthesis and search error rows follow
+the same rule. If you shared benchmark or eval JSON produced with an earlier
+build of this branch, check its `judge_error` fields for sensitive text.
 
 The last two judges follow the same rule, so no LLM judge in kairix turns a
 failure into a score any more:

@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Fail when a ``kairix eval --json`` SuiteResult has LLM-judge failures.
+"""Refuse a partial ``kairix eval --json`` SuiteResult (LLM-judge failures).
 
-A SuiteResult with ``judge_failures > 0`` covers only the questions the
-judge actually scored, so its pass rate and mean are partial. The LoCoMo
-nightly must not publish such a result as a trend point, and the nightly
+Thin CLI over the shared :mod:`kairix.quality.completeness` rule: a result
+with any judge failure covers only the questions the judge actually scored,
+so the LoCoMo nightly must not publish it as a trend point and the nightly
 comparison must not compare against (or from) one.
 
 Usage::
 
     python3 scripts/ci/judge_coverage.py <label> <suite-result.json>
 
-Exit 0 when every question was judged; exit 1 (with a GitHub ``::error::``
-line and fix:/next: hints) when any judge call failed or the file cannot
-be read. Artifacts written before ``judge_failures`` existed carry no
-count and are treated as complete.
+Exit 0 when every question was judged; exit 3 (the shared
+``EXIT_INCONCLUSIVE``) with a GitHub ``::error::`` line and fix:/next:
+hints when the result is partial; exit 1 when the file cannot be read.
+Artifacts written before judge failures were recorded count as complete.
 """
 
 from __future__ import annotations
@@ -22,12 +22,7 @@ import json
 import sys
 from pathlib import Path
 
-
-def judge_failures(data: dict) -> int:
-    """Judge failures in a SuiteResult: the summary count or the failed rows, whichever is larger."""
-    counted = int(data.get("judge_failures", 0) or 0)
-    failed_rows = sum(1 for row in data.get("rows") or [] if isinstance(row, dict) and row.get("judge_failure"))
-    return max(counted, failed_rows)
+from kairix.quality.completeness import EXIT_INCONCLUSIVE, judge_failures, partial_diagnostic
 
 
 def main(argv: list[str]) -> int:
@@ -44,13 +39,8 @@ def main(argv: list[str]) -> int:
         return 1
     failures = judge_failures(data)
     if failures:
-        print(
-            f"::error::{label} SuiteResult {path} is partial — the LLM judge failed on "
-            f"{failures} question(s), so its pass rate / mean cover only the judged questions"
-        )
-        print("fix: check the LLM provider credentials / availability for the eval run")
-        print("next: re-run the nightly; partial results are never published or compared")
-        return 1
+        print("::error::" + partial_diagnostic(f"{label} SuiteResult {path}", failures))
+        return EXIT_INCONCLUSIVE
     return 0
 
 

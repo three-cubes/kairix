@@ -28,8 +28,10 @@ if [ -z "$CURRENT_JSON" ] || [ ! -f "$CURRENT_JSON" ]; then
     exit 1
 fi
 
-if ! python3 "$SCRIPT_DIR/judge_coverage.py" "current LoCoMo nightly" "$CURRENT_JSON"; then
-    exit 1
+coverage_rc=0
+python3 "$SCRIPT_DIR/judge_coverage.py" "current LoCoMo nightly" "$CURRENT_JSON" || coverage_rc=$?
+if [ "$coverage_rc" -ne 0 ]; then
+    exit "$coverage_rc"
 fi
 
 if ! command -v gh >/dev/null 2>&1; then
@@ -73,8 +75,9 @@ if [ -z "$PRIOR_JSON" ]; then
     exit 0
 fi
 
-if ! python3 "$SCRIPT_DIR/judge_coverage.py" "prior LoCoMo nightly (run $PRIOR_RUN_ID)" "$PRIOR_JSON"; then
-    exit 1
+python3 "$SCRIPT_DIR/judge_coverage.py" "prior LoCoMo nightly (run $PRIOR_RUN_ID)" "$PRIOR_JSON" || coverage_rc=$?
+if [ "$coverage_rc" -ne 0 ]; then
+    exit "$coverage_rc"
 fi
 
 # Compute pass-rate delta in percentage points.

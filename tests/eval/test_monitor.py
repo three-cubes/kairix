@@ -554,3 +554,33 @@ def test_log_entries_missing_ts_or_weighted_ndcg_are_excluded_from_baseline(tmp_
     # Only the one complete entry (0.8) contributes. 0.5 is a 37.5% drop → regression.
     assert result.regression is True
     assert "0.8000" in (result.regression_detail or "")
+
+
+@pytest.mark.unit
+def test_partial_run_is_not_trended_and_never_flags_regression(tmp_path: Path) -> None:
+    """A run with judge failures is returned as partial: it is NOT appended
+    to the trend log and never compared against the rolling baseline.
+
+    Sabotage proof: drop the ``if failures:`` early return in
+    ``run_monitor`` — the partial run is logged (and compared), so the log
+    grows and the assertions fail. Restored.
+    """
+    log_path = tmp_path / "mon.jsonl"
+    _seed_log(log_path, [_make_log_entry(0.9, days_ago=1)])
+
+    def _partial_runner(_suite: BenchmarkSuite, **_kwargs: Any) -> BenchmarkResult:
+        return BenchmarkResult(
+            meta={},
+            summary={"weighted_total": 0.1, "category_scores": {"recall": 0.1}, "judge_failures": 3},
+            diagnostics={},
+            cases=[],
+        )
+
+    result = run_monitor(
+        "fixtures/canary.yaml",
+        log_path=str(log_path),
+        deps=MonitorDeps(load_suite=_suite_loader_with_n_cases(5), run_benchmark=_partial_runner),
+    )
+    assert result.judge_failures == 3
+    assert result.regression is False
+    assert len(_read_log(log_path)) == 1

@@ -446,7 +446,7 @@ class SuiteRunner:
         try:
             response = self._llm.chat(prompt, max_tokens=8)
         except Exception as exc:
-            raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, f"{type(exc).__name__}: {exc}") from exc
+            raise JudgeFailedError.from_backend_exception(exc) from exc
         if not response or not response.strip():
             raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, "empty judge reply (LLM backend failure)")
         return _parse_score(response)

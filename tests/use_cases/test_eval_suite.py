@@ -220,6 +220,7 @@ def test_main_regression_gate_fails_when_below_tolerance(tmp_path: Path) -> None
     assert "next:" in err
 
 
+@pytest.mark.unit
 def test_main_regression_gate_inconclusive_when_judge_failed(tmp_path: Path) -> None:
     """One question judged 1.0 and one judge failure (backend returned
     ``""``): the partial mean (1.0) would sail past a 1.0 baseline, so the
@@ -240,7 +241,7 @@ def test_main_regression_gate_inconclusive_when_judge_failed(tmp_path: Path) -> 
     )
     assert code == _use_case.EXIT_REGRESSION_INCONCLUSIVE == 3
     assert "INCONCLUSIVE" in err
-    assert "1 question(s)" in err
+    assert "failed on 1 case(s)" in err
     assert "fix:" in err
     assert "next:" in err
 
@@ -952,3 +953,63 @@ def test_resolve_production_fact_extractor_falls_back_on_factory_construction_er
 # "test-shaped API". The branches carry ``# pragma: no cover`` with
 # the rationale documented inline; coverage of the helpers' happy paths
 # is provided by the existing main()-driven tests above.
+
+
+_SENTINEL = "credential-sentinel-7f3a"  # stand-in for a secret a provider error could echo
+
+
+@pytest.mark.unit
+def test_main_json_never_contains_backend_exception_text(tmp_path: Path) -> None:
+    """``kairix eval --json`` with a judge backend whose exception message
+    carries a credential: the sentinel is absent from stdout / stderr, and
+    every row keeps the machine-readable failure class.
+
+    Sabotage-proof: put the message back into
+    ``JudgeFailedError.from_backend_exception`` — the sentinel lands in each
+    row's ``judge_error`` and the first assertion fails. Restored.
+    """
+    suite = _make_suite_dir(tmp_path)
+    out = io.StringIO()
+    err = io.StringIO()
+    code = _use_case.main(
+        [str(suite), "--json", "--legacy-direct"],
+        out=out,
+        err=err,
+        paths=_paths(tmp_path),
+        fact_store=FakeFactStore(),
+        fact_extractor=FakeFactExtractor(),
+        llm=FakeLLMBackend(chat_raises=RuntimeError(f"Authorization: Bearer {_SENTINEL}")),
+    )
+    assert _SENTINEL not in out.getvalue()
+    assert _SENTINEL not in err.getvalue()
+    assert code == 0
+    payload = json.loads(out.getvalue())
+    assert payload["judge_failures"] == 2
+    assert {row["judge_error"] for row in payload["rows"]} == {"backend raised RuntimeError"}
+    assert {row["judge_failure"] for row in payload["rows"]} == {"backend_error"}
+
+
+@pytest.mark.unit
+def test_main_regression_gate_inconclusive_when_baseline_is_partial(tmp_path: Path) -> None:
+    """A fully judged run against a PARTIAL pinned baseline is inconclusive
+    (exit 3): the baseline's mean covers only its judged questions.
+
+    Sabotage-proof: drop the ``if not is_complete(baseline_raw)`` block in
+    ``_check_regression`` — the partial baseline is compared and the gate
+    exits 0. Restored.
+    """
+    suite = _make_suite_dir(tmp_path)
+    baseline_dir = _write_baseline(tmp_path, "engagement-alpha", mean=0.5)
+    baseline_file = baseline_dir / "engagement-alpha.json"
+    baseline = json.loads(baseline_file.read_text(encoding="utf-8"))
+    baseline["judge_failures"] = 4
+    baseline_file.write_text(json.dumps(baseline), encoding="utf-8")
+
+    code, _, err = _invoke(
+        [str(suite), "--regression-against", str(baseline_dir)],
+        tmp_path=tmp_path,
+        chat_response="1.0",
+    )
+    assert code == 3
+    assert "PARTIAL" in err
+    assert "the baseline" in err

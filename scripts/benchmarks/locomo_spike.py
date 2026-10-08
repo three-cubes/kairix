@@ -75,6 +75,7 @@ from typing import Any
 
 import yaml
 
+from kairix.quality.completeness import judge_failures, partial_warning
 from kairix.quality.scoring.types import (
     JUDGE_FAILURE_BACKEND_ERROR,
     JUDGE_FAILURE_UNPARSEABLE,
@@ -566,7 +567,7 @@ def _result_to_conv(
         mean_score=float(result.get("mean_score", 0.0)),
         per_category=dict(result.get("per_category") or {}),
         rows=list(result.get("rows") or []),
-        judge_failures=int(result.get("judge_failures", 0) or 0),
+        judge_failures=judge_failures(result),
     )
 
 
@@ -679,7 +680,7 @@ def _synthesise_answer_from_memories(
     try:
         return backend.chat([{"role": "user", "content": prompt}], max_tokens=200).strip()
     except Exception as exc:
-        return f"ERROR: synthesis failed: {type(exc).__name__}: {exc!s}"
+        return f"ERROR: synthesis failed ({type(exc).__name__})"
 
 
 def _judge_response(
@@ -712,7 +713,7 @@ def _judge_response(
     try:
         raw = backend.chat([{"role": "user", "content": prompt}], max_tokens=300)
     except Exception as exc:
-        raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, f"{type(exc).__name__}: {exc!s}") from exc
+        raise JudgeFailedError.from_backend_exception(exc) from exc
 
     raw = (raw or "").strip()
     if not raw:
@@ -825,7 +826,7 @@ def _run_mem0_backend(
             mems = search_result.get("results") if isinstance(search_result, dict) else search_result
             response = _synthesise_answer_from_memories(qa["question"], mems or [])
         except Exception as exc:
-            response = f"ERROR: mem0 search failed: {type(exc).__name__}: {exc!s}"
+            response = f"ERROR: mem0 search failed ({type(exc).__name__})"
         row: dict[str, Any] = {
             "question": qa["question"],
             "answer": qa["answer"],
@@ -888,9 +889,10 @@ def _print_summary(conv_results: list[_ConvResult]) -> None:
     else:
         print("Passes          : 0/0")
     print(f"Mean score      : {overall_mean:.3f}")
-    judge_failures = sum(c.judge_failures for c in conv_results)
-    if judge_failures:
-        print(f"Judge failures  : {judge_failures} question(s) unscored — excluded from the numbers above")
+    n_judge_failures = sum(c.judge_failures for c in conv_results)
+    if n_judge_failures:
+        print(partial_warning("this LoCoMo run", n_judge_failures))
+        print(f"Judge failures  : {n_judge_failures} question(s) unscored — excluded from the numbers above")
     print()
     print(f"  {'conv':<14}  {'backend':<12}  {'passed':>6}  {'questions':>9}  {'mean':>6}")
     print(f"  {'-' * 14}  {'-' * 12}  {'-' * 6}  {'-' * 9}  {'-' * 6}")

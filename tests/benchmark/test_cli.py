@@ -690,3 +690,33 @@ def test_main_compare_dispatch(tmp_path: Path) -> None:
     with redirect_stdout(io.StringIO()):
         rc = main(["compare", str(a), str(b)])
     assert rc == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("partial_side", ["a", "b"])
+def test_cmd_compare_refuses_partial_result(tmp_path: Path, partial_side: str) -> None:
+    """``kairix benchmark compare`` exits 3 (inconclusive) with a PARTIAL
+    diagnostic when either result had judge failures; nothing is compared.
+
+    Sabotage: drop the partial check in ``cmd_compare`` — the comparison
+    table prints and the command exits 0. Restored.
+    """
+    import argparse
+
+    complete = {"meta": {"system": "x"}, "summary": {"weighted_total": 0.5, "category_scores": {}}}
+    partial = {
+        "meta": {"system": "y"},
+        "summary": {"weighted_total": 0.9, "category_scores": {}, "gates": {"judge_coverage": False}},
+    }
+    a_path = tmp_path / "a.json"
+    b_path = tmp_path / "b.json"
+    a_path.write_text(json.dumps(partial if partial_side == "a" else complete))
+    b_path.write_text(json.dumps(partial if partial_side == "b" else complete))
+
+    out = io.StringIO()
+    err = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = cmd_compare(argparse.Namespace(subcommand="compare", result_a=str(a_path), result_b=str(b_path)))
+    assert rc == 3
+    assert "PARTIAL" in err.getvalue()
+    assert "BENCHMARK COMPARISON" not in out.getvalue()

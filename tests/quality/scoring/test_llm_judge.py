@@ -226,11 +226,16 @@ class TestLLMJudgeScorer:
         — the raw TimeoutError escapes and ``pytest.raises(JudgeFailedError)``
         fails. Restored.
         """
-        scorer = LLMJudgeScorer(llm=FakeLLMBackend(chat_raises=TimeoutError("judge timed out")), expected_answer="E")
+        scorer = LLMJudgeScorer(
+            llm=FakeLLMBackend(chat_raises=TimeoutError("timed out; api-key credential-sentinel-7f3a")),
+            expected_answer="E",
+        )
         with pytest.raises(JudgeFailedError) as excinfo:
             scorer.score(_run("ans"))
         assert excinfo.value.reason == JUDGE_FAILURE_BACKEND_ERROR
-        assert "TimeoutError: judge timed out" in excinfo.value.detail
+        # Class name only — the exception message is never copied (it can carry secrets).
+        assert excinfo.value.detail == "backend raised TimeoutError"
+        assert "credential-sentinel-7f3a" not in str(excinfo.value)
 
     def test_failed_judgement_is_excluded_from_category_mean(self) -> None:
         """Fan two queries out to the judge: one judged 1.0, one whose reply

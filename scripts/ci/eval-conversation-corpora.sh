@@ -99,9 +99,16 @@ for suite in "${suites[@]}"; do
     elif [ "$sentinel_rc" -eq 1 ]; then
         # Real SuiteResult baseline — enforce regression gate.
         echo "Baseline for $suite_name is pinned — regression gate enforced (>2pp = fail)."
-        if ! python3 -m kairix.cli eval "$suite" --json --regression-against "$EXPECTED_DIR" > "$out_file" 2> "$eval_err_log"; then
+        eval_rc=0
+        python3 -m kairix.cli eval "$suite" --json --regression-against "$EXPECTED_DIR" > "$out_file" 2> "$eval_err_log" || eval_rc=$?
+        if [ "$eval_rc" -ne 0 ]; then
             cat "$eval_err_log" >&2
-            if grep -q "SecretNotFoundError\|kairix-provider-llm-api-key" "$eval_err_log"; then
+            if [ "$eval_rc" -eq 3 ]; then
+                echo "::error::$suite_name regression gate INCONCLUSIVE — the run or the pinned baseline is partial (LLM-judge failures)"
+                echo "fix: check the LLM provider credentials / availability; never pin a partial result as a baseline"
+                echo "next: re-run the gate once every question is judged"
+                overall_status=1
+            elif grep -q "SecretNotFoundError\|kairix-provider-llm-api-key" "$eval_err_log"; then
                 echo "::warning::$suite_name regression gate skipped — LLM API key not available in this CI environment (expected on PR builds without KV access)"
             else
                 echo "::error::$suite_name regressed against pinned baseline"
@@ -125,12 +132,17 @@ import json
 import sys
 from pathlib import Path
 
+from kairix.quality.completeness import judge_failures, partial_warning
+
 path = Path(sys.argv[1])
 name = sys.argv[2]
 if not path.exists() or path.stat().st_size == 0:
     print(f"  [warn] no result file at {path} — eval likely failed")
     sys.exit(0)
 data = json.loads(path.read_text(encoding="utf-8"))
+failures = judge_failures(data)
+if failures:
+    print("  " + partial_warning(f"corpus {name} — never pin it as a baseline", failures))
 n_passed = data.get("n_passed", 0)
 n_total = data.get("n_questions", 0)
 pct = round(100 * n_passed / n_total) if n_total else 0

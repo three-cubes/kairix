@@ -45,6 +45,13 @@ from kairix.core.protocols import (
 from kairix.core.search.pipeline import SearchPipeline
 from kairix.paths import KairixPaths
 from kairix.platform.llm.protocol import LLMBackend
+from kairix.quality.completeness import (
+    EXIT_INCONCLUSIVE,
+    is_complete,
+    judge_failures,
+    partial_diagnostic,
+    partial_warning,
+)
 from kairix.quality.eval.suite_runner import SuiteResult, SuiteRunner
 
 __all__ = ["main"]
@@ -496,9 +503,10 @@ def _format_human(result: SuiteResult, *, suite_path: Path) -> str:
         mean = stats["mean"]
         cat_pct = pct(passed, n)
         lines.append(f"    {cat:<14} {passed}/{n} ({cat_pct}%) mean={mean:.3f}")
-    if result.judge_failures:
+    if not is_complete(result):
+        lines.append("  " + partial_warning(f"suite {result.suite_name}", judge_failures(result)))
         lines.append(
-            f"  Judge failures: {result.judge_failures} question(s) unscored — excluded from the "
+            f"  Judge failures: {judge_failures(result)} question(s) unscored — excluded from the "
             "scores above (not counted as wrong). fix: check the LLM provider credentials; "
             "next: per-row 'judge_failure' / 'judge_error' in --json output name the cause."
         )
@@ -523,11 +531,12 @@ def pct(passed: int, total: int) -> int:
 # ---------------------------------------------------------------------------
 
 
-# Exit code for ``--regression-against`` when the run cannot be compared:
-# LLM-judge failures left questions unscored, so ``mean_score`` covers only
-# part of the suite and one good row could hide a regression. Distinct from
-# 1 (regression) and 2 (missing / invalid baseline).
-EXIT_REGRESSION_INCONCLUSIVE = 3
+# Exit code for ``--regression-against`` when the run or the baseline is
+# partial (LLM-judge failures): its mean covers only the judged questions and
+# one good row could hide a regression. The shared
+# ``kairix.quality.completeness.EXIT_INCONCLUSIVE``; distinct from 1
+# (regression) and 2 (missing / invalid baseline).
+EXIT_REGRESSION_INCONCLUSIVE = EXIT_INCONCLUSIVE
 
 
 def _check_regression(
@@ -547,13 +556,11 @@ def _check_regression(
     invalid; :data:`EXIT_REGRESSION_INCONCLUSIVE` (3) = the run had LLM-judge
     failures, so its partial mean is not compared at all.
     """
-    if result.judge_failures:
+    if not is_complete(result):
         err_sink.write(
-            f"{_ERROR_PREFIX}regression check INCONCLUSIVE on {result.suite_name} — "
-            f"the LLM judge failed on {result.judge_failures} question(s), so the mean score "
-            f"covers only {result.n_questions} judged question(s) and is not comparable to the baseline. "
-            f"fix: check the LLM provider credentials / availability. "
-            f"next: re-run until judge_failures is 0, then re-check the regression.\n"
+            f"{_ERROR_PREFIX}regression check on {result.suite_name}: "
+            + partial_diagnostic(f"this run ({result.n_questions} judged question(s))", judge_failures(result))
+            + "\n"
         )
         return EXIT_REGRESSION_INCONCLUSIVE
     baseline_path = baseline_dir / f"{result.suite_name}.json"
@@ -574,6 +581,14 @@ def _check_regression(
             f"next: re-run the regression gate.\n"
         )
         return 2
+
+    if not is_complete(baseline_raw):
+        err_sink.write(
+            f"{_ERROR_PREFIX}regression check on {result.suite_name}: "
+            + partial_diagnostic(f"the baseline {baseline_path}", judge_failures(baseline_raw))
+            + "\n"
+        )
+        return EXIT_REGRESSION_INCONCLUSIVE
 
     baseline_mean = float(baseline_raw.get("mean_score", 0.0))
     delta_pp = (baseline_mean - result.mean_score) * 100.0

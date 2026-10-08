@@ -74,6 +74,9 @@ jobs:
           print(f'weighted_total: {result.summary[\"weighted_total\"]}')
           for cat, score in sorted(result.summary['category_scores'].items()):
               print(f'  {cat:<14} {score:.4f}')
+          from kairix.quality.completeness import judge_failures, partial_warning
+          if judge_failures(result):
+              print(partial_warning('contract suite run', judge_failures(result)))
           "
 
       - name: Compare against baseline
@@ -96,6 +99,10 @@ jobs:
           except Exception as e:
               print(f'Could not read result files: {e}', file=sys.stderr)
               sys.exit(0)
+
+          from kairix.quality.completeness import judge_failures
+          partial = {name: judge_failures(data) for name, data in (('current', current), ('baseline', baseline))}
+          partial = {name: n for name, n in partial.items() if n}
 
           cur_total = current['summary']['weighted_total']
           base_total = baseline['summary']['weighted_total']
@@ -120,11 +127,15 @@ jobs:
               flag = ' ⚠️' if c < 0.50 else (' ↓' if d < -0.01 else '')
               lines.append(f'| {cat} | {b:.4f} | {c:.4f} | {d:+.4f}{flag} |')
 
-          lines += [
-              '',
-              '_No regression detected. Gate passed._' if passed
-              else '_Gate failed: regression detected (threshold ±0.02). Review scores above._',
-          ]
+          if partial:
+              detail = ', '.join(f'{name}: {n} judge failure(s)' for name, n in partial.items())
+              lines += ['', f'_Gate INCONCLUSIVE: PARTIAL result ({detail}) — scores not compared._']
+          else:
+              lines += [
+                  '',
+                  '_No regression detected. Gate passed._' if passed
+                  else '_Gate failed: regression detected (threshold ±0.02). Review scores above._',
+              ]
 
           body = chr(10).join(lines)
           # Write to env file for next step
