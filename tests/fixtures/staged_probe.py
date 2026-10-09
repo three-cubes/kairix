@@ -23,7 +23,6 @@ if str(CHECKS_DIR) not in sys.path:
 
 import pytest  # noqa: E402
 import run_checks  # noqa: E402
-from run_checks import decide  # noqa: E402
 from tc_fitness.context import CheckContext  # noqa: E402
 from tc_fitness.staged import restrict_python_files  # noqa: E402
 
@@ -125,7 +124,7 @@ def run_one_narrowed(rule_id: str, staged: list[str]) -> tuple[int, str]:
     Returns ``(rc, captured_output)`` where ``rc`` is 0 (pass) / 1 (fail)."""
     entry = next(e for e in run_checks._select_all() if e.id == rule_id)
     script = run_checks.resolve_script(entry)
-    decision = decide(entry, script, staged)
+    decision = run_checks.decide(entry, script, staged)
     assert decision.run, f"{rule_id} must be selected for staged={staged}; reason: {decision.reason}"
     buf = io.StringIO()
     ctx = CheckContext(repo_root=run_checks.REPO_ROOT)
