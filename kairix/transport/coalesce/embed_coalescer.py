@@ -76,6 +76,7 @@ __all__ = [
     "DEFAULT_MAX_BATCH_SIZE",
     "CoalescerStats",
     "EmbedCoalescer",
+    "WindowWait",
     "current_embed_coalescer",
     "get_embed_coalescer",
     "install_embed_coalescer",
@@ -92,6 +93,19 @@ DEFAULT_MAX_BATCH_SIZE = 16
 # F17: lift repeated literal action labels to module-level constants so
 # the same identifier isn't duplicated across logs and stats.
 _LOG_DISPATCH_ERROR = "embed_coalescer: dispatch failed: %s"
+
+
+# The coalesce-window wait: ``(condition, ready, timeout_s)``. Called by the
+# dispatcher with the condition's lock HELD; it must block until ``ready()``
+# is true or the window closes, releasing the lock while it waits (the
+# ``threading.Condition.wait_for`` contract). The return value is ignored —
+# the dispatcher re-reads its own state afterwards.
+WindowWait = Callable[[threading.Condition, Callable[[], bool], float], object]
+
+
+def _default_window_wait(cv: threading.Condition, ready: Callable[[], bool], timeout_s: float) -> object:
+    """Production window: a real wall-clock ``Condition.wait_for``."""
+    return cv.wait_for(ready, timeout=timeout_s)
 
 
 @dataclass(frozen=True)
@@ -138,7 +152,13 @@ class EmbedCoalescer:
         embed_batch_fn: Callable[[list[str]], list[list[float]]],
         coalesce_window_ms: int = DEFAULT_COALESCE_WINDOW_MS,
         max_batch_size: int = DEFAULT_MAX_BATCH_SIZE,
+        window_wait: WindowWait = _default_window_wait,
     ) -> None:
+        # ``window_wait`` is the clock seam for the coalesce window: the
+        # default waits on the real wall clock; tests inject a fake window
+        # they close explicitly, so "every caller enqueued before the window
+        # closed" is a proven precondition rather than a timing bet.
+        self._window_wait = window_wait
         # Window of 0 disables coalescing entirely — each call dispatches
         # immediately (synchronous fall-through). Useful for
         # low-concurrency deployments and for debugging.
@@ -287,9 +307,10 @@ class EmbedCoalescer:
             # "no work yet" wait above), and a bare wait would then lose that
             # wakeup and park a FULL batch for the entire window. ``wait_for``
             # re-checks the condition first and releases the lock while it waits.
-            self._cv.wait_for(
+            self._window_wait(
+                self._cv,
                 lambda: self._stop or len(self._pending) >= self._max_batch_size,
-                timeout=self._window_s,
+                self._window_s,
             )
             if self._stop:
                 return []
