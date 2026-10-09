@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -254,18 +255,9 @@ def test_default_token_exchanger_raises_when_pyjwt_absent(
     GitHubAppFlow.authorize() surface — confirms the ImportError
     translation honours the F21 contract.
     """
-    import builtins
-
-    # No sys.modules eviction needed: an ``import`` statement always calls
-    # ``builtins.__import__`` (patched below), cached module or not.
-    original_import = builtins.__import__
-
-    def blocking_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "jwt":
-            raise ImportError("blocked jwt")
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", blocking_import)
+    # A None entry in sys.modules makes ``import <dep>`` raise ImportError —
+    # the optional dependency is simulated as not installed (auto-undone).
+    monkeypatch.setitem(sys.modules, "jwt", None)
     pem_path = tmp_path / "app.pem"
     _write_pem(pem_path)
     browser = FakeBrowserLauncher()

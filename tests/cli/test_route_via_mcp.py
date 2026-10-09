@@ -873,30 +873,27 @@ def test_envelope_round_trips_through_dispatcher(capsys: pytest.CaptureFixture[s
 
 
 @pytest.mark.unit
-def test_http_client_is_responsive_returns_false_when_requests_unavailable(monkeypatch) -> None:
+def test_http_client_is_responsive_returns_false_when_requests_unavailable(monkeypatch, caplog) -> None:
     """When ``requests`` is unimportable, ``is_responsive`` returns False.
 
     Tests the defensive ImportError branch — covers the edge case where
-    a stripped-down install ships without requests. F2-clean because
-    monkeypatch targets ``builtins.__import__``, a stdlib hook, not a
-    KAIRIX internal.
+    a stripped-down install ships without requests. ``requests`` is
+    simulated as not installed with a ``None`` ``sys.modules`` entry
+    (auto-undone by monkeypatch) — no import hook is patched.
 
     Sabotage-proof: removed the try/except around ``import requests``;
     this test failed with the underlying ImportError leaking.
     Restoring the except restored green.
     """
-    import builtins
-
-    real_import = builtins.__import__
-
-    def _no_requests(name, *args, **kwargs):
-        if name == "requests":
-            raise ImportError("simulated: requests unavailable")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _no_requests)
+    # A None entry in sys.modules makes ``import <dep>`` raise ImportError —
+    # the optional dependency is simulated as not installed (auto-undone).
+    monkeypatch.setitem(sys.modules, "requests", None)
+    caplog.set_level("DEBUG", logger="kairix.agents.mcp.client_dispatcher")
     client = HttpMcpDispatchClient()
     assert client.is_responsive("http://localhost:1/mcp", timeout_s=0.05) is False
+    # The ImportError branch returns BEFORE any probe — a probe failure would
+    # mean requests was importable and the network path ran instead.
+    assert "mcp_responsive_probe_failed" not in caplog.text
 
 
 @pytest.mark.unit

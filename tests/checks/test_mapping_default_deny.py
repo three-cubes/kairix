@@ -12,8 +12,8 @@ or an unfoldable target is a violation. This module pins:
 * the default-deny property — an arbitrary helper call ``some_helper(R)``,
   returning / yielding ``R``, comparing it, putting it in a container — fails;
 * the six spellings a review round found against the old denylist;
-* the tightened exemptions (nested callbacks inherit nothing; an early
-  ``return`` voids a ``clear()`` restore).
+* the one remaining exemption (the session baseline) covers only statements
+  directly in the fixture body — nested callbacks inherit nothing.
 
 Sabotage proofs (executed — mutate, confirm red, restore, confirm green):
   * make ``MappingGuard.classify`` treat an unknown context as a read
@@ -328,32 +328,6 @@ def test_session_exemption_covers_only_the_fixture_body(tmp_path: Path, body: st
     assert bool(file_violations(path)) is expected
 
 
-def test_early_return_before_restore_voids_the_clear_exemption(tmp_path: Path) -> None:
-    """``clear()`` then ``if flag: return`` then ``update(snapshot)`` leaves the
-    env cleared on the early-exit path — the ``clear()`` is reported.
-
-    Sabotage proof (executed): drop the ``_may_exit_early`` check from
-    ``_followed_by_full_restore`` → reports clean; restored.
-    """
-    source = """import os
-
-import pytest
-
-
-@pytest.fixture
-def _restored(flag):
-    snapshot = dict(os.environ)
-    yield
-    os.environ.clear()
-    if flag:
-        return
-    os.environ.update(snapshot)
-"""
-    path = tmp_path / "test_sample.py"
-    path.write_text(source, encoding="utf-8")
-    assert any(v.endswith("os.environ.clear()") for v in file_violations(path))
-
-
 # ---------------------------------------------------------------------------
 # Rule (a): the guarded MODULE objects (``os`` / ``sys``) are default-deny too.
 # ---------------------------------------------------------------------------
@@ -527,32 +501,6 @@ def test_binding_a_copy_is_allowed(tmp_path: Path, copy_expr: str) -> None:
 # ---------------------------------------------------------------------------
 # The five Codex items at a6409d6.
 # ---------------------------------------------------------------------------
-
-
-def test_snapshot_bound_in_a_nested_def_does_not_exempt_a_restore(tmp_path: Path) -> None:
-    """Snapshot discovery reads only statements DIRECTLY in the fixture body —
-    a ``snapshot`` bound inside a nested def cannot exempt a teardown write.
-
-    Sabotage proof (executed): restore ``ast.walk(fn)`` snapshot discovery →
-    reports clean; restored.
-    """
-    source = """import os
-
-import pytest
-
-
-@pytest.fixture
-def _restored():
-    def _capture():
-        snapshot = dict(os.environ)
-        return snapshot
-
-    yield
-    os.environ.update(snapshot)
-"""
-    path = tmp_path / "test_sample.py"
-    path.write_text(source, encoding="utf-8")
-    assert any("os.environ.update" in v for v in file_violations(path))
 
 
 def test_unrelated_local_named_like_an_alias_is_not_tainted(tmp_path: Path) -> None:

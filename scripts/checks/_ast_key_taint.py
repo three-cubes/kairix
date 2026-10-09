@@ -83,7 +83,7 @@ BINDING_SITE_TYPES = (
 _FUNCTION_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
 _SCOPE_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 #: attribute names whose references the detectors classify
-INDEXED_ATTRIBUTES = frozenset({"environ", "modules", "reload"})
+INDEXED_ATTRIBUTES = frozenset({"environ", "modules", "reload", "__import__"})
 
 #: binding kinds recorded per name
 VALUE, ELEMENT, RETURN, PARAM, UNKNOWN = "value", "element", "return", "param", "unknown"
@@ -122,6 +122,7 @@ _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 #: one name binding: ("import", "os.path") for ``import os.path`` (binds ``os``),
 #: ("import_as", "os") for ``import os as o``, ("from", "os", "environ"), ("other",)
 Binding = tuple[str, ...]
+_OTHER: Binding = ("other",)
 
 
 @dataclass
@@ -131,6 +132,8 @@ class ScopeInfo:
     node: ast.AST
     parent: ScopeInfo | None
     bindings: dict[str, list[Binding]] = field(default_factory=dict)
+    #: every binding with the AST node that makes it (for line-accurate reports)
+    sites: dict[str, list[tuple[Binding, ast.AST]]] = field(default_factory=dict)
     globals: set[str] = field(default_factory=set)
     nonlocals: set[str] = field(default_factory=set)
 
@@ -138,8 +141,13 @@ class ScopeInfo:
     def is_class(self) -> bool:
         return isinstance(self.node, ast.ClassDef)
 
-    def bind(self, name: str, binding: Binding) -> None:
+    @property
+    def is_module(self) -> bool:
+        return self.parent is None
+
+    def bind(self, name: str, binding: Binding, node: ast.AST) -> None:
         self.bindings.setdefault(name, []).append(binding)
+        self.sites.setdefault(name, []).append((binding, node))
 
 
 def _child_scope(node: ast.AST, child: ast.AST, scope: ScopeInfo, new: ScopeInfo | None) -> ScopeInfo:
@@ -182,11 +190,15 @@ class ModuleIndex:
     params: dict[str, list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, int | None]]] = field(default_factory=dict)
     #: statements / calls that can write a mapping or patch an attribute
     candidates: list[ast.AST] = field(default_factory=list)
+    #: every ``x[key]`` expression (dynamic lookups of guarded names)
+    subscripts: list[ast.Subscript] = field(default_factory=list)
     #: every binding site (assignment, walrus, return / yield, loop / with target, defaults)
     binding_sites: list[ast.AST] = field(default_factory=list)
     #: the lexical scope every ``Name`` node is evaluated in (by node id)
     name_scope: dict[int, ScopeInfo] = field(default_factory=dict)
     module_scope: ScopeInfo | None = None
+    #: every lexical scope in the file (module first)
+    scopes: list[ScopeInfo] = field(default_factory=list)
 
     @classmethod
     def build(cls, tree: ast.AST) -> ModuleIndex:
@@ -194,10 +206,13 @@ class ModuleIndex:
         returns: list[ast.Return] = []
         root = ScopeInfo(tree, None)
         index.module_scope = root
+        index.scopes.append(root)
         stack: list[tuple[ast.AST, ScopeInfo]] = [(tree, root)]
         while stack:
             node, scope = stack.pop()
             new = ScopeInfo(node, scope) if isinstance(node, _SCOPE_NODES) and node is not tree else None
+            if new is not None:
+                index.scopes.append(new)
             for child in ast.iter_child_nodes(node):
                 index.parents[child] = node
                 stack.append((child, index._scope_for_child(node, child, scope, new)))
@@ -207,7 +222,21 @@ class ModuleIndex:
             fn = enclosing_function(index.parents, ret)
             if fn is not None:
                 index._bind(fn.name, RETURN if ret.value is not None else UNKNOWN, ret.value)
+        index._hoist_globals()
         return index
+
+    def _hoist_globals(self) -> None:
+        """A binding of a name declared ``global`` in its scope rebinds the
+        MODULE-level name — move it there (after traversal: the stack walk does
+        not visit a ``global`` statement before the stores it governs)."""
+        root = self.module_scope
+        if root is None:
+            return
+        for scope in self.scopes[1:]:
+            for name in scope.globals:
+                for binding, node in scope.sites.pop(name, []):
+                    root.bind(name, binding, node)
+                scope.bindings.pop(name, None)
 
     @staticmethod
     def _scope_for_child(node: ast.AST, child: ast.AST, scope: ScopeInfo, new: ScopeInfo | None) -> ScopeInfo:
@@ -227,34 +256,58 @@ class ModuleIndex:
         return _child_scope(node, child, scope, new)
 
     def _record_scope(self, node: ast.AST, scope: ScopeInfo) -> None:
-        """Record which scope binds what, and the scope every Name is read in."""
-        if isinstance(node, ast.Name):
-            self.name_scope[id(node)] = scope
-            # ``environ |= {...}`` rebinds the name to the SAME mapping (in-place
-            # ``__ior__``), so an augmented-assignment target never shadows it
-            parent = self.parents.get(node)
-            augmented = isinstance(parent, ast.AugAssign) and parent.target is node
-            if not isinstance(node.ctx, ast.Load) and not augmented:
-                scope.bind(node.id, ("other",))
-        elif isinstance(node, ast.arg):
-            scope.bind(node.arg, ("other",))
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.asname:
-                    scope.bind(alias.asname, ("import_as", alias.name))
-                else:
-                    scope.bind(alias.name.split(".")[0], ("import", alias.name))
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                scope.bind(alias.asname or alias.name, ("from", node.module or "", alias.name))
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            scope.bind(node.name, ("other",))
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            scope.bind(node.name, ("other",))
-        elif isinstance(node, ast.Global):
-            scope.globals.update(node.names)
-        elif isinstance(node, ast.Nonlocal):
-            scope.nonlocals.update(node.names)
+        """Record which scope binds what, and the scope every Name is read in
+        (one dict lookup per node — the index walks every node of every file)."""
+        handler = _SCOPE_RECORDERS.get(type(node))
+        if handler is not None:
+            handler(self, node, scope)
+
+    def _scope_name(self, node: ast.Name, scope: ScopeInfo) -> None:
+        self.name_scope[id(node)] = scope
+        if isinstance(node.ctx, ast.Load):
+            return
+        # ``environ |= {...}`` rebinds the name to the SAME mapping (in-place
+        # ``__ior__``), so an augmented-assignment target never shadows it
+        parent = self.parents.get(node)
+        if not (isinstance(parent, ast.AugAssign) and parent.target is node):
+            scope.bind(node.id, _OTHER, node)
+
+    @staticmethod
+    def _scope_arg(node: ast.arg, scope: ScopeInfo) -> None:
+        scope.bind(node.arg, _OTHER, node)
+
+    @staticmethod
+    def _scope_import(node: ast.Import, scope: ScopeInfo) -> None:
+        for alias in node.names:
+            if alias.asname:
+                scope.bind(alias.asname, ("import_as", alias.name), node)
+            else:
+                scope.bind(alias.name.split(".")[0], ("import", alias.name), node)
+
+    @staticmethod
+    def _scope_import_from(node: ast.ImportFrom, scope: ScopeInfo) -> None:
+        for alias in node.names:
+            scope.bind(alias.asname or alias.name, ("from", node.module or "", alias.name), node)
+
+    @staticmethod
+    def _scope_named(node: ast.AST, scope: ScopeInfo) -> None:
+        """def / class / except-as / match capture: binds ``node.name`` (if any)."""
+        name = getattr(node, "name", None)
+        if name:
+            scope.bind(name, _OTHER, node)
+
+    @staticmethod
+    def _scope_match_mapping(node: ast.MatchMapping, scope: ScopeInfo) -> None:
+        if node.rest:
+            scope.bind(node.rest, _OTHER, node)
+
+    @staticmethod
+    def _scope_global(node: ast.Global, scope: ScopeInfo) -> None:
+        scope.globals.update(node.names)
+
+    @staticmethod
+    def _scope_nonlocal(node: ast.Nonlocal, scope: ScopeInfo) -> None:
+        scope.nonlocals.update(node.names)
 
     # -- scope-aware resolution -------------------------------------------
 
@@ -310,6 +363,13 @@ class ModuleIndex:
         """``name`` is an un-shadowed builtin (nothing in the file binds it)."""
         return isinstance(name, ast.Name) and self.resolve(name) is None
 
+    def is_builtin_ref(self, name: ast.expr) -> bool:
+        """``name`` is the builtin of that name: un-shadowed, or bound only by
+        ``from builtins import <name>``."""
+        if not isinstance(name, ast.Name):
+            return False
+        return self.is_builtin(name) or self.resolves_to_from(name, "builtins", name.id)
+
     def _bind(self, name: str, kind: str, source: ast.expr | None) -> None:
         self.value_bindings.setdefault(name, []).append((kind, source))
 
@@ -359,6 +419,9 @@ class ModuleIndex:
     def _on_attribute(self, node: ast.Attribute, _returns: list[ast.Return]) -> None:
         if node.attr in INDEXED_ATTRIBUTES:
             self.attributes.setdefault(node.attr, []).append(node)
+
+    def _on_subscript(self, node: ast.Subscript, _returns: list[ast.Return]) -> None:
+        self.subscripts.append(node)
 
     def _on_import(self, node: ast.Import, _returns: list[ast.Return]) -> None:
         self.imports.append(node)
@@ -443,6 +506,26 @@ class ModuleIndex:
         return current if current is not None else node
 
 
+def _static_recorder(fn: Callable[[Any, ScopeInfo], None]) -> Callable[[ModuleIndex, Any, ScopeInfo], None]:
+    return lambda _index, node, scope: fn(node, scope)
+
+
+_SCOPE_RECORDERS: dict[type, Callable[[ModuleIndex, Any, ScopeInfo], None]] = {
+    ast.Name: ModuleIndex._scope_name,
+    ast.arg: _static_recorder(ModuleIndex._scope_arg),
+    ast.Import: _static_recorder(ModuleIndex._scope_import),
+    ast.ImportFrom: _static_recorder(ModuleIndex._scope_import_from),
+    ast.FunctionDef: _static_recorder(ModuleIndex._scope_named),
+    ast.AsyncFunctionDef: _static_recorder(ModuleIndex._scope_named),
+    ast.ClassDef: _static_recorder(ModuleIndex._scope_named),
+    ast.ExceptHandler: _static_recorder(ModuleIndex._scope_named),
+    ast.MatchAs: _static_recorder(ModuleIndex._scope_named),
+    ast.MatchStar: _static_recorder(ModuleIndex._scope_named),
+    ast.MatchMapping: _static_recorder(ModuleIndex._scope_match_mapping),
+    ast.Global: _static_recorder(ModuleIndex._scope_global),
+    ast.Nonlocal: _static_recorder(ModuleIndex._scope_nonlocal),
+}
+
 _CLASSIFIERS: dict[type, Callable[[ModuleIndex, Any, list[ast.Return]], None]] = {
     ast.Name: ModuleIndex._on_name,
     ast.Attribute: ModuleIndex._on_attribute,
@@ -462,6 +545,7 @@ _CLASSIFIERS: dict[type, Callable[[ModuleIndex, Any, list[ast.Return]], None]] =
     ast.With: ModuleIndex._on_with,
     ast.AsyncWith: ModuleIndex._on_with,
     ast.ExceptHandler: ModuleIndex._on_except,
+    ast.Subscript: ModuleIndex._on_subscript,
 }
 
 # Constant folding.

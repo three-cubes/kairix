@@ -7,6 +7,7 @@ and works in environments without ``azure-identity`` installed.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
@@ -210,18 +211,9 @@ def test_lazy_import_azure_identity_raises_typed(monkeypatch: Any) -> None:
     missing, ``_build_credential`` raises the typed error with the
     "azure-identity package" rationale.
     """
-    import builtins
-    import sys
-
-    monkeypatch.delitem(sys.modules, "azure.identity", raising=False)
-    original = builtins.__import__
-
-    def blocked(name: str, *args: object, **kwargs: object) -> object:
-        if name == "azure.identity":
-            raise ImportError("no azure-identity in this env")
-        return original(name, *args, **kwargs)  # type: ignore[arg-type]  # F3 rationale: builtins.__import__ wrapper signature mirrors stdlib but mypy refuses the *args/**kwargs forward
-
-    monkeypatch.setattr(builtins, "__import__", blocked)
+    # A None entry in sys.modules makes ``import <dep>`` raise ImportError —
+    # the optional dependency is simulated as not installed (auto-undone).
+    monkeypatch.setitem(sys.modules, "azure.identity", None)
     # Construct without credential_factory so the lazy import path runs.
     store = AzureKeyVaultTokenStore(vault_name="x", env={})
     # Strengthened: the prior regex `match="azure-identity"` matched the
@@ -317,18 +309,9 @@ def test_lazy_import_real_azure_keyvault_returns_client() -> None:
 
 def test_lazy_import_azure_keyvault_raises_typed(monkeypatch: Any) -> None:
     """When ``azure-keyvault-secrets`` isn't installed the client build surfaces a typed error."""
-    import builtins
-
-    # No sys.modules eviction needed: an ``import`` statement always calls
-    # ``builtins.__import__`` (patched below), cached module or not.
-    original = builtins.__import__
-
-    def blocked(name: str, *args: object, **kwargs: object) -> object:
-        if name == "azure.keyvault.secrets":
-            raise ImportError("no azure-keyvault-secrets in this env")
-        return original(name, *args, **kwargs)  # type: ignore[arg-type]  # F3 rationale: builtins.__import__ wrapper signature mirrors stdlib but mypy refuses the *args/**kwargs forward
-
-    monkeypatch.setattr(builtins, "__import__", blocked)
+    # A None entry in sys.modules makes ``import <dep>`` raise ImportError —
+    # the optional dependency is simulated as not installed (auto-undone).
+    monkeypatch.setitem(sys.modules, "azure.keyvault.secrets", None)
     # Supply credential_factory so we don't fail on identity first; let
     # client_factory remain unset so the keyvault lazy import is hit.
     store = AzureKeyVaultTokenStore(

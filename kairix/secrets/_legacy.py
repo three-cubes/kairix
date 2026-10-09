@@ -365,12 +365,13 @@ def set_llm_api_key(value: str) -> None:
     os.environ["KAIRIX_LLM_API_KEY"] = value
 
 
-def refresh_secrets(path: str | Path | None = None) -> int:
+def refresh_secrets(path: str | Path | None = None, *, env: MutableMapping[str, str] | None = None) -> int:
     """Clear cached secrets and reload from the secrets file.
 
     Clears the lru_cache on ``load_secrets_file`` so the next
     ``get_secret`` call re-reads the file. Then calls ``load_secrets``
-    to re-populate ``os.environ`` with any new or rotated values.
+    to re-populate ``env`` (``None`` — production — is the live
+    ``os.environ``) with any new or rotated values.
 
     Use this after rotating credentials in Azure Key Vault and
     re-fetching the secrets file (e.g., via a cron job or systemd
@@ -379,4 +380,4 @@ def refresh_secrets(path: str | Path | None = None) -> int:
     Returns the number of environment variables loaded.
     """
     load_secrets_file.cache_clear()
-    return load_secrets(path)
+    return load_secrets(path, env=env)

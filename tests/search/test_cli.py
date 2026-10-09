@@ -15,7 +15,7 @@ from dataclasses import field as _field
 
 import pytest
 
-from kairix.core.search.cli import build_parser, format_text, to_json_envelope
+from kairix.core.search.cli import build_parser, format_text, main, to_json_envelope
 from kairix.use_cases.search import SearchHit, SearchOutput
 
 pytestmark = pytest.mark.unit
@@ -308,9 +308,8 @@ def test_main_text_mode_prints_query_and_intent_lines(
     Sabotage: deleting ``print(format_text(out))`` in main() causes
     capsys.readouterr().out to be empty and the "Query:" assertion to fail.
     """
-    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
     with pytest.raises(SystemExit) as exc_info:
-        main_module.main(["my unit test query"])
+        main(["my unit test query"])
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "Query: my unit test query" in captured.out
@@ -328,9 +327,8 @@ def test_main_json_mode_emits_parseable_envelope(
     Sabotage: swapping to_json_envelope for format_text in the --json branch
     makes captured.out non-JSON and json.loads raises ValueError → test fails.
     """
-    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
     with pytest.raises(SystemExit) as exc_info:
-        main_module.main(["another query", "--json"])
+        main(["another query", "--json"])
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
@@ -348,9 +346,8 @@ def test_main_exits_nonzero_when_search_output_has_error(
     #
     # We trigger an error by passing scope=all-agents which surfaces an
     # error inside run_search (the collection resolver path).
-    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
     with pytest.raises(SystemExit) as exc_info:
-        main_module.main(["query", "--scope", "all-agents", "--agent", "shape"])
+        main(["query", "--scope", "all-agents", "--agent", "shape"])
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "Error:" in captured.out
@@ -439,8 +436,7 @@ def test_main_with_collection_flag_injects_collections_into_search_call(
 
     from kairix.use_cases.search import SearchDeps
 
-    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
-    main_module.main(
+    main(
         ["q", "--collection", "reference-library", "--no-entity-card"],
         deps=SearchDeps(search_fn=_spy_search),
     )
@@ -470,8 +466,7 @@ def test_main_without_collection_flag_does_not_inject_collections(
 
     from kairix.use_cases.search import SearchDeps
 
-    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
-    main_module.main(["q", "--no-entity-card"], deps=SearchDeps(search_fn=_spy_search))
+    main(["q", "--no-entity-card"], deps=SearchDeps(search_fn=_spy_search))
     _ = capsys.readouterr()
 
     assert "collections" not in captured

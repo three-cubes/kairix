@@ -305,30 +305,28 @@ def test_get_secret_oserror_message_is_informative() -> None:
 
 
 @pytest.mark.unit
-def test_refresh_secrets_clears_cache_and_reloads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """refresh_secrets clears lru_cache and re-reads the secrets file."""
+def test_refresh_secrets_clears_cache_and_reloads(tmp_path: Path) -> None:
+    """refresh_secrets clears lru_cache and re-reads the secrets file into the
+    injected env mapping (``env=None`` in production is the live process env)."""
     from kairix.secrets import load_secrets_file, refresh_secrets
 
     secrets_file = tmp_path / "kairix.env"
     secrets_file.write_text("MY_SECRET_A=original\n")
+    env: dict[str, str] = {}
 
     # First load
     load_secrets_file.cache_clear()
-    loaded = refresh_secrets(str(secrets_file))
+    loaded = refresh_secrets(str(secrets_file), env=env)
     assert loaded >= 1
-    assert os.environ.get("MY_SECRET_A") == "original"
+    assert env == {"MY_SECRET_A": "original"}  # pragma: allowlist secret — fixture value, not a credential
 
-    # Rotate the secret
+    # Rotate the secret; a fresh mapping (nothing exported) picks up the new file
     secrets_file.write_text("MY_SECRET_A=rotated\nMY_SECRET_B=new\n")
-
-    # Without refresh, cache would return old value
-    # After refresh, new value should be picked up
-    monkeypatch.delenv("MY_SECRET_A", raising=False)
-    monkeypatch.delenv("MY_SECRET_B", raising=False)
-    loaded = refresh_secrets(str(secrets_file))
+    rotated: dict[str, str] = {}
+    loaded = refresh_secrets(str(secrets_file), env=rotated)
     assert loaded >= 2
-    assert os.environ.get("MY_SECRET_A") == "rotated"
-    assert os.environ.get("MY_SECRET_B") == "new"
+    assert rotated == {"MY_SECRET_A": "rotated", "MY_SECRET_B": "new"}  # pragma: allowlist secret — fixture values
+    assert "MY_SECRET_A" not in os.environ, "refresh_secrets(env=...) must not touch the process env"
 
 
 @pytest.mark.unit

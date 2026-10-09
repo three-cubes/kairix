@@ -430,11 +430,27 @@ guarded import only when no enclosing function, lambda, comprehension or class
 scope rebinds the name (parameter, assignment, loop / with / except target,
 walrus, import, `def` / `class`; bound anywhere in a body means local
 throughout), so `def helper(os): ...` or a local `environ = {}` is not the
-guarded object. A module-level rebind of the imported name (`os = FakeOs()`)
-shadows it for the WHOLE module; an augmented assignment (`environ |= {...}`)
-mutates in place and does not shadow. Every reference to `sys.modules` and to
+guarded object. **Rebinding a guarded name is itself a violation** (the
+alias-ban principle): at module level or directly in a class body, ANY
+binding of `os` / `sys` / `importlib` / `environ` / `modules` / `reload` /
+`getattr` / `setattr` / `delattr` / `__import__` other than its own import
+fails — `os = FakeOs()`, `import json as os`, `def getattr(...)`, a store
+after `global os` in a function — and so does a function that both imports
+such a name and rebinds it, since a reference there means different things
+before and after the rebind. A function-local shadow with no import of the
+name in that function (a parameter named `os`) is not a violation: Python
+makes the name local for the whole body. An augmented assignment
+(`environ |= {...}`) mutates in place and is not a rebind. Every reference to `sys.modules` and to
 `importlib.reload` must be an allow-listed READ, or a write PROVEN safe;
-**anything not provably a safe read or a safe write fails.** A key, module
+**anything not provably a safe read or a safe write fails.** **Any reference
+to builtin `__import__` fails** — the bare name, `<x>.__import__`
+(`builtins` / `__builtins__` / `importlib`), or a `getattr` name, subscript
+key or call argument that folds to it (`getattr(builtins, "__im" +
+"port__")`, `__builtins__["__import__"]`, `monkeypatch.setattr(builtins,
+"__import__", ...)`): tests import normally, or call
+`importlib.import_module` with a static name; a missing optional dependency
+is simulated with `monkeypatch.setitem(sys.modules, "<dep>", None)` (a
+non-kairix key, so a provably safe write). A key, module
 argument or patch target that cannot be resolved statically (a runtime value,
 a parameter with no resolvable call site, an imported constant) is treated as
 protected — the gate never has to have seen the spelling before. Resolution
@@ -618,26 +634,26 @@ worse evasion: they skip monkeypatch's auto-undo, so a forgotten restore
 leaks the value into every later test in the process (a pytest-bdd step's
 `os.environ["KAIRIX_DB_PATH"] = ...` did exactly that).
 
-Two reviewed process-boundary shapes are recognised **structurally** — no
-allow-list, baseline, pragma or path list:
+ONE reviewed process-boundary shape is recognised **structurally** — no
+allow-list, baseline, pragma or path list: statements DIRECTLY in the body of
+a `conftest.py` fixture declared `@pytest.fixture(scope="session",
+autouse=True)` — not in a nested function, lambda or yielded / returned
+callback, which inherit nothing — the once-per-run hermetic baseline
+(`tests/conftest.py::_hermetic_data_dirs` clears the ambient operator
+variables and sets the `KAIRIX_CONNECT_DISABLE_BROWSER` kill-switch, undone
+at session end). It stays because it is a safety net for code paths that
+escape their injection seam — it cannot be expressed as a per-test seam
+without every test opting in, which is exactly what a net must not rely on.
 
-- statements DIRECTLY in the body of a `conftest.py` fixture declared
-  `@pytest.fixture(scope="session", autouse=True)` — not in a nested
-  function, lambda or yielded / returned callback, which inherit nothing — the once-per-run
-  hermetic baseline (`tests/conftest.py::_hermetic_data_dirs` clears the
-  ambient operator variables and sets the `KAIRIX_CONNECT_DISABLE_BROWSER`
-  kill-switch, undone at session end);
-- writes AFTER the `yield` of a `@pytest.fixture` that copied `os.environ`
-  (`dict(os.environ)` / `os.environ.copy()` / `{**os.environ}`) BEFORE the
-  yield — both the copy and the `yield` statements directly in the fixture
-  body, never inside a nested `def` / `lambda` / `class` — when the write is a genuine restore from that snapshot —
-  `os.environ.update(snapshot)` (optionally preceded by
-  `os.environ.clear()` in the same unconditional statement list, with no
-  early `return` / `raise` in between), `os.environ[k] = snapshot[k]` for the same key, or
-  a `pop` / `del` of `k` guarded by `k` being absent from the snapshot
-  (`tests/setup/test_wizard.py::_restored_environ`). Writes before the
-  yield, and post-yield writes that merely mention the snapshot, are still
-  violations.
+There is **no snapshot / restore exemption**: a fixture that copies
+`os.environ` and restores it after the `yield` (`clear()` +
+`update(snapshot)`, per-key restore, `pop`) is reported like any other
+write. When the code under test writes the process env, inject the env
+mapping through the production seam instead — e.g.
+`persist_llm_credentials(..., environ=env)` /
+`refresh_secrets(path, env=env)` / `load_secrets(path, env=env)` hydrate
+into the mapping passed — and when a test genuinely needs a clean real
+process env (a subprocess), pass `env=` to the subprocess.
 
 #### Why
 
@@ -679,9 +695,17 @@ guarded import only when no enclosing function, lambda, comprehension or class
 scope rebinds the name (parameter, assignment, loop / with / except target,
 walrus, import, `def` / `class`; bound anywhere in a body means local
 throughout), so `def helper(os): ...` or a local `environ = {}` is not the
-guarded object. A module-level rebind of the imported name (`os = FakeOs()`)
-shadows it for the WHOLE module; an augmented assignment (`environ |= {...}`)
-mutates in place and does not shadow. Every reference to `os.environ` (and every
+guarded object. **Rebinding a guarded name is itself a violation** (the
+alias-ban principle): at module level or directly in a class body, ANY
+binding of `os` / `sys` / `importlib` / `environ` / `modules` / `reload` /
+`getattr` / `setattr` / `delattr` / `__import__` other than its own import
+fails — `os = FakeOs()`, `import json as os`, `def getattr(...)`, a store
+after `global os` in a function — and so does a function that both imports
+such a name and rebinds it, since a reference there means different things
+before and after the rebind. A function-local shadow with no import of the
+name in that function (a parameter named `os`) is not a violation: Python
+makes the name local for the whole body. An augmented assignment
+(`environ |= {...}`) mutates in place and is not a rebind. Every reference to `os.environ` (and every
 `setenv` / `delenv`) must be an allow-listed READ, or a write PROVEN safe;
 **anything not provably a safe read or a safe write fails.** A key or patch
 target that cannot be resolved statically (a runtime value,

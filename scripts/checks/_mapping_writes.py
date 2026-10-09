@@ -251,6 +251,62 @@ _OS_LAUNCHER_PREFIXES = ("exec", "spawn", "posix_spawn")
 Finding = tuple[ast.AST, str]
 
 
+# ---------------------------------------------------------------------------
+# Rebinding a guarded import name (same principle as the alias ban).
+# ---------------------------------------------------------------------------
+
+#: A guarded NAME and the one binding that makes it the guarded object:
+#: ``("module", "os")`` — ``import os`` / ``import os.path`` / ``import os as os``;
+#: ``("from", "os", "environ")`` — ``from os import environ``. Builtins
+#: (``getattr`` / ``__import__`` ...) are canonical as ``from builtins import x``
+#: or when nothing binds them at all.
+GuardedName = tuple[str, ...]
+
+BUILTIN_GUARDED_NAMES: dict[str, GuardedName] = {
+    name: ("from", "builtins", name) for name in ("getattr", "setattr", "delattr", "__import__")
+}
+
+
+def _is_canonical(binding: tuple[str, ...], canonical: GuardedName) -> bool:
+    if canonical[0] == "module":
+        module = canonical[1]
+        if binding[0] == "import":
+            return binding[1] == module or binding[1].startswith(f"{module}.")
+        return binding[0] == "import_as" and binding[1] == module
+    return binding == canonical
+
+
+def guarded_rebinds(index: ModuleIndex, guarded: dict[str, GuardedName]) -> list[Finding]:
+    """Every binding that makes a guarded name something OTHER than its guarded
+    import, where that could change what an earlier / later reference means:
+
+    * at module level or directly in a class body — ANY such binding
+      (``os = object()``, ``import json as os``, ``def getattr(...)``,
+      ``environ = {}``, ``for sys in ...``, a ``global os`` store in a function);
+    * in a function / lambda / comprehension scope — only when the SAME scope
+      also imports the guarded object (``import os`` ... ``os = x``), since the
+      reference then means different things before and after the rebind.
+
+    A plain function-local shadow (a parameter named ``os``, a local
+    ``environ = {}`` with no import of it in that function) is not reported:
+    Python makes the name local for the whole body, so no reference in that
+    body can reach the guarded import.
+    """
+    out: list[Finding] = []
+    for scope in index.scopes:
+        module_like = scope.is_module or scope.is_class
+        for name, canonical in guarded.items():
+            sites = scope.sites.get(name, [])
+            rebinds = [node for binding, node in sites if not _is_canonical(binding, canonical)]
+            if not rebinds:
+                continue
+            imported_here = any(_is_canonical(binding, canonical) for binding, _ in sites)
+            if module_like or imported_here:
+                where = "module level" if scope.is_module else ("class body" if scope.is_class else "function")
+                out.extend((node, f"rebinds guarded name {name} ({where})") for node in rebinds)
+    return out
+
+
 class MappingGuard:
     """Classifies every reference to one process-global mapping (default-deny)."""
 
@@ -332,7 +388,7 @@ class MappingGuard:
         if any(isinstance(a, ast.Starred) for a in call.args) or any(kw.arg is None for kw in call.keywords):
             return False  # a spread may hide the attribute name or the value
         func = call.func
-        if isinstance(func, ast.Name) and func.id in _ATTRIBUTE_READERS and self.index.is_builtin(func):
+        if isinstance(func, ast.Name) and func.id in _ATTRIBUTE_READERS and self.index.is_builtin_ref(func):
             # builtin getattr / hasattr, called directly: (obj, name[, default])
             return len(call.args) >= 2 and call.args[0] is ref and self._statically_other_attr(call.args[1])
         if isinstance(func, ast.Attribute) and func.attr in {"setattr", "delattr"}:
@@ -381,10 +437,7 @@ class MappingGuard:
                 if expr.value.id in self.builtins_modules and self.index.resolves_to_module(expr.value, "builtins"):
                     return f"builtins.{expr.attr}"
         if isinstance(expr, ast.Name) and expr.id in self.builtin_attr_functions:
-            unshadowed = self.index.is_builtin(expr) or any(
-                self.index.resolves_to_from(expr, "builtins", fn) for fn in ("getattr", "setattr", "delattr")
-            )
-            if unshadowed:
+            if self.index.is_builtin_ref(expr):
                 return f"builtin {expr.id}"
         return self.extra_guarded(expr)
 
@@ -481,7 +534,7 @@ class MappingGuard:
         if node.func is ref:
             return [(node, f"call {self.label}")]
         func = node.func
-        builtin_reader = isinstance(func, ast.Name) and func.id in READ_BUILTINS and self.index.is_builtin(func)
+        builtin_reader = isinstance(func, ast.Name) and func.id in READ_BUILTINS and self.index.is_builtin_ref(func)
         if builtin_reader and node.args and node.args[0] is ref:
             return []
         return self._argument_use(node, ref)

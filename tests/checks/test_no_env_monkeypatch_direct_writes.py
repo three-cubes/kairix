@@ -6,9 +6,9 @@ tests evading it by writing ``os.environ`` directly — the pytest-bdd step that
 did ``os.environ["KAIRIX_DB_PATH"] = ...`` leaked the value into every later
 test in the process, because a raw write has no auto-undo. This module pins
 each direct-write shape, the key-resolution hops (variable, loop, alias), the
-negatives (reads, non-KAIRIX keys), and the two structurally-recognised
-process-boundary shapes (conftest session baseline, snapshot-restore
-teardown).
+negatives (reads, non-KAIRIX keys), the ONE structurally-recognised
+process-boundary shape (the conftest session baseline), and that a
+snapshot-restore teardown is a violation like any other write.
 
 Pattern: write a small source string under ``tmp_path``, run it through the
 public ``file_violations`` surface, assert on the reported shapes.
@@ -282,174 +282,53 @@ def test_conftest_fixture_without_session_autouse_is_flagged(tmp_path: Path, dec
 
 
 # ---------------------------------------------------------------------------
-# Structural recognition 2 — snapshot-restore teardown.
+# No snapshot / restore exemption: every restore of the process env is a write.
 # ---------------------------------------------------------------------------
 
-_SNAPSHOT_RESTORE = """
+_RESTORE_FIXTURE = """
 import os
 
 import pytest
 
+_KEYS = ("KAIRIX_DB_PATH", "KAIRIX_DATA_DIR")
+
 
 @pytest.fixture
-def _restored_environ():
+def _restored(flag):
     snapshot = {snapshot_expr}
     yield
-    os.environ.clear()
-    os.environ.update(snapshot)
+{body}
 """
 
+RESTORE_SHAPES = {
+    "clear + update(dict copy)": ("dict(os.environ)", "    os.environ.clear()\n    os.environ.update(snapshot)"),
+    "clear + update(.copy())": ("os.environ.copy()", "    os.environ.clear()\n    os.environ.update(snapshot)"),
+    "clear + update({**})": ("{**os.environ}", "    os.environ.clear()\n    os.environ.update(snapshot)"),
+    "update(snapshot) only": ("dict(os.environ)", "    os.environ.update(snapshot)"),
+    "finally clear + update": (
+        "dict(os.environ)",
+        "    try:\n        pass\n    finally:\n        os.environ.clear()\n        os.environ.update(snapshot)",
+    ),
+    "per-key restore / pop": (
+        "dict(os.environ)",
+        "    for key in _KEYS:\n        if key in snapshot:\n            os.environ[key] = snapshot[key]\n"
+        "        else:\n            os.environ.pop(key, None)",
+    ),
+}
 
-@pytest.mark.parametrize("snapshot_expr", ["dict(os.environ)", "os.environ.copy()", "{**os.environ}"])
-def test_snapshot_restore_teardown_is_recognised(tmp_path: Path, snapshot_expr: str) -> None:
-    """Restoring a pre-yield ``os.environ`` snapshot after the yield is allowed.
 
-    Sabotage proof (executed): make ``_is_recognised_boundary`` return
-    ``False`` → the ``update(snapshot)`` is reported and this fails;
-    restored.
+@pytest.mark.parametrize(("snapshot_expr", "body"), RESTORE_SHAPES.values(), ids=list(RESTORE_SHAPES))
+def test_snapshot_restore_teardown_is_a_violation(tmp_path: Path, snapshot_expr: str, body: str) -> None:
+    """The snapshot-restore exemption is gone (PR #814 review): a fixture that
+    restores the process env from a snapshot is reported like any other
+    write — inject the env mapping through the production seam instead.
+
+    Sabotage proof (executed): make ``_is_recognised_boundary`` also exempt
+    every statement directly in any ``@pytest.fixture`` body → every case
+    reports clean (6 red); restored.
     """
-    src = _SNAPSHOT_RESTORE.replace("{snapshot_expr}", snapshot_expr)
-    assert _violations(tmp_path, src) == []
-
-
-def test_write_before_the_yield_of_a_snapshotting_fixture_is_flagged(tmp_path: Path) -> None:
-    """Seeding a KAIRIX_* value before the yield is still a violation."""
-    src = """
-import os
-
-import pytest
-
-
-@pytest.fixture
-def _seeded():
-    snapshot = dict(os.environ)
-    os.environ["KAIRIX_DB_PATH"] = "/tmp/db"
-    yield
-    os.environ.clear()
-    os.environ.update(snapshot)
-"""
-    assert _violations(tmp_path, src) == ["10: assign os.environ[KAIRIX_*]"]
-
-
-def test_teardown_write_not_from_the_snapshot_is_flagged(tmp_path: Path) -> None:
-    """After the yield, only a write that restores FROM the snapshot is allowed."""
-    src = """
-import os
-
-import pytest
-
-
-@pytest.fixture
-def _leaky():
-    snapshot = dict(os.environ)
-    yield
-    os.environ.update(snapshot)
-    os.environ["KAIRIX_DB_PATH"] = "/tmp/leak"
-"""
-    assert _violations(tmp_path, src) == ["12: assign os.environ[KAIRIX_*]"]
-
-
-def test_restore_without_a_snapshot_or_outside_a_fixture_is_flagged(tmp_path: Path) -> None:
-    """No pre-yield snapshot, or not a fixture -> not the recognised shape."""
-    src = """
-import os
-
-import pytest
-
-
-@pytest.fixture
-def _no_snapshot(overrides):
-    yield
-    os.environ.update(overrides)
-
-
-def _plain_generator():
-    snapshot = dict(os.environ)
-    yield
-    os.environ.update(snapshot)
-"""
-    assert _violations(tmp_path, src) == [
-        "10: os.environ.update(<may carry KAIRIX_*>)",
-        "16: os.environ.update(<may carry KAIRIX_*>)",
-    ]
-
-
-def test_post_yield_write_that_merely_mentions_the_snapshot_is_flagged(tmp_path: Path) -> None:
-    """Codex PR #814 thread: only GENUINE restoration is recognised. A teardown
-    write that reads some other value out of the snapshot seeds a KAIRIX_*
-    key and must still be reported.
-
-    Sabotage proof (executed): make ``_is_genuine_restore`` return ``True``
-    (back to "references the snapshot") → no violation is reported; restored.
-    """
-    src = """
-import os
-
-import pytest
-
-
-@pytest.fixture
-def _leaky():
-    snapshot = dict(os.environ)
-    yield
-    os.environ.clear()
-    os.environ.update(snapshot)
-    os.environ["KAIRIX_DB_PATH"] = snapshot.get("PATH", "/leak")
-"""
-    assert _violations(tmp_path, src) == ["13: assign os.environ[KAIRIX_*]"]
-
-
-def test_per_key_restore_from_the_snapshot_is_recognised(tmp_path: Path) -> None:
-    """``os.environ[k] = snapshot[k]`` (same key) and a ``pop`` of ``k`` only
-    when ``k`` was absent from the snapshot are genuine per-key restores.
-
-    Sabotage proof (executed): make ``_is_genuine_restore`` return ``False``
-    → both restore writes are reported; restored.
-    """
-    src = """
-import os
-
-import pytest
-
-_KEYS = ("KAIRIX_DB_PATH", "KAIRIX_DATA_DIR")
-
-
-@pytest.fixture
-def _restored():
-    snapshot = dict(os.environ)
-    yield
-    for key in _KEYS:
-        if key in snapshot:
-            os.environ[key] = snapshot[key]
-        else:
-            os.environ.pop(key, None)
-"""
-    assert _violations(tmp_path, src) == []
-
-
-def test_unguarded_or_mismatched_per_key_restore_is_flagged(tmp_path: Path) -> None:
-    """A pop not guarded by key-absence, or a restore from a DIFFERENT key,
-    is not genuine restoration."""
-    src = """
-import os
-
-import pytest
-
-_KEYS = ("KAIRIX_DB_PATH", "KAIRIX_DATA_DIR")
-
-
-@pytest.fixture
-def _restored():
-    snapshot = dict(os.environ)
-    yield
-    for key in _KEYS:
-        os.environ.pop(key, None)
-        os.environ[key] = snapshot["PATH"]
-"""
-    assert _violations(tmp_path, src) == [
-        "14: os.environ.pop(KAIRIX_*)",
-        "15: assign os.environ[KAIRIX_*]",
-    ]
+    src = _RESTORE_FIXTURE.replace("{snapshot_expr}", snapshot_expr).replace("{body}", body)
+    assert _violations(tmp_path, src), "a snapshot-restore teardown must be reported"
 
 
 def test_key_returned_by_a_helper_call_is_flagged(tmp_path: Path) -> None:
@@ -506,9 +385,11 @@ def test_patch_dict_keyword_form_on_other_dicts_is_not_flagged(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("relative", ["tests/conftest.py", "tests/setup/test_wizard.py"])
-def test_reviewed_boundary_sites_in_the_tree_are_clean(relative: str) -> None:
-    """The two reviewed process-boundary fixtures pass through the structural
-    recognitions — no allow-list entry names them."""
+def test_reviewed_sites_in_the_tree_are_clean(relative: str) -> None:
+    """The conftest session baseline passes through the one structural
+    recognition; the wizard hydrate test injects its env mapping through the
+    ``environ=`` seam and so writes no process env at all — no allow-list
+    entry names either."""
     assert file_violations(_REPO_ROOT / relative) == []
 
 
@@ -527,72 +408,6 @@ def test_remediation_is_f21_actionable() -> None:
     for marker in ("fix:", "next:", "run:", "Pass example:", "Forbidden example:"):
         assert marker in REMEDIATION
     assert "os.environ['KAIRIX_DB_PATH']" in REMEDIATION
-
-
-# ---------------------------------------------------------------------------
-# clear() + restore: only on the same unconditional straight-line path
-# (PR #814 thread).
-# ---------------------------------------------------------------------------
-
-_CLEAR_FIXTURE = """
-import os
-
-import pytest
-
-
-@pytest.fixture
-def _restored(flag):
-    snapshot = dict(os.environ)
-    yield
-{body}
-"""
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        "    os.environ.clear()\n    os.environ.update(snapshot)",
-        "    try:\n        pass\n    finally:\n        os.environ.clear()\n        os.environ.update(snapshot)",
-        "    os.environ.clear()\n    note = 1\n    os.environ.update(snapshot)",
-    ],
-    ids=["sibling", "finally-body", "later-sibling"],
-)
-def test_clear_then_unconditional_restore_is_recognised(tmp_path: Path, body: str) -> None:
-    """``clear()`` followed by ``update(snapshot)`` as a later sibling in the
-    same unconditional statement list (the fixture body, or a ``finally`` on
-    that path) is genuine restoration.
-
-    Sabotage proof (executed): make ``_followed_by_full_restore`` return
-    ``False`` → every case reports the ``clear()``; restored.
-    """
-    assert _violations(tmp_path, _CLEAR_FIXTURE.format(body=body)) == []
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        "    os.environ.clear()\n    if flag:\n        os.environ.update(snapshot)",
-        "    os.environ.clear()\n    for _ in range(1):\n        os.environ.update(snapshot)",
-        "    os.environ.clear()\n\n    def _restore():\n        os.environ.update(snapshot)\n\n    _restore()",
-        "    os.environ.clear()\n    restore = lambda: os.environ.update(snapshot)\n    restore()",
-        "    try:\n        os.environ.clear()\n        os.environ.update(snapshot)\n"
-        + "    except Exception:\n        pass",
-        "    if flag:\n        os.environ.clear()\n        os.environ.update(snapshot)",
-        "    os.environ.update(snapshot)\n    os.environ.clear()",
-    ],
-    ids=["conditional", "loop", "nested-def", "lambda", "try-body", "clear-in-if", "update-before"],
-)
-def test_clear_without_an_unconditional_restore_is_flagged(tmp_path: Path, body: str) -> None:
-    """A restore that is conditional, looped, inside a nested function /
-    lambda, in a ``try`` body, or before the ``clear()`` leaves the env
-    cleared on some path — the ``clear()`` is reported.
-
-    Sabotage proof (executed): revert ``_followed_by_full_restore`` to "any
-    later ``update(snapshot)`` anywhere in the fixture" → every case except
-    ``update-before`` passes clean (6 of 7 red); restored.
-    """
-    violations = _violations(tmp_path, _CLEAR_FIXTURE.format(body=body))
-    assert any(v.endswith("os.environ.clear()") for v in violations), violations
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -85,16 +85,17 @@ def _default_write_config(updates: Mapping[str, Any], output_path: str | None) -
     )
 
 
-def _default_hydrate(path: Path) -> int:
-    """Production seam — hydrate the just-written bundle into the process env.
+def _default_hydrate(path: Path, environ: MutableMapping[str, str] | None) -> int:
+    """Production seam — hydrate the just-written bundle into ``environ``.
 
     Routes through :func:`kairix.secrets.refresh_secrets` so the
     in-process connection test resolves the persisted canonical values
-    through the standard loader chain.
+    through the standard loader chain. ``environ=None`` (production) is the
+    live process env.
     """
     from kairix.secrets import refresh_secrets
 
-    return refresh_secrets(path)
+    return refresh_secrets(path, env=environ)
 
 
 # Legacy (pre-Foundry) Azure endpoint host fragments — mirrors the
@@ -156,7 +157,8 @@ def persist_llm_credentials(
     llm_model: str = "",
     *,
     bundle_path: Path | None = None,
-    hydrate_fn: Callable[[Path], int] = _default_hydrate,
+    hydrate_fn: Callable[[Path, MutableMapping[str, str] | None], int] = _default_hydrate,
+    environ: MutableMapping[str, str] | None = None,
 ) -> Path | None:
     """Persist the wizard's collected credentials under canonical names.
 
@@ -168,7 +170,9 @@ def persist_llm_credentials(
     overriding its built-in default. Empty values are skipped. After the
     last write the bundle is hydrated into the process env
     (``hydrate_fn`` seam; production = ``refresh_secrets``) so the
-    connection test resolves the stored values.
+    connection test resolves the stored values. ``environ`` is the env
+    mapping the bundle hydrates into — ``None`` (production) is the live
+    process env; a caller holding its own env mapping passes it.
 
     Returns the bundle path written to, or ``None`` when every value
     was empty (nothing persisted, nothing hydrated).
@@ -186,7 +190,7 @@ def persist_llm_credentials(
         if value:
             path = set_secret(name, value, bundle_path=bundle_path)
     if path is not None:
-        hydrate_fn(path)
+        hydrate_fn(path, environ)
     return path
 
 

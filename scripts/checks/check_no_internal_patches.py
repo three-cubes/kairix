@@ -66,22 +66,26 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import re
 
-from _ast_key_taint import UNKNOWN, VALUE, ConstantTable, ModuleIndex, ProtectedKeys, parse_index
+from _ast_key_taint import UNKNOWN, VALUE, ConstantTable, ModuleIndex, ProtectedKeys, fold_string, parse_index
 from _fitness_rule import FitnessRule
 from _mapping_writes import (
+    BUILTIN_GUARDED_NAMES,
     IMPORT_MODULE_SIGNATURE,
     MONKEYPATCH_SIGNATURES,
     PATCH_OBJECT_SIGNATURE,
     PATCH_SIGNATURE,
     RELOAD_SIGNATURE,
+    GuardedName,
     MappingGuard,
     ProcessMapping,
     bind_call,
+    guarded_rebinds,
 )
 
 REMEDIATION = """kairix-internal substitution found in a test (@patch / monkeypatch.setattr /
 attribute assignment on a kairix target, a sys.modules swap of a kairix
-module, or importlib.reload of one). Refactor to constructor injection
+module, importlib.reload of one, any reference to builtin __import__, or a
+rebinding of a guarded name). Refactor to constructor injection
 with a fake from tests/fakes.py to pass.
 
 fix: rewrite the test to construct the unit under test with a Fake*
@@ -104,6 +108,15 @@ For "importing X has no side effects", import X in a fresh interpreter
 (``subprocess.run([sys.executable, "-c", "import X"])``) instead of
 reloading it in the shared test process.
 
+Import normally, or call ``importlib.import_module`` with a static name —
+never ``__import__`` (by name, ``builtins.__import__``, or a string that
+folds to it). To simulate an optional dependency that is not installed, put
+``None`` in ``sys.modules`` for it: ``monkeypatch.setitem(sys.modules,
+"yaml", None)`` makes ``import yaml`` raise ImportError and is undone
+automatically. Never rebind ``sys`` / ``importlib`` / ``modules`` /
+``reload`` / ``getattr`` / ``setattr`` / ``delattr`` / ``__import__`` at
+module level or in a class body (or alongside its import in a function).
+
 next: re-run ``python3 scripts/checks/check_no_internal_patches.py``
 to confirm the gate goes green. The gate is DEFAULT-DENY for
 ``sys.modules``, ``importlib.reload`` and dotted patch targets: a reference
@@ -119,6 +132,7 @@ Pass example:
   assert pipeline.run(query='x') == ...
   cache = CrossEncoderCache()
   assert get_cross_encoder("m", cache=cache) is None
+  monkeypatch.setitem(sys.modules, "yaml", None)   # yaml "not installed"
 
 Forbidden example:
   Shapes that fire the gate (all eight are the same anti-pattern):
@@ -133,6 +147,9 @@ Forbidden example:
   sys.modules["kairix.core.search.pipeline"] = BrokenModule(...)
   mods = sys.modules; mods.update(fakes)
   importlib.reload(kairix.core.search.rerank)   # or reload(module=...)
+  mod = __import__("kairix.paths")
+  monkeypatch.setattr(builtins, "__import__", blocking_import)
+  sys = FakeSys()   # module-level rebind of a guarded name
 
 Stdlib boundaries (os.*, time.*, etc.) and external SDK boundaries
 (httpx.*, openai.*, boto3.*, etc.) remain allowed — F1 only flags
@@ -297,10 +314,21 @@ _KAIRIX_MODULES = ProtectedKeys(prefixes=("kairix.",), exact=("kairix",))
 #: Cheap pre-parse filter on the CALL / RECEIVER tokens every F1 shape needs —
 #: never on the kairix NAME alone, which constant folding can assemble
 #: (``"kai" + "rix.paths"``): a ``kairix`` import or string, ``sys.modules``,
-#: ``reload`` / ``import_module``, or a ``patch`` / ``setattr`` / ``delattr``
-#: helper. A file with none of these tokens cannot violate, so it is never
-#: parsed.
-_PREFILTER = re.compile(r"kairix|modules|reload|import_module|patch|setattr|delattr")
+#: ``reload`` / ``import_module``, a ``patch`` / ``setattr`` / ``delattr``
+#: helper, or ``__import__`` / ``builtins``. A file with none of these tokens
+#: cannot violate, so it is never parsed.
+_PREFILTER = re.compile(r"kairix|modules|reload|import_module|patch|setattr|delattr|__import__|builtins")
+
+#: Names F1 guards against rebinding at module / class level (or alongside
+#: their own import in a function) — see ``_mapping_writes.guarded_rebinds``.
+_F1_GUARDED_NAMES: dict[str, GuardedName] = {
+    "sys": ("module", "sys"),
+    "importlib": ("module", "importlib"),
+    "modules": ("from", "sys", "modules"),
+    "reload": ("from", "importlib", "reload"),
+    **BUILTIN_GUARDED_NAMES,
+}
+_DUNDER_IMPORT = "__import__"
 
 
 def _is_kairix_module_name(value: str) -> bool:
@@ -504,6 +532,57 @@ def _is_string_expr(expr: ast.expr) -> bool:
     )
 
 
+def _may_name_dunder_import(ctx: _F1Ctx, key: ast.expr | None) -> bool:
+    """``key`` (a getattr name / subscript key) may evaluate to ``"__import__"``.
+
+    Resolved strings decide; otherwise a constant leading prefix decides
+    (``f"__im{x}"``); a wholly unknown key does not count (it is everywhere)."""
+    if key is None:
+        return False
+    values = ctx.constants.strings(key)
+    if values is not None:
+        return _DUNDER_IMPORT in values
+    folded = fold_string(key)
+    return folded is not None and bool(folded[0]) and _DUNDER_IMPORT.startswith(folded[0])
+
+
+def _names_dunder_import(ctx: _F1Ctx, arg: ast.expr) -> bool:
+    """A call argument that resolves to ``"__import__"`` or a dotted
+    ``"<x>.__import__"`` target — ``monkeypatch.setattr(builtins, "__import__",
+    ...)``, ``patch("builtins.__import__")``."""
+    values = ctx.constants.strings(arg)
+    return values is not None and any(
+        value == _DUNDER_IMPORT or value.endswith(f".{_DUNDER_IMPORT}") for value in values
+    )
+
+
+def _dunder_import_violation(ctx: _F1Ctx) -> bool:
+    """ANY reference to builtin ``__import__`` is an F1 violation — tests import
+    normally, or call ``importlib.import_module`` with a static name.
+
+    Caught: the bare builtin (or ``from builtins import __import__``), any
+    ``<x>.__import__`` attribute (``builtins`` / ``__builtins__`` /
+    ``importlib``), and a dynamic lookup whose name / key folds to it —
+    ``getattr(builtins, "__im" + "port__")``, ``__builtins__["__import__"]``,
+    ``vars(builtins)["__import__"]``."""
+    index = ctx.index
+    if index.attributes.get(_DUNDER_IMPORT):
+        return True
+    for ref in index.name_loads.get(_DUNDER_IMPORT, []):
+        if index.is_builtin_ref(ref):
+            return True
+    for node in index.candidates:
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        is_getattr = isinstance(func, ast.Name) and func.id == "getattr" and index.is_builtin_ref(func)
+        if is_getattr and len(node.args) >= 2 and _may_name_dunder_import(ctx, node.args[1]):
+            return True
+        if any(_names_dunder_import(ctx, arg) for arg in (*node.args, *(kw.value for kw in node.keywords))):
+            return True
+    return any(_may_name_dunder_import(ctx, sub.slice) for sub in index.subscripts)
+
+
 def _reload_violation(ctx: _F1Ctx) -> bool:
     """Shape 8 (default-deny): ANY reference to ``importlib.reload`` — called or
     aliased — fails unless it is a direct call whose ``module`` argument is
@@ -549,7 +628,7 @@ def _importlib_argument_harmless(call: ast.Call, ref: ast.expr, ctx: _F1Ctx) -> 
         return False
     func = call.func
     name: ast.expr | None = None
-    if isinstance(func, ast.Name) and func.id in {"getattr", "hasattr"} and ctx.index.is_builtin(func):
+    if isinstance(func, ast.Name) and func.id in {"getattr", "hasattr"} and ctx.index.is_builtin_ref(func):
         name = call.args[1] if len(call.args) >= 2 and call.args[0] is ref else None
     elif isinstance(func, ast.Attribute) and func.attr in {"setattr", "delattr"}:
         bound = bind_call(call, MONKEYPATCH_SIGNATURES[func.attr])
@@ -570,7 +649,9 @@ def file_has_internal_patch(path: Path) -> bool:
     ctx = _F1Ctx(index)
     parent_map = index.parents
 
-    if ctx.guard.findings() or _reload_violation(ctx):
+    if ctx.guard.findings() or _reload_violation(ctx) or _dunder_import_violation(ctx):
+        return True
+    if guarded_rebinds(index, _F1_GUARDED_NAMES):
         return True
 
     for node in index.candidates:
