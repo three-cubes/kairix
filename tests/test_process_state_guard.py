@@ -259,6 +259,22 @@ def test_patching_non_guarded_objects_is_clean(monkeypatch):
     monkeypatch.setattr(ns, "a", 2)
     with mock.patch.object(ns, "a", 3):
         pass
+
+
+class _EqualityRaises:
+    a = 1
+
+    def __eq__(self, other):
+        raise RuntimeError("__eq__ must not be called by the guard")
+
+    __hash__ = object.__hash__
+
+
+def test_patching_an_object_whose_eq_raises_is_clean(monkeypatch):
+    target = _EqualityRaises()
+    monkeypatch.setattr(target, "a", 2)
+    with mock.patch.object(target, "a", 3):
+        pass
 """
 
 _COLLECT_ENV_TESTS = """
@@ -430,6 +446,7 @@ def test_env_write_at_module_import_fails_collection(inner_outcomes: dict[str, t
         "test_first_import_is_clean",
         "test_patching_non_guarded_objects_is_clean",
         "test_env_patch_dict_of_other_keys_is_clean",
+        "test_patching_an_object_whose_eq_raises_is_clean",
     ],
 )
 def test_clean_tests_pass(inner_outcomes: dict[str, tuple[str, str]], name: str) -> None:

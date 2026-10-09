@@ -8,7 +8,11 @@ starting with ``KAIRIX_``:
 * ``os.environ["KAIRIX_X"] = ...`` / ``+=`` / ``del os.environ["KAIRIX_X"]``
   (or the name bound by ``from os import environ [as e]``, unless the
   enclosing function rebinds it);
-* ``os.environ.pop("KAIRIX_X")`` / ``os.environ.setdefault("KAIRIX_X", ...)``.
+* ``os.environ.pop("KAIRIX_X")`` / ``os.environ.setdefault("KAIRIX_X", ...)``;
+* ``os.environ = ...`` with ANY value (a wholesale replacement — even one
+  restored within the same phase, which the runtime identity check misses).
+
+``os`` includes every ``import os as <alias>``.
 
 Writes inside ``with allow_baseline_writes():`` in ``tests/conftest.py`` (the
 session env baseline) are exempt, mirroring the runtime guard. In any
@@ -86,6 +90,7 @@ _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 class _Environ:
     """Decides whether an expression is ``os.environ`` in one parsed file.
 
+    ``<os>.environ`` counts for ``os`` and every ``import os as <alias>``.
     A bare name counts only when the file binds it with ``from os import
     environ [as name]`` and the enclosing function does not rebind it (a
     parameter or an assignment of that name in the function) — a simple
@@ -100,7 +105,17 @@ class _Environ:
             for alias in node.names
             if alias.name == "environ"
         }
+        self.os_names = {"os"} | {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+            if alias.name == "os"
+        }
         self.parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+    def is_os(self, node: ast.expr) -> bool:
+        return isinstance(node, ast.Name) and node.id in self.os_names
 
     def _rebound_locally(self, node: ast.Name) -> bool:
         scope = self.parents.get(node)
@@ -115,7 +130,7 @@ class _Environ:
 
     def __call__(self, node: ast.expr) -> bool:
         if isinstance(node, ast.Attribute):
-            return node.attr == "environ" and isinstance(node.value, ast.Name) and node.value.id == "os"
+            return node.attr == "environ" and self.is_os(node.value)
         return isinstance(node, ast.Name) and node.id in self.names and not self._rebound_locally(node)
 
 
@@ -125,6 +140,8 @@ def _shape(node: ast.AST, is_environ: _Environ) -> str | None:
 
     if isinstance(node, (ast.Assign, ast.AugAssign)):
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if any(isinstance(t, ast.Attribute) and is_environ(t) for t in targets):
+            return "os.environ replaced wholesale"
         if any(subscript_write(t) for t in targets):
             return "assign os.environ[KAIRIX_*]"
     elif isinstance(node, ast.Delete):
@@ -153,7 +170,7 @@ def _any_environ_write(node: ast.AST, is_environ: _Environ) -> bool:
         func = node.func
         if func.attr in _ENVIRON_WRITE_METHODS and is_environ(func.value):
             return True
-        return func.attr in ("putenv", "unsetenv") and isinstance(func.value, ast.Name) and func.value.id == "os"
+        return func.attr in ("putenv", "unsetenv") and is_environ.is_os(func.value)
     return False
 
 

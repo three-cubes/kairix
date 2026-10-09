@@ -288,7 +288,9 @@ def _wrap(owner: type, attr: str, check: Any, *, quiet_on_environ: bool = False)
 
 def _environ_replacement(owner: object, name: object) -> bool:
     """``os`` + ``"environ"`` (or the dotted ``"os.environ"``): replacing the mapping wholesale."""
-    return owner == "os.environ" or (owner is os and name == "environ")
+    if isinstance(owner, str):  # never call == on an arbitrary patched object
+        return owner == "os.environ"
+    return owner is os and isinstance(name, str) and name == "environ"
 
 
 def _check_monkeypatch_attr(_mp: Any, target: object, name: object = None, *_a: Any, **_k: Any) -> str | None:

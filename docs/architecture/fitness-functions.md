@@ -527,7 +527,10 @@ F2 has two halves, like F1.
 `FitnessRule` over `tests/` (staged-narrowable). It is a small AST match on
 the common spellings with a literal `KAIRIX_` key —
 `monkeypatch.setenv` / `delenv`, `os.environ[...] =` / `+=` / `del`,
-`os.environ.pop` / `setdefault` — reporting `path:line: shape`. Writes
+`os.environ.pop` / `setdefault` — plus any assignment to `os.environ`
+itself (a wholesale replacement, even one restored within the same phase,
+which the runtime identity check cannot see), reporting `path:line: shape`.
+`os` includes every `import os as <alias>`. Writes
 inside `with allow_baseline_writes():` are exempt, and the block itself
 fails anywhere but `tests/conftest.py`. In any `conftest.py`, an
 `os.environ` write at module level fails for ANY key, computed or not:

@@ -198,3 +198,47 @@ def test_fixture_body_write_in_a_conftest_is_not_a_module_level_write(tmp_path: 
     conftest.write_text(_CONFTEST_BASELINE, encoding="utf-8")
     violations = file_violations(conftest)
     assert not any("module-level" in v for v in violations), violations
+
+
+def test_aliased_os_module_level_write_in_a_conftest_is_flagged(tmp_path: Path) -> None:
+    """``import os as _os`` (the root conftest's own spelling) is still ``os``.
+
+    Sabotage proof (executed): recognise only the literal name ``os`` →
+    nothing is flagged and this fails; restored.
+    """
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text('import os as _os\n\n_os.environ["X"] = "1"\n', encoding="utf-8")
+    assert file_violations(conftest) == ["3: module-level os.environ write in conftest.py (any key)"]
+
+
+def test_aliased_os_kairix_write_in_a_test_is_flagged_and_reads_are_clean(tmp_path: Path) -> None:
+    source = (
+        "import os as _os\n\n\n"
+        "def test_x():\n"
+        '    value = _os.environ.get("KAIRIX_DB_PATH")\n'
+        '    other = _os.environ["KAIRIX_DB_PATH"]\n'
+        '    _os.environ["KAIRIX_DB_PATH"] = value or other\n'
+    )
+    assert _file_violations(tmp_path, source) == ["7: assign os.environ[KAIRIX_*]"]
+
+
+def test_wholesale_environ_replacement_is_flagged_even_when_restored(tmp_path: Path) -> None:
+    """A replace-and-restore inside one phase leaves ``os.environ`` the same
+    object at the phase end, so the runtime identity check cannot see it; the
+    static half flags every assignment to ``os.environ`` (any alias).
+
+    Sabotage proof (executed): drop the wholesale-replacement branch in
+    ``_shape`` → no violations and this fails; restored.
+    """
+    source = (
+        "import os\nimport os as _os\n\n\n"
+        "def test_x():\n"
+        "    original = os.environ\n"
+        "    os.environ = {}\n"
+        "    _os.environ = original\n"
+        "    assert dict(os.environ)\n"
+    )
+    assert _file_violations(tmp_path, source) == [
+        "7: os.environ replaced wholesale",
+        "8: os.environ replaced wholesale",
+    ]
