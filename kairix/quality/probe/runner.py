@@ -19,6 +19,7 @@ callers omit ``deps`` and get the bundled suite resolution +
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -284,7 +285,11 @@ def _per_query_stages(
     return out
 
 
-def _run_warmup(fn: Callable[[SampledQuery], Any], warm_query: SampledQuery) -> float:
+def _run_warmup(
+    fn: Callable[[SampledQuery], Any],
+    warm_query: SampledQuery,
+    clock: Callable[[], float],
+) -> float:
     """Run one warm-up query and return its latency (ms).
 
     The warm-up pays the one-time factory build + first-query model load so
@@ -293,7 +298,7 @@ def _run_warmup(fn: Callable[[SampledQuery], Any], warm_query: SampledQuery) -> 
     executor (never raised) — a cold build that errors still yields a
     measured duration, so the cold/steady separation holds either way.
     """
-    warm_run = run_concurrent([lambda: fn(warm_query)], concurrency=1)
+    warm_run = run_concurrent([lambda: fn(warm_query)], concurrency=1, clock=clock)
     return round(warm_run.results[0].duration_ms, 2) if warm_run.results else 0.0
 
 
@@ -306,6 +311,7 @@ def run_probe_search(
     *,
     deps: ProbeDeps | None = None,
     warmup: bool = True,
+    clock: Callable[[], float] = time.perf_counter,
 ) -> ProbeResult:
     """Run a weighted sample of suite queries at the requested concurrency.
 
@@ -327,6 +333,10 @@ def run_probe_search(
             the cold build no longer inflates the p95 the gate reads (#436).
             False reproduces the legacy single-pass behaviour
             (``cold_build_ms == 0.0``).
+        clock: monotonic clock (seconds) every query latency and the run
+            wallclock are measured on. Defaults to :func:`time.perf_counter`;
+            deterministic callers inject a controlled virtual timeline
+            (mirrors ``run_probe_burst``'s ``clock``).
 
     Returns:
         ProbeResult with steady-state overall + per-category latency stats,
@@ -350,10 +360,10 @@ def run_probe_search(
     # Cold-build warm-up (PLA-273): one query before the measured sample so
     # the factory build + first-query model load is paid (and reported)
     # separately rather than folded into the steady-state p95.
-    cold_build_ms = _run_warmup(fn, sampled[0]) if (warmup and sampled) else 0.0
+    cold_build_ms = _run_warmup(fn, sampled[0], clock) if (warmup and sampled) else 0.0
 
     tasks = [(lambda q=sq: fn(q)) for sq in sampled]
-    run = run_concurrent(tasks, concurrency=concurrency)
+    run = run_concurrent(tasks, concurrency=concurrency, clock=clock)
 
     durations_ms = [r.duration_ms for r in run.results]
     overall = latency_stats(durations_ms)

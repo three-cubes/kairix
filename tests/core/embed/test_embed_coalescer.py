@@ -28,6 +28,7 @@ from kairix.transport.coalesce.embed_coalescer import (
     get_embed_coalescer,
     reset_embed_coalescer,
 )
+from tests.fakes import FakeCoalesceWindow
 
 pytestmark = pytest.mark.unit
 
@@ -63,16 +64,26 @@ class _CountingBatchFn:
 
 
 def test_concurrent_embeds_collapse_to_one_batch() -> None:
-    """Ten threads in the same window cause one batched call.
+    """Ten callers enqueued inside one window cause one batched call.
 
-    Sabotage: in ``_dispatch_loop`` change the ``wait(timeout=window_s)``
-    to ``wait(timeout=0)`` and each request fires its own batch — the
-    call count grows past 1 and this assertion fires.
+    Deterministic: the window is a ``FakeCoalesceWindow`` that stays open
+    until the test closes it, and the test closes it only after
+    ``stats().requests == 10`` proves every caller is buffered. No real
+    200 ms timer, so a slow or loaded host cannot split the batch.
+
+    Sabotage-proof (executed): bypass the injected window in
+    ``_await_next_batch`` (drain without calling ``self._window_wait``)
+    and the first caller dispatches alone — the call count exceeds 1 and
+    this test fails. Restored.
     """
     fake = _CountingBatchFn()
-    # Long-ish window so all 10 threads land in the same batch even on
-    # a slow CI box. max_batch_size=64 lets all 10 land in one batch.
-    coalescer = EmbedCoalescer(embed_batch_fn=fake, coalesce_window_ms=200, max_batch_size=64)
+    window = FakeCoalesceWindow()
+    coalescer = EmbedCoalescer(
+        embed_batch_fn=fake,
+        coalesce_window_ms=200,
+        max_batch_size=64,
+        window_wait=window,
+    )
     try:
         results: list[list[float]] = [[] for _ in range(10)]
         errors: list[BaseException] = []
@@ -86,17 +97,23 @@ def test_concurrent_embeds_collapse_to_one_batch() -> None:
         threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
         for t in threads:
             t.start()
+        # Every caller is buffered BEFORE the window closes.
+        window.wait_for_requests(coalescer, 10)
+        assert fake.calls == [], "nothing may dispatch while the window is open"
+        window.close()
         for t in threads:
             t.join()
 
         assert not errors, f"workers raised: {errors!r}"
+        # The configured window reached the seam (ms -> s conversion intact).
+        assert window.timeouts == [0.2]
         # Sabotage: if the dispatcher fires per-request the call count
         # explodes to 10 and this assertion fires.
         assert len(fake.calls) == 1, f"expected 1 batched call; got {len(fake.calls)}: {fake.calls!r}"
         assert len(fake.calls[0]) == 10, f"expected 10 texts in the one batch; got {len(fake.calls[0])}"
         # Each caller gets back its own embedding.
         for i, vec in enumerate(results):
-            assert vec, f"worker {i} got empty result"
+            assert vec == [float(len(f"text-{i}")), 1.0, 2.0], f"worker {i} got {vec!r}"
     finally:
         coalescer.shutdown()
 
@@ -147,17 +164,23 @@ def test_empty_text_bypasses_queue() -> None:
     batch containing it, call count > 0 and this assertion fires.
     """
     fake = _CountingBatchFn()
-    coalescer = EmbedCoalescer(embed_batch_fn=fake, coalesce_window_ms=50, max_batch_size=16)
+    window = FakeCoalesceWindow()
+    # Window closed up front: anything that IS enqueued dispatches at once,
+    # so "nothing dispatched" needs no wait-past-the-window sleep.
+    window.close()
+    coalescer = EmbedCoalescer(embed_batch_fn=fake, coalesce_window_ms=50, max_batch_size=16, window_wait=window)
     try:
         assert coalescer.embed("") == []
         assert coalescer.embed("   ") == []
-        # Wait past the window — no dispatch should ever fire.
-        time.sleep(0.15)
-        assert fake.calls == [], f"empty inputs should not reach the batch fn; got {fake.calls!r}"
         # Stats should not count empty inputs as requests.
         stats = coalescer.stats()
         assert stats.requests == 0
         assert stats.batches == 0
+        # A real text afterwards is the FIFO sentinel: had either empty input
+        # been queued, it would have dispatched (and blocked its caller)
+        # before this one — so the batch fn sees ONLY the sentinel.
+        assert coalescer.embed("sentinel")
+        assert fake.calls == [["sentinel"]], f"empty inputs should not reach the batch fn; got {fake.calls!r}"
     finally:
         coalescer.shutdown()
 
@@ -248,30 +271,36 @@ def test_shutdown_releases_pending_futures() -> None:
         slow_event.wait(timeout=5.0)
         return [[1.0] for _ in texts]
 
+    # A window the test never closes: the request is provably still PENDING
+    # (buffered, not yet handed to slow_batch) when shutdown() runs, so this
+    # exercises shutdown's pending-Future release — not the in-flight path.
+    window = FakeCoalesceWindow()
     coalescer = EmbedCoalescer(
         embed_batch_fn=slow_batch,
         coalesce_window_ms=10,
         max_batch_size=16,
+        window_wait=window,
     )
 
-    # Submit a request, then shutdown before the window expires +
-    # before the slow_batch returns.
     results: list[list[float]] = [[]]
 
     def worker() -> None:
         results[0] = coalescer.embed("pending")
 
-    t = threading.Thread(target=worker)
+    # Daemon: if shutdown regresses and never releases the Future, the
+    # stranded worker must not hold the pytest process open at exit.
+    t = threading.Thread(target=worker, daemon=True)
     t.start()
 
-    # Give the worker a moment to enqueue.
-    time.sleep(0.005)
+    # The worker has enqueued (stats count it) before shutdown runs.
+    window.wait_for_requests(coalescer, 1)
     coalescer.shutdown()
     slow_event.set()
     t.join(timeout=2.0)
     # If shutdown didn't release the Future, the worker would still
     # be blocked and t.is_alive() would be True.
     assert not t.is_alive(), "shutdown failed to release pending Future"
+    assert results[0] == [], "a pending request released by shutdown resolves to []"
 
 
 def test_shutdown_joins_dispatcher_thread() -> None:
