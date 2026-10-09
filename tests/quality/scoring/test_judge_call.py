@@ -33,6 +33,25 @@ class TestCallJudge:
         assert excinfo.value.detail == "backend raised TimeoutError"
         assert _SENTINEL not in str(excinfo.value)
 
+    def test_formatted_traceback_never_carries_the_backend_message(self) -> None:
+        """An uncaught JudgeFailedError (e.g. propagated by
+        ``LLMJudgeScorer.score``) must not render the provider exception —
+        neither as ``__cause__`` nor as implicit ``__context__``.
+
+        Sabotage-proof: raise with ``from exc`` (or no ``from``) in
+        ``call_judge`` — the formatted traceback includes the sentinel."""
+        import traceback
+
+        def _boom() -> str:
+            raise RuntimeError(f"401 for api-key={_SENTINEL}")
+
+        with pytest.raises(JudgeFailedError) as excinfo:
+            call_judge(_boom)
+        rendered = "".join(traceback.format_exception(excinfo.value))
+        assert _SENTINEL not in rendered
+        assert excinfo.value.__cause__ is None
+        assert excinfo.value.__suppress_context__
+
     @pytest.mark.parametrize("reply", ["", "   \n"])
     def test_blank_reply_is_backend_error(self, reply: str) -> None:
         """Sabotage-proof: drop the blank-reply check — ``call_judge`` returns

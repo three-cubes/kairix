@@ -37,7 +37,9 @@ def call_judge(complete: Callable[[], str]) -> str:
     try:
         reply = complete()
     except Exception as exc:
-        raise JudgeFailedError.from_backend_exception(exc) from exc
+        # ``from None``: never chain the provider exception — its message can carry
+        # credentials or payloads, and a chained cause renders in any traceback.
+        raise JudgeFailedError.from_backend_exception(exc) from None
     if not reply or not reply.strip():
         raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, "empty judge reply (LLM backend failure)")
     return reply
