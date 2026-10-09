@@ -242,3 +242,45 @@ def test_wholesale_environ_replacement_is_flagged_even_when_restored(tmp_path: P
         "7: os.environ replaced wholesale",
         "8: os.environ replaced wholesale",
     ]
+
+
+def test_annotated_environ_replacement_is_flagged_and_bare_annotation_is_clean(tmp_path: Path) -> None:
+    """``os.environ: dict[str, str] = {}`` is an ``AnnAssign`` — still a
+    wholesale replacement. A bare annotation (no value) assigns nothing.
+
+    Sabotage proof (executed): drop ``ast.AnnAssign`` from ``_shape`` → the
+    annotated replacement is not flagged and this fails; restored.
+    """
+    source = "import os\n\n\ndef test_x():\n    os.environ: dict[str, str] = {}\n    os.environ: dict[str, str]\n"
+    assert _file_violations(tmp_path, source) == ["5: os.environ replaced wholesale"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import os\n\n\ndef fixture(value=os.environ.pop("X", None)):\n    return value\n',
+        'import os\n\n\n@register(os.environ.setdefault("X", "1"))\ndef fixture():\n    return 1\n',
+        'import os\n\nhook = lambda value=os.environ.pop("X", None): value\n',
+    ],
+    ids=["default", "decorator", "lambda-default"],
+)
+def test_conftest_writes_in_defaults_and_decorators_run_at_import(tmp_path: Path, source: str) -> None:
+    """Defaults and decorators are evaluated when the ``def`` executes — at
+    conftest import, before the runtime guard is configured — so they are
+    module-level writes; only a function / lambda BODY is deferred.
+
+    Sabotage proof (executed): treat any node under a ``def`` / ``lambda`` as
+    deferred (the old ancestor walk) → nothing is flagged and every case
+    fails; restored.
+    """
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(source, encoding="utf-8")
+    assert [v.split(": ", 1)[1] for v in file_violations(conftest)] == [
+        "module-level os.environ write in conftest.py (any key)"
+    ]
+
+
+def test_conftest_write_inside_a_lambda_body_is_deferred(tmp_path: Path) -> None:
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text('import os\n\nhook = lambda: os.environ.pop("X", None)\n', encoding="utf-8")
+    assert not any("module-level" in v for v in file_violations(conftest))

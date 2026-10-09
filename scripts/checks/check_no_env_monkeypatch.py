@@ -138,7 +138,9 @@ def _shape(node: ast.AST, is_environ: _Environ) -> str | None:
     def subscript_write(target: ast.expr) -> bool:
         return isinstance(target, ast.Subscript) and is_environ(target.value) and _is_kairix_literal(target.slice)
 
-    if isinstance(node, (ast.Assign, ast.AugAssign)):
+    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            return None  # a bare annotation assigns nothing
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         if any(isinstance(t, ast.Attribute) and is_environ(t) for t in targets):
             return "os.environ replaced wholesale"
@@ -163,7 +165,9 @@ _CONFTEST_MODULE_WRITE = "module-level os.environ write in conftest.py (any key)
 def _any_environ_write(node: ast.AST, is_environ: _Environ) -> bool:
     """An ``os.environ`` write of ANY key (subscript store / del, a mutating
     method, ``os.environ = ...``) or an ``os.putenv`` / ``os.unsetenv`` call."""
-    if isinstance(node, (ast.Assign, ast.AugAssign, ast.Delete)):
+    if isinstance(node, ast.AnnAssign) and node.value is None:
+        return False  # a bare annotation assigns nothing
+    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
         targets = node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
         return any(is_environ(t) or (isinstance(t, ast.Subscript) and is_environ(t.value)) for t in targets)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
@@ -184,14 +188,26 @@ def _conftest_module_level_writes(tree: ast.AST, is_environ: _Environ) -> set[tu
     """
     found = set()
     for node in ast.walk(tree):
-        if not _any_environ_write(node, is_environ):
-            continue
-        scope = is_environ.parents.get(node)
-        while scope is not None and not isinstance(scope, _FUNCTIONS):
-            scope = is_environ.parents.get(scope)
-        if scope is None:
+        if _any_environ_write(node, is_environ) and _runs_at_import(node, is_environ.parents):
             found.add((getattr(node, "lineno", 0), _CONFTEST_MODULE_WRITE))
     return found
+
+
+def _runs_at_import(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    """True unless ``node`` sits inside a function or lambda BODY.
+
+    Decorators, parameter defaults and annotations are evaluated when the
+    ``def`` / ``lambda`` executes, i.e. at module import, so they count as
+    import-time code; only the body is deferred to call time.
+    """
+    child, scope = node, parents.get(node)
+    while scope is not None:
+        if isinstance(scope, ast.Lambda) and child is scope.body:
+            return False
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) and child in scope.body:
+            return False
+        child, scope = scope, parents.get(scope)
+    return True
 
 
 def _baseline_blocks(tree: ast.AST) -> list[ast.With]:
