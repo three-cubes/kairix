@@ -15,8 +15,8 @@ module drives the remaining branches:
 from __future__ import annotations
 
 import io
-import runpy
 import sqlite3
+import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -444,17 +444,16 @@ def test_default_generate_summaries_delegates_through_real_generator() -> None:
 
 
 def test_module_main_guard() -> None:
-    """Drive the ``__main__`` guard at the bottom of the file."""
-    old_argv = sys.argv
-    try:
-        sys.argv = ["kairix-summarise", "--status"]
-        # No document_root override — runpy will hit the default resolution.
-        # We catch SystemExit no matter what — the guard executed if we got here.
-        with pytest.raises(SystemExit):
-            runpy.run_module("kairix.knowledge.summaries.cli", run_name="__main__")
-    except SystemExit:
-        # The guard ran main(), which may itself raise SystemExit. Either
-        # outcome means the guard was executed.
-        pass
-    finally:
-        sys.argv = old_argv
+    """Drive the ``__main__`` guard at the bottom of the file in a subprocess
+    — a fresh interpreter, so no kairix module body re-executes in the test
+    process (F1). With no mode flag main()'s argparse exits 2 with its usage
+    line — proof the guard called main()."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "kairix.knowledge.summaries.cli"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "usage: kairix summarise" in proc.stderr

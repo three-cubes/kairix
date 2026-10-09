@@ -158,18 +158,21 @@ def test_help_short_flag_prints_doc_and_exits_0(monkeypatch):
 
 
 @pytest.mark.unit
-def test_main_module_guard_runs_main_when_executed_as_script(monkeypatch):
-    """Drive the ``if __name__ == "__main__": main()`` guard at line 95.
+def test_main_module_guard_runs_main_when_executed_as_script():
+    """Drive the ``if __name__ == "__main__": main()`` guard.
 
-    Importing under runpy with ``run_name="__main__"`` is the documented
-    way to execute a module's __main__ block in-process without spawning
-    a subprocess (uses the real import machinery).
+    Runs ``python -m kairix.cli`` in a subprocess — a fresh interpreter, so
+    no kairix module body re-executes in the test process (F1). No args →
+    the exit-1 path that prints the subcommand list.
     """
-    import runpy
+    import subprocess
 
-    monkeypatch.setattr(sys, "argv", ["kairix"])  # no args → exit 1 path
-    out = io.StringIO()
-    with pytest.raises(SystemExit) as exc_info, redirect_stdout(out):
-        runpy.run_module("kairix.cli", run_name="__main__")
-    assert int(exc_info.value.code or 0) == 1
-    assert "Subcommands:" in out.getvalue()
+    proc = subprocess.run(
+        [sys.executable, "-m", "kairix.cli"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 1
+    assert "Subcommands:" in proc.stdout

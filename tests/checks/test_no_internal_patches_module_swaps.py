@@ -1,21 +1,16 @@
-"""F1 detector tests — ``sys.modules`` swaps and ``importlib.reload`` of kairix modules.
+"""F1 static-half tests — ``patch.object``, ``sys.modules`` swaps, reloads.
 
-The F1 detector (``scripts/checks/check_no_internal_patches.py``) shapes 1-6
-catch ``@patch`` / ``monkeypatch.setattr`` / attribute assignment on kairix
-targets (pinned in ``tests/architecture/test_check_no_internal_patches.py``).
-A paydown found tests evading those shapes one level up: replacing a whole
-kairix module object in ``sys.modules`` (to simulate an import failure, or to
-evict it so the next import re-runs module code) and ``importlib.reload`` of a
-kairix module (to reset hidden singleton state). Both substitute an
-implementation no production process runs. This module pins shape 7 (the
-``sys.modules`` swap family) and shape 8 (``importlib.reload``), their
-key/receiver resolution, and the third-party negatives that stay allowed.
+Shapes 1-6 of ``scripts/checks/check_no_internal_patches.py`` (``@patch`` /
+``monkeypatch.setattr`` / attribute assignment on kairix targets) are pinned
+in ``tests/architecture/test_check_no_internal_patches.py``. This module pins
+the direct spellings added for the static half: ``patch.object`` on a kairix
+reference, a literal ``sys.modules["kairix..."]`` swap, ``importlib.reload``
+of an imported kairix module, and ``monkeypatch.delattr``. Every other
+spelling is the runtime guard's job (``tests/fixtures/process_state_guard.py``,
+proven in ``tests/test_process_state_guard.py``).
 
-Sabotage proofs (executed — mutate the detector, confirm red, restore, green):
-  * every shape-7 positive fails when ``file_has_internal_patch`` stops
-    consulting the shared default-deny ``MappingGuard`` (``ctx.guard``);
-  * every shape-8 positive fails when ``_reload_violation`` returns
-    ``False``.
+Sabotage proof (executed): make ``_node_shape`` return ``None`` → every
+positive case fails; restored.
 """
 
 from __future__ import annotations
@@ -33,204 +28,68 @@ if str(_CHECKS_DIR) not in sys.path:
 from check_no_internal_patches import (  # noqa: E402 — see _CHECKS_DIR sys.path insert above
     F1,
     REMEDIATION,
-    file_has_internal_patch,
+    file_violations,
 )
 
 pytestmark = pytest.mark.unit
 
+_HEADER = (
+    "import importlib\nimport sys\nfrom importlib import reload\nfrom unittest import mock\n"
+    "from unittest.mock import patch\n\nimport kairix.core.search.rerank as rerank_mod\nimport yaml\n\n\n"
+)
 
-def _flagged(tmp_path: Path, source: str) -> bool:
+
+def _violations(tmp_path: Path, body: str) -> list[str]:
     path = tmp_path / "test_sample.py"
-    path.write_text(source, encoding="utf-8")
-    return file_has_internal_patch(path)
-
-
-# ---------------------------------------------------------------------------
-# Shape 7 — sys.modules swap of a kairix module.
-# ---------------------------------------------------------------------------
+    path.write_text(_HEADER + body + "\n", encoding="utf-8")
+    return [v.split(": ", 1)[1] for v in file_violations(path)]
 
 
 @pytest.mark.parametrize(
-    "statement",
+    ("statement", "shape"),
     [
-        'sys.modules["kairix.core.search.pipeline"] = broken',
-        'sys.modules["kairix"] = broken',
-        'del sys.modules["kairix.platform.llm.embed_provider"]',
-        'sys.modules.pop("kairix", None)',
-        'sys.modules.setdefault("kairix.core.search.config", broken)',
-        'sys.modules.update({"kairix.core.search.intent": broken})',
-        'monkeypatch.setitem(sys.modules, "kairix.core.search.pipeline", broken)',
-        'monkeypatch.delitem(sys.modules, "kairix.core.search.pipeline")',
-        'sys.modules[f"kairix.{name}"] = broken',
+        ('patch.object(rerank_mod, "RERANK_MODEL", "x")', "patch.object(<kairix ref>)"),
+        ('mock.patch.object(rerank_mod, "RERANK_MODEL", "x")', "patch.object(<kairix ref>)"),
+        ('patch("kairix.core.search.rerank.rerank").start()', "patch(kairix.*)"),
+        ('monkeypatch.delattr(rerank_mod, "RERANK_MODEL")', "monkeypatch.setattr/delattr(<kairix target>)"),
+        ('sys.modules["kairix.core.search.rerank"] = None', "sys.modules[kairix.*] swap"),
+        ('sys.modules["kairix"] = None', "sys.modules[kairix.*] swap"),
+        ('del sys.modules["kairix.core.search.rerank"]', "sys.modules[kairix.*] swap"),
+        ("importlib.reload(rerank_mod)", "importlib.reload(<kairix module>)"),
+        ("reload(rerank_mod)", "importlib.reload(<kairix module>)"),
     ],
 )
-def test_sys_modules_swap_of_kairix_module_is_flagged(tmp_path: Path, statement: str) -> None:
-    """Every write / eviction form on a ``kairix`` module key is a violation.
-
-    Sabotage proof (executed): stop consulting ``ctx.guard.findings()`` in
-    ``file_has_internal_patch`` → every parametrised case reports clean and
-    fails; restored.
-    """
-    src = f"import sys\n\n\ndef test_x(monkeypatch, broken, name):\n    {statement}\n"
-    assert _flagged(tmp_path, src) is True
-
-
-def test_sys_modules_key_held_in_a_variable_is_flagged(tmp_path: Path) -> None:
-    """``name = "kairix.X"; sys.modules[name] = m`` — the literal one hop away.
-
-    Sabotage proof (executed): make ``ConstantTable.name_strings`` claim
-    every name is the empty (provably safe) set → the variable key no longer
-    resolves to kairix and this fails; restored.
-    """
-    src = """
-import sys
-
-
-def test_x(broken):
-    target = "kairix.core.search.pipeline"
-    sys.modules[target] = broken
-"""
-    assert _flagged(tmp_path, src) is True
-
-
-def test_aliased_sys_and_from_import_modules_are_flagged(tmp_path: Path) -> None:
-    """``import sys as _sys`` and ``from sys import modules`` receivers resolve."""
-    assert _flagged(tmp_path, 'import sys as _sys\n_sys.modules.pop("kairix.paths", None)\n') is True
-    assert _flagged(tmp_path, 'from sys import modules\nmodules["kairix.paths"] = object()\n') is True
+def test_direct_kairix_substitution_is_flagged(tmp_path: Path, statement: str, shape: str) -> None:
+    assert _violations(tmp_path, statement) == [shape]
 
 
 @pytest.mark.parametrize(
     "statement",
     [
-        'sys.modules["openai"] = stub',
         'monkeypatch.setitem(sys.modules, "sentence_transformers", None)',
-        'sys.modules.pop("spacy", None)',
-        'sys.modules["tests._fake_kairix_handlers.nonzero"] = stub',
-        'sys.modules["_f52_detector"] = stub',
-        'loaded = sys.modules["kairix.core.search.pipeline"]',
-        'present = "kairix.paths" in sys.modules',
+        'sys.modules["openai"] = None',
+        'patch.object(yaml, "safe_load")',
+        "importlib.reload(yaml)",
+        'module = sys.modules.get("kairix.core.search.rerank")',
     ],
 )
-def test_third_party_swaps_and_reads_are_not_flagged(tmp_path: Path, statement: str) -> None:
-    """Faking an external SDK import, test-local modules, and READS of
-    ``sys.modules`` stay allowed — F1 blocks only kairix substitution."""
-    src = f"import sys\n\n\ndef test_x(monkeypatch, stub):\n    {statement}\n"
-    assert _flagged(tmp_path, src) is False
+def test_third_party_targets_and_reads_are_not_flagged(tmp_path: Path, statement: str) -> None:
+    assert _violations(tmp_path, statement) == []
 
 
-# ---------------------------------------------------------------------------
-# Shape 8 — importlib.reload of a kairix module.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "source",
-    [
-        "import importlib\nimport kairix.core.search.rerank as rerank_module\nimportlib.reload(rerank_module)\n",
-        "import importlib\nimport kairix.core.search.rerank\nimportlib.reload(kairix.core.search.rerank)\n",
-        "import importlib\nfrom kairix.core.search import rerank\nimportlib.reload(rerank)\n",
-        'import importlib\nimport sys\nimportlib.reload(sys.modules["kairix.agents.onboarding.cli"])\n',
-        'import importlib\nimportlib.reload(importlib.import_module("kairix.paths"))\n',
-        "from importlib import reload\nimport kairix.paths as paths_mod\nreload(paths_mod)\n",
-    ],
-)
-def test_reload_of_kairix_module_is_flagged(tmp_path: Path, source: str) -> None:
-    """Reloading a kairix module, however it is referenced, is a violation.
-
-    Sabotage proof (executed): make ``_reload_violation`` return ``False``
-    → every parametrised case reports clean and fails; restored.
-    """
-    assert _flagged(tmp_path, source) is True
-
-
-def test_reload_of_non_kairix_module_is_not_flagged(tmp_path: Path) -> None:
-    """Reloading a stdlib / third-party module stays allowed."""
-    src = "import importlib\nimport json\nimportlib.reload(json)\n"
-    assert _flagged(tmp_path, src) is False
-
-
-def test_reload_through_an_aliased_import_module_is_flagged(tmp_path: Path) -> None:
-    """Codex PR #814 thread: ``from importlib import import_module as load``
-    is tracked like the ``reload`` alias.
-
-    Sabotage proof (executed): drop the ``from_imports(tree, "importlib",
-    "import_module")`` term from ``import_module_names`` → reports clean;
-    restored.
-    """
-    src = 'from importlib import import_module as load, reload\nreload(load("kairix.paths"))\n'
-    assert _flagged(tmp_path, src) is True
-
-
-# ---------------------------------------------------------------------------
-# Opaque sys.modules.update payloads + helper-returned keys (PR #814 threads).
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "statement",
-    [
-        "sys.modules.update(mods)",
-        "sys.modules.update(build_mods())",
-        "sys.modules.update({name: stub for name in names})",
-        "sys.modules.update(**mods)",
-    ],
-)
-def test_sys_modules_update_with_opaque_mapping_is_flagged(tmp_path: Path, statement: str) -> None:
-    """An opaque ``sys.modules.update`` payload can install a kairix module the
-    AST cannot see — treated like F2's opaque ``os.environ.update``.
-
-    Sabotage proof (executed): make ``MappingGuard.payload_safe`` accept
-    any non-dict payload → the variable, call and comprehension cases report
-    clean (``**mods`` is still caught as a spread); restored.
-    """
-    src = f"import sys\n\n\ndef test_x(mods, build_mods, names, stub):\n    {statement}\n"
-    assert _flagged(tmp_path, src) is True
-
-
-def test_sys_modules_update_with_third_party_literal_is_not_flagged(tmp_path: Path) -> None:
-    src = 'import sys\n\n\ndef test_x(stub):\n    sys.modules.update({"openai": stub})\n'
-    assert _flagged(tmp_path, src) is False
-
-
-def test_sys_modules_key_returned_by_a_helper_call_is_flagged(tmp_path: Path) -> None:
-    """``sys.modules.pop(module_key(), None)`` with a helper returning a
-    ``"kairix..."`` literal.
-
-    Sabotage proof (executed): make ``ConstantTable._call`` claim every
-    helper returns the empty (provably safe) set → reports clean; restored.
-    """
-    src = (
-        'import sys\n\n\ndef module_key():\n    return "kairix.paths"\n\n\n'
-        + "def test_x():\n    sys.modules.pop(module_key(), None)\n"
-    )
-    assert _flagged(tmp_path, src) is True
-
-
-# ---------------------------------------------------------------------------
-# Failure message contract.
-# ---------------------------------------------------------------------------
-
-
-def test_remediation_names_the_new_shapes_and_is_f21_actionable() -> None:
-    """The message names the defect and the refactor, shows the new
-    forbidden shapes, and carries fix:/next:/run: + Pass/Forbidden (F21)."""
-    assert REMEDIATION.startswith("kairix-internal substitution found in a test")
-    assert "Refactor to constructor injection" in REMEDIATION
-    for marker in ("fix:", "next:", "run:", "Pass example:", "Forbidden example:"):
+def test_remediation_is_f21_actionable() -> None:
+    assert REMEDIATION.startswith("Refactor to")
+    for marker in ("fix:", "next:", "run:", "Pass example:", "Forbidden example:", "sys.modules", "reload"):
         assert marker in REMEDIATION
-    assert 'sys.modules["kairix.core.search.pipeline"]' in REMEDIATION
-    assert "importlib.reload(kairix.core.search.rerank)" in REMEDIATION
 
 
-def test_rule_gate_scans_tests_and_fails_on_a_violation(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """``F1(repo_root=...).run()`` — the in-process, staged-narrowable gate —
-    scans ``tests/`` under the root, names the violating file, returns 1; a
-    clean tree returns 0."""
+def test_rule_gate_reports_line_keys_and_fails(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """``F1(repo_root=...).run()`` scans ``tests/`` under the root, prints each
+    ``path:line: shape`` and returns 1; a clean tree returns 0."""
     tests_dir = tmp_path / "tests"
     tests_dir.mkdir()
-    bad = tests_dir / "test_bad.py"
-    bad.write_text('import sys\nsys.modules["kairix.paths"] = object()\n', encoding="utf-8")
+    (tests_dir / "test_bad.py").write_text('import sys\nsys.modules["kairix.x"] = None\n', encoding="utf-8")
     assert F1(repo_root=tmp_path).run() == 1
-    assert "tests/test_bad.py" in capsys.readouterr().out
-    bad.write_text('import sys\nsys.modules["openai"] = object()\n', encoding="utf-8")
+    assert "tests/test_bad.py:2: sys.modules[kairix.*] swap" in capsys.readouterr().out
+    (tests_dir / "test_bad.py").write_text('import sys\nsys.modules["openai"] = None\n', encoding="utf-8")
     assert F1(repo_root=tmp_path).run() == 0

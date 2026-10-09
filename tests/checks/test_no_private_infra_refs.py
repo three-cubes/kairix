@@ -33,16 +33,6 @@ from check_no_private_infra_refs import (  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
-# The detector's env var, spelled as a literal so F2 (default-deny) can PROVE
-# the ``monkeypatch.setenv`` key below is not a ``KAIRIX_*`` variable — an
-# imported constant is not statically resolvable across modules.
-# ``test_patterns_env_var_literal_matches_detector`` pins the two together.
-_PATTERNS_ENV_VAR = "PRIVATE_INFRA_PATTERNS"
-
-
-def test_patterns_env_var_literal_matches_detector() -> None:
-    assert _PATTERNS_ENV_VAR == PATTERNS_ENV_VAR
-
 
 _SYNTHETIC_PATTERN_SOURCE = """
 # Comment lines are skipped
@@ -82,7 +72,7 @@ def test_compile_patterns_unlabelled_lines_get_synthetic_label() -> None:
 
 
 def test_load_patterns_reads_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(_PATTERNS_ENV_VAR, "from-env: \\bsynthetic-env-marker\\b")
+    monkeypatch.setenv(PATTERNS_ENV_VAR, "from-env: \\bsynthetic-env-marker\\b")
     patterns = _load_patterns()
     labels = [label for label, _ in patterns]
     assert "from-env" in labels
@@ -91,7 +81,7 @@ def test_load_patterns_reads_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_load_patterns_env_overrides_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(_PATTERNS_ENV_VAR, "from-env: \\bonly-from-env\\b")
+    monkeypatch.setenv(PATTERNS_ENV_VAR, "from-env: \\bonly-from-env\\b")
     patterns = _load_patterns()
     labels = [label for label, _ in patterns]
     assert labels == ["from-env"]

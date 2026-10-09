@@ -359,23 +359,26 @@ def test_main_drain_default_out_streams_to_stdio(tmp_path: Path, capsys: pytest.
     assert "no drainable dead-letter state" in capsys.readouterr().out
 
 
-def test_main_runs_via_module_main_guard(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_main_runs_via_module_main_guard(tmp_path: Path) -> None:
     """The ``if __name__ == '__main__'`` guard executes :func:`main`.
 
-    Uses monkeypatch on ``sys.argv`` (test harness state, NOT a kairix
-    internal — F1 permits this). Sabotage: change ``sys.exit(main(...) or 0)``
-    to plain ``main(...)`` and the SystemExit raise path changes.
+    Runs ``python -m kairix.dead_letter_cli`` in a subprocess — a fresh
+    interpreter, so no kairix module body re-executes in the test process
+    (F1). Sabotage: drop ``main(...)`` from the guard → no status output and
+    the assert on stdout fails.
     """
-    db_path = _seed_db(tmp_path, rows=False)
-    import runpy
+    import subprocess
 
-    monkeypatch.setattr(sys, "argv", ["kairix-dead-letter", "status", "--db-path", str(db_path)])
-    with pytest.raises(SystemExit) as exc:
-        runpy.run_module("kairix.dead_letter_cli", run_name="__main__")
-    assert exc.value.code == 0
+    db_path = _seed_db(tmp_path, rows=False)
+    proc = subprocess.run(
+        [sys.executable, "-m", "kairix.dead_letter_cli", "status", "--db-path", str(db_path)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "no dead-letter state" in proc.stdout
 
 
 def test_status_default_out_err_streams_route_to_stdio(

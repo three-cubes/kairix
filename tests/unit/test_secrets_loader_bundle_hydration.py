@@ -78,11 +78,15 @@ def test_bootstrap_is_idempotent_one_shot_guard(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    n1 = bootstrap_secrets(bundle_path=bundle)
+    env: dict[str, str] = {}
+    n1 = bootstrap_secrets(bundle_path=bundle, env=env)
     assert n1 >= 1, f"first call must hydrate; got {n1}"
+    assert env == {"KAIRIX_BOOTSTRAP_TEST_VAR": "v1"}  # pragma: allowlist secret
 
-    n2 = bootstrap_secrets(bundle_path=bundle)
+    env.clear()
+    n2 = bootstrap_secrets(bundle_path=bundle, env=env)
     assert n2 == 0, f"second call must be a no-op; got {n2}"
+    assert env == {}
 
 
 def test_bootstrap_with_missing_bundle_returns_zero_does_not_raise(tmp_path: Path) -> None:
@@ -105,35 +109,29 @@ def test_bootstrap_absent_bundle_does_not_latch_so_later_write_recovers(tmp_path
     lookup), so the fix is to latch only once hydration has SETTLED — when the
     bundle is still absent we stay un-latched and the next build recovers.
 
-    F2-clean: injected ``bundle_path``; the env var is a unique, deliberately
-    non-``KAIRIX_`` test-only slot (the bundle hydrates any key), popped
-    either side so the real ``os.environ`` is left untouched.
+    F2-clean: injected ``bundle_path`` and ``env`` mapping — the real
+    ``os.environ`` is never written.
     """
-    import os
-
     from kairix.secrets.bootstrap import bootstrap_secrets
 
-    var = "BOOTSTRAP_RACE_RECOVERY_TEST_VAR"
-    os.environ.pop(var, None)
-    try:
-        bundle = tmp_path / "kairix.env"
+    var = "KAIRIX_BOOTSTRAP_RACE_RECOVERY_TEST_VAR"
+    env: dict[str, str] = {}
+    bundle = tmp_path / "kairix.env"
 
-        # First bootstrap during the race window: bundle not written yet.
-        assert bootstrap_secrets(bundle_path=bundle) == 0, "absent bundle must return 0"
+    # First bootstrap during the race window: bundle not written yet.
+    assert bootstrap_secrets(bundle_path=bundle, env=env) == 0, "absent bundle must return 0"
 
-        # The fetch-secrets sidecar finishes and writes the tmpfs bundle.
-        bundle.write_text(f"{var}=recovered\n", encoding="utf-8")  # pragma: allowlist secret
+    # The fetch-secrets sidecar finishes and writes the tmpfs bundle.
+    bundle.write_text(f"{var}=recovered\n", encoding="utf-8")  # pragma: allowlist secret
 
-        # The next per-build bootstrap must re-attempt and hydrate — NOT stay
-        # latched on the earlier miss. A 0 here is the silent BM25-only defect.
-        n2 = bootstrap_secrets(bundle_path=bundle)
-        assert n2 >= 1, (
-            f"bootstrap must recover after an initially-absent bundle appears; "
-            f"got {n2} — the process would be stuck BM25-only until a restart"
-        )
-        assert os.environ.get(var) == "recovered", "the appeared bundle must hydrate into env"
-    finally:
-        os.environ.pop(var, None)
+    # The next per-build bootstrap must re-attempt and hydrate — NOT stay
+    # latched on the earlier miss. A 0 here is the silent BM25-only defect.
+    n2 = bootstrap_secrets(bundle_path=bundle, env=env)
+    assert n2 >= 1, (
+        f"bootstrap must recover after an initially-absent bundle appears; "
+        f"got {n2} — the process would be stuck BM25-only until a restart"
+    )
+    assert env.get(var) == "recovered", "the appeared bundle must hydrate into env"
 
 
 def test_loader_explicit_env_is_live_reference_not_snapshot() -> None:

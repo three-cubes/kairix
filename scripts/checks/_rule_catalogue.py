@@ -250,9 +250,11 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         scope="per-file",
         summary=(
             "no @patch / monkeypatch, sys.modules swap or importlib.reload of kairix internals"
-            " — inject Fake* through a seam"
+            " — inject Fake* through a seam (static: common spellings; runtime:"
+            " tests/fixtures/process_state_guard.py, exact)"
         ),
-        # In-process FitnessRule over tests/ — the staged runner narrows it to staged files.
+        # Static half: in-process FitnessRule over tests/ — the staged runner
+        # narrows it to staged files. Runtime half: the pytest plugin above.
     ),
     RuleEntry(
         id="F2",
@@ -261,10 +263,12 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         category="test-discipline",
         scope="per-file",
         summary=(
-            'no monkeypatch.setenv("KAIRIX_*") or direct os.environ write of a KAIRIX_* key'
-            " — pass deps as kwargs instead"
+            'no monkeypatch.setenv("KAIRIX_*") or any other KAIRIX_* process-env write'
+            " — pass deps as kwargs instead (static: common spellings; runtime:"
+            " tests/fixtures/process_state_guard.py audit hook, exact)"
         ),
-        # In-process FitnessRule over tests/ — the staged runner narrows it to staged files.
+        # Static half: in-process FitnessRule over tests/ — the staged runner
+        # narrows it to staged files. Runtime half: the pytest plugin above.
     ),
     RuleEntry(
         id="F5",

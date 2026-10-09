@@ -1,23 +1,14 @@
-"""F2 detector tests — direct ``os.environ`` writes of ``KAIRIX_*`` keys.
+"""F2 static-half tests — the common ``KAIRIX_*`` env-write spellings.
 
-The F2 detector (``scripts/checks/check_no_env_monkeypatch.py``) originally
-caught only ``monkeypatch.setenv/setattr/delenv("KAIRIX_*")``. A paydown found
-tests evading it by writing ``os.environ`` directly — the pytest-bdd step that
-did ``os.environ["KAIRIX_DB_PATH"] = ...`` leaked the value into every later
-test in the process, because a raw write has no auto-undo. This module pins
-each direct-write shape, the key-resolution hops (variable, loop, alias), the
-negatives (reads, non-KAIRIX keys), the ONE structurally-recognised
-process-boundary shape (the conftest session baseline), and that a
-snapshot-restore teardown is a violation like any other write.
+``scripts/checks/check_no_env_monkeypatch.py`` is the fast pre-commit layer:
+it matches the direct spellings with a literal ``KAIRIX_`` key. Every other
+spelling (computed keys, aliases, ``patch.dict``, ``os.putenv``, ...) is the
+runtime guard's job (``tests/fixtures/process_state_guard.py``, proven in
+``tests/test_process_state_guard.py``), so it is deliberately not pinned here.
 
-Pattern: write a small source string under ``tmp_path``, run it through the
-public ``file_violations`` surface, assert on the reported shapes.
-
-Sabotage proofs (executed — mutate the detector, confirm red, restore, green;
-see the per-test docstrings for the exact mutation):
-  * every positive test fails when ``_findings`` returns ``[]``;
-  * each structural-recognition test fails when ``_is_recognised_boundary``
-    returns ``False``.
+Sabotage proof (executed): make ``_shape`` return ``None`` → every positive
+case fails; drop the ``exempt`` filter → the baseline-block case fails;
+restored.
 """
 
 from __future__ import annotations
@@ -41,356 +32,59 @@ from check_no_env_monkeypatch import (  # noqa: E402 — see _CHECKS_DIR sys.pat
 
 pytestmark = pytest.mark.unit
 
+_HEADER = "import os\nfrom os import environ\n\n\n"
 
-def _violations(tmp_path: Path, source: str, name: str = "test_sample.py") -> list[str]:
-    path = tmp_path / name
-    path.write_text(source, encoding="utf-8")
+
+def _violations(tmp_path: Path, body: str) -> list[str]:
+    path = tmp_path / "test_sample.py"
+    path.write_text(_HEADER + body + "\n", encoding="utf-8")
     return file_violations(path)
 
 
-# ---------------------------------------------------------------------------
-# Direct os.environ write shapes (positives).
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("statement", "shape"),
     [
+        ('monkeypatch.setenv("KAIRIX_DB_PATH", "x")', "setenv(KAIRIX_*)"),
+        ('mp.delenv("KAIRIX_DB_PATH", raising=False)', "delenv(KAIRIX_*)"),
         ('os.environ["KAIRIX_DB_PATH"] = "x"', "assign os.environ[KAIRIX_*]"),
         ('os.environ["KAIRIX_DB_PATH"] += "x"', "assign os.environ[KAIRIX_*]"),
+        ('environ["KAIRIX_DB_PATH"] = "x"', "assign os.environ[KAIRIX_*]"),
         ('del os.environ["KAIRIX_DB_PATH"]', "del os.environ[KAIRIX_*]"),
         ('os.environ.pop("KAIRIX_DB_PATH", None)', "os.environ.pop(KAIRIX_*)"),
         ('os.environ.setdefault("KAIRIX_DB_PATH", "x")', "os.environ.setdefault(KAIRIX_*)"),
-        ('os.environ.update({"KAIRIX_DB_PATH": "x"})', "os.environ.update(<may carry KAIRIX_*>)"),
-        ('os.environ.update(KAIRIX_DB_PATH="x")', "os.environ.update(<may carry KAIRIX_*>)"),
-        ("os.environ.update(overrides)", "os.environ.update(<may carry KAIRIX_*>)"),
-        ('patch.dict(os.environ, {"KAIRIX_DB_PATH": "x"})', "patch.dict(os.environ, <KAIRIX_*>)"),
-        ('mock.patch.dict(os.environ, {"KAIRIX_DB_PATH": "x"})', "patch.dict(os.environ, <KAIRIX_*>)"),
-        ('monkeypatch.setitem(os.environ, "KAIRIX_DB_PATH", "x")', "monkeypatch.setitem(os.environ, KAIRIX_*)"),
-        ('monkeypatch.delitem(os.environ, "KAIRIX_DB_PATH")', "monkeypatch.delitem(os.environ, KAIRIX_*)"),
-        ('os.environ[f"KAIRIX_{suffix}"] = "x"', "assign os.environ[KAIRIX_*]"),
     ],
 )
-def test_direct_environ_write_of_kairix_key_is_flagged(tmp_path: Path, statement: str, shape: str) -> None:
-    """Every direct-write shape on a KAIRIX_* key is a violation.
-
-    Sabotage proof (executed): make ``_findings`` return ``[]`` →
-    every parametrised case reports no violation and fails; restored.
-    """
-    header = "import os\nfrom unittest import mock\nfrom unittest.mock import patch\n\n\n"
-    src = f"{header}def test_x(monkeypatch):\n    {statement}\n"
-    assert _violations(tmp_path, src) == [f"7: {shape}"]
-
-
-def test_patch_dict_as_decorator_and_context_manager_is_flagged(tmp_path: Path) -> None:
-    """``patch.dict`` is caught whether used as a decorator or a ``with``."""
-    src = """
-import os
-from unittest.mock import patch
-
-
-@patch.dict(os.environ, {"KAIRIX_MAX_CONCURRENCY": "3"})
-def test_a():
-    pass
-
-
-def test_b():
-    with patch.dict(os.environ, {"KAIRIX_MAX_CONCURRENCY": "3"}):
-        pass
-"""
-    assert _violations(tmp_path, src) == [
-        "6: patch.dict(os.environ, <KAIRIX_*>)",
-        "12: patch.dict(os.environ, <KAIRIX_*>)",
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Key resolution — the literal moved one or more hops away.
-# ---------------------------------------------------------------------------
-
-
-def test_key_held_in_a_variable_is_flagged(tmp_path: Path) -> None:
-    """``var = "KAIRIX_X"; os.environ.pop(var)`` — the evasion this rule closes.
-
-    Sabotage proof (executed): make ``ConstantTable.name_strings`` claim
-    every name is the empty (provably safe) set → the variable key resolves
-    as non-KAIRIX and the assertion fails; restored.
-    """
-    src = """
-import os
-
-
-def test_x():
-    var = "KAIRIX_BOOTSTRAP_VAR"
-    os.environ.pop(var, None)
-"""
-    assert _violations(tmp_path, src) == ["7: os.environ.pop(KAIRIX_*)"]
-
-
-def test_key_from_a_loop_over_a_module_constant_is_flagged(tmp_path: Path) -> None:
-    """Taint flows constant -> loop target -> comprehension -> restore loop."""
-    src = """
-import os
-
-_SECRETS = ("KAIRIX_PROVIDER_LLM_API_KEY", "KAIRIX_NEO4J_PASSWORD")
-
-
-def test_x():
-    saved = {k: os.environ.pop(k, None) for k in _SECRETS}
-    for key, value in saved.items():
-        os.environ[key] = value
-"""
-    assert _violations(tmp_path, src) == [
-        "8: os.environ.pop(KAIRIX_*)",
-        "10: assign os.environ[KAIRIX_*]",
-    ]
-
-
-def test_monkeypatch_delenv_with_a_variable_key_is_flagged(tmp_path: Path) -> None:
-    """The original monkeypatch shapes now resolve variable keys too."""
-    src = """
-def _names():
-    return ("KAIRIX_SECRETS_FILE", "KAIRIX_KV_NAME")
-
-
-def test_x(monkeypatch):
-    for var in _names():
-        monkeypatch.delenv(var, raising=False)
-"""
-    assert _violations(tmp_path, src) == ["8: monkeypatch.delenv(KAIRIX_*)"]
+def test_direct_kairix_env_write_is_flagged(tmp_path: Path, statement: str, shape: str) -> None:
+    assert _violations(tmp_path, statement) == [f"5: {shape}"]
 
 
 @pytest.mark.parametrize(
-    "header",
-    ["import os as _os\n", "from os import environ\n"],
-)
-def test_aliased_environ_receivers_are_flagged(tmp_path: Path, header: str) -> None:
-    """``import os as _os`` and ``from os import environ`` receivers are resolved."""
-    receiver = "_os.environ" if "_os" in header else "environ"
-    src = f'{header}\n\ndef test_x():\n    {receiver}["KAIRIX_DB_PATH"] = "x"\n'
-    violations = _violations(tmp_path, src)
-    assert len(violations) == 1
-    assert violations[0].endswith("assign os.environ[KAIRIX_*]")
-
-
-@pytest.mark.parametrize(
-    ("statement", "shape"),
+    "statement",
     [
-        ('b["KAIRIX_DB_PATH"] = "x"', "assign os.environ[KAIRIX_*]"),
-        ('del b["KAIRIX_DB_PATH"]', "del os.environ[KAIRIX_*]"),
-        ('b.pop("KAIRIX_DB_PATH", None)', "os.environ.pop(KAIRIX_*)"),
-        ('b.setdefault("KAIRIX_DB_PATH", "x")', "os.environ.setdefault(KAIRIX_*)"),
-        ('b.update({"KAIRIX_DB_PATH": "x"})', "os.environ.update(<may carry KAIRIX_*>)"),
-        ('monkeypatch.setitem(b, "KAIRIX_DB_PATH", "x")', "monkeypatch.setitem(os.environ, KAIRIX_*)"),
+        'value = os.environ.get("KAIRIX_DB_PATH")',
+        'value = os.environ["KAIRIX_DB_PATH"]',
+        'monkeypatch.setenv("XDG_CONFIG_HOME", "x")',
+        'os.environ["PATH"] = "x"',
+        'env = dict(os.environ)\nenv["KAIRIX_DB_PATH"] = "x"',
+        'subprocess.run(cmd, env={**os.environ, "KAIRIX_DB_PATH": "x"})',
     ],
 )
-def test_local_alias_chain_of_environ_is_flagged(tmp_path: Path, statement: str, shape: str) -> None:
-    """``a = os.environ; b = a`` then a write through ``b``: aliases are no longer
-    chased — the binding ``a = os.environ`` is itself the violation (guarded
-    objects may only be used in the direct form), whatever ``b`` does next.
-
-    Sabotage proof (executed): make ``MappingGuard.alias_findings`` return
-    ``[]`` → every parametrised case reports clean; restored.
-    """
-    _ = shape  # the write through the alias is never reached — the alias is the finding
-    src = f"import os\n\n\ndef test_x(monkeypatch):\n    a = os.environ\n    b = a\n    {statement}\n"
-    assert _violations(tmp_path, src) == ["5: aliases os.environ (assignment)"]
+def test_reads_copies_and_other_keys_are_not_flagged(tmp_path: Path, statement: str) -> None:
+    assert _violations(tmp_path, statement) == []
 
 
-@pytest.mark.parametrize("copy_expr", ["dict(os.environ)", "os.environ.copy()", "{**os.environ}"])
-def test_write_to_a_copy_of_environ_is_not_flagged(tmp_path: Path, copy_expr: str) -> None:
-    """A copied dict is a different object — writing it never touches the env."""
-    src = f'import os\n\n\ndef test_x():\n    env = {copy_expr}\n    alias = env\n    alias["KAIRIX_DB_PATH"] = "x"\n'
-    assert _violations(tmp_path, src) == []
-
-
-# ---------------------------------------------------------------------------
-# Negatives.
-# ---------------------------------------------------------------------------
-
-
-def test_reads_and_non_kairix_writes_are_not_flagged(tmp_path: Path) -> None:
-    """Reads of KAIRIX_* keys and writes of non-KAIRIX keys stay allowed."""
-    src = """
-import os
-from unittest.mock import patch
-
-
-def test_x(monkeypatch):
-    seen = os.environ["KAIRIX_KV_NAME"]
-    other = os.environ.get("KAIRIX_DB_PATH")
-    os.environ["XDG_CONFIG_HOME"] = "/tmp/x"
-    os.environ.pop("CONNECTOR_GITHUB_APP_ID", None)
-    os.environ.update({"PATH": "/bin"})
-    monkeypatch.setenv("XDG_DATA_HOME", "/tmp/y")
-    env = {"KAIRIX_DB_PATH": "/tmp/db"}
-    with patch.dict(os.environ, {}, clear=False):
-        pass
-    return seen, other, env
-"""
-    assert _violations(tmp_path, src) == []
-
-
-# ---------------------------------------------------------------------------
-# Structural recognition 1 — conftest session baseline.
-# ---------------------------------------------------------------------------
-
-_SESSION_BASELINE = """
-import pytest
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _hermetic(tmp_path_factory):
-    monkeypatch = pytest.MonkeyPatch()
-    for name in ("KAIRIX_DATA_DIR", "KAIRIX_DB_PATH"):
-        monkeypatch.delenv(name, raising=False)
+_BASELINE = """
+with allow_baseline_writes():
     monkeypatch.setenv("KAIRIX_CONNECT_DISABLE_BROWSER", "1")
-    yield
-    monkeypatch.undo()
 """
 
 
-def test_session_autouse_fixture_in_conftest_is_recognised(tmp_path: Path) -> None:
-    """The once-per-run hermetic baseline in a conftest.py is not a violation.
-
-    Sabotage proof (executed): make ``_is_recognised_boundary`` return
-    ``False`` → both baseline writes are reported and this fails; restored.
-    """
-    assert _violations(tmp_path, _SESSION_BASELINE, name="conftest.py") == []
-
-
-def test_session_baseline_shape_outside_conftest_is_flagged(tmp_path: Path) -> None:
-    """The same fixture in an ordinary test module is NOT recognised."""
-    assert _violations(tmp_path, _SESSION_BASELINE, name="test_sample.py") == [
-        "9: monkeypatch.delenv(KAIRIX_*)",
-        "10: monkeypatch.setenv(KAIRIX_*)",
-    ]
-
-
-@pytest.mark.parametrize(
-    "decorator",
-    [
-        "@pytest.fixture(autouse=True)",
-        '@pytest.fixture(scope="session")',
-        '@pytest.fixture(scope="module", autouse=True)',
-    ],
-)
-def test_conftest_fixture_without_session_autouse_is_flagged(tmp_path: Path, decorator: str) -> None:
-    """Only ``scope="session", autouse=True`` together is the baseline shape."""
-    src = _SESSION_BASELINE.replace('@pytest.fixture(scope="session", autouse=True)', decorator)
-    assert len(_violations(tmp_path, src, name="conftest.py")) == 2
-
-
-# ---------------------------------------------------------------------------
-# No snapshot / restore exemption: every restore of the process env is a write.
-# ---------------------------------------------------------------------------
-
-_RESTORE_FIXTURE = """
-import os
-
-import pytest
-
-_KEYS = ("KAIRIX_DB_PATH", "KAIRIX_DATA_DIR")
-
-
-@pytest.fixture
-def _restored(flag):
-    snapshot = {snapshot_expr}
-    yield
-{body}
-"""
-
-RESTORE_SHAPES = {
-    "clear + update(dict copy)": ("dict(os.environ)", "    os.environ.clear()\n    os.environ.update(snapshot)"),
-    "clear + update(.copy())": ("os.environ.copy()", "    os.environ.clear()\n    os.environ.update(snapshot)"),
-    "clear + update({**})": ("{**os.environ}", "    os.environ.clear()\n    os.environ.update(snapshot)"),
-    "update(snapshot) only": ("dict(os.environ)", "    os.environ.update(snapshot)"),
-    "finally clear + update": (
-        "dict(os.environ)",
-        "    try:\n        pass\n    finally:\n        os.environ.clear()\n        os.environ.update(snapshot)",
-    ),
-    "per-key restore / pop": (
-        "dict(os.environ)",
-        "    for key in _KEYS:\n        if key in snapshot:\n            os.environ[key] = snapshot[key]\n"
-        "        else:\n            os.environ.pop(key, None)",
-    ),
-}
-
-
-@pytest.mark.parametrize(("snapshot_expr", "body"), RESTORE_SHAPES.values(), ids=list(RESTORE_SHAPES))
-def test_snapshot_restore_teardown_is_a_violation(tmp_path: Path, snapshot_expr: str, body: str) -> None:
-    """The snapshot-restore exemption is gone (PR #814 review): a fixture that
-    restores the process env from a snapshot is reported like any other
-    write — inject the env mapping through the production seam instead.
-
-    Sabotage proof (executed): make ``_is_recognised_boundary`` also exempt
-    every statement directly in any ``@pytest.fixture`` body → every case
-    reports clean (6 red); restored.
-    """
-    src = _RESTORE_FIXTURE.replace("{snapshot_expr}", snapshot_expr).replace("{body}", body)
-    assert _violations(tmp_path, src), "a snapshot-restore teardown must be reported"
-
-
-def test_key_returned_by_a_helper_call_is_flagged(tmp_path: Path) -> None:
-    """Codex PR #814 thread: ``os.environ.pop(env_key(), None)`` — the key
-    comes from a call to a helper that returns a KAIRIX_* literal.
-
-    Sabotage proof (executed): make ``ConstantTable._call`` claim every
-    helper returns the empty (provably safe) set → no violation is
-    reported; restored.
-    """
-    src = """
-import os
-
-
-def env_key():
-    return "KAIRIX_DB_PATH"
-
-
-def test_x():
-    os.environ.pop(env_key(), None)
-"""
-    assert _violations(tmp_path, src) == ["10: os.environ.pop(KAIRIX_*)"]
-
-
-@pytest.mark.parametrize(
-    "call",
-    [
-        'patch.dict(in_dict=os.environ, values={"KAIRIX_DB_PATH": "x"})',
-        'patch.dict(values={"KAIRIX_DB_PATH": "x"}, in_dict=os.environ)',
-        'patch.dict(os.environ, values={"KAIRIX_DB_PATH": "x"})',
-    ],
-)
-def test_patch_dict_keyword_form_is_flagged(tmp_path: Path, call: str) -> None:
-    """Codex PR #814 thread: ``in_dict=`` / ``values=`` keyword spellings.
-
-    Sabotage proof (executed): resolve only the positional ``in_dict`` /
-    ``values`` (the pre-fix code) → every case reports clean; restored.
-    """
-    src = f"import os\nfrom unittest.mock import patch\n\n\ndef test_x():\n    with {call}:\n        pass\n"
-    assert _violations(tmp_path, src) == ["6: patch.dict(os.environ, <KAIRIX_*>)"]
-
-
-def test_patch_dict_keyword_form_on_other_dicts_is_not_flagged(tmp_path: Path) -> None:
-    src = (
-        "from unittest.mock import patch\n\n\ndef test_x(cfg):\n"
-        + '    with patch.dict(in_dict=cfg, values={"KAIRIX_DB_PATH": "x"}):\n        pass\n'
-    )
-    assert _violations(tmp_path, src) == []
-
-
-# ---------------------------------------------------------------------------
-# The reviewed real-tree sites + the failure message contract.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("relative", ["tests/conftest.py", "tests/setup/test_wizard.py"])
-def test_reviewed_sites_in_the_tree_are_clean(relative: str) -> None:
-    """The conftest session baseline passes through the one structural
-    recognition; the wizard hydrate test injects its env mapping through the
-    ``environ=`` seam and so writes no process env at all — no allow-list
-    entry names either."""
-    assert file_violations(_REPO_ROOT / relative) == []
+def test_baseline_block_is_exempt_only_in_the_root_conftest(tmp_path: Path) -> None:
+    """Writes inside ``with allow_baseline_writes():`` are the session
+    baseline's, exempt in ``tests/conftest.py`` — and the block itself is a
+    violation anywhere else (it is the runtime guard's one exemption)."""
+    assert _violations(tmp_path, _BASELINE) == ["6: allow_baseline_writes() outside tests/conftest.py"]
+    assert file_violations(_REPO_ROOT / "tests" / "conftest.py") == []
 
 
 def test_bool_surface_agrees_with_violation_list(tmp_path: Path) -> None:
@@ -402,17 +96,9 @@ def test_bool_surface_agrees_with_violation_list(tmp_path: Path) -> None:
 
 
 def test_remediation_is_f21_actionable() -> None:
-    """The failure message names the defect, the refactor, and carries the
-    fix:/next:/run: markers plus Pass + Forbidden examples (F21)."""
     assert REMEDIATION.startswith("KAIRIX_* process-env write found in a test. Refactor to")
     for marker in ("fix:", "next:", "run:", "Pass example:", "Forbidden example:"):
         assert marker in REMEDIATION
-    assert "os.environ['KAIRIX_DB_PATH']" in REMEDIATION
-
-
-# ---------------------------------------------------------------------------
-# The in-process FitnessRule gate (staged-narrowable) reports path:line keys.
-# ---------------------------------------------------------------------------
 
 
 def test_rule_gate_reports_line_keys_and_fails(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

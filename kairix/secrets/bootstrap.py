@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import MutableMapping
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,12 @@ _BOOTSTRAP_LOCK = threading.Lock()
 _BOOTSTRAPPED: bool = False
 
 
-def bootstrap_secrets(*, bundle_path: Path | None = None, force: bool = False) -> int:
+def bootstrap_secrets(
+    *,
+    bundle_path: Path | None = None,
+    force: bool = False,
+    env: MutableMapping[str, str] | None = None,
+) -> int:
     """Hydrate the kairix secrets bundle into ``os.environ`` once per process.
 
     Called from every kairix process entry point — the CLI dispatcher,
@@ -77,6 +83,9 @@ def bootstrap_secrets(*, bundle_path: Path | None = None, force: bool = False) -
         force: Re-hydrate even if a previous call already ran. Default
             False — the second call is a no-op. Force=True is for
             tests that need a clean per-test bootstrap.
+        env: The env mapping the bundle hydrates into (and resolves
+            ``$KAIRIX_SECRETS_FILE`` from). ``None`` (production) is the
+            live ``os.environ``; tests pass a dict (F2-clean).
 
     Returns:
         Number of env vars loaded from the bundle (0 if no bundle or
@@ -92,8 +101,8 @@ def bootstrap_secrets(*, bundle_path: Path | None = None, force: bool = False) -
         # Check existence BEFORE the load so a bundle that appears mid-load is
         # never mistaken for a settled-empty state (TOCTOU-safe: either the
         # load caught it — count > 0 — or the next call sees it present).
-        present = _bundle_present(bundle_path)
-        count = load_secrets(bundle_path)
+        present = _bundle_present(bundle_path, env)
+        count = load_secrets(bundle_path, env=env)
         # Latch only once hydration has SETTLED. Settled means either we loaded
         # secrets, or the bundle file exists (an intentionally-empty bundle, or
         # every key already in env). When the bundle is still ABSENT we are in
@@ -113,7 +122,7 @@ def bootstrap_secrets(*, bundle_path: Path | None = None, force: bool = False) -
         return count
 
 
-def _bundle_present(bundle_path: Path | None) -> bool:
+def _bundle_present(bundle_path: Path | None, env: MutableMapping[str, str] | None = None) -> bool:
     """Whether the operator secrets bundle exists at its resolved path.
 
     Resolves the same path ``load_secrets`` uses (the explicit override, or
@@ -126,7 +135,7 @@ def _bundle_present(bundle_path: Path | None) -> bool:
     if path is None:
         from kairix.secrets.store import resolve_bundle_path
 
-        path = resolve_bundle_path()
+        path = resolve_bundle_path(env=env)
     try:
         return Path(path).exists()
     except OSError:

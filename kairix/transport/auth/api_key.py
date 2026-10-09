@@ -29,10 +29,8 @@ plugin's tree. No plugin-private state lives here.
 from __future__ import annotations
 
 import threading
-import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
 
 
 class MissingCredentialsError(RuntimeError):
@@ -66,19 +64,12 @@ class BearerHeaders:
 
 # Process-wide cache so repeated ``headers(...)`` calls reuse the
 # resolved secret without re-walking the resolver chain on every HTTP
-# request. Partitioned by resolver OBJECT IDENTITY, then by logical secret
-# name: instances sharing a resolver (the canonical default, or one injected
-# resolver object) share one resolution per secret name, while two distinct
-# resolvers — even ones that compare equal, or are unhashable — never share
-# an entry, so tenant B can never be served tenant A's key.
-#
-# Each bucket holds only a WEAK reference to its resolver and is evicted when the
-# resolver is garbage-collected, so per-request / per-tenant resolver closures
-# never accumulate in a long-running process. The canonical default resolver is
-# a module-level function that lives for the whole process, so its cache stays
-# process-wide. (While a resolver is alive its ``id`` cannot be reused; on its
-# death the weakref callback removes the bucket before the id can be recycled.)
-_CACHE: dict[int, tuple[weakref.ref[Any], dict[str, str]]] = {}
+# request. Keyed on the logical secret name so an operator can declare
+# multiple API-key-backed connectors without their lookups colliding.
+# Only the canonical default resolver is cached here: an injected
+# ``secret_lookup`` is called on every request (its owner caches if it
+# wants to), so two resolvers can never share — or leak — an entry.
+_CACHE: dict[str, str] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -99,48 +90,6 @@ def reset_api_key_cache() -> None:
     """
     with _CACHE_LOCK:
         _CACHE.clear()
-
-
-def _resolver_bucket(resolver: Callable[[str], str | None]) -> dict[str, str]:
-    """The per-resolver secret cache, keyed by ``resolver`` identity.
-
-    Never hashes or compares the resolver itself (an unhashable callable
-    works; two equal-but-distinct resolvers stay separate) and holds it only
-    weakly (a dropped resolver's bucket is evicted). Caller holds
-    ``_CACHE_LOCK``.
-    """
-    key = id(resolver)
-    entry = _CACHE.get(key)
-    if entry is not None and entry[0]() is resolver:
-        return entry[1]
-    try:
-        ref = weakref.ref(resolver, _evict_when_collected(key))
-    except TypeError:
-        # Not weak-referenceable (rare: a ``__slots__`` callable without
-        # ``__weakref__``): resolve without process-wide caching rather than
-        # retain the resolver forever.
-        return {}
-    bucket: dict[str, str] = {}
-    _CACHE[key] = (ref, bucket)
-    return bucket
-
-
-def _evict_when_collected(key: int) -> Callable[[weakref.ref[Any]], None]:
-    """Weakref callback: drop ``key``'s bucket once ITS resolver is collected.
-
-    Runs from the garbage collector, possibly while another thread holds
-    ``_CACHE_LOCK`` — so it never takes the lock; the identity check plus a
-    single ``dict.pop`` keep it safe under the GIL.
-    """
-
-    def _callback(dead: weakref.ref[Any]) -> None:
-        entry = _CACHE.get(key)
-        if entry is None:
-            return  # already reset / evicted
-        if entry[0] is dead:  # never evict a newer resolver's bucket under the same id
-            _CACHE.pop(key, None)
-
-    return _callback
 
 
 def _default_secret_lookup(secret_name: str) -> str | None:
@@ -170,9 +119,8 @@ class ApiKeyAuth:
     the cached resolution.
 
     Frozen dataclass — the helper itself carries no mutable state.
-    The cache lives at module scope, keyed on (resolver identity, secret-name), so
-    multiple instances using the same resolver share one resolution per
-    secret-name while distinct injected resolvers never share entries.
+    The cache lives at module scope so multiple instances pointing at
+    the same secret-name share one resolution.
 
     Construction is cheap and side-effect-free, so callers can build an
     :class:`ApiKeyAuth` at module import without paying the resolver
@@ -183,8 +131,10 @@ class ApiKeyAuth:
 
     ``secret_lookup`` is the resolver seam: ``(secret_name) -> value | None``.
     Production leaves it at the default (the :func:`kairix.secrets.get_secret`
-    chain); a caller holding its own secret source — or a test proving the
-    missing-secret path without touching the process env — injects one.
+    chain), which is cached process-wide; a caller holding its own secret
+    source — or a test proving the missing-secret path without touching the
+    process env — injects one, which is called on every :meth:`headers` call
+    and never cached here.
     """
 
     secret_lookup: Callable[[str], str | None] = field(default=_default_secret_lookup, repr=False)
@@ -205,18 +155,26 @@ class ApiKeyAuth:
                 this exception up to the operator surface stays F21-
                 actionable.
         """
-        with _CACHE_LOCK:
-            cached = _resolver_bucket(self.secret_lookup).get(secret_name)
-        if cached is None:
-            resolved = self.secret_lookup(secret_name)
-            if resolved is None or not resolved.strip():
-                raise MissingCredentialsError(
-                    f"api_key_auth: secret {secret_name!r} is not configured. "
-                    f"fix: set the secret via the configured resolver chain "
-                    f"(env var, per-file secret, sidecar bundle, or Azure Key Vault). "
-                    f"next: see docs/operations/OPERATIONS.md for the secret-loading runbook."
-                )
+        if self.secret_lookup is not _default_secret_lookup:
+            token = _require(secret_name, self.secret_lookup(secret_name))
+        else:
             with _CACHE_LOCK:
-                _resolver_bucket(self.secret_lookup)[secret_name] = resolved
-            cached = resolved
-        return BearerHeaders(mapping={"Authorization": f"Bearer {cached}"})
+                cached = _CACHE.get(secret_name)
+            if cached is None:
+                cached = _require(secret_name, _default_secret_lookup(secret_name))
+                with _CACHE_LOCK:
+                    _CACHE[secret_name] = cached
+            token = cached
+        return BearerHeaders(mapping={"Authorization": f"Bearer {token}"})
+
+
+def _require(secret_name: str, resolved: str | None) -> str:
+    """Return ``resolved``, or raise the typed error when it is missing / blank."""
+    if resolved is None or not resolved.strip():
+        raise MissingCredentialsError(
+            f"api_key_auth: secret {secret_name!r} is not configured. "
+            f"fix: set the secret via the configured resolver chain "
+            f"(env var, per-file secret, sidecar bundle, or Azure Key Vault). "
+            f"next: see docs/operations/OPERATIONS.md for the secret-loading runbook."
+        )
+    return resolved

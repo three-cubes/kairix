@@ -26,7 +26,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -67,14 +67,16 @@ _KNOWN_ENV_PATHS = (
 )
 
 
-def load_env_file(path: str) -> list[str]:
+def load_env_file(path: str, env: MutableMapping[str, str] | None = None) -> list[str]:
     """
-    Load KEY=VALUE pairs from *path* into os.environ.
+    Load KEY=VALUE pairs from *path* into ``env``.
 
-    Only sets keys that are not already present (does not override).
-    Returns list of keys that were loaded.
+    ``env`` defaults to the live ``os.environ`` (production); a caller
+    holding its own mapping passes it. Only sets keys that are not already
+    present (does not override). Returns list of keys that were loaded.
     Silently ignores missing files and malformed lines.
     """
+    target = os.environ if env is None else env
     loaded: list[str] = []
     try:
         for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -84,8 +86,8 @@ def load_env_file(path: str) -> list[str]:
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip().strip("'\"")
-            if key and key not in os.environ:
-                os.environ[key] = value
+            if key and key not in target:
+                target[key] = value
                 loaded.append(key)
     except OSError:
         pass
@@ -97,6 +99,7 @@ def self_load_env(
     *,
     env_file_override_fn: Callable[[], str | None] = env_file_override,
     known_env_paths: tuple[str, ...] | None = None,
+    env: MutableMapping[str, str] | None = None,
 ) -> tuple[str | None, list[str]]:
     """
     Attempt to self-load production env files before running checks.
@@ -114,20 +117,22 @@ def self_load_env(
       production function is used.
       ``known_env_paths`` overrides the module-level ``_KNOWN_ENV_PATHS``
       tuple; when ``None`` the production constant is used.
+      ``env`` is the mapping the file loads into; ``None`` (production) is
+      the live ``os.environ``.
     """
     if explicit_path:
-        loaded = load_env_file(explicit_path)
+        loaded = load_env_file(explicit_path, env)
         return (explicit_path, loaded)
 
     env_var_path = env_file_override_fn() or ""
     if env_var_path:
-        loaded = load_env_file(env_var_path)
+        loaded = load_env_file(env_var_path, env)
         return (env_var_path, loaded)
 
     probes = known_env_paths if known_env_paths is not None else _KNOWN_ENV_PATHS
     for probe in probes:
         if Path(probe).exists():
-            loaded = load_env_file(probe)
+            loaded = load_env_file(probe, env)
             return (probe, loaded)
 
     return (None, [])
@@ -185,6 +190,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         getattr(args, "env_file", None),
         env_file_override_fn=getattr(args, "_env_file_override_fn", env_file_override),
         known_env_paths=getattr(args, "_known_env_paths", None),
+        env=getattr(args, "_environ", None),
     )
 
     run_all_checks_fn = getattr(args, "_run_all_checks_fn", _default_run_all_checks)
@@ -528,6 +534,7 @@ def main(
     run_all_checks_fn: Callable[..., Any] = _default_run_all_checks,
     pkg_root: Path | None = None,
     is_warm_fn: Callable[[], bool] = _default_warm_state_is_warm,
+    environ: MutableMapping[str, str] | None = None,
 ) -> int:
     """`kairix onboard` entry point.
 
@@ -541,6 +548,8 @@ def main(
       ``env_file_override_fn`` — overrides ``kairix.paths.env_file_override``
       ``known_env_paths`` — overrides module-level ``_KNOWN_ENV_PATHS``
       ``document_root_override_fn`` — overrides ``kairix.paths.document_root_override``
+      ``environ`` — the env mapping ``check`` loads env files into (``None``:
+      the live ``os.environ``)
     """
     parser = argparse.ArgumentParser(
         prog="kairix onboard",
@@ -607,6 +616,7 @@ def main(
     args._run_all_checks_fn = run_all_checks_fn
     args._pkg_root = pkg_root
     args._is_warm_fn = is_warm_fn
+    args._environ = environ
 
     if args.subcommand == "check":
         return cmd_check(args)

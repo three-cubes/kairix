@@ -952,25 +952,28 @@ def test_http_client_is_responsive_returns_true_on_200(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_module_run_as_script_emits_usage(capsys: pytest.CaptureFixture[str]) -> None:
+def test_module_run_as_script_emits_usage() -> None:
     """``python -m kairix.agents.mcp.client_dispatcher`` exits 1 with usage hint.
 
-    Drives the module's ``__main__`` guard through runpy — the same
-    way ``test_top_level_cli_dispatch.py`` drives the kairix.cli
-    ``__main__`` guard. F5-clean: no import of the private
-    ``__module_main_guard`` helper.
+    Runs the module's ``__main__`` guard in a subprocess — a fresh
+    interpreter, so no kairix module body re-executes in the test process
+    (F1). F5-clean: no import of the private ``__module_main_guard`` helper.
 
     Sabotage-proof: removed the ``sys.exit(1)`` from the guard; this
-    test failed because no SystemExit was raised. Restoring restored
-    green.
+    test failed because the exit code was 0. Restoring restored green.
     """
-    import runpy
+    import subprocess
+    import sys
 
-    with pytest.raises(SystemExit) as excinfo:
-        runpy.run_module("kairix.agents.mcp.client_dispatcher", run_name="__main__")
-    assert int(excinfo.value.code or 0) == 1
-    err = capsys.readouterr().err
-    assert "kairix --help" in err, "module guard must surface the right next step"
+    proc = subprocess.run(
+        [sys.executable, "-m", "kairix.agents.mcp.client_dispatcher"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 1
+    assert "kairix --help" in proc.stderr, "module guard must surface the right next step"
 
 
 @pytest.mark.unit

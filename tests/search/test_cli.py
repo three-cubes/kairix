@@ -354,37 +354,29 @@ def test_main_exits_nonzero_when_search_output_has_error(
 
 
 @pytest.mark.unit
-def test_main_module_guard_invokes_main(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_main_module_guard_invokes_main() -> None:
     """The ``if __name__ == "__main__"`` guard wires ``main()`` so
     ``python -m kairix.core.search.cli`` works.
 
-    In the test env there's no ``provider:`` in ``kairix.config.yaml``,
-    so the CLI exits 1 via SystemExit after printing the error
-    envelope. We capture the SystemExit and assert the "Query:" line
-    still made it to stdout.
+    Runs in a subprocess — a fresh interpreter — so no kairix module body is
+    re-executed in the shared test process (F1). argparse's ``--help``
+    output proves the guard called ``main()``.
 
     Sabotage: removing ``main()`` under ``if __name__ == "__main__"``
-    makes runpy.run_module return without printing the "Query:" line,
-    so the captured.out assert fails.
-
-    runpy executes the module as __main__ which triggers the guard line.
-    We patch sys.argv (NOT a KAIRIX_ env var, so F2-compliant) to feed argv.
+    makes the module exit 0 with no output, so the usage assert fails.
     """
-    import runpy
+    import subprocess
     import sys as _sys
 
-    saved_argv = _sys.argv
-    _sys.argv = ["kairix-search", "guarded module run"]
-    try:
-        with pytest.raises(SystemExit) as exc_info:
-            runpy.run_module("kairix.core.search.cli", run_name="__main__")
-        assert exc_info.value.code == 1
-    finally:
-        _sys.argv = saved_argv
-    captured = capsys.readouterr()
-    assert "Query: guarded module run" in captured.out
+    proc = subprocess.run(
+        [_sys.executable, "-m", "kairix.core.search.cli", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "usage:" in proc.stdout
 
 
 # ---------------------------------------------------------------------------

@@ -278,7 +278,11 @@ def _capture_store_from_main(tmp_path: Path, store_arg: str) -> tuple[int, objec
             captured["error"] = exc
             raise
         captured["store"] = store
-        return store
+        # Record the routed store but write to a fake: the real FileTokenStore
+        # targets the session-shared default bundle, and tokens persisted
+        # there were later hydrated into os.environ by an unrelated test's
+        # factory bootstrap (a KAIRIX_* env leak across tests).
+        return FakeTokenStore()
 
     listener = FakeCallbackListener()
     deps = ConnectDeps(

@@ -198,8 +198,8 @@ _Generated from `scripts/checks/_rule_catalogue.py` — do not edit by hand._
 | F38 | layering | per-file | shipped | Silver processing (chunking + signal extraction) only in kairix/core/connectors/silver.py |
 | F44 | layering | per-file | shipped | engagement-scope code may not import firm-scope storage clients (psycopg etc.) |
 | F61 | layering | per-file | shipped | bare _SqliteChunkWriter(db, collection=...) construction only under kairix/core/connectors/ |
-| F1 | test-discipline | per-file | shipped | no @patch / monkeypatch, sys.modules swap or importlib.reload of kairix internals — inject Fake* through a seam |
-| F2 | test-discipline | per-file | shipped | no monkeypatch.setenv("KAIRIX_*") or direct os.environ write of a KAIRIX_* key — pass deps as kwargs instead |
+| F1 | test-discipline | per-file | shipped | no @patch / monkeypatch, sys.modules swap or importlib.reload of kairix internals — inject Fake* through a seam (static: common spellings; runtime: tests/fixtures/process_state_guard.py, exact) |
+| F2 | test-discipline | per-file | shipped | no monkeypatch.setenv("KAIRIX_*") or any other KAIRIX_* process-env write — pass deps as kwargs instead (static: common spellings; runtime: tests/fixtures/process_state_guard.py audit hook, exact) |
 | F5 | test-discipline | per-file | shipped | no internal-name imports in tests — use public surface only |
 | F6 | test-discipline | per-method | shipped | no *_fn=None test-only kwargs in production |
 | F7 | coverage | per-file | shipped | per-file coverage ≥ 90% (unit) — Stage 2 floor |
@@ -344,37 +344,21 @@ Each rule below is described with: **statement**, **why**,
 #### Statement
 
 Test files MUST NOT reach into a production kairix module's namespace
-to swap an implementation. F1 flags eight structurally-identical shapes:
+to swap an implementation — by patching an attribute, by replacing or
+evicting a kairix module in `sys.modules`, or by re-executing one
+(`importlib.reload`). The static half flags these spellings:
 
-1. `patch(target, ...)` — as a decorator, a `with`, or `.start()` — whose
-   dotted `target` is not PROVABLY a non-kairix path (default-deny: an
-   unfoldable target fails); `target` is bound by signature
-2. `patch.object(<kairix ref>, "attr", ...)` — positional or keyword
+1. `patch("kairix.X.Y", ...)` — decorator, `with`, or `.start()`
+2. `patch.object(<kairix ref>, "attr", ...)`
 3. `kairix.X.Y = <expr>` — full-path attribute assignment
 4. `<alias>.Y = <expr>` where alias resolves via imports to a kairix module
-5. `<monkeypatch>.setattr / delattr("a.b.c", ...)` — string-target form whose
-   dotted path is not PROVABLY non-kairix
-6. `<monkeypatch>.setattr / delattr(<kairix module ref>, "attr", ...)` —
-   ref-target form. `<monkeypatch>` is the fixture, any
-   `pytest.MonkeyPatch()` instance (or alias of one), or a
-   `MonkeyPatch.context()` target
-7. any reference to `sys.modules` outside the
-   [read allow-list](#shared-mapping-guard-f1--f2-default-deny) that is not a
-   write PROVEN to touch only non-kairix keys
-8. any reference to `importlib.reload` — called or aliased
-   (`r = importlib.reload`) — unless it is a direct call whose `module`
-   argument is PROVABLY a non-kairix module (an import of an external module,
-   `import_module("json")`, `sys.modules["json"]`, or a name bound only to
-   those); an unresolved argument fails
+5. `monkeypatch.setattr / delattr("kairix.X.Y", ...)` — string-target form
+6. `monkeypatch.setattr / delattr(<kairix module ref>, "attr", fake)` — ref-target form
+7. `sys.modules["kairix.X"] = ...` / `del sys.modules["kairix.X"]`
+8. `importlib.reload(<imported kairix module>)`
 
-Shapes 7 + 8 replace (or evict and re-import) the whole module object — the
-same substitution as `@patch`, one level up. Move the state they reset onto
-an injectable holder (`CrossEncoderCache` in `kairix/core/search/rerank.py`)
-or the import onto a Deps seam (`PackageInitDeps` in
-`kairix/package_meta.py`); prove "importing X has no side effects" in a
-fresh interpreter (`subprocess.run([sys.executable, "-c", "import X"])`).
-Third-party `sys.modules` entries (`sys.modules["openai"] = stub`) stay
-allowed.
+The runtime half fails any spelling of the same substitutions while the
+test runs (see Detection).
 
 Stdlib (`os`, `time`, `pathlib`, `sys`, `importlib`, ...) and external
 SDKs (`httpx`, `openai`, `boto3`, `anthropic`, `requests`, `numpy`,
@@ -400,178 +384,43 @@ the Fake* at construction.
 
 #### Detection
 
+F1 has two halves, like F86 / F86-dynamic.
+
+**Static half — fast pre-commit feedback.**
 `scripts/checks/check_no_internal_patches.py` is an in-process
-`FitnessRule` over `tests/` (so the staged runner narrows it to the staged
-test files; `--all` / CI scan every file). The detector is AST-based,
-parses each file once (after a cheap token prefilter on the call / receiver
-tokens every shape needs — `kairix`, `modules`, `reload`, `import_module`,
-`patch`, `setattr`, `delattr` — never on the kairix name alone, which
-folding can assemble) into a single-traversal `ModuleIndex`, walks each test
-file's imports to resolve aliases (plus local names bound to a kairix module:
-`m = importlib.import_module("kairix.paths")`, `m = sys.modules[...]`,
-`m = kairix.paths`), and flags any of the eight shapes against the
-alias-resolved root. Multi-line constructs, aliased imports
-(`import kairix.paths as paths_mod`), from-imports
-(`from kairix import providers as providers_mod`), and full-path
-forms (`kairix.paths.provider_name = ...`) are all caught.
+`FitnessRule` over `tests/` (the staged runner narrows it to the staged
+test files). It is a small AST match: it walks each test file's imports to
+resolve aliases (`import kairix.paths as paths_mod`,
+`from kairix import providers as providers_mod`) and flags the eight
+spellings above, reporting `path:line: shape`. It deliberately does not
+chase computed targets or aliases of `sys.modules` — that is the runtime
+half's job. Its tests: `tests/architecture/test_check_no_internal_patches.py`
+(shapes 1-6) and `tests/checks/test_no_internal_patches_module_swaps.py`
+(the newer spellings).
 
-**Scope — default-deny.** **Guarded objects cannot be aliased:** `os.environ`, `sys.modules`, the
-`os` / `sys` / `importlib` modules, `importlib.reload`, builtin
-`getattr` / `setattr` / `delattr` and any bound helper method
-(`<x>.setenv` / `.delenv` / `.setitem` / `.delitem` / `.setattr` /
-`.delattr`, `os.environ.<m>`, `sys.modules.<m>`) may not be bound to a name
-by assignment, walrus, default argument, `for` / `with` target, tuple
-unpacking, `return`, `yield` or a lambda body — reads and safe writes use
-the direct form, so nothing is ever chased through an alias (and an
-unrelated `env = {}` can never be mistaken for one). Copies are fine:
-`dict(os.environ)`, `os.environ.copy()`, `{**os.environ}`. Name resolution is
-scope-aware: `os` / `sys` / `importlib` / `environ` / `reload` refer to the
-guarded import only when no enclosing function, lambda, comprehension or class
-scope rebinds the name (parameter, assignment, loop / with / except target,
-walrus, import, `def` / `class`; bound anywhere in a body means local
-throughout), so `def helper(os): ...` or a local `environ = {}` is not the
-guarded object. **Rebinding a guarded name is itself a violation** (the
-alias-ban principle): at module level or directly in a class body, ANY
-binding of `os` / `sys` / `importlib` / `environ` / `modules` / `reload` /
-`getattr` / `setattr` / `delattr` / `__import__` other than its own import
-fails — `os = FakeOs()`, `import json as os`, `def getattr(...)`, a store
-after `global os` in a function — and so does a function that both imports
-such a name and rebinds it, since a reference there means different things
-before and after the rebind. A function-local shadow with no import of the
-name in that function (a parameter named `os`) is not a violation: Python
-makes the name local for the whole body. An augmented assignment
-(`environ |= {...}`) mutates in place and is not a rebind. The same scope
-resolution decides `patch` / `mock` (a local `def patch(...)` or a parameter
-named `patch` / `mock` is not `unittest.mock`; an unbound `patch` from a star
-import still is), the process launchers that may receive `env=R`, and every
-constant: values are tracked per VARIABLE — (scope, name) — so `key =
-"PATH"` in one test never merges with `key = "KAIRIX_DB_PATH"` in another,
-a parameter resolves only through the call sites of the function that owns
-it, and `global` / `nonlocal` stores count toward the variable they rebind.
-**Dunders are default-deny:** any `__x__` attribute on `os` / `sys` /
-`importlib` (`os.__dict__`, `sys.__getattribute__`, ...), a `getattr` of
-one, and `vars(R)` / `R.__dict__` on the mapping itself fail — never traced. Every reference to `sys.modules` and to
-`importlib.reload` must be an allow-listed READ, or a write PROVEN safe;
-**anything not provably a safe read or a safe write fails.** **Any reference
-to builtin `__import__` fails** — the bare name, `<x>.__import__`
-(`builtins` / `__builtins__` / `importlib`), or a `getattr` name, subscript
-key or call argument that folds to it (`getattr(builtins, "__im" +
-"port__")`, `__builtins__["__import__"]`, `monkeypatch.setattr(builtins,
-"__import__", ...)`): tests import normally, or call
-`importlib.import_module` with a static name; a missing optional dependency
-is simulated with `monkeypatch.setitem(sys.modules, "<dep>", None)` (a
-non-kairix key, so a provably safe write). A key, module
-argument or patch target that cannot be resolved statically (a runtime value,
-a parameter with no resolvable call site, an imported constant) is treated as
-protected — the gate never has to have seen the spelling before. Resolution
-is static constant propagation: literals, `+` / f-string / `%` / `.format`
-folding, names and loop variables over constant containers, `KEYS[0]`
-indexing, conditional expressions, constant-returning helpers, parameters
-resolved through their call sites, and `spec_from_file_location("x", ...).name`.
+**Runtime half — exact.** `tests/fixtures/process_state_guard.py` is a
+pytest plugin registered in `tests/conftest.py` `pytest_plugins`, so it runs
+in every pytest tier. While a test item runs it:
 
-The detector's own tests live at
-`tests/architecture/test_check_no_internal_patches.py` (shapes 1-6) and
-`tests/checks/test_no_internal_patches_module_swaps.py` (shapes 7-8) —
-each shape has a positive (kairix target → violation) and negative
-(stdlib/external target → allowed) test. To verify the gate stays
-honest: comment out the detector branch for a shape, run the matching
-positive test, confirm red, restore, confirm green.
+- snapshots the `kairix` / `kairix.*` entries of `sys.modules` before setup
+  and compares them at the end of the call phase (fixture patches still
+  active) — a replaced or removed entry fails the test; new imports are fine;
+- watches the `exec` audit event: a module body whose file belongs to a
+  kairix module imported before the test started is a re-execution
+  (`importlib.reload`, `exec_module` on the live module, `runpy` of an
+  imported module) and fails the test;
+- wraps `MonkeyPatch.setattr` / `delattr` / `setitem` / `delitem`,
+  `mock.patch` / `patch.object` (`_patch.__enter__`, shared by `with`,
+  `start()` and the decorator) and `mock.patch.dict` — patching an object
+  that is a kairix module or has a kairix `__module__`, a dotted
+  `"kairix..."` monkeypatch target, or a kairix key of `sys.modules` fails
+  the test.
 
-#### Shared mapping guard (F1 + F2, default-deny)
-
-F1 (`sys.modules`, protected keys = kairix module names) and F2
-(`os.environ`, protected keys = `KAIRIX_*`) ask the same question of a
-process-global `MutableMapping`. Enumerating write spellings (a denylist)
-kept losing to new spellings, so both use one **default-deny** engine,
-`scripts/checks/_mapping_writes.py` (`MappingGuard`): it visits EVERY
-reference `R` to the mapping once and classifies its parent context. A use
-is allowed only if it is an allow-listed read or a write proven safe;
-**everything else fails**.
-
-1. **References.** `R` is the live mapping reached as `os.environ` /
-   `sys.modules`, through an import alias (`import os as o`) or a
-   from-import (`from os import environ as e`) — import statements only. Local
-   rebinding is NOT followed: binding a guarded object to a name is itself a
-   violation (see the aliasing rule below). The owning module `M` resolves the
-   same way. A copy (`dict(R)`, `R.copy()`, `{**R}`) is a different object.
-2. **Allowed reads.**
-
-| Context | Example |
-|---|---|
-| subscript load | `R["PATH"]` |
-| read methods (called or not) | `R.get / copy / items / keys / values / __contains__ / __getitem__ / __len__ / __iter__` |
-| membership | `k in R`, `k not in R` |
-| read builtins (first argument) | `len(R)`, `dict(R, ...)` |
-| unpacking / iteration | `{**R}`, `for x in R`, comprehension source |
-| process environment | `env=R` / `environ=R` to `subprocess.*`, `os.exec*`, `os.spawn*` |
-
-3. **Writes allowed only when PROVEN safe** — every key resolves statically
-   (`ConstantTable`) to a NON-protected value; an unresolved key counts as
-   protected:
-
-| Write | Proven safe when |
-|---|---|
-| `R[k] = v`, `R[k] op= v`, `del R[k]` — incl. inside a tuple / list / starred unpack | `k` provably non-protected |
-| `R.pop / setdefault / __setitem__ / __delitem__(key, ...)` | `key` provably non-protected |
-| `R.update(other, /, **kw)`, `R.__ior__(other)`, `R \|= other` | `other` is a dict literal of provably non-protected keys; `**kw` names non-protected |
-| `<monkeypatch>.setitem(R, name, v)` / `.delitem(R, name)` | `name` provably non-protected |
-| `patch.dict(R, values, clear)` | `values` provably non-protected and `clear` falsy |
-| `<monkeypatch>.setenv(name, v)` / `.delenv(name)` (F2, never names `R`) | `name` provably non-protected |
-
-4. **Everything else fails**, for example: `R.clear()` / `R.popitem()`, any
-   other method or attribute, passing `R` to any other callable
-   (`some_helper(R)`, `print(R)`, `monkeypatch.setattr(R, ...)`), calling
-   it, comparing it other than `in`, returning / yielding it, putting it in a
-   container or tuple, and replacing the mapping (`os.environ = m`,
-   `del os.environ`, `setattr` / `delattr` / `patch.object` /
-   `monkeypatch.setattr` on `(os, "environ")` or `"os.environ"`, `patch`
-   / `patch.dict` on `"os.environ"` — dotted strings constant-folded).
-5. **The owning MODULE objects are guarded too** (`os` for F2, `sys` and
-   `importlib` for F1 — import aliases only). A static attribute access
-   (`os.path`, `os.getcwd()`, `sys.argv`, `sys.argv = [...]`) is allowed —
-   its attribute name is provably not the guarded one (`os.environ` itself is
-   then classified as a mapping reference). As an ARGUMENT the module is
-   allowed only to builtin `getattr` / `hasattr` called directly, or to
-   `<x>.setattr` / `<x>.delattr` / `patch.object`, each with no `*` / `**`
-   spread and a statically named attribute that is not `environ` / `modules`
-   (`reload` for `importlib`): `monkeypatch.setattr(os, "chown", f)` and
-   `getattr(sys, "frozen", False)` pass; `mutate(os, "path")`, `vars(sys)`,
-   `fetch(os, "environ")`, `some_helper(os)` and `monkeypatch.setattr(os,
-   "environ", **kw)` fail. There is no "next argument is a harmless string"
-   exemption for any other callable.
-7. **Aliasing is forbidden.** Binding any guarded object to a name — by
-   assignment, annotated assignment, walrus, default argument, `for` target,
-   `with` target, tuple / list / starred unpacking, conditional expression,
-   `return`, `yield` or a lambda body — is a violation in its own right. The
-   guarded objects are `os.environ`, `sys.modules`, the `os` / `sys` /
-   `importlib` modules, `importlib.reload`, builtin `getattr` / `setattr` /
-   `delattr`, and every bound helper method (`<x>.setenv` / `.delenv` /
-   `.setitem` / `.delitem` / `.setattr` / `.delattr`, `os.environ.<m>`,
-   `sys.modules.<m>`). The classifier therefore never needs alias chasing; a
-   copy (`dict(os.environ)`, `os.environ.copy()`, `{**os.environ}`) is not an
-   alias.
-6. **MonkeyPatch helper methods are matched by METHOD NAME on any receiver.**
-   `.setenv` / `.delenv` / `.setitem` / `.delitem` / `.setattr` / `.delattr`
-   are classified by name plus bound arguments whatever object they are
-   called on (the fixture, an inline `pytest.MonkeyPatch()`, a
-   `MonkeyPatch.context()` target, anything): a protected or unresolved
-   `.setenv` / `.delenv` key fails F2; a `.setattr` / `.delattr` dotted target
-   that folds to kairix (or is unresolved), or an object target resolving to
-   a kairix module, fails F1.
-
-`patch` is `unittest.mock.patch`
-(bound name, `<mock>.patch`, `unittest.mock.patch` — not an HTTP client's
-`.patch`). Calls are bound to the callee's real parameters, positional or
-keyword (`inspect.Signature.bind` semantics; `update`'s `other` is
-positional-only); a `*args` / `**kw` spread that could hide an argument makes
-it unknown.
-
-Tests: `tests/checks/test_mapping_default_deny.py` (allow-listed reads stay
-clean, provably safe writes stay clean, the default-deny property —
-`some_helper(R)` fails — and the spellings the denylist missed) and the
-table-driven `tests/checks/test_mapping_write_surface.py` (every write form ×
-receiver spelling × call style, for both receivers, plus negatives on an
-ordinary dict / object).
+`monkeypatch.setitem(sys.modules, "<third-party dep>", None)` (simulate a
+missing optional dependency) stays allowed. The plugin's end-to-end proof,
+`tests/test_process_state_guard.py`, installs it as the conftest of a
+throwaway pytest run against a fake package and shows each rule failing a
+violating test and passing a clean one.
 
 #### Examples
 
@@ -619,11 +468,18 @@ If the production class doesn't yet have a constructor seam, **add one**
 following the pattern of `GoldBuilder(llm_judge=..., retriever=...,
 db_path=...)` — one keyword argument per Protocol-shaped collaborator.
 
+To reset module-level singleton state, call the module's public reset
+function (`reset_cross_encoder_cache()`, `reset_api_key_cache()`); to prove
+"importing X behaves" (a version fallback, a missing optional module), import
+it in a fresh interpreter
+(`subprocess.run([sys.executable, "-c", "import kairix"])`); to drive a CLI's
+`__main__` guard, run `python -m <module>` in a subprocess.
+
 #### Allowed exceptions
 
 Patching `os.*`, `builtins.*`, `pathlib.*`, `sys.*` (stdlib boundaries)
 or named external SDKs (`openai.*`, `httpx.*`, `mcp.*`) remains
-allowed. The check explicitly only matches `"kairix.…"` strings.
+allowed. Both halves only match kairix targets.
 
 ---
 
@@ -631,42 +487,12 @@ allowed. The check explicitly only matches `"kairix.…"` strings.
 
 #### Statement
 
-Test files MUST NOT write any process-env key starting with `KAIRIX_`.
-Under the [default-deny guard](#shared-mapping-guard-f1--f2-default-deny),
-every reference to `os.environ` must be an allow-listed read or a write
-PROVEN to touch only non-`KAIRIX_*` keys. That covers `<monkeypatch>.setenv / delenv / setitem /
-delitem / setattr / delattr`, every `MutableMapping` write
-(`os.environ["KAIRIX_X"] = v`, `del`, `|=`, `pop`, `setdefault`, `update`,
-`__setitem__`, `__delitem__`, and `clear()` / `popitem()`), wholesale
-replacement of `os.environ`, and `patch.dict` / `patch.object` / `patch`
-on it — positional or keyword, through any alias — plus the keyed writers
-`os.putenv` / `os.unsetenv` (also `posix` / `nt`, and `from os import
-putenv`): a protected or unresolved key fails, as does any use other than a
-direct call. The direct forms are the
-worse evasion: they skip monkeypatch's auto-undo, so a forgotten restore
-leaks the value into every later test in the process (a pytest-bdd step's
-`os.environ["KAIRIX_DB_PATH"] = ...` did exactly that).
-
-ONE reviewed process-boundary shape is recognised **structurally** — no
-allow-list, baseline, pragma or path list: statements DIRECTLY in the body of
-a `conftest.py` fixture declared `@pytest.fixture(scope="session",
-autouse=True)` — not in a nested function, lambda or yielded / returned
-callback, which inherit nothing — the once-per-run hermetic baseline
-(`tests/conftest.py::_hermetic_data_dirs` clears the ambient operator
-variables and sets the `KAIRIX_CONNECT_DISABLE_BROWSER` kill-switch, undone
-at session end). It stays because it is a safety net for code paths that
-escape their injection seam — it cannot be expressed as a per-test seam
-without every test opting in, which is exactly what a net must not rely on.
-
-There is **no snapshot / restore exemption**: a fixture that copies
-`os.environ` and restores it after the `yield` (`clear()` +
-`update(snapshot)`, per-key restore, `pop`) is reported like any other
-write. When the code under test writes the process env, inject the env
-mapping through the production seam instead — e.g.
-`persist_llm_credentials(..., environ=env)` /
-`refresh_secrets(path, env=env)` / `load_secrets(path, env=env)` hydrate
-into the mapping passed — and when a test genuinely needs a clean real
-process env (a subprocess), pass `env=` to the subprocess.
+Tests MUST NOT write a `KAIRIX_*` process-env variable — by
+`monkeypatch.setenv` / `delenv`, `os.environ[...] =` / `del` / `pop` /
+`update` / `clear`, `patch.dict(os.environ, ...)`, `os.putenv`, or any other
+spelling. The one sanctioned writer is the session env baseline
+(`_hermetic_data_dirs` in `tests/conftest.py`), whose writes sit in a
+`with allow_baseline_writes():` block.
 
 #### Why
 
@@ -682,63 +508,28 @@ explicitly reverted.
 
 #### Detection
 
-`scripts/checks/check_no_env_monkeypatch.py` is an in-process
-`FitnessRule` over `tests/` (staged-narrowable like F1) that reports
-`path:line: shape` per violation, after a cheap token prefilter
-(`environ|setenv|delenv|putenv|unsetenv|patch|setattr|delattr|getattr|vars`
-and attribute dunders `.__x__`) and one parse + one
-traversal per file. The classifier is the shared default-deny guard
-`scripts/checks/_mapping_writes.py` (see the tables under F1); constant
-resolution lives in `scripts/checks/_ast_key_taint.py`. Detector tests:
-`tests/checks/test_no_env_monkeypatch_direct_writes.py`,
-`tests/checks/test_mapping_default_deny.py` and the table-driven
-`tests/checks/test_mapping_write_surface.py`.
+F2 has two halves, like F1.
 
-**Scope — default-deny.** **Guarded objects cannot be aliased:** `os.environ`, `sys.modules`, the
-`os` / `sys` / `importlib` modules, `importlib.reload`, builtin
-`getattr` / `setattr` / `delattr` and any bound helper method
-(`<x>.setenv` / `.delenv` / `.setitem` / `.delitem` / `.setattr` /
-`.delattr`, `os.environ.<m>`, `sys.modules.<m>`) may not be bound to a name
-by assignment, walrus, default argument, `for` / `with` target, tuple
-unpacking, `return`, `yield` or a lambda body — reads and safe writes use
-the direct form, so nothing is ever chased through an alias (and an
-unrelated `env = {}` can never be mistaken for one). Copies are fine:
-`dict(os.environ)`, `os.environ.copy()`, `{**os.environ}`. Name resolution is
-scope-aware: `os` / `sys` / `importlib` / `environ` / `reload` refer to the
-guarded import only when no enclosing function, lambda, comprehension or class
-scope rebinds the name (parameter, assignment, loop / with / except target,
-walrus, import, `def` / `class`; bound anywhere in a body means local
-throughout), so `def helper(os): ...` or a local `environ = {}` is not the
-guarded object. **Rebinding a guarded name is itself a violation** (the
-alias-ban principle): at module level or directly in a class body, ANY
-binding of `os` / `sys` / `importlib` / `environ` / `modules` / `reload` /
-`getattr` / `setattr` / `delattr` / `__import__` other than its own import
-fails — `os = FakeOs()`, `import json as os`, `def getattr(...)`, a store
-after `global os` in a function — and so does a function that both imports
-such a name and rebinds it, since a reference there means different things
-before and after the rebind. A function-local shadow with no import of the
-name in that function (a parameter named `os`) is not a violation: Python
-makes the name local for the whole body. An augmented assignment
-(`environ |= {...}`) mutates in place and is not a rebind. The same scope
-resolution decides `patch` / `mock` (a local `def patch(...)` or a parameter
-named `patch` / `mock` is not `unittest.mock`; an unbound `patch` from a star
-import still is), the process launchers that may receive `env=R`, and every
-constant: values are tracked per VARIABLE — (scope, name) — so `key =
-"PATH"` in one test never merges with `key = "KAIRIX_DB_PATH"` in another,
-a parameter resolves only through the call sites of the function that owns
-it, and `global` / `nonlocal` stores count toward the variable they rebind.
-**Dunders are default-deny:** any `__x__` attribute on `os` / `sys` /
-`importlib` (`os.__dict__`, `sys.__getattribute__`, ...), a `getattr` of
-one, and `vars(R)` / `R.__dict__` on the mapping itself fail — never traced. Every reference to `os.environ` (and every
-`setenv` / `delenv`) must be an allow-listed READ, or a write PROVEN safe;
-**anything not provably a safe read or a safe write fails.** A key or patch
-target that cannot be resolved statically (a runtime value,
-a parameter with no resolvable call site, an imported constant) is treated as
-protected — the gate never has to have seen the spelling before. Resolution
-is static constant propagation: literals, `+` / f-string / `%` / `.format`
-folding, names and loop variables over constant containers, `KEYS[0]`
-indexing, conditional expressions, constant-returning helpers, parameters
-resolved through their call sites, and `spec_from_file_location("x", ...).name`.
+**Static half — fast pre-commit feedback.**
+`scripts/checks/check_no_env_monkeypatch.py` is an in-process
+`FitnessRule` over `tests/` (staged-narrowable). It is a small AST match on
+the common spellings with a literal `KAIRIX_` key —
+`monkeypatch.setenv` / `delenv`, `os.environ[...] =` / `+=` / `del`,
+`os.environ.pop` / `setdefault` — reporting `path:line: shape`. Writes
+inside `with allow_baseline_writes():` are exempt, and the block itself
+fails anywhere but `tests/conftest.py`. Tests:
+`tests/checks/test_no_env_monkeypatch_direct_writes.py`.
+
+**Runtime half — exact.** `tests/fixtures/process_state_guard.py` installs
+one `sys.addaudithook`. CPython raises the `os.putenv` / `os.unsetenv` audit
+events for every env write, however it is spelled — subscript, `update`,
+`pop`, `clear`, `os.__dict__["environ"]`, `os.putenv`, `patch.dict`,
+`monkeypatch.setenv`. A `KAIRIX_*` key written while a test item runs
+(setup / call / teardown) or while a test module is collected fails that
+test or module, naming the key. The hook only records (raising inside an
+audit hook would break the interpreter); the item hooks turn records into
+`pytest.fail`. `allow_baseline_writes()` turns recording off for the session
+baseline's own writes.
 
 #### Examples
 
@@ -750,14 +541,6 @@ def test_brief(monkeypatch, tmp_path):
 
 # REJECTED — even setattr on os.environ
 monkeypatch.setattr("os.environ", {"KAIRIX_DB_PATH": "/x"})
-
-# REJECTED — direct writes (no auto-undo; leak into later tests)
-os.environ["KAIRIX_DB_PATH"] = str(tmp_path / "db.sqlite")
-os.environ.pop("KAIRIX_DB_PATH", None)
-with patch.dict(os.environ, {"KAIRIX_MAX_CONCURRENCY": "3"}): ...
-
-# ALLOWED — the reader's env= mapping seam
-assert resolve_dispatch_concurrency(env={"KAIRIX_MAX_CONCURRENCY": "3"}) == 3
 
 # ALLOWED — non-KAIRIX env (e.g. PATH for subprocess tests)
 monkeypatch.setenv("PATH", "/usr/local/bin")
@@ -3096,8 +2879,8 @@ scripts/checks/
 ├── _fitness_rule.py                      # FitnessRule ABC — 3-line check subclasses over tc_fitness.gate()
 ├── generate_catalogue_docs.py            # Regenerates the F-CATALOGUE doc regions (F92 currency gate)
 ├── _lib.sh                               # Shell helper: arch_gate() function
-├── check_no_internal_patches.py                       # F1
-├── check_no_env_monkeypatch.py                        # F2
+├── check-no-internal-patches.sh                       # F1
+├── check-no-env-monkeypatch.sh                        # F2
 ├── check-suppressions-have-rationale.sh               # F3 (extended: covers # type: ignore + # nosec)
 ├── check-env-reads-stay-in-paths.sh                   # F4
 ├── check_no_internal_imports.py                       # F5 (AST)
@@ -3140,10 +2923,10 @@ enumerate / scope / gate inherited from `tc_fitness.gate`.
 
 For each rule, I chose the simplest tool that gives correct detection:
 
-- **Shell + grep** for line-pattern rules (F3) where the
+- **Shell + grep** for line-pattern rules (F1, F2, F3) where the
   trigger is an unambiguous string at the line level. AST adds no
   precision; the grep regex is short, readable, and fast.
-- **Python AST** for structural rules (F1, F2, F5, F6, F8) where the trigger
+- **Python AST** for structural rules (F5, F6, F8) where the trigger
   depends on import structure (rejected `from kairix.x import _y`
   vs. allowed `from kairix.x import y as _alias`), function
   signatures (`*_fn=None` requires inspecting `args.args` /
@@ -3183,9 +2966,9 @@ def test_x(monkeypatch):
     monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/tmp/x")
 EOF
 cp /tmp/sabotage.py tests/_sabotage.py
-python3 scripts/checks/check_no_env_monkeypatch.py  # expect FAIL
+bash scripts/checks/check-no-env-monkeypatch.sh  # expect FAIL
 rm tests/_sabotage.py
-python3 scripts/checks/check_no_env_monkeypatch.py  # expect ok
+bash scripts/checks/check-no-env-monkeypatch.sh  # expect ok
 ```
 
 If a check passes the sabotage test on the first commit but starts
@@ -3335,7 +3118,7 @@ Refactor: pass paths as a constructor argument or use FakePaths
 from tests/fakes.py. The production code must not require process-env
 mutation to be testable — that's the test-shaped-API smell #139 reverted.
 
-next: re-run python3 scripts/checks/check_no_env_monkeypatch.py until clean.
+next: re-run bash scripts/checks/check-no-env-monkeypatch.sh until clean.
 
 === Architecture fitness functions FAILED ===
 ```
@@ -3357,7 +3140,7 @@ bash scripts/checks/run-all.sh
 bash scripts/checks/run-all.sh --skip-coverage
 
 # Run one check only
-python3 scripts/checks/check_no_env_monkeypatch.py
+bash scripts/checks/check-no-env-monkeypatch.sh
 python3 scripts/checks/check_no_internal_imports.py
 python3 scripts/checks/check_per_file_coverage.py coverage.xml
 ```
@@ -3553,13 +3336,13 @@ violation blocks.
 fitness_functions:
   - id: F1
     name: no-internal-patches
-    script: scripts/checks/check_no_internal_patches.py
+    script: scripts/checks/check-no-internal-patches.sh
     precommit_hook: arch-no-internal-patches
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F2
     name: no-env-monkeypatch
-    script: scripts/checks/check_no_env_monkeypatch.py
+    script: scripts/checks/check-no-env-monkeypatch.sh
     precommit_hook: arch-no-env-monkeypatch
     layer: [pre-commit, safe-commit, ci-stage0]
 

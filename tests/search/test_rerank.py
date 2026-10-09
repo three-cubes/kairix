@@ -1,15 +1,17 @@
 """Tests for cross-encoder re-ranking module.
 
-Drives all behaviour through the ``rerank()`` public surface, the public
-``get_cross_encoder()`` lazy-loader, and the ``encoder=`` / ``cache=`` DI
-seams. Each lazy-loader test passes a fresh ``CrossEncoderCache`` so the
-success / ImportError / generic-Exception paths can each be exercised
-deterministically — no module reload, no mutation of private names (F1/F5).
+Drives all behaviour through the ``rerank()`` public surface, the pure
+``load_cross_encoder()`` loader, the memoising ``get_cross_encoder()`` (reset
+via ``reset_cross_encoder_cache()``), and the ``encoder=`` DI seam — no module
+reload, no mutation of private names (F1/F5). The loader's
+not-installed / load-failure / success paths are driven by putting ``None``
+or a stub in ``sys.modules["sentence_transformers"]`` (a third-party key).
 """
 
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
 from types import ModuleType
 from unittest.mock import MagicMock
 
@@ -18,9 +20,10 @@ import pytest
 from kairix.core.search.rerank import (
     RERANK_CANDIDATE_LIMIT,
     RERANK_MODEL,
-    CrossEncoderCache,
     get_cross_encoder,
+    load_cross_encoder,
     rerank,
+    reset_cross_encoder_cache,
 )
 from kairix.core.search.rrf import FusedResult
 
@@ -247,125 +250,92 @@ def test_returns_unchanged_when_encoder_arg_is_explicit_falsy_via_mock() -> None
 
 
 # ---------------------------------------------------------------------------
-# Lazy-loader public surface — get_cross_encoder()
+# Loader + memo — load_cross_encoder() / get_cross_encoder()
 #
-# These tests inject a fresh ``CrossEncoderCache`` (the ``cache=`` seam), then
-# drive the public ``get_cross_encoder()`` function under controlled
-# ``sys.modules`` state. ``sys.modules['sentence_transformers']`` is a third-party namespace
-# (not a kairix internal), so manipulating it does not violate F1.
+# ``sys.modules['sentence_transformers']`` is a third-party namespace (not a
+# kairix internal), so injecting ``None`` / a stub there does not violate F1.
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def fresh_cache() -> CrossEncoderCache:
-    """An empty load-once cache, isolated from the process-wide singleton."""
-    return CrossEncoderCache()
+def fresh_memo() -> Iterator[None]:
+    """Start and end with an empty process-wide cross-encoder memo."""
+    reset_cross_encoder_cache()
+    yield
+    reset_cross_encoder_cache()
 
 
 @pytest.fixture
 def no_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force the lazy-loader's ``from sentence_transformers import CrossEncoder``
-    to raise ``ImportError`` regardless of whether the package is installed.
+    """Make ``from sentence_transformers import CrossEncoder`` raise ImportError.
 
-    Setting ``sys.modules['sentence_transformers'] = None`` is the documented
-    Python convention for blocking an import: the import machinery sees the
-    sentinel and raises ``ImportError``. This is third-party namespace
-    manipulation and does not touch any kairix internal."""
+    ``sys.modules[name] = None`` is the documented Python convention for
+    blocking an import, regardless of whether the package is installed."""
     monkeypatch.setitem(sys.modules, "sentence_transformers", None)
 
 
-@pytest.fixture
-def stub_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-    """Inject a stub ``sentence_transformers`` module exposing ``CrossEncoder``
-    so the lazy-loader's success path can be exercised without pulling in
-    the real ~22 MB model. Yields the stub module so tests can swap behaviour
-    (e.g. raise during construction)."""
+def _stub_module(cross_encoder: type) -> ModuleType:
     stub = ModuleType("sentence_transformers")
+    stub.CrossEncoder = cross_encoder  # type: ignore[attr-defined]  # dynamic stub injection on synthesised ModuleType
+    return stub
+
+
+def _recording_module(constructed: list[str]) -> ModuleType:
+    """A stub ``sentence_transformers`` whose ``CrossEncoder`` records each construction."""
 
     class _StubCrossEncoder:
         def __init__(self, model_name: str) -> None:
             self.model_name = model_name
+            constructed.append(model_name)
 
         def predict(self, pairs: list[tuple[str, str]]) -> _ScoreArray:
-            return _ScoreArray([0.0] * len(pairs))
+            return _ScoreArray([1.5] * len(pairs))
 
-    # type: ignore[attr-defined] — ModuleType has no static CrossEncoder attr;
-    # this is dynamic stub injection to drive the rerank lazy-loader.
-    stub.CrossEncoder = _StubCrossEncoder  # type: ignore[attr-defined]  # dynamic stub injection — see comment above
-    monkeypatch.setitem(sys.modules, "sentence_transformers", stub)
-    return stub
+    return _stub_module(_StubCrossEncoder)
 
 
-@pytest.mark.unit
-def test_get_cross_encoder_returns_none_on_import_error(
-    fresh_cache: CrossEncoderCache,
-    no_sentence_transformers: None,
-) -> None:
-    """Per docstring: returns None on import failure (sentence-transformers
-    not installed). Sabotage-prove by re-asserting after a second call —
-    the cached state must continue to return None, not silently swap in a
-    truthy value."""
-    out = get_cross_encoder("any-model", cache=fresh_cache)
-    assert out is None
-    # Second call uses the cached-checked branch.
-    again = get_cross_encoder("any-model", cache=fresh_cache)
-    assert again is None
+@pytest.fixture
+def stub_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Inject a recording stub ``sentence_transformers``; returns its construction record."""
+    constructed: list[str] = []
+    monkeypatch.setitem(sys.modules, "sentence_transformers", _recording_module(constructed))
+    return constructed
 
 
-@pytest.mark.unit
-def test_get_cross_encoder_constructs_and_caches_encoder_on_success(
-    fresh_cache: CrossEncoderCache,
-    stub_sentence_transformers: ModuleType,
-) -> None:
-    """Per docstring: the model is loaded on first call and reused for
-    subsequent calls. Sabotage-prove by swapping the stub's CrossEncoder
-    after the first call — the cached instance MUST be returned, not a new
-    one constructed from the swapped class."""
-    first = get_cross_encoder("test-model-name", cache=fresh_cache)
-    assert first is not None
-    assert first.model_name == "test-model-name"
-
-    # Swap the stub class so any new construction would produce a different
-    # instance. The cache means the cached `first` is what we get back.
-    class _OtherCrossEncoder:
+def _failing_module(error: Exception) -> ModuleType:
+    class _FailingCrossEncoder:
         def __init__(self, model_name: str) -> None:
-            self.model_name = "should-not-be-used"
+            raise error
 
-    stub_sentence_transformers.CrossEncoder = _OtherCrossEncoder  # type: ignore[attr-defined]  # dynamic stub mutation on injected module
-
-    second = get_cross_encoder("a-different-model", cache=fresh_cache)
-    assert second is first  # cached singleton
-    assert second.model_name == "test-model-name"
+    return _stub_module(_FailingCrossEncoder)
 
 
 @pytest.mark.unit
-def test_get_cross_encoder_returns_none_on_construction_error(
-    fresh_cache: CrossEncoderCache,
-    monkeypatch: pytest.MonkeyPatch,
+def test_load_cross_encoder_returns_none_when_not_installed(
+    no_sentence_transformers: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Per docstring: any non-ImportError failure during model load (corrupt
-    weights, bad model name, OOM) returns None. Sabotage-prove by also
-    asserting the cached state — a subsequent call must continue to return
-    None even though the failing class is still in sys.modules."""
-    stub = ModuleType("sentence_transformers")
+    with caplog.at_level("WARNING", logger="kairix.core.search.rerank"):
+        assert load_cross_encoder("any-model") is None
+    assert any("not installed" in r.getMessage() for r in caplog.records)
 
-    class _BlowingUpCrossEncoder:
-        def __init__(self, model_name: str) -> None:
-            raise RuntimeError("simulated model load failure")
 
-    stub.CrossEncoder = _BlowingUpCrossEncoder  # type: ignore[attr-defined]  # dynamic stub injection on synthesised ModuleType
-    monkeypatch.setitem(sys.modules, "sentence_transformers", stub)
+@pytest.mark.unit
+def test_load_cross_encoder_constructs_the_named_model(stub_sentence_transformers: list[str]) -> None:
+    encoder = load_cross_encoder("test-model-name")
+    assert encoder.model_name == "test-model-name"
+    assert load_cross_encoder().model_name == RERANK_MODEL
+    assert stub_sentence_transformers == ["test-model-name", RERANK_MODEL]
 
-    out = get_cross_encoder("broken-model", cache=fresh_cache)
-    assert out is None
-    # The cached-checked branch still returns None.
-    out2 = get_cross_encoder("broken-model", cache=fresh_cache)
-    assert out2 is None
+
+@pytest.mark.unit
+def test_load_cross_encoder_returns_none_on_construction_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any failure during model load (corrupt weights, bad model name, OOM) returns None."""
+    monkeypatch.setitem(sys.modules, "sentence_transformers", _failing_module(RuntimeError("simulated failure")))
+    assert load_cross_encoder("broken-model") is None
 
 
 @pytest.mark.unit
 def test_import_error_during_model_load_is_reported_as_a_load_failure(
-    fresh_cache: CrossEncoderCache,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -377,87 +347,75 @@ def test_import_error_during_model_load_is_reported_as_a_load_failure(
     the import's ``try`` (the pre-fix shape) → the "not installed" message is
     logged instead and the assertion fails; restored.
     """
-    stub = ModuleType("sentence_transformers")
-
-    class _MissingBackendCrossEncoder:
-        def __init__(self, model_name: str) -> None:
-            raise ImportError("torch backend unavailable")
-
-    stub.CrossEncoder = _MissingBackendCrossEncoder  # type: ignore[attr-defined]  # dynamic stub injection on synthesised ModuleType
-    monkeypatch.setitem(sys.modules, "sentence_transformers", stub)
-
+    monkeypatch.setitem(sys.modules, "sentence_transformers", _failing_module(ImportError("torch backend unavailable")))
     with caplog.at_level("WARNING", logger="kairix.core.search.rerank"):
-        assert get_cross_encoder("model-x", cache=fresh_cache) is None
+        assert load_cross_encoder("model-x") is None
     messages = [r.getMessage() for r in caplog.records]
     assert any("failed to load model" in m and "torch backend unavailable" in m for m in messages), messages
     assert not any("not installed" in m for m in messages), messages
 
 
 @pytest.mark.unit
-def test_get_cross_encoder_default_model_argument(
-    fresh_cache: CrossEncoderCache,
-    no_sentence_transformers: None,
-) -> None:
-    """Public ``get_cross_encoder()`` accepts a default model argument and
-    returns None when sentence-transformers is unavailable. Confirms the
-    default-arg path of the public alias is reachable."""
-    out = get_cross_encoder(cache=fresh_cache)
-    assert out is None
+def test_get_cross_encoder_loads_once_until_reset(fresh_memo: None, stub_sentence_transformers: list[str]) -> None:
+    """The first call loads; later calls (any model name) reuse that encoder
+    until ``reset_cross_encoder_cache()``.
+
+    Sabotage proof (executed): drop the ``_cross_encoder_checked = True``
+    assignment → the second call constructs again and this fails; restored.
+    """
+    first = get_cross_encoder("test-model-name")
+    assert get_cross_encoder("a-different-model") is first
+    assert stub_sentence_transformers == ["test-model-name"]
+
+    reset_cross_encoder_cache()
+    assert get_cross_encoder("after-reset").model_name == "after-reset"
+    assert stub_sentence_transformers == ["test-model-name", "after-reset"]
+
+
+@pytest.mark.unit
+def test_get_cross_encoder_remembers_a_failed_load(fresh_memo: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed load is remembered: a broken install never retries per query."""
+    monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+    assert get_cross_encoder() is None
+    monkeypatch.setitem(sys.modules, "sentence_transformers", _recording_module([]))
+    assert get_cross_encoder() is None
 
 
 # ---------------------------------------------------------------------------
 # rerank() ↔ lazy-loader integration
 #
-# When ``encoder=None``, ``rerank()`` falls through to the lazy loader.
-# These tests exercise that path end-to-end with controlled sys.modules state.
+# When ``encoder=None``, ``rerank()`` falls through to ``get_cross_encoder``.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 def test_rerank_falls_back_to_lazy_loader_when_encoder_is_none(
-    fresh_cache: CrossEncoderCache,
+    fresh_memo: None,
     no_sentence_transformers: None,
 ) -> None:
-    """Per docstring: ``encoder=None`` triggers lazy-load; on import failure
-    the function returns the input list unchanged. This covers the
-    ``encoder is None`` -> ``get_cross_encoder`` -> ``return results``
-    path inside ``rerank()`` itself."""
+    """``encoder=None`` triggers the lazy load; on import failure the function
+    returns the input list unchanged."""
     results = [_make_result("a.md", 0.9), _make_result("b.md", 0.5)]
-    out = rerank("query", results, cache=fresh_cache)
+    out = rerank("query", results)
     assert out == results
-    # Sabotage-prove: scores are NOT touched (no rerank happened).
-    # Use approx — float equality on the default sentinel still triggers S1244.
+    # Scores are NOT touched (no rerank happened). Use approx — float
+    # equality on the default sentinel still triggers S1244.
     assert all(r.rerank_score == pytest.approx(0.0) for r in out)
 
 
 @pytest.mark.unit
 def test_rerank_uses_lazy_loaded_encoder_when_encoder_arg_omitted(
-    fresh_cache: CrossEncoderCache,
-    stub_sentence_transformers: ModuleType,
+    fresh_memo: None,
+    stub_sentence_transformers: list[str],
 ) -> None:
-    """Per docstring: when the ``encoder`` kwarg is omitted, ``rerank()``
-    pulls the lazy-loaded singleton. With a working stub injected via
-    ``sys.modules``, the encoder is constructed once and used. Sabotage-
-    prove by asserting that ``rerank_score`` was overwritten on each
-    result (the stub returns 0.0 for all pairs, but the field is still
-    populated, distinguishing this from the import-failure short-circuit)."""
-
-    # Override the stub to produce a discriminating signal.
-    class _RecordingCrossEncoder:
-        def __init__(self, model_name: str) -> None:
-            self.model_name = model_name
-
-        def predict(self, pairs: list[tuple[str, str]]) -> _ScoreArray:
-            return _ScoreArray([1.5] * len(pairs))
-
-    stub_sentence_transformers.CrossEncoder = _RecordingCrossEncoder  # type: ignore[attr-defined]  # dynamic stub mutation on injected module
-
+    """With the ``encoder`` kwarg omitted, ``rerank()`` uses the lazily loaded
+    encoder: every result gets the stub's 1.5 score (a broken short-circuit
+    would leave rerank_score at 0.0)."""
     results = [_make_result("a.md", 0.9), _make_result("b.md", 0.5)]
-    out = rerank("query", results, cache=fresh_cache)
-    # Encoder ran — every result got the stub score (sabotage check: a
-    # broken short-circuit would leave rerank_score at 0.0).
+    out = rerank("query", results)
     assert all(r.rerank_score == pytest.approx(1.5) for r in out)
     assert all(r.boosted_score == pytest.approx(1.5) for r in out)
+    assert stub_sentence_transformers == [RERANK_MODEL]
 
 
 # ---------------------------------------------------------------------------
