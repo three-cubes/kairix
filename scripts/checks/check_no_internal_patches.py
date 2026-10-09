@@ -11,12 +11,18 @@ AST and reports each line matching one of these shapes:
 6. ``monkeypatch.setattr / delattr(<kairix module ref>, "attr", ...)``
 7. ``sys.modules["kairix.X"] = ...`` / ``del sys.modules["kairix.X"]``
 8. ``importlib.reload(<imported kairix module>)``
+9. builtin ``setattr / delattr(<imported kairix module or attribute>, ...)``
 
 The exact half is the runtime guard ``tests/fixtures/process_state_guard.py``:
 it fails a running test that swaps or removes a ``sys.modules`` kairix entry,
 re-executes an imported kairix module, or patches a kairix object through
 ``monkeypatch`` / ``mock.patch`` — however it is spelled. This file
 deliberately stays a small AST match — it is the fast loop, not the proof.
+
+Scope: the static half resolves kairix references through the file's imports
+only. A runtime-computed module reference plus a manual restore (e.g.
+``setattr(importlib.import_module(name), ...)``) is deliberate evasion and is
+out of scope for both halves by design.
 
 Stdlib roots (``os``, ``time``, ``pathlib``, ``sys``, ``importlib``,
 ``builtins``, ``threading``, ``functools``, ``re``, ``json``,
@@ -274,6 +280,17 @@ def _is_kairix_reload(node: ast.Call, aliases: dict[str, str]) -> bool:
     return is_reload and bool(node.args) and _resolves_to_kairix(node.args[0], aliases)
 
 
+def _is_builtin_attr_write(node: ast.Call, aliases: dict[str, str]) -> bool:
+    """Builtin ``setattr(<kairix ref>, ...)`` / ``delattr(<kairix ref>, ...)``."""
+    func = node.func
+    return (
+        isinstance(func, ast.Name)
+        and func.id in ("setattr", "delattr")
+        and bool(node.args)
+        and _resolves_to_kairix(node.args[0], aliases)
+    )
+
+
 def _first_arg_is_kairix_string(call: ast.Call) -> bool:
     """First positional arg of patch(...) / setattr(...) is a string starting with ``kairix.``."""
     if not call.args:
@@ -331,6 +348,8 @@ def _call_shape(node: ast.Call, aliases: dict[str, str]) -> str | None:
         return "monkeypatch.setattr/delattr(<kairix target>)"
     if _is_kairix_reload(node, aliases):
         return "importlib.reload(<kairix module>)"
+    if _is_builtin_attr_write(node, aliases):
+        return "setattr/delattr(<kairix target>)"
     return None
 
 

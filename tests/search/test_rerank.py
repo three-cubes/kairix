@@ -11,6 +11,7 @@ or a stub in ``sys.modules["sentence_transformers"]`` (a third-party key).
 from __future__ import annotations
 
 import sys
+import threading
 from collections.abc import Iterator
 from types import ModuleType
 from unittest.mock import MagicMock
@@ -370,6 +371,49 @@ def test_get_cross_encoder_loads_once_until_reset(fresh_memo: None, stub_sentenc
     reset_cross_encoder_cache()
     assert get_cross_encoder("after-reset").model_name == "after-reset"
     assert stub_sentence_transformers == ["test-model-name", "after-reset"]
+
+
+@pytest.mark.unit
+def test_concurrent_first_calls_construct_the_model_once(fresh_memo: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two threads racing the first ``get_cross_encoder()`` (the shared rerank
+    executor's shape) construct the model exactly once and share it.
+
+    Both threads start together on a barrier. The stub constructor then waits
+    briefly for a second constructor to arrive: unserialised, both threads
+    meet inside it (two constructions); serialised by the memo lock, the wait
+    times out with one thread inside and the other gets the stored instance.
+
+    Sabotage proof (executed): drop the ``with _MEMO_LOCK:`` around the
+    check -> load -> store → two constructions and this fails; restored.
+    """
+    constructed: list[str] = []
+    both_inside = threading.Barrier(2)
+
+    class _SlowCrossEncoder:
+        def __init__(self, model_name: str) -> None:
+            constructed.append(model_name)
+            try:
+                both_inside.wait(timeout=0.5)  # passes only if a second constructor runs concurrently
+            except threading.BrokenBarrierError:
+                pass
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", _stub_module(_SlowCrossEncoder))
+    start = threading.Barrier(2)
+    results: list[object] = []
+
+    def _first_call() -> None:
+        start.wait()
+        results.append(get_cross_encoder())
+
+    threads = [threading.Thread(target=_first_call) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert constructed == [RERANK_MODEL]
+    assert len(results) == 2
+    assert results[0] is results[1]
 
 
 @pytest.mark.unit

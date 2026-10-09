@@ -356,6 +356,7 @@ evicting a kairix module in `sys.modules`, or by re-executing one
 6. `monkeypatch.setattr / delattr(<kairix module ref>, "attr", fake)` — ref-target form
 7. `sys.modules["kairix.X"] = ...` / `del sys.modules["kairix.X"]`
 8. `importlib.reload(<imported kairix module>)`
+9. builtin `setattr / delattr(<imported kairix module or attribute>, ...)`
 
 The runtime half fails any spelling of the same substitutions while the
 test runs (see Detection).
@@ -391,7 +392,7 @@ F1 has two halves, like F86 / F86-dynamic.
 `FitnessRule` over `tests/` (the staged runner narrows it to the staged
 test files). It is a small AST match: it walks each test file's imports to
 resolve aliases (`import kairix.paths as paths_mod`,
-`from kairix import providers as providers_mod`) and flags the eight
+`from kairix import providers as providers_mod`) and flags the nine
 spellings above, reporting `path:line: shape`. It deliberately does not
 chase computed targets or aliases of `sys.modules` — that is the runtime
 half's job. Its tests: `tests/architecture/test_check_no_internal_patches.py`
@@ -403,12 +404,16 @@ pytest plugin registered in `tests/conftest.py` `pytest_plugins`, so it runs
 in every pytest tier. While a test item runs it:
 
 - snapshots the `kairix` / `kairix.*` entries of `sys.modules` before setup
-  and compares them at the end of the call phase (fixture patches still
-  active) — a replaced or removed entry fails the test; new imports are fine;
-- watches the `exec` audit event: a module body whose file belongs to a
-  kairix module imported before the test started is a re-execution
+  and compares them at the end of setup, call (fixture patches still active)
+  and teardown — a replaced or removed entry fails the test; a NEW entry
+  passes only if the import machinery made it (a module whose `__spec__` has
+  a loader and whose origin / `__file__` is under the kairix package
+  directory), so a stub inserted under any key fails;
+- watches the `exec` audit event: every kairix module file is recorded on
+  its first execution (seeded at configure time from the modules already
+  imported); a second execution of the same file is a reload
   (`importlib.reload`, `exec_module` on the live module, `runpy` of an
-  imported module) and fails the test;
+  imported module) and fails the test, or the module being collected;
 - wraps `MonkeyPatch.setattr` / `delattr` / `setitem` / `delitem`,
   `mock.patch` / `patch.object` (`_patch.__enter__`, shared by `with`,
   `start()` and the decorator) and `mock.patch.dict` — patching an object
@@ -421,6 +426,13 @@ missing optional dependency) stays allowed. The plugin's end-to-end proof,
 `tests/test_process_state_guard.py`, installs it as the conftest of a
 throwaway pytest run against a fake package and shows each rule failing a
 violating test and passing a clean one.
+
+**Scope.** Both halves catch substitution done through the patch APIs,
+`sys.modules`, module re-execution and (statically) builtin `setattr` /
+`delattr` on an imported kairix reference. A runtime-computed module
+reference with a manual restore (`setattr(importlib.import_module(name), ...)`
+then putting the old value back) is deliberate evasion and is out of scope by
+design — review catches it, the gates do not try to.
 
 #### Examples
 
@@ -529,7 +541,8 @@ events for every env write, however it is spelled — subscript, `update`,
 test or module, naming the key. The hook only records (raising inside an
 audit hook would break the interpreter); the item hooks turn records into
 `pytest.fail`. `allow_baseline_writes()` turns recording off for the session
-baseline's own writes.
+baseline's own writes; entered from any file but the root `tests/conftest.py`
+it records a violation and exempts nothing.
 
 #### Examples
 

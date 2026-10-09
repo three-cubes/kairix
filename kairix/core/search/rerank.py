@@ -25,6 +25,7 @@ Optional dependency — install via:
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -35,8 +36,12 @@ logger = logging.getLogger(__name__)
 RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 RERANK_CANDIDATE_LIMIT: int = 20
 
-_cross_encoder: Any = None  # lazy singleton
-_cross_encoder_checked = False  # True once we've tried to load (even if it failed)
+# Load-once memo: holds the "encoder" key (the loaded encoder, or None for a
+# failed load) once a load has been attempted. The lock serialises the
+# check -> load -> store so concurrent first calls from the shared rerank
+# executor construct (and download) the model exactly once.
+_MEMO: dict[str, Any] = {}
+_MEMO_LOCK = threading.Lock()
 
 
 def load_cross_encoder(model: str = RERANK_MODEL) -> Any:
@@ -74,11 +79,12 @@ def get_cross_encoder(model: str = RERANK_MODEL) -> Any:
     failure; a failed load is remembered too, so a broken install never
     retries the ≈300ms load on every query.
     """
-    global _cross_encoder, _cross_encoder_checked
-    if not _cross_encoder_checked:
-        _cross_encoder = load_cross_encoder(model)
-        _cross_encoder_checked = True
-    return _cross_encoder
+    if "encoder" in _MEMO:  # fast path once loaded; re-checked under the lock below
+        return _MEMO["encoder"]
+    with _MEMO_LOCK:
+        if "encoder" not in _MEMO:
+            _MEMO["encoder"] = load_cross_encoder(model)
+        return _MEMO["encoder"]
 
 
 def reset_cross_encoder_cache() -> None:
@@ -86,9 +92,8 @@ def reset_cross_encoder_cache() -> None:
 
     Mirrors :func:`kairix.transport.auth.api_key.reset_api_key_cache`.
     """
-    global _cross_encoder, _cross_encoder_checked
-    _cross_encoder = None
-    _cross_encoder_checked = False
+    with _MEMO_LOCK:
+        _MEMO.clear()
 
 
 def rerank(

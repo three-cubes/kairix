@@ -29,6 +29,7 @@ import os as _os
 
 GUARDED_PACKAGES = ("fakepkg",)
 GUARDED_ENV_PREFIXES = ("FAKEPKG_",)
+BASELINE_CONFTEST = Path(__file__).resolve()  # this throwaway conftest is the root one
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -150,6 +151,37 @@ def test_first_import_is_clean():
     assert fakepkg.lazy.LAZY == 1
 
 
+@pytest.fixture
+def swapped_in_setup():
+    original = sys.modules["fakepkg.sub"]
+    sys.modules["fakepkg.sub"] = types.ModuleType("fakepkg.sub")
+    yield
+    sys.modules["fakepkg.sub"] = original
+
+
+def test_sys_modules_swap_in_setup(swapped_in_setup):
+    pass  # never runs: the guard fails the item at the end of setup
+
+
+@pytest.fixture
+def injected_entry():
+    name = "fake" + "pkg.injected"  # a computed key
+    yield name
+    sys.modules.pop(name, None)
+
+
+def test_sys_modules_computed_key_insertion(injected_entry):
+    sys.modules[injected_entry] = types.ModuleType(injected_entry)
+
+
+def test_baseline_exemption_from_a_test_module(monkeypatch):
+    from conftest import allow_baseline_writes as exempt
+
+    with exempt():
+        os.environ["FAKEPKG_ALIAS"] = "1"
+    del os.environ["FAKEPKG_ALIAS"]
+
+
 # --- F1: reloads ----------------------------------------------------------------
 
 
@@ -199,6 +231,38 @@ def test_never_runs():
     pass
 """
 
+_COLLECT_RELOAD_TESTS = """
+import importlib
+
+import fakepkg.sub
+
+importlib.reload(fakepkg.sub)
+
+
+def test_never_runs():
+    pass
+"""
+
+# Runs last (file name order): its teardown swap leaks into nothing after it.
+_TEARDOWN_SWAP_TESTS = """
+import sys
+import types
+
+import pytest
+
+import fakepkg.sub
+
+
+@pytest.fixture
+def swaps_in_teardown():
+    yield
+    sys.modules["fakepkg.sub"] = types.ModuleType("fakepkg.sub")
+
+
+def test_sys_modules_swap_in_teardown(swaps_in_teardown):
+    pass
+"""
+
 
 def _run_inner(root: Path) -> dict[str, tuple[str, str]]:
     junit = root / "junit.xml"
@@ -245,6 +309,8 @@ def inner_outcomes(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[
     (pkg / "lazy.py").write_text("LAZY = 1\n")
     (root / "test_inner.py").write_text(_INNER_TESTS)
     (root / "test_collect_env.py").write_text(_COLLECT_ENV_TESTS)
+    (root / "test_collect_reload.py").write_text(_COLLECT_RELOAD_TESTS)
+    (root / "test_zz_teardown_swap.py").write_text(_TEARDOWN_SWAP_TESTS)
     return _run_inner(root)
 
 
@@ -316,3 +382,41 @@ def test_reload_of_a_guarded_module_fails(inner_outcomes: dict[str, tuple[str, s
 )
 def test_patches_of_guarded_objects_fail(inner_outcomes: dict[str, tuple[str, str]], name: str, needle: str) -> None:
     _assert_fails(inner_outcomes, name, "[F1]", needle)
+
+
+def test_swap_undone_before_the_call_is_caught_at_setup(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    """A fixture's swap is checked at the end of setup, not only after the call."""
+    _assert_fails(inner_outcomes, "test_sys_modules_swap_in_setup", "[F1]", "failed on setup", "'fakepkg.sub'")
+
+
+def test_swap_in_a_teardown_finalizer_is_caught(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    _assert_fails(inner_outcomes, "test_sys_modules_swap_in_teardown", "[F1]", "failed on teardown", "'fakepkg.sub'")
+
+
+def test_inserted_entry_that_the_import_machinery_did_not_make_fails(
+    inner_outcomes: dict[str, tuple[str, str]],
+) -> None:
+    _assert_fails(
+        inner_outcomes,
+        "test_sys_modules_computed_key_insertion",
+        "[F1]",
+        "sys.modules['fakepkg.injected'] inserted without the import machinery",
+    )
+
+
+def test_baseline_exemption_entered_outside_the_root_conftest_fails(
+    inner_outcomes: dict[str, tuple[str, str]],
+) -> None:
+    """An aliased import of allow_baseline_writes() from a test module grants
+    nothing: the call itself and the write it tried to cover both fail."""
+    _assert_fails(
+        inner_outcomes,
+        "test_baseline_exemption_from_a_test_module",
+        "[F2]",
+        "allow_baseline_writes() entered from",
+        "set FAKEPKG_ALIAS",
+    )
+
+
+def test_reload_at_collection_time_fails_collection(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    _assert_fails(inner_outcomes, "test_collect_reload", "[F1]", "re-executed already-imported module", "sub.py")

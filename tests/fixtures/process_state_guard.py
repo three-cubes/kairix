@@ -19,16 +19,19 @@ to shared process state, however it is spelled.
   while a test item runs (setup / call / teardown) or a test module is
   collected fails it.
 * **F1 — sys.modules swaps.** The guarded ``sys.modules`` entries are
-  snapshotted before each item's setup and compared at the end of its call
-  phase (fixture-applied patches still active). A replaced or removed entry
-  fails the item; a newly imported module is fine.
+  snapshotted before each item's setup and compared at the end of its setup,
+  call (fixture-applied patches still active) and teardown phases. A replaced
+  or removed entry fails the item. A NEW entry passes only if the import
+  machinery made it: a module whose ``__spec__`` has a loader and whose
+  ``__spec__.origin`` / ``__file__`` lies under the guarded package's
+  directory. A bare ``ModuleType`` stub or any other object fails.
 * **F1 — reloads.** The ``exec`` audit event fires whenever a module body
-  runs. A ``<module>`` code object whose file belongs to a module that was
-  already imported before the item started is a re-execution
+  runs. Every guarded module's file is recorded on its first execution (seeded
+  at configure time from the guarded modules already imported); a second
+  execution of the same file — during collection or a test — is a reload
   (``importlib.reload``, ``exec_module`` on the live module, or
   ``runpy.run_module`` of an imported module — drive a ``__main__`` guard
-  with ``python -m`` in a subprocess instead); a first import is not in the
-  snapshot and passes.
+  with ``python -m`` in a subprocess instead).
 * **F1 — patch APIs.** ``MonkeyPatch.setattr`` / ``delattr`` and
   ``mock.patch`` / ``patch.object`` (``_patch.__enter__``, which ``start()``
   and the decorator form also use) record a violation when the patched object
@@ -43,14 +46,18 @@ to shared process state, however it is spelled.
 The audit hook only records; the item hooks turn records into ``pytest.fail``
 (raising inside an audit hook would break the interpreter). The session env
 baseline in ``tests/conftest.py`` wraps its own writes in
-:func:`allow_baseline_writes` — the one sanctioned writer.
+:func:`allow_baseline_writes` — the one sanctioned writer; called from any
+other file it records a violation and exempts nothing.
 """
 
 from __future__ import annotations
 
 import contextlib
+import importlib.util
+import os
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -60,6 +67,8 @@ import pytest
 GUARDED_PACKAGES: tuple[str, ...] = ("kairix",)
 # Process-env key prefixes tests must not write (F2).
 GUARDED_ENV_PREFIXES: tuple[str, ...] = ("KAIRIX_",)
+# The only file allowed to enter allow_baseline_writes(): the root conftest.
+BASELINE_CONFTEST = Path(__file__).resolve().parent.parent / "conftest.py"
 
 F2_MESSAGE = (
     "[F2] process-env write of a guarded key found in {where}: {details}. "
@@ -88,16 +97,17 @@ class _State:
 
     def __init__(self) -> None:
         self.enabled = False  # between pytest_configure and pytest_unconfigure
+        self.hook_installed = False  # audit hooks cannot be removed: install once
         self.active = False  # inside an item phase or a collection
         self.exempt = 0  # depth of allow_baseline_writes()
         self.env: list[str] = []
         self.patches: list[str] = []
-        self.modules: dict[str, ModuleType] | None = None  # pre-setup snapshot
-        self.module_files: frozenset[str] = frozenset()
+        self.modules: dict[str, Any] | None = None  # pre-setup snapshot
+        self.module_files: set[str] = set()  # guarded module files executed so far
+        self.package_dirs: tuple[str, ...] = ()  # guarded packages' directories
 
 
 _STATE = _State()
-_HOOK_INSTALLED = False
 _ORIGINALS: dict[tuple[type, str], Any] = {}
 
 
@@ -125,25 +135,53 @@ def _audit(event: str, args: tuple[Any, ...]) -> None:
     """Record guarded env writes and module re-executions. Never raises."""
     if event == "exec":
         code = args[0] if args else None
-        if (
-            _recording()
-            and getattr(code, "co_name", None) == "<module>"
-            and getattr(code, "co_filename", None) in _STATE.module_files
-        ):
-            _STATE.patches.append(f"re-executed already-imported module file {code.co_filename}")
+        if _STATE.enabled and getattr(code, "co_name", None) == "<module>":
+            _record_module_exec(code.co_filename)
         return
     if event in ("os.putenv", "os.unsetenv") and _recording() and args and _guarded_key(args[0]):
         key = args[0].decode("utf-8", "surrogateescape") if isinstance(args[0], bytes) else args[0]
         _STATE.env.append(f"{'set' if event == 'os.putenv' else 'unset'} {key}")
 
 
-@contextlib.contextmanager
-def allow_baseline_writes() -> Iterator[None]:
+def _under_package_dirs(path: object) -> bool:
+    return isinstance(path, str) and path.startswith(_STATE.package_dirs)
+
+
+def _record_module_exec(filename: str) -> None:
+    """First execution of a guarded module's file records it; a second is a reload.
+
+    Only files backing a guarded ``sys.modules`` entry count (the import
+    machinery inserts the module, ``__file__`` set, before executing it), so
+    package data compiled to code (templates) or a plugin file a host loads
+    under its own non-guarded name never registers.
+    """
+    if filename in _STATE.module_files:
+        if _recording():
+            _STATE.patches.append(f"re-executed already-imported module file {filename}")
+    elif _under_package_dirs(filename) and any(
+        getattr(mod, "__file__", None) == filename for mod in _guarded_modules().values()
+    ):
+        _STATE.module_files.add(filename)
+
+
+def allow_baseline_writes() -> contextlib.AbstractContextManager[None]:
     """Exempt the session env baseline's own writes (``tests/conftest.py``).
 
     Session-scoped fixtures set up inside the first item's setup and tear down
     inside the last item's teardown, so the baseline wraps its writes here.
+    Only the root conftest may enter it: from any other file it records an F2
+    violation and exempts nothing.
     """
+    caller = Path(sys._getframe(1).f_code.co_filename).resolve()
+    if caller != BASELINE_CONFTEST.resolve():
+        if _recording():
+            _STATE.env.append(f"allow_baseline_writes() entered from {caller} (only {BASELINE_CONFTEST} may)")
+        return contextlib.nullcontext()
+    return _exempt()
+
+
+@contextlib.contextmanager
+def _exempt() -> Iterator[None]:
     _STATE.exempt += 1
     try:
         yield
@@ -151,22 +189,52 @@ def allow_baseline_writes() -> Iterator[None]:
         _STATE.exempt -= 1
 
 
-def _snapshot_modules() -> None:
-    modules = {name: mod for name, mod in list(sys.modules.items()) if _guarded_name(name)}
-    _STATE.modules = modules
-    _STATE.module_files = frozenset(f for m in modules.values() if isinstance(f := getattr(m, "__file__", None), str))
+def _guarded_modules() -> dict[str, Any]:
+    return {name: mod for name, mod in list(sys.modules.items()) if _guarded_name(name)}
+
+
+def _seed_package_state() -> None:
+    """Locate the guarded packages and record the module files already executed."""
+    dirs = []
+    for pkg in GUARDED_PACKAGES:
+        spec = importlib.util.find_spec(pkg)
+        for location in (spec.submodule_search_locations or []) if spec else []:
+            # raw + symlink-resolved, each with a trailing separator ("kairix/" never matches "kairix_x/")
+            dirs += [str(Path(location)) + os.sep, str(Path(location).resolve()) + os.sep]
+    _STATE.package_dirs = tuple(dirs)
+    for mod in _guarded_modules().values():
+        file = getattr(mod, "__file__", None)
+        if isinstance(file, str):
+            _STATE.module_files.add(file)
+
+
+def _genuine_import(mod: object) -> bool:
+    """A module the import machinery made from a file in a guarded package."""
+    spec = getattr(mod, "__spec__", None)
+    if not isinstance(mod, ModuleType) or spec is None or spec.loader is None:
+        return False
+    locations = [spec.origin, getattr(mod, "__file__", None), *(spec.submodule_search_locations or [])]
+    return any(_under_package_dirs(loc) for loc in locations)
 
 
 def _module_swaps() -> list[str]:
+    """Guarded sys.modules entries changed since the pre-setup snapshot."""
     before = _STATE.modules or {}
-    found = []
-    for name, mod in before.items():
-        now = sys.modules.get(name)
-        if now is not mod:
-            found.append(
-                f"sys.modules[{name!r}] {'removed' if now is None and name not in sys.modules else 'replaced'}"
-            )
+    now = _guarded_modules()
+    found = [
+        f"sys.modules[{name!r}] {'removed' if name not in now else 'replaced'}"
+        for name, mod in before.items()
+        if now.get(name, _MISSING) is not mod
+    ]
+    found += [
+        f"sys.modules[{name!r}] inserted without the import machinery"
+        for name, mod in now.items()
+        if name not in before and not _genuine_import(mod)
+    ]
     return found
+
+
+_MISSING = object()
 
 
 def _raise_recorded(where: str) -> None:
@@ -252,10 +320,10 @@ def _install_wrappers() -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    global _HOOK_INSTALLED
-    if not _HOOK_INSTALLED:
+    _seed_package_state()
+    if not _STATE.hook_installed:
         sys.addaudithook(_audit)  # audit hooks cannot be removed; _STATE.enabled gates it
-        _HOOK_INSTALLED = True
+        _STATE.hook_installed = True
     if not _ORIGINALS:
         _install_wrappers()
     _STATE.enabled = True
@@ -270,7 +338,8 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 @contextlib.contextmanager
 def _watching(where: str) -> Iterator[None]:
-    """Record while the body runs; fail ``where`` with anything recorded.
+    """Record while the body runs, then check the sys.modules snapshot; fail
+    ``where`` with anything recorded.
 
     When the body itself raised, a recorded violation still wins (chained to
     the original error); otherwise the original error propagates unchanged.
@@ -281,18 +350,25 @@ def _watching(where: str) -> Iterator[None]:
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException:
-        _STATE.active = False
+        _end_phase()
         _raise_recorded(where)
         raise
     finally:
         _STATE.active = False
+    _end_phase()
     _raise_recorded(where)
+
+
+def _end_phase() -> None:
+    _STATE.active = False
+    if _STATE.enabled and _STATE.modules is not None:
+        _STATE.patches.extend(_module_swaps())
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item):
     _STATE.env, _STATE.patches = [], []
-    _snapshot_modules()
+    _STATE.modules = _guarded_modules()
     with _watching(item.nodeid):
         return (yield)
 
@@ -300,11 +376,7 @@ def pytest_runtest_setup(item: pytest.Item):
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_runtest_call(item: pytest.Item):
     with _watching(item.nodeid):
-        try:
-            return (yield)
-        finally:
-            if _STATE.enabled:
-                _STATE.patches.extend(_module_swaps())
+        return (yield)
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
@@ -313,7 +385,7 @@ def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None):
         with _watching(item.nodeid):
             return (yield)
     finally:
-        _STATE.modules, _STATE.module_files = None, frozenset()
+        _STATE.modules = None
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)

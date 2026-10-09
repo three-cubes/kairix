@@ -5,7 +5,8 @@ Shapes 1-6 of ``scripts/checks/check_no_internal_patches.py`` (``@patch`` /
 in ``tests/architecture/test_check_no_internal_patches.py``. This module pins
 the direct spellings added for the static half: ``patch.object`` on a kairix
 reference, a literal ``sys.modules["kairix..."]`` swap, ``importlib.reload``
-of an imported kairix module, and ``monkeypatch.delattr``. Every other
+of an imported kairix module, ``monkeypatch.delattr``, and builtin
+``setattr`` / ``delattr`` on an imported kairix module or its attribute. Every other
 spelling is the runtime guard's job (``tests/fixtures/process_state_guard.py``,
 proven in ``tests/test_process_state_guard.py``).
 
@@ -57,6 +58,8 @@ def _violations(tmp_path: Path, body: str) -> list[str]:
         ('del sys.modules["kairix.core.search.rerank"]', "sys.modules[kairix.*] swap"),
         ("importlib.reload(rerank_mod)", "importlib.reload(<kairix module>)"),
         ("reload(rerank_mod)", "importlib.reload(<kairix module>)"),
+        ('setattr(rerank_mod, "RERANK_MODEL", "x")', "setattr/delattr(<kairix target>)"),
+        ('delattr(rerank_mod.rerank, "__doc__")', "setattr/delattr(<kairix target>)"),
     ],
 )
 def test_direct_kairix_substitution_is_flagged(tmp_path: Path, statement: str, shape: str) -> None:
@@ -70,6 +73,7 @@ def test_direct_kairix_substitution_is_flagged(tmp_path: Path, statement: str, s
         'sys.modules["openai"] = None',
         'patch.object(yaml, "safe_load")',
         "importlib.reload(yaml)",
+        'setattr(yaml, "safe_load", None)',
         'module = sys.modules.get("kairix.core.search.rerank")',
     ],
 )
