@@ -26,15 +26,12 @@ factory).
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from typing import Any
 
 from kairix.platform.llm.protocol import LLMBackend
+from kairix.quality.scoring.judge_call import call_judge, parse_judge_score
 from kairix.quality.scoring.types import (
-    JUDGE_FAILURE_BACKEND_ERROR,
-    JUDGE_FAILURE_UNPARSEABLE,
-    JudgeFailedError,
     QueryRunResult,
     ScorerResult,
 )
@@ -68,39 +65,6 @@ def build_judge_prompt(
             ),
         },
     ]
-
-
-def parse_judge_score(response: str) -> float:
-    """Parse an LLM-judge response into a clamped 0.0-1.0 float.
-
-    Robust to leading/trailing whitespace and surrounding text (the first
-    parseable float wins); out-of-range values are clamped.
-
-    Raises:
-        JudgeFailedError: ``unparseable_response`` when the response is
-            empty, holds no parseable float, or the float is non-finite
-            (``nan`` / ``inf``). Only the response length is reported.
-    """
-    stripped = (response or "").strip()
-    try:
-        value: float | None = float(stripped)
-    except ValueError:
-        value = _first_float_in(stripped)
-    if value is None:
-        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, f"non-numeric reply ({len(stripped)} chars)")
-    if not math.isfinite(value):
-        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, "non-finite reply")
-    return max(0.0, min(1.0, value))
-
-
-def _first_float_in(text: str) -> float | None:
-    """Return the first parseable float in ``text``, or ``None`` if none."""
-    for token in text.replace(",", " ").split():
-        try:
-            return float(token)
-        except ValueError:
-            continue
-    return None
 
 
 class LLMJudgeScorer:
@@ -168,12 +132,7 @@ class LLMJudgeScorer:
             expected=self._expected,
             context=run.synthesised_answer,
         )
-        try:
-            response = self._llm.chat(prompt, max_tokens=8)
-        except Exception as exc:
-            raise JudgeFailedError.from_backend_exception(exc) from exc
-        if not response or not response.strip():
-            raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, "empty judge reply (LLM backend failure)")
+        response = call_judge(lambda: self._llm.chat(prompt, max_tokens=8))
         value = parse_judge_score(response)
         return ScorerResult(
             metric_name=self._metric_name,

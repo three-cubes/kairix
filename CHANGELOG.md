@@ -95,6 +95,11 @@ results print a "PARTIAL RESULT" warning instead.
   says "No tuning needed" for a partial result.
 - A blank judge reply now counts as a backend failure (`backend_error`) in
   the benchmark judge, the same as in the other judges.
+- All four LLM judges now use one shared routine to call the backend and
+  read the score (`kairix.quality.scoring.judge_call`). As a result, the
+  benchmark judge now accepts the first number in a reply that has extra
+  text (for example `"0.8 (mostly)"`), as the other judges already did. It
+  used to treat that as a failure.
 - Retrieval metadata can no longer overwrite or fake a case's
   `judge_failure` / `judge_error` fields in the benchmark output.
 

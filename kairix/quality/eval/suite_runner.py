@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,9 +51,8 @@ from kairix.core.search.pipeline import SearchPipeline
 from kairix.corpus.ingest import IngestRequest, SessionPayload, ingest_corpus
 from kairix.paths import KairixPaths, agent_cli_roots, confine_to_roots
 from kairix.platform.llm.protocol import LLMBackend
+from kairix.quality.scoring.judge_call import call_judge, parse_judge_score
 from kairix.quality.scoring.types import (
-    JUDGE_FAILURE_BACKEND_ERROR,
-    JUDGE_FAILURE_UNPARSEABLE,
     JudgeFailedError,
 )
 
@@ -443,13 +441,7 @@ class SuiteRunner:
                 ),
             },
         ]
-        try:
-            response = self._llm.chat(prompt, max_tokens=8)
-        except Exception as exc:
-            raise JudgeFailedError.from_backend_exception(exc) from exc
-        if not response or not response.strip():
-            raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, "empty judge reply (LLM backend failure)")
-        return _parse_score(response)
+        return parse_judge_score(call_judge(lambda: self._llm.chat(prompt, max_tokens=8)))
 
     def _score_extraction(
         self,
@@ -667,40 +659,6 @@ def _search_result_to_context(result: Any) -> str:
             title = getattr(inner, "title", "") or getattr(inner, "path", "")
             lines.append(f"- [{title}] {snippet[:_CHUNK_SNIPPET_CHARS]}")
     return "\n".join(lines) if lines else "(no relevant facts retrieved)"
-
-
-def _parse_score(response: str) -> float:
-    """Parse the LLM-judge response into a 0.0-1.0 float.
-
-    Robust to leading/trailing whitespace and surrounding text (the first
-    parseable float wins); out-of-range values are clamped.
-
-    Raises:
-        JudgeFailedError: the response holds no parseable float, or the
-            float is non-finite (``nan`` / ``inf``). Only the response's
-            length is reported, never its text.
-    """
-    stripped = (response or "").strip()
-    try:
-        value: float | None = float(stripped)
-    except ValueError:
-        # Otherwise scan tokens for the first parseable float.
-        value = _first_float_in(stripped)
-    if value is None:
-        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, f"non-numeric reply ({len(stripped)} chars)")
-    if not math.isfinite(value):
-        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, "non-finite reply")
-    return max(0.0, min(1.0, value))
-
-
-def _first_float_in(text: str) -> float | None:
-    """Return the first parseable float in ``text``, or ``None`` if none."""
-    for token in text.replace(",", " ").split():
-        try:
-            return float(token)
-        except ValueError:
-            continue
-    return None
 
 
 def _has_matching_extracted(gt_fact: dict[str, Any], extracted: list[Any]) -> bool:

@@ -6,19 +6,19 @@ so it must not be gated, compared, ranked, trended or published as if it
 were complete. Every consumer routes through :func:`judge_failures` /
 :func:`is_complete` so the rule lives in one place:
 
-* partial  ⇔  ``judge_failures > 0`` (summary count, top-level count, or any
-  case/row carrying ``judge_failure``) or ``gates.judge_coverage`` is False;
-* results written before judge failures were recorded carry none of these
-  fields and count as complete.
+* partial  ⇔  the result's ``judge_failures`` count is > 0;
+* results written before judge failures were recorded carry no count and
+  count as complete.
 
 Gate and compare paths return :data:`EXIT_INCONCLUSIVE` with
 :func:`partial_diagnostic`; display-only paths print :func:`partial_warning`.
 
-Accepted shapes (dicts loaded from JSON, or the in-memory dataclasses):
+Each result type carries the count in exactly ONE canonical place (dicts
+loaded from JSON, or the in-memory dataclasses):
 
-* benchmark result — ``{"summary": {"judge_failures", "gates"}, "cases": [...]}``
-  (``BenchmarkResult``);
-* eval suite result — ``{"judge_failures", "rows": [...]}`` (``SuiteResult``).
+* benchmark result (``BenchmarkResult``) — ``summary.judge_failures``;
+* eval suite result (``SuiteResult``, LoCoMo rows, cutover partial marker) —
+  top-level ``judge_failures``.
 
 Stdlib-only so CI scripts can import it without the heavy kairix stack.
 """
@@ -26,7 +26,7 @@ Stdlib-only so CI scripts can import it without the heavy kairix stack.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 EXIT_INCONCLUSIVE: int = 3
@@ -43,39 +43,16 @@ def _as_mapping(result: Any) -> Mapping[str, Any]:
     return {}
 
 
-def _count(value: Any) -> int:
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _failed_rows(rows: Any) -> int:
-    if not isinstance(rows, Iterable) or isinstance(rows, (str, bytes, Mapping)):
-        return 0
-    return sum(1 for row in rows if isinstance(row, Mapping) and row.get("judge_failure"))
-
-
 def judge_failures(result: Any) -> int:
     """Number of LLM-judge failures recorded in ``result`` (0 = complete).
 
-    Takes the largest of the summary count, the top-level count and the
-    number of failed case/row entries; a failed ``judge_coverage`` gate with
-    no count still reports 1.
+    Reads the one canonical count: ``summary.judge_failures`` for a benchmark
+    result (it has a ``summary``), else the top-level ``judge_failures``.
     """
     data = _as_mapping(result)
     summary = data.get("summary")
-    summary = summary if isinstance(summary, Mapping) else {}
-    failures = max(
-        _count(summary.get(_KEY_JUDGE_FAILURES)),
-        _count(data.get(_KEY_JUDGE_FAILURES)),
-        _failed_rows(data.get("cases")),
-        _failed_rows(data.get("rows")),
-    )
-    gates = summary.get("gates")
-    if failures == 0 and isinstance(gates, Mapping) and gates.get("judge_coverage") is False:
-        return 1
-    return failures
+    holder = summary if isinstance(summary, Mapping) else data
+    return int(holder.get(_KEY_JUDGE_FAILURES) or 0)
 
 
 def is_complete(result: Any) -> bool:

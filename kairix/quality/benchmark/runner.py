@@ -16,7 +16,6 @@ Score methods:
 from __future__ import annotations
 
 import json
-import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -43,6 +42,7 @@ from kairix.quality.eval.metrics import (
     reciprocal_rank_graded,
 )
 from kairix.quality.redaction import describe_exception
+from kairix.quality.scoring.judge_call import call_judge, parse_judge_score
 from kairix.quality.scoring.types import (
     JUDGE_FAILURE_BACKEND_ERROR,
     JUDGE_FAILURE_UNPARSEABLE,
@@ -134,7 +134,16 @@ EXACT_MATCH_TOPK = 5
 FUZZY_MATCH_TOPK = 10
 
 # match_gold_to_path re-exported from metrics for external callers
-__all__ = ["CATEGORY_ALIASES", "CATEGORY_WEIGHTS", "PHASE_GATES", "match_gold_to_path"]
+__all__ = [
+    "CATEGORY_ALIASES",
+    "CATEGORY_WEIGHTS",
+    # Re-exported from kairix.quality.scoring.types (historical import path).
+    "JUDGE_FAILURE_BACKEND_ERROR",
+    "JUDGE_FAILURE_UNPARSEABLE",
+    "PHASE_GATES",
+    "JudgeFailedError",
+    "match_gold_to_path",
+]
 
 
 def title_in_retrieved(gold_title: str, retrieved_paths: list[str], top_k: int) -> bool:
@@ -381,32 +390,14 @@ def llm_judge(
     _ = snippets  # consumed at signature time; explicit drop documents intent
     if not paths:
         return 0.0
-    if chat_backend is None:
-        # Lazy production default — resolves the configured provider plugin
-        # on first ``complete()``; a resolution failure surfaces as a
-        # JudgeFailedError below. Success-path tests inject FakeChatBackend.
-        chat_backend = _default_chat_backend()
-
-    try:
-        reply = chat_backend.complete(
-            _judge_prompt(query, paths),
-            api_key="",
-            endpoint="",
-            deployment="gpt-4o-mini",
-        )
-    except Exception as exc:
-        raise JudgeFailedError.from_backend_exception(exc) from exc
-
-    if not reply or not reply.strip():
-        # Blank is the provider's failure sentinel, not an unparseable verdict.
-        raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, "empty judge reply (LLM backend failure)")
-    try:
-        score = float(reply)
-    except (TypeError, ValueError) as exc:
-        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, f"non-numeric reply ({len(reply)} chars)") from exc
-    if not math.isfinite(score):
-        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, "non-finite reply")
-    return max(0.0, min(1.0, score))
+    # Lazy production default — resolves the configured provider plugin on
+    # first ``complete()``; a resolution failure surfaces as a JudgeFailedError.
+    # Success-path tests inject FakeChatBackend.
+    backend = chat_backend if chat_backend is not None else _default_chat_backend()
+    reply = call_judge(
+        lambda: backend.complete(_judge_prompt(query, paths), api_key="", endpoint="", deployment="gpt-4o-mini")
+    )
+    return parse_judge_score(reply)
 
 
 # ---------------------------------------------------------------------------

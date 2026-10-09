@@ -42,8 +42,9 @@ class JudgeFailedError(RuntimeError):
         reason: Stable machine-readable failure class —
                 :data:`JUDGE_FAILURE_BACKEND_ERROR` or
                 :data:`JUDGE_FAILURE_UNPARSEABLE`.
-        detail: Human-readable detail (exception type + message, or the
-                length of the unparseable reply — never the reply text).
+        detail: Human-readable detail — the backend exception's class name
+                only (never its message), or the length of the unparseable
+                reply (never the reply text).
     """
 
     def __init__(self, reason: str, detail: str) -> None:

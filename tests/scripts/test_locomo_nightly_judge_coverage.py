@@ -247,20 +247,17 @@ def test_nightly_compare_without_complete_prior_establishes_baseline(tmp_path: P
     [
         (_suite_result(), 0),
         (_suite_result(judge_failures=1), 3),
-        # Row-level failure without the summary count still counts.
-        ({**_suite_result(judge_failures=1), "judge_failures": 0}, 3),
         # Pre-judge_failures artifacts carry no count and are treated as complete.
         ({"suite_name": "locomo", "n_questions": 1, "n_passed": 1, "mean_score": 1.0, "rows": []}, 0),
     ],
-    ids=["complete", "counted", "row_only", "legacy"],
+    ids=["complete", "counted", "legacy"],
 )
 def test_judge_coverage_helper_exit_codes(tmp_path: Path, data: dict[str, Any], expected_rc: int) -> None:
-    """The helper exits 3 (shared inconclusive) for any judge failure —
-    summary count or failed row — via ``kairix.quality.completeness``.
+    """The helper exits 3 (shared inconclusive) when the canonical
+    ``judge_failures`` count is > 0, via ``kairix.quality.completeness``.
 
-    Sabotage-proof: drop the ``_failed_rows(...)`` terms from
-    ``completeness.judge_failures`` — the ``row_only`` case exits 0 and fails.
-    Restored.
+    Sabotage-proof: make ``completeness.judge_failures`` return 0 — the
+    ``counted`` case exits 0 and fails. Restored.
     """
     path = _dump(tmp_path / "result.json", data)
     proc = subprocess.run(

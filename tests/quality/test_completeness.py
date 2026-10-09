@@ -39,39 +39,30 @@ def _suite_result(**overrides: Any) -> SuiteResult:
     [
         ({"summary": {"weighted_total": 0.9}}, 0),  # legacy benchmark artifact
         ({"n_questions": 3, "mean_score": 0.5}, 0),  # legacy suite artifact
-        ({"summary": {"judge_failures": 2}}, 2),
-        ({"summary": {"gates": {"judge_coverage": False}}}, 1),
-        ({"summary": {"gates": {"judge_coverage": True}}}, 0),
-        ({"judge_failures": 4}, 4),
-        ({"rows": [{"judge_failure": "backend_error"}, {"score": 1.0}]}, 1),
-        ({"cases": [{"judge_failure": "unparseable_response"}] * 2, "summary": {}}, 2),
-        ({"summary": {"judge_failures": "garbage"}}, 0),
-        ({"summary": "not-a-dict", "rows": "not-rows"}, 0),
+        ({"summary": {"judge_failures": 2}}, 2),  # benchmark: summary.judge_failures
+        ({"judge_failures": 4}, 4),  # suite / partial marker: top-level judge_failures
         (None, 0),
     ],
-    ids=[
-        "legacy_benchmark",
-        "legacy_suite",
-        "summary_count",
-        "coverage_gate",
-        "coverage_gate_ok",
-        "suite_count",
-        "suite_rows",
-        "benchmark_cases",
-        "garbage_count",
-        "garbage_shapes",
-        "none",
-    ],
+    ids=["legacy_benchmark", "legacy_suite", "benchmark_count", "suite_count", "none"],
 )
-def test_judge_failures_reads_every_result_shape(result: Any, expected: int) -> None:
-    """Partial ⇔ any judge failure (summary/top-level count, failed row/case, or a
-    failed judge_coverage gate); legacy artifacts without the fields are complete.
+def test_judge_failures_reads_the_canonical_count(result: Any, expected: int) -> None:
+    """Partial ⇔ the canonical count is > 0: ``summary.judge_failures`` for a
+    benchmark result, top-level ``judge_failures`` otherwise; legacy
+    artifacts without a count are complete.
 
-    Sabotage-proof: drop the ``judge_coverage is False`` branch — the
-    ``coverage_gate`` case reports 0 and fails. Restored.
+    Sabotage-proof: read only the top-level count — the ``benchmark_count``
+    case reports 0 and fails. Restored.
     """
     assert judge_failures(result) == expected
     assert is_complete(result) is (expected == 0)
+
+
+def test_non_canonical_fields_are_not_read() -> None:
+    """Only the canonical count decides completeness: failed rows / cases and
+    the derived ``judge_coverage`` gate are not separate sources (every
+    writer sets the count alongside them)."""
+    assert judge_failures({"summary": {"gates": {"judge_coverage": False}}, "cases": [{"judge_failure": "x"}]}) == 0
+    assert judge_failures({"rows": [{"judge_failure": "backend_error"}]}) == 0
 
 
 def test_judge_failures_reads_in_memory_dataclasses() -> None:

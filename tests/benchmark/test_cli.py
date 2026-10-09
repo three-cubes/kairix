@@ -706,7 +706,7 @@ def test_cmd_compare_refuses_partial_result(tmp_path: Path, partial_side: str) -
     complete = {"meta": {"system": "x"}, "summary": {"weighted_total": 0.5, "category_scores": {}}}
     partial = {
         "meta": {"system": "y"},
-        "summary": {"weighted_total": 0.9, "category_scores": {}, "gates": {"judge_coverage": False}},
+        "summary": {"weighted_total": 0.9, "category_scores": {}, "judge_failures": 1},
     }
     a_path = tmp_path / "a.json"
     b_path = tmp_path / "b.json"

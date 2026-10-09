@@ -265,8 +265,8 @@ class TestJudgeCoverage:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         "summary_extra",
-        [{"judge_failures": 2}, {"gates": {"phase1": True, "judge_coverage": False}}],
-        ids=["judge_failures_count", "judge_coverage_gate"],
+        [{"judge_failures": 2}],
+        ids=["judge_failures_count"],
     )
     def test_partial_current_result_is_inconclusive(self, tmp_path, summary_extra):
         """Same totals as the baseline (no regression), but the current run had

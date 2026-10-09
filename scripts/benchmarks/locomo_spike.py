@@ -62,7 +62,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
 import shutil
 import subprocess
@@ -77,8 +76,8 @@ import yaml
 
 from kairix.quality.completeness import judge_failures, partial_warning
 from kairix.quality.redaction import describe_exception
+from kairix.quality.scoring.judge_call import call_judge, parse_judge_score
 from kairix.quality.scoring.types import (
-    JUDGE_FAILURE_BACKEND_ERROR,
     JUDGE_FAILURE_UNPARSEABLE,
     JudgeFailedError,
 )
@@ -711,14 +710,7 @@ def _judge_response(
         "Respond with a single JSON object ONLY (no prose around it):\n"
         '{"correct": true|false, "score": 0.0-1.0, "reasoning": "one-sentence rationale"}'
     )
-    try:
-        raw = backend.chat([{"role": "user", "content": prompt}], max_tokens=300)
-    except Exception as exc:
-        raise JudgeFailedError.from_backend_exception(exc) from exc
-
-    raw = (raw or "").strip()
-    if not raw:
-        raise JudgeFailedError(JUDGE_FAILURE_BACKEND_ERROR, "empty judge reply (LLM backend failure)")
+    raw = call_judge(lambda: backend.chat([{"role": "user", "content": prompt}], max_tokens=300)).strip()
     start = raw.find("{")
     end = raw.rfind("}")
     parsed: Any = None
@@ -729,13 +721,10 @@ def _judge_response(
             parsed = None
     if not isinstance(parsed, dict):
         raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, f"no JSON object in reply ({len(raw)} chars)")
-    try:
-        score = float(parsed["score"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, "reply has no numeric 'score'") from exc
-    if not math.isfinite(score):
-        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, "non-finite score")
-    score = max(0.0, min(1.0, score))
+    if "score" not in parsed:
+        raise JudgeFailedError(JUDGE_FAILURE_UNPARSEABLE, "reply has no 'score'")
+    # Same float / finite / clamp rule as every other judge.
+    score = parse_judge_score(str(parsed["score"]))
     correct = bool(parsed.get("correct", score >= _PASS_THRESHOLD))
     reasoning = str(parsed.get("reasoning", ""))[:300]
     return score, correct, reasoning
