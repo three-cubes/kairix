@@ -73,6 +73,43 @@ def test_reads_copies_and_other_keys_are_not_flagged(tmp_path: Path, statement: 
     assert _violations(tmp_path, statement) == []
 
 
+def _file_violations(tmp_path: Path, source: str) -> list[str]:
+    path = tmp_path / "test_sample.py"
+    path.write_text(source, encoding="utf-8")
+    return file_violations(path)
+
+
+def test_bare_environ_counts_only_when_imported_from_os(tmp_path: Path) -> None:
+    """``environ[...] =`` is the process env only via ``from os import
+    environ [as e]``; without that import a bare ``environ`` is someone's dict.
+
+    Sabotage proof (executed): match every bare name ``environ`` again → the
+    no-import case is flagged and this fails; restored.
+    """
+    imported = 'from os import environ as env\n\n\ndef test_x():\n    env["KAIRIX_DB_PATH"] = "x"\n'
+    assert _file_violations(tmp_path, imported) == ["5: assign os.environ[KAIRIX_*]"]
+    not_imported = 'environ = {}\n\n\ndef test_x():\n    environ["KAIRIX_DB_PATH"] = "x"\n'
+    assert _file_violations(tmp_path, not_imported) == []
+
+
+@pytest.mark.parametrize(
+    "function",
+    [
+        'def test_x():\n    environ = {}\n    environ["KAIRIX_DB_PATH"] = "x"\n',
+        'def test_x(environ):\n    environ["KAIRIX_DB_PATH"] = "x"\n',
+    ],
+    ids=["local-assignment", "parameter"],
+)
+def test_locally_rebound_environ_is_not_flagged(tmp_path: Path, function: str) -> None:
+    """Even with ``from os import environ`` in the file, a function that
+    rebinds the name (an assignment or a parameter) writes its own mapping.
+
+    Sabotage proof (executed): make ``_rebound_locally`` return ``False`` →
+    both cases are flagged and this fails; restored.
+    """
+    assert _file_violations(tmp_path, "from os import environ\n\n\n" + function) == []
+
+
 _BASELINE = """
 with allow_baseline_writes():
     monkeypatch.setenv("KAIRIX_CONNECT_DISABLE_BROWSER", "1")

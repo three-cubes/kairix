@@ -179,6 +179,41 @@ def test_sys_modules_computed_key_insertion(injected_entry):
     sys.modules[injected_entry] = types.ModuleType(injected_entry)
 
 
+@pytest.fixture
+def restore_environ():
+    original = os.environ
+    yield dict(original)
+    os.environ = original
+
+
+def test_env_replaced_directly(restore_environ):
+    os.environ = restore_environ
+
+
+def test_env_replaced_by_monkeypatch(monkeypatch):
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+
+
+def test_env_replaced_by_mock_patch():
+    with mock.patch("os.environ", dict(os.environ)):
+        pass
+
+
+def test_env_patch_dict_of_other_keys_is_clean():
+    with mock.patch.dict(os.environ, {"OTHER": "1"}):
+        assert os.environ["OTHER"] == "1"
+
+
+@pytest.fixture
+def misnamed_entry():
+    yield "fakepkg.computed"
+    sys.modules.pop("fakepkg.computed", None)
+
+
+def test_sys_modules_real_module_under_another_name(misnamed_entry):
+    sys.modules[misnamed_entry] = fakepkg
+
+
 def test_baseline_exemption_from_a_test_module(monkeypatch):
     from conftest import allow_baseline_writes as exempt
 
@@ -394,6 +429,7 @@ def test_env_write_at_module_import_fails_collection(inner_outcomes: dict[str, t
         "test_sys_modules_third_party_none_is_clean",
         "test_first_import_is_clean",
         "test_patching_non_guarded_objects_is_clean",
+        "test_env_patch_dict_of_other_keys_is_clean",
     ],
 )
 def test_clean_tests_pass(inner_outcomes: dict[str, tuple[str, str]], name: str) -> None:
@@ -478,3 +514,20 @@ def test_sys_modules_removal_at_collection_time_fails_collection(
 
 def test_genuine_import_at_collection_time_is_clean(inner_outcomes: dict[str, tuple[str, str]]) -> None:
     assert inner_outcomes["test_collected_module_is_usable"] == ("passed", "")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["test_env_replaced_directly", "test_env_replaced_by_monkeypatch", "test_env_replaced_by_mock_patch"],
+)
+def test_wholesale_environ_replacement_fails(inner_outcomes: dict[str, tuple[str, str]], name: str) -> None:
+    _assert_fails(inner_outcomes, name, "[F2]", "os.environ replaced wholesale")
+
+
+def test_real_module_inserted_under_another_name_fails(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    _assert_fails(
+        inner_outcomes,
+        "test_sys_modules_real_module_under_another_name",
+        "[F1]",
+        "sys.modules['fakepkg.computed'] inserted without the import machinery",
+    )

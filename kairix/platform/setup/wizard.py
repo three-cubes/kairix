@@ -85,7 +85,7 @@ def _default_write_config(updates: Mapping[str, Any], output_path: str | None) -
     )
 
 
-def _default_hydrate(path: Path, environ: MutableMapping[str, str] | None) -> int:
+def _default_hydrate(path: Path, environ: MutableMapping[str, str] | None = None) -> int:
     """Production seam — hydrate the just-written bundle into ``environ``.
 
     Routes through :func:`kairix.secrets.refresh_secrets` so the
@@ -157,7 +157,7 @@ def persist_llm_credentials(
     llm_model: str = "",
     *,
     bundle_path: Path | None = None,
-    hydrate_fn: Callable[[Path, MutableMapping[str, str] | None], int] = _default_hydrate,
+    hydrate_fn: Callable[[Path], int] = _default_hydrate,
     environ: MutableMapping[str, str] | None = None,
 ) -> Path | None:
     """Persist the wizard's collected credentials under canonical names.
@@ -169,10 +169,11 @@ def persist_llm_credentials(
     ``kairix-provider-llm-model`` slot the credentials resolver reads,
     overriding its built-in default. Empty values are skipped. After the
     last write the bundle is hydrated into the process env
-    (``hydrate_fn`` seam; production = ``refresh_secrets``) so the
-    connection test resolves the stored values. ``environ`` is the env
-    mapping the bundle hydrates into — ``None`` (production) is the live
-    process env; a caller holding its own env mapping passes it.
+    (``hydrate_fn`` seam: ``(path) -> int``; production = ``refresh_secrets``)
+    so the connection test resolves the stored values. ``environ`` is the env
+    mapping the DEFAULT hydrator loads into — ``None`` (production) is the
+    live process env; an injected ``hydrate_fn`` is called with the path
+    only.
 
     Returns the bundle path written to, or ``None`` when every value
     was empty (nothing persisted, nothing hydrated).
@@ -190,7 +191,10 @@ def persist_llm_credentials(
         if value:
             path = set_secret(name, value, bundle_path=bundle_path)
     if path is not None:
-        hydrate_fn(path, environ)
+        if hydrate_fn is _default_hydrate:
+            _default_hydrate(path, environ)
+        else:
+            hydrate_fn(path)
     return path
 
 

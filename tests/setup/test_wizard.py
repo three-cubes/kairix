@@ -729,7 +729,7 @@ def test_persist_llm_credentials_writes_canonical_names(tmp_path: Path) -> None:
         "text-embedding-3-large",
         "gpt-4o-mini",
         bundle_path=bundle,
-        hydrate_fn=lambda p, _environ: hydrated.append(p) or 0,
+        hydrate_fn=lambda p: hydrated.append(p) or 0,
     )
 
     assert path == bundle
@@ -745,6 +745,40 @@ def test_persist_llm_credentials_writes_canonical_names(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_injected_hydrate_fn_keeps_its_one_argument_contract(tmp_path: Path) -> None:
+    """An injected ``hydrate_fn`` is ``(path) -> int``: it runs once with the
+    written bundle path even when an ``environ`` mapping is also passed (that
+    mapping only feeds the default hydrator).
+
+    Sabotage proof (executed): call the injected hook as
+    ``hydrate_fn(path, environ)`` → ``TypeError`` from the one-argument
+    callback and this fails; restored.
+    """
+    from kairix.platform.setup.wizard import persist_llm_credentials
+
+    calls: list[Path] = []
+
+    def hydrate(path: Path) -> int:
+        calls.append(path)
+        return 1
+
+    bundle = tmp_path / "kairix.env"
+    environ: dict[str, str] = {}
+    path = persist_llm_credentials(
+        "example-credential-value",  # pragma: allowlist secret — generic fixture
+        "https://example-resource.services.ai.azure.com",
+        "text-embedding-3-large",
+        bundle_path=bundle,
+        hydrate_fn=hydrate,
+        environ=environ,
+    )
+
+    assert path == bundle
+    assert calls == [bundle]
+    assert environ == {}, "the injected hook owns hydration; the default must not also run"
+
+
+@pytest.mark.unit
 def test_persist_llm_credentials_skips_empty_values(tmp_path: Path) -> None:
     """Empty endpoint / model fields are skipped, not written as blank lines."""
     from kairix.platform.setup.wizard import persist_llm_credentials
@@ -756,7 +790,7 @@ def test_persist_llm_credentials_skips_empty_values(tmp_path: Path) -> None:
         "",
         "",
         bundle_path=bundle,
-        hydrate_fn=lambda _p, _environ: 0,
+        hydrate_fn=lambda _p: 0,
     )
     assert path == bundle
     content = bundle.read_text(encoding="utf-8")

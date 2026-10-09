@@ -5,7 +5,9 @@ starting with ``KAIRIX_``:
 
 * ``monkeypatch.setenv("KAIRIX_X", ...)`` / ``monkeypatch.delenv("KAIRIX_X")``
   (any fixture name);
-* ``os.environ["KAIRIX_X"] = ...`` / ``+=`` / ``del os.environ["KAIRIX_X"]``;
+* ``os.environ["KAIRIX_X"] = ...`` / ``+=`` / ``del os.environ["KAIRIX_X"]``
+  (or the name bound by ``from os import environ [as e]``, unless the
+  enclosing function rebinds it);
 * ``os.environ.pop("KAIRIX_X")`` / ``os.environ.setdefault("KAIRIX_X", ...)``.
 
 Writes inside ``with allow_baseline_writes():`` in ``tests/conftest.py`` (the
@@ -76,30 +78,61 @@ def _is_kairix_literal(node: ast.expr | None) -> bool:
     return isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("KAIRIX_")
 
 
-def _is_environ(node: ast.expr) -> bool:
-    """``os.environ`` or a bare ``environ`` name (``from os import environ``)."""
-    if isinstance(node, ast.Attribute):
-        return node.attr == "environ" and isinstance(node.value, ast.Name) and node.value.id == "os"
-    return isinstance(node, ast.Name) and node.id == "environ"
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 
 
-def _subscript_write(target: ast.expr) -> bool:
-    return isinstance(target, ast.Subscript) and _is_environ(target.value) and _is_kairix_literal(target.slice)
+class _Environ:
+    """Decides whether an expression is ``os.environ`` in one parsed file.
+
+    A bare name counts only when the file binds it with ``from os import
+    environ [as name]`` and the enclosing function does not rebind it (a
+    parameter or an assignment of that name in the function) — a simple
+    local check, not a scope engine.
+    """
+
+    def __init__(self, tree: ast.AST) -> None:
+        self.names = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "os"
+            for alias in node.names
+            if alias.name == "environ"
+        }
+        self.parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+    def _rebound_locally(self, node: ast.Name) -> bool:
+        scope = self.parents.get(node)
+        while scope is not None and not isinstance(scope, _FUNCTIONS):
+            scope = self.parents.get(scope)
+        if scope is None:
+            return False
+        args = scope.args
+        params = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg) if a}
+        stores = {n.id for n in ast.walk(scope) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        return node.id in params | stores
+
+    def __call__(self, node: ast.expr) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr == "environ" and isinstance(node.value, ast.Name) and node.value.id == "os"
+        return isinstance(node, ast.Name) and node.id in self.names and not self._rebound_locally(node)
 
 
-def _shape(node: ast.AST) -> str | None:
+def _shape(node: ast.AST, is_environ: _Environ) -> str | None:
+    def subscript_write(target: ast.expr) -> bool:
+        return isinstance(target, ast.Subscript) and is_environ(target.value) and _is_kairix_literal(target.slice)
+
     if isinstance(node, (ast.Assign, ast.AugAssign)):
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        if any(_subscript_write(t) for t in targets):
+        if any(subscript_write(t) for t in targets):
             return "assign os.environ[KAIRIX_*]"
     elif isinstance(node, ast.Delete):
-        if any(_subscript_write(t) for t in node.targets):
+        if any(subscript_write(t) for t in node.targets):
             return "del os.environ[KAIRIX_*]"
     elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.args:
         func, first = node.func, node.args[0]
         if func.attr in _ENV_HELPERS and _is_kairix_literal(first):
             return f"{func.attr}(KAIRIX_*)"
-        if func.attr in _ENVIRON_METHODS and _is_environ(func.value) and _is_kairix_literal(first):
+        if func.attr in _ENVIRON_METHODS and is_environ(func.value) and _is_kairix_literal(first):
             return f"os.environ.{func.attr}(KAIRIX_*)"
     return None
 
@@ -132,7 +165,8 @@ def file_violations(path: Path) -> list[str]:
         return []
     blocks = _baseline_blocks(tree)
     exempt = {line for b in blocks for line in range(b.lineno, (b.end_lineno or b.lineno) + 1)}
-    found = {(getattr(node, "lineno", 0), shape) for node in ast.walk(tree) if (shape := _shape(node))}
+    is_environ = _Environ(tree)
+    found = {(getattr(node, "lineno", 0), shape) for node in ast.walk(tree) if (shape := _shape(node, is_environ))}
     found = {(line, shape) for line, shape in found if line not in exempt}
     if path.resolve() != _BASELINE_HOME:
         found |= {(b.lineno, f"{_BASELINE_CONTEXT}() outside tests/conftest.py") for b in blocks}

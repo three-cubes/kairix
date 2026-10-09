@@ -17,7 +17,10 @@ to shared process state, however it is spelled.
   ``patch.dict(os.environ, ...)``, ``monkeypatch.setenv`` / ``delenv``, and any
   ``os.__dict__`` route to the same mapping. A write of a guarded-prefix key
   while a test item runs (setup / call / teardown) or a test module is
-  collected fails it.
+  collected fails it. Replacing ``os.environ`` wholesale raises no such
+  event, so the ``os.environ`` object is also identity-checked at the end of
+  every phase and collection (and the patch wrappers reject ``os`` +
+  ``"environ"`` targets up front).
 * **F1 — sys.modules swaps.** The guarded ``sys.modules`` entries are
   snapshotted before each item's setup and compared at the end of its setup,
   call (fixture-applied patches still active) and teardown phases, and
@@ -104,6 +107,7 @@ class _State:
         self.env: list[str] = []
         self.patches: list[str] = []
         self.modules: dict[str, Any] | None = None  # pre-setup snapshot
+        self.environ: object | None = None  # the os.environ object at the snapshot
         self.module_files: set[str] = set()  # guarded module files executed so far
         self.package_dirs: tuple[str, ...] = ()  # guarded packages' directories
 
@@ -209,10 +213,13 @@ def _seed_package_state() -> None:
             _STATE.module_files.add(file)
 
 
-def _genuine_import(mod: object) -> bool:
-    """A module the import machinery made from a file in a guarded package."""
+def _genuine_import(key: str, mod: object) -> bool:
+    """A module the import machinery made from a file in a guarded package,
+    registered under its own name (key == ``__name__`` == ``__spec__.name``)."""
     spec = getattr(mod, "__spec__", None)
     if not isinstance(mod, ModuleType) or spec is None or spec.loader is None:
+        return False
+    if not key == mod.__name__ == spec.name:
         return False
     locations = [spec.origin, getattr(mod, "__file__", None), *(spec.submodule_search_locations or [])]
     return any(_under_package_dirs(loc) for loc in locations)
@@ -230,7 +237,7 @@ def _module_swaps() -> list[str]:
     found += [
         f"sys.modules[{name!r}] inserted without the import machinery"
         for name, mod in now.items()
-        if name not in before and not _genuine_import(mod)
+        if name not in before and not _genuine_import(name, mod)
     ]
     return found
 
@@ -254,22 +261,39 @@ def _raise_recorded(where: str) -> None:
 # --- patch-API wrappers ------------------------------------------------------
 
 
-def _wrap(owner: type, attr: str, check: Any) -> None:
+def _wrap(owner: type, attr: str, check: Any, *, quiet_on_environ: bool = False) -> None:
+    """Install ``check`` in front of ``owner.attr``.
+
+    ``quiet_on_environ`` (``patch.dict``): once ``check`` has vetted the keys a
+    ``patch.dict(os.environ, ...)`` sets, its apply and restore run without
+    audit recording — the restore's ``clear()`` + ``update()`` would otherwise
+    re-write every guarded key that was already there.
+    """
     original = getattr(owner, attr)
     _ORIGINALS[(owner, attr)] = original
 
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-        if _recording():
+        if _recording() and check is not None:
             detail = check(self, *args, **kwargs)
             if detail:
                 _STATE.patches.append(detail)
+        if quiet_on_environ and _is_environ_target(self.in_dict):
+            with _exempt():
+                return original(self, *args, **kwargs)
         return original(self, *args, **kwargs)
 
     wrapper.__wrapped__ = original  # type: ignore[attr-defined]  # introspection aid only
     setattr(owner, attr, wrapper)
 
 
+def _environ_replacement(owner: object, name: object) -> bool:
+    """``os`` + ``"environ"`` (or the dotted ``"os.environ"``): replacing the mapping wholesale."""
+    return owner == "os.environ" or (owner is os and name == "environ")
+
+
 def _check_monkeypatch_attr(_mp: Any, target: object, name: object = None, *_a: Any, **_k: Any) -> str | None:
+    if _environ_replacement(target, name):
+        _STATE.env.append("os.environ replaced wholesale")
     if isinstance(target, str):
         return f"monkeypatch of dotted target {target!r}" if _guarded_name(target) else None
     if _guarded_object(target):
@@ -288,13 +312,24 @@ def _check_mock_patch(patcher: Any) -> str | None:
         target = patcher.getter()
     except Exception:
         return None  # an unresolvable target: let mock raise its own error
+    if _environ_replacement(target, patcher.attribute):
+        _STATE.env.append("os.environ replaced wholesale")
     if _guarded_object(target):
         return f"mock.patch of {getattr(target, '__name__', type(target).__name__)}.{patcher.attribute}"
     return None
 
 
+def _is_environ_target(in_dict: object) -> bool:
+    return in_dict is os.environ or (isinstance(in_dict, str) and in_dict == "os.environ")
+
+
 def _check_mock_patch_dict(patcher: Any) -> str | None:
     in_dict, values = patcher.in_dict, patcher.values
+    if _is_environ_target(in_dict):
+        env_keys = [k for k in dict(values) if _guarded_key(k)]
+        if patcher.clear or env_keys:
+            _STATE.env.append(f"patch.dict(os.environ) of {env_keys[0] if env_keys else 'every key (clear=True)'}")
+        return None
     if in_dict != "sys.modules" and in_dict is not sys.modules:
         return None
     keys = [k for k in dict(values) if _guarded_name(k)]
@@ -314,7 +349,8 @@ def _install_wrappers() -> None:
     # Private classes: the single entry points of patch / patch.object (also
     # start() and the decorator form) and of patch.dict.
     _wrap(mock._patch, "__enter__", _check_mock_patch)  # type: ignore[attr-defined]  # private class, see above
-    _wrap(mock._patch_dict, "_patch_dict", _check_mock_patch_dict)  # type: ignore[attr-defined]  # private class, see above
+    _wrap(mock._patch_dict, "_patch_dict", _check_mock_patch_dict, quiet_on_environ=True)  # type: ignore[attr-defined]  # private class, see above
+    _wrap(mock._patch_dict, "_unpatch_dict", None, quiet_on_environ=True)  # type: ignore[attr-defined]  # private class, see above
 
 
 # --- pytest hooks ------------------------------------------------------------
@@ -364,12 +400,14 @@ def _end_phase() -> None:
     _STATE.active = False
     if _STATE.enabled and _STATE.modules is not None:
         _STATE.patches.extend(_module_swaps())
+    if _STATE.enabled and _STATE.environ is not None and os.environ is not _STATE.environ:
+        _STATE.env.append("os.environ replaced wholesale")
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item):
     _STATE.env, _STATE.patches = [], []
-    _STATE.modules = _guarded_modules()
+    _STATE.modules, _STATE.environ = _guarded_modules(), os.environ
     with _watching(item.nodeid):
         return (yield)
 
@@ -386,7 +424,7 @@ def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None):
         with _watching(item.nodeid):
             return (yield)
     finally:
-        _STATE.modules = None
+        _STATE.modules = _STATE.environ = None
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
@@ -394,14 +432,14 @@ def pytest_make_collect_report(collector: pytest.Collector):
     """Collection runs under the same lifecycle as a test phase: snapshot the
     guarded sys.modules entries, record while collecting, compare after (and
     put back whatever snapshot / recording state was in force before)."""
-    prior_modules, prior_active = _STATE.modules, _STATE.active
-    _STATE.modules = _guarded_modules()
+    prior = _STATE.modules, _STATE.environ, _STATE.active
+    _STATE.modules, _STATE.environ = _guarded_modules(), os.environ
     _STATE.active = True
     try:
         report = yield
     finally:
         _end_phase()
-        _STATE.modules, _STATE.active = prior_modules, prior_active
+        _STATE.modules, _STATE.environ, _STATE.active = prior
     try:
         _raise_recorded(collector.nodeid or "collection")
     except pytest.fail.Exception as exc:
