@@ -11,7 +11,7 @@ try:
     # SETUPTOOLS_SCM_PRETEND_VERSION so the wheel's metadata carries the
     # real version; this lookup just had to ask for the right name (#267).
     __version__ = version("Kairix-agentic-knowledge-mgt")
-except Exception:
+except Exception:  # pragma: no cover — runs only in a fresh interpreter; tests/test_init.py proves it via subprocess
     __version__ = "0.0.0"  # fallback for editable installs without metadata
 
 __all__ = ["QueryIntent", "RetrievalConfig", "SearchResult", "__version__"]
@@ -20,15 +20,15 @@ __all__ = ["QueryIntent", "RetrievalConfig", "SearchResult", "__version__"]
 # (e.g. neo4j) are missing.
 try:
     from kairix.core.search.pipeline import SearchResult
-except ImportError:
+except ImportError:  # pragma: no cover — subprocess-proven in tests/test_init.py
     pass
 
 try:
     from kairix.core.search.config import RetrievalConfig
-except ImportError:
+except ImportError:  # pragma: no cover — subprocess-proven in tests/test_init.py
     pass
 
 try:
     from kairix.core.search.intent import QueryIntent
-except ImportError:
+except ImportError:  # pragma: no cover — subprocess-proven in tests/test_init.py
     pass

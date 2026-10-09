@@ -8,6 +8,7 @@ the cwd-fallback from picking up a stray ``kairix.config.yaml``.
 
 from __future__ import annotations
 
+import sys
 import textwrap
 
 import pytest
@@ -380,28 +381,21 @@ class TestLoadCachedEdgeCases:
     def test_yaml_not_installed_falls_back(self, tmp_path, monkeypatch):
         """When PyYAML is not installed, falls back to defaults.
 
-        This test patches ``builtins.__import__`` (a stdlib boundary) to
-        simulate the optional-dep-missing path; that's an exempt root under
-        F1 (stdlib patches are legitimate boundary fakes).
+        PyYAML is simulated as not installed with a ``None`` ``sys.modules``
+        entry (auto-undone by monkeypatch) — no import hook is patched.
         """
         from kairix.core.search import config_loader
 
         config_loader.load_cached.cache_clear()
         config_file = tmp_path / "test.yaml"
-        config_file.write_text("retrieval: {}")
+        # A non-default value: if the file were parsed, rrf_k would be 7.
+        config_file.write_text("retrieval:\n  rrf_k: 7\n")
 
-        import builtins
-
-        real_import = builtins.__import__
-
-        def mock_import(name, *args, **kwargs):
-            if name == "yaml":
-                raise ImportError("mocked")
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", mock_import)
+        # A None entry in sys.modules makes ``import <dep>`` raise ImportError —
+        # the optional dependency is simulated as not installed (auto-undone).
+        monkeypatch.setitem(sys.modules, "yaml", None)
         cfg = load_cached(config_file)
-        assert isinstance(cfg, RetrievalConfig)
+        assert cfg == RetrievalConfig.defaults(), "without PyYAML the file must not be parsed — defaults only"
 
     @pytest.mark.unit
     def test_parse_exception_falls_back(self, tmp_path):

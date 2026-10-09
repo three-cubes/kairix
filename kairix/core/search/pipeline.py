@@ -20,7 +20,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
@@ -156,7 +156,7 @@ def cpu_aware_default_concurrency(cpu_count: int | None) -> int:
     return min(_MAX_DISPATCH_CONCURRENCY, max(_MIN_DISPATCH_CONCURRENCY, scaled))
 
 
-def resolve_dispatch_concurrency() -> int:
+def resolve_dispatch_concurrency(env: Mapping[str, str] | None = None) -> int:
     """Resolve the expected concurrent-search load, with env override (F4-clean).
 
     Public seam so the resolution (env-override precedence + CPU-aware default)
@@ -167,12 +167,17 @@ def resolve_dispatch_concurrency() -> int:
     when ``KAIRIX_MAX_CONCURRENCY`` is SET, ``read_int_env`` returns that value
     verbatim and it stays authoritative (operators tune it to their teaming
     load — the number of agents firing searches at once).
+
+    ``env``: the environment mapping to resolve from. ``None`` (production)
+    reads the live process env at the :mod:`kairix.paths` boundary; a caller
+    holding its own mapping passes it explicitly (F2-clean for tests).
     """
     from kairix.paths import read_int_env
 
     return read_int_env(
         "KAIRIX_MAX_CONCURRENCY",
         default=cpu_aware_default_concurrency(os.cpu_count()),
+        env=env,
     )
 
 

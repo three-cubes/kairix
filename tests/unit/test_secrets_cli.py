@@ -150,24 +150,67 @@ def test_verify_loads_bundle_file_before_reading_env(tmp_path) -> None:
     file has 'KAIRIX_PROVIDER_LLM_API_KEY=...' but env doesn't until
     hydration).
 
-    F2-clean: bundle_path is passed explicitly via the secrets_main
-    kwarg seam — no monkeypatch.setenv on KAIRIX_* keys.
+    F2-clean: bundle_path and the env mapping the bundle hydrates into are
+    passed explicitly via the secrets_main kwarg seams (``environ=`` plus a
+    ``loader_factory`` reading the same mapping) — no process-env write.
     """
+    from kairix.secrets.loader import SecretsLoader
+
     bundle = tmp_path / "kairix.env"
     bundle.write_text(
         "KAIRIX_PROVIDER_LLM_API_KEY=hydrated-from-bundle\n",  # pragma: allowlist secret
         encoding="utf-8",
     )
+    env: dict[str, str] = {}
 
     out, rc = _capture(
         ["verify", "--json"],
         identities_provider=lambda: (("provider", "llm", None, "api-key"),),
         bundle_path=bundle,
+        environ=env,
+        loader_factory=lambda: SecretsLoader(env=env),
     )
     assert rc == 0, f"expected exit 0 (bundle hydrates key); got rc={rc}, out={out}"
     payload = json.loads(out)
     row = next(r for r in payload["secrets"] if r["leaf"] == "api-key")
     assert row["status"] == "present", f"expected key resolved via bundle hydration; got {row}"
+    assert env == {"KAIRIX_PROVIDER_LLM_API_KEY": "hydrated-from-bundle"}  # pragma: allowlist secret
+
+
+def test_verify_rehydrates_even_after_process_bootstrap_latched(tmp_path) -> None:
+    """``verify`` forces a fresh hydration: a process whose boot-time
+    bootstrap already latched (an earlier bundle) still sees the bundle
+    verify is pointed at.
+
+    Sabotage proof (executed): ``force=True`` -> ``False`` in
+    ``_ensure_bundle_loaded`` → the latched guard skips the load, the key
+    is MISSING and this fails; restored.
+    """
+    from kairix.secrets.bootstrap import bootstrap_secrets, reset_for_tests
+    from kairix.secrets.loader import SecretsLoader
+
+    boot_bundle = tmp_path / "boot.env"
+    boot_bundle.write_text("KAIRIX_UNRELATED_BOOT_KEY=x\n", encoding="utf-8")
+    verify_bundle = tmp_path / "kairix.env"
+    verify_bundle.write_text(
+        "KAIRIX_PROVIDER_LLM_API_KEY=hydrated-from-bundle\n",  # pragma: allowlist secret
+        encoding="utf-8",
+    )
+    env: dict[str, str] = {}
+    reset_for_tests()
+    try:
+        assert bootstrap_secrets(bundle_path=boot_bundle, env={}) == 1  # latches the guard
+        out, rc = _capture(
+            ["verify", "--json"],
+            identities_provider=lambda: (("provider", "llm", None, "api-key"),),
+            bundle_path=verify_bundle,
+            environ=env,
+            loader_factory=lambda: SecretsLoader(env=env),
+        )
+    finally:
+        reset_for_tests()
+    assert rc == 0, out
+    assert env == {"KAIRIX_PROVIDER_LLM_API_KEY": "hydrated-from-bundle"}  # pragma: allowlist secret
 
 
 # ── set: persistence verb ──────────────────────────────────────────

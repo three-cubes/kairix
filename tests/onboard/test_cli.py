@@ -332,14 +332,15 @@ def test_human_output_renders_env_source_when_loaded(monkeypatch, capsys, tmp_pa
         [CheckResult(name="kairix_on_path", ok=True, detail="found")],
     )
 
-    main(["check", "--env-file", str(env_file)])
+    environ: dict[str, str] = {}
+    main(["check", "--env-file", str(env_file)], environ=environ)
     captured = capsys.readouterr()
 
-    # File path is surfaced
+    # File path is surfaced, and both keys landed in the injected env mapping
+    # (never the process env — F2).
     assert str(env_file) in captured.out
-    # Either "keys loaded" or "already in env" (depending on whether the
-    # KAIRIX_TEST_* keys were already set in the test environment)
-    assert "keys loaded" in captured.out or "already in env" in captured.out
+    assert "keys loaded" in captured.out
+    assert environ == {"KAIRIX_TEST_KEY_FOR_RENDER": "value1", "KAIRIX_OTHER_TEST": "value2"}
 
 
 @pytest.mark.unit
@@ -368,7 +369,7 @@ def test_human_output_when_no_env_source_detected(monkeypatch, capsys) -> None:
 
 @pytest.mark.unit
 def test_load_env_file_returns_loaded_keys(tmp_path) -> None:
-    """load_env_file returns the list of keys it actually set in os.environ.
+    """load_env_file returns the list of keys it actually set in ``env``.
 
     Existing keys are skipped (do-not-override semantics).
     """
@@ -377,14 +378,20 @@ def test_load_env_file_returns_loaded_keys(tmp_path) -> None:
     env_file = tmp_path / "x.env"
     env_file.write_text(
         '# a comment\n\nKAIRIX_TEST_NEW_KEY_42=hello\nMALFORMED_NO_EQUALS\n"KAIRIX_TEST_QUOTED_42"="quoted-value"\n'
+        "KAIRIX_TEST_PRESET=from-file\n"
     )
+    env = {"KAIRIX_TEST_PRESET": "already-set"}
 
-    loaded = cli_mod.load_env_file(str(env_file))
+    loaded = cli_mod.load_env_file(str(env_file), env)
 
-    # The known-novel key (won't already be in env) was loaded
+    # The novel key was loaded into the injected mapping
     assert "KAIRIX_TEST_NEW_KEY_42" in loaded
+    assert env["KAIRIX_TEST_NEW_KEY_42"] == "hello"
     # Comments + malformed lines were skipped
     assert "MALFORMED_NO_EQUALS" not in loaded
+    # An existing key is not overridden
+    assert "KAIRIX_TEST_PRESET" not in loaded
+    assert env["KAIRIX_TEST_PRESET"] == "already-set"
 
 
 @pytest.mark.unit
@@ -404,9 +411,11 @@ def test_self_load_env_explicit_path_wins(tmp_path) -> None:
     env_file = tmp_path / "explicit.env"
     env_file.write_text("KAIRIX_EXPLICIT_NEW=yes\n")
 
-    source, _loaded = cli_mod.self_load_env(str(env_file))
+    env: dict[str, str] = {}
+    source, loaded = cli_mod.self_load_env(str(env_file), env=env)
     assert source == str(env_file)
-    # Loaded keys list may include KAIRIX_EXPLICIT_NEW (if not previously set)
+    assert loaded == ["KAIRIX_EXPLICIT_NEW"]
+    assert env == {"KAIRIX_EXPLICIT_NEW": "yes"}
     # Sabotage-prove: source is exactly the explicit path, not a probe path
     assert source != "/run/secrets/kairix.env"
 
@@ -419,12 +428,15 @@ def test_self_load_env_falls_back_to_known_path(tmp_path, monkeypatch) -> None:
     known_file = tmp_path / "service.env"
     known_file.write_text("KAIRIX_FALLBACK_NEW=ok\n")
 
+    env: dict[str, str] = {}
     source, _loaded = cli_mod.self_load_env(
         None,
         env_file_override_fn=lambda: None,
         known_env_paths=(str(known_file),),
+        env=env,
     )
     assert source == str(known_file)
+    assert env == {"KAIRIX_FALLBACK_NEW": "ok"}
 
 
 @pytest.mark.unit
@@ -449,12 +461,15 @@ def test_self_load_env_uses_env_file_override(monkeypatch, tmp_path) -> None:
     target = tmp_path / "via-override.env"
     target.write_text("KAIRIX_OVERRIDE_NEW=set\n")
 
+    env: dict[str, str] = {}
     source, _loaded = cli_mod.self_load_env(
         None,
         env_file_override_fn=lambda: str(target),
         known_env_paths=(),
+        env=env,
     )
     assert source == str(target)
+    assert env == {"KAIRIX_OVERRIDE_NEW": "set"}
 
 
 # ---------------------------------------------------------------------------

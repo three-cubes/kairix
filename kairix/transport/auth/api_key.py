@@ -29,8 +29,8 @@ plugin's tree. No plugin-private state lives here.
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 
 
 class MissingCredentialsError(RuntimeError):
@@ -66,6 +66,9 @@ class BearerHeaders:
 # resolved secret without re-walking the resolver chain on every HTTP
 # request. Keyed on the logical secret name so an operator can declare
 # multiple API-key-backed connectors without their lookups colliding.
+# Only the canonical default resolver is cached here: an injected
+# ``secret_lookup`` is called on every request (its owner caches if it
+# wants to), so two resolvers can never share — or leak — an entry.
 _CACHE: dict[str, str] = {}
 _CACHE_LOCK = threading.Lock()
 
@@ -89,6 +92,22 @@ def reset_api_key_cache() -> None:
         _CACHE.clear()
 
 
+def _default_secret_lookup(secret_name: str) -> str | None:
+    """Production default — walk the canonical :func:`kairix.secrets.get_secret` chain.
+
+    ``required=False`` so a missing secret returns control to
+    :meth:`ApiKeyAuth.headers` for the typed
+    :class:`MissingCredentialsError` rather than an :class:`OSError` from
+    deep inside ``secrets.py``. Lazy import so the helper itself doesn't
+    pull in the secrets module at construction time — keeps module import
+    cheap and avoids the circular-import shape between transport/auth and
+    the secrets resolver.
+    """
+    from kairix.secrets import get_secret
+
+    return get_secret(secret_name, required=False)
+
+
 @dataclass(frozen=True)
 class ApiKeyAuth:
     """Static-API-key Bearer auth helper.
@@ -109,7 +128,16 @@ class ApiKeyAuth:
     happens on first :meth:`headers` call, and a missing secret raises
     :class:`MissingCredentialsError` with an actionable message — not
     the raw :func:`get_secret` stack trace.
+
+    ``secret_lookup`` is the resolver seam: ``(secret_name) -> value | None``.
+    Production leaves it at the default (the :func:`kairix.secrets.get_secret`
+    chain), which is cached process-wide; a caller holding its own secret
+    source — or a test proving the missing-secret path without touching the
+    process env — injects one, which is called on every :meth:`headers` call
+    and never cached here.
     """
+
+    secret_lookup: Callable[[str], str | None] = field(default=_default_secret_lookup, repr=False)
 
     def headers(self, secret_name: str) -> BearerHeaders:
         """Return the Bearer header mapping for ``secret_name``.
@@ -127,24 +155,26 @@ class ApiKeyAuth:
                 this exception up to the operator surface stays F21-
                 actionable.
         """
-        with _CACHE_LOCK:
-            cached = _CACHE.get(secret_name)
-        if cached is None:
-            # Lazy import so the helper itself doesn't pull in the
-            # secrets module at construction time — keeps module import
-            # cheap and avoids the circular-import shape between
-            # transport/auth and the secrets resolver.
-            from kairix.secrets import get_secret
-
-            resolved = get_secret(secret_name, required=False)
-            if resolved is None or not resolved.strip():
-                raise MissingCredentialsError(
-                    f"api_key_auth: secret {secret_name!r} is not configured. "
-                    f"fix: set the secret via the configured resolver chain "
-                    f"(env var, per-file secret, sidecar bundle, or Azure Key Vault). "
-                    f"next: see docs/operations/OPERATIONS.md for the secret-loading runbook."
-                )
+        if self.secret_lookup is not _default_secret_lookup:
+            token = _require(secret_name, self.secret_lookup(secret_name))
+        else:
             with _CACHE_LOCK:
-                _CACHE[secret_name] = resolved
-            cached = resolved
-        return BearerHeaders(mapping={"Authorization": f"Bearer {cached}"})
+                cached = _CACHE.get(secret_name)
+            if cached is None:
+                cached = _require(secret_name, _default_secret_lookup(secret_name))
+                with _CACHE_LOCK:
+                    _CACHE[secret_name] = cached
+            token = cached
+        return BearerHeaders(mapping={"Authorization": f"Bearer {token}"})
+
+
+def _require(secret_name: str, resolved: str | None) -> str:
+    """Return ``resolved``, or raise the typed error when it is missing / blank."""
+    if resolved is None or not resolved.strip():
+        raise MissingCredentialsError(
+            f"api_key_auth: secret {secret_name!r} is not configured. "
+            f"fix: set the secret via the configured resolver chain "
+            f"(env var, per-file secret, sidecar bundle, or Azure Key Vault). "
+            f"next: see docs/operations/OPERATIONS.md for the secret-loading runbook."
+        )
+    return resolved

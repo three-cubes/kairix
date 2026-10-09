@@ -873,30 +873,27 @@ def test_envelope_round_trips_through_dispatcher(capsys: pytest.CaptureFixture[s
 
 
 @pytest.mark.unit
-def test_http_client_is_responsive_returns_false_when_requests_unavailable(monkeypatch) -> None:
+def test_http_client_is_responsive_returns_false_when_requests_unavailable(monkeypatch, caplog) -> None:
     """When ``requests`` is unimportable, ``is_responsive`` returns False.
 
     Tests the defensive ImportError branch — covers the edge case where
-    a stripped-down install ships without requests. F2-clean because
-    monkeypatch targets ``builtins.__import__``, a stdlib hook, not a
-    KAIRIX internal.
+    a stripped-down install ships without requests. ``requests`` is
+    simulated as not installed with a ``None`` ``sys.modules`` entry
+    (auto-undone by monkeypatch) — no import hook is patched.
 
     Sabotage-proof: removed the try/except around ``import requests``;
     this test failed with the underlying ImportError leaking.
     Restoring the except restored green.
     """
-    import builtins
-
-    real_import = builtins.__import__
-
-    def _no_requests(name, *args, **kwargs):
-        if name == "requests":
-            raise ImportError("simulated: requests unavailable")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _no_requests)
+    # A None entry in sys.modules makes ``import <dep>`` raise ImportError —
+    # the optional dependency is simulated as not installed (auto-undone).
+    monkeypatch.setitem(sys.modules, "requests", None)
+    caplog.set_level("DEBUG", logger="kairix.agents.mcp.client_dispatcher")
     client = HttpMcpDispatchClient()
     assert client.is_responsive("http://localhost:1/mcp", timeout_s=0.05) is False
+    # The ImportError branch returns BEFORE any probe — a probe failure would
+    # mean requests was importable and the network path ran instead.
+    assert "mcp_responsive_probe_failed" not in caplog.text
 
 
 @pytest.mark.unit
@@ -955,25 +952,28 @@ def test_http_client_is_responsive_returns_true_on_200(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_module_run_as_script_emits_usage(capsys: pytest.CaptureFixture[str]) -> None:
+def test_module_run_as_script_emits_usage() -> None:
     """``python -m kairix.agents.mcp.client_dispatcher`` exits 1 with usage hint.
 
-    Drives the module's ``__main__`` guard through runpy — the same
-    way ``test_top_level_cli_dispatch.py`` drives the kairix.cli
-    ``__main__`` guard. F5-clean: no import of the private
-    ``__module_main_guard`` helper.
+    Runs the module's ``__main__`` guard in a subprocess — a fresh
+    interpreter, so no kairix module body re-executes in the test process
+    (F1). F5-clean: no import of the private ``__module_main_guard`` helper.
 
     Sabotage-proof: removed the ``sys.exit(1)`` from the guard; this
-    test failed because no SystemExit was raised. Restoring restored
-    green.
+    test failed because the exit code was 0. Restoring restored green.
     """
-    import runpy
+    import subprocess
+    import sys
 
-    with pytest.raises(SystemExit) as excinfo:
-        runpy.run_module("kairix.agents.mcp.client_dispatcher", run_name="__main__")
-    assert int(excinfo.value.code or 0) == 1
-    err = capsys.readouterr().err
-    assert "kairix --help" in err, "module guard must surface the right next step"
+    proc = subprocess.run(
+        [sys.executable, "-m", "kairix.agents.mcp.client_dispatcher"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 1
+    assert "kairix --help" in proc.stderr, "module guard must surface the right next step"
 
 
 @pytest.mark.unit

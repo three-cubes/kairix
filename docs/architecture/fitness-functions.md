@@ -198,8 +198,8 @@ _Generated from `scripts/checks/_rule_catalogue.py` — do not edit by hand._
 | F38 | layering | per-file | shipped | Silver processing (chunking + signal extraction) only in kairix/core/connectors/silver.py |
 | F44 | layering | per-file | shipped | engagement-scope code may not import firm-scope storage clients (psycopg etc.) |
 | F61 | layering | per-file | shipped | bare _SqliteChunkWriter(db, collection=...) construction only under kairix/core/connectors/ |
-| F1 | test-discipline | per-file | shipped | no @patch / monkeypatch on kairix internals — inject Fake* through a seam |
-| F2 | test-discipline | per-file | shipped | no monkeypatch.setenv("KAIRIX_*") — pass deps as kwargs instead |
+| F1 | test-discipline | per-file | shipped | no @patch / monkeypatch, sys.modules swap or importlib.reload of kairix internals — inject Fake* through a seam (static: common spellings; runtime: tests/fixtures/process_state_guard.py, exact) |
+| F2 | test-discipline | per-file | shipped | no monkeypatch.setenv("KAIRIX_*") or any other KAIRIX_* process-env write — pass deps as kwargs instead (static: common spellings; runtime: tests/fixtures/process_state_guard.py audit hook, exact) |
 | F5 | test-discipline | per-file | shipped | no internal-name imports in tests — use public surface only |
 | F6 | test-discipline | per-method | shipped | no *_fn=None test-only kwargs in production |
 | F7 | coverage | per-file | shipped | per-file coverage ≥ 90% (unit) — Stage 2 floor |
@@ -344,14 +344,22 @@ Each rule below is described with: **statement**, **why**,
 #### Statement
 
 Test files MUST NOT reach into a production kairix module's namespace
-to swap an implementation. F1 flags six structurally-identical shapes:
+to swap an implementation — by patching an attribute, by replacing or
+evicting a kairix module in `sys.modules`, or by re-executing one
+(`importlib.reload`). The static half flags these spellings:
 
-1. `@patch("kairix.X.Y", ...)` — decorator
-2. `with patch("kairix.X.Y", ...):` — context manager
+1. `patch("kairix.X.Y", ...)` — decorator, `with`, or `.start()`
+2. `patch.object(<kairix ref>, "attr", ...)`
 3. `kairix.X.Y = <expr>` — full-path attribute assignment
 4. `<alias>.Y = <expr>` where alias resolves via imports to a kairix module
-5. `monkeypatch.setattr("kairix.X.Y", ...)` — string-target form
-6. `monkeypatch.setattr(<kairix module ref>, "attr", fake)` — ref-target form
+5. `monkeypatch.setattr / delattr("kairix.X.Y", ...)` — string-target form
+6. `monkeypatch.setattr / delattr(<kairix module ref>, "attr", fake)` — ref-target form
+7. `sys.modules["kairix.X"] = ...` / `del sys.modules["kairix.X"]`
+8. `importlib.reload(<imported kairix module>)`
+9. builtin `setattr / delattr(<imported kairix module or attribute>, ...)`
+
+The runtime half fails any spelling of the same substitutions while the
+test runs (see Detection).
 
 Stdlib (`os`, `time`, `pathlib`, `sys`, `importlib`, ...) and external
 SDKs (`httpx`, `openai`, `boto3`, `anthropic`, `requests`, `numpy`,
@@ -377,21 +385,54 @@ the Fake* at construction.
 
 #### Detection
 
-`scripts/checks/check-no-internal-patches.sh` delegates to
-`scripts/checks/check_no_internal_patches.py`. The detector is
-AST-based, walks each test file's imports to resolve aliases, and
-flags any of the six shapes against the alias-resolved root.
-Multi-line constructs, aliased imports
-(`import kairix.paths as paths_mod`), from-imports
-(`from kairix import providers as providers_mod`), and full-path
-forms (`kairix.paths.provider_name = ...`) are all caught.
+F1 has two halves, like F86 / F86-dynamic.
 
-The detector's own tests live at
-`tests/architecture/test_check_no_internal_patches.py` — each of the
-six shapes has a positive (kairix target → violation) and negative
-(stdlib/external target → allowed) test. To verify the gate stays
-honest: comment out the detector branch for a shape, run the matching
-positive test, confirm red, restore, confirm green.
+**Static half — fast pre-commit feedback.**
+`scripts/checks/check_no_internal_patches.py` is an in-process
+`FitnessRule` over `tests/` (the staged runner narrows it to the staged
+test files). It is a small AST match: it walks each test file's imports to
+resolve aliases (`import kairix.paths as paths_mod`,
+`from kairix import providers as providers_mod`) and flags the nine
+spellings above, reporting `path:line: shape`. It deliberately does not
+chase computed targets or aliases of `sys.modules` — that is the runtime
+half's job. Its tests: `tests/architecture/test_check_no_internal_patches.py`
+(shapes 1-6) and `tests/checks/test_no_internal_patches_module_swaps.py`
+(the newer spellings).
+
+**Runtime half — exact.** `tests/fixtures/process_state_guard.py` is a
+pytest plugin registered in `tests/conftest.py` `pytest_plugins`, so it runs
+in every pytest tier. While a test item runs it:
+
+- snapshots the `kairix` / `kairix.*` entries of `sys.modules` before setup
+  and compares them at the end of setup, call (fixture patches still active)
+  and teardown — a replaced or removed entry fails the test; a NEW entry
+  passes only if the import machinery made it (a module whose `__spec__` has
+  a loader and whose origin / `__file__` is under the kairix package
+  directory), so a stub inserted under any key fails;
+- watches the `exec` audit event: every kairix module file is recorded on
+  its first execution (seeded at configure time from the modules already
+  imported); a second execution of the same file is a reload
+  (`importlib.reload`, `exec_module` on the live module, `runpy` of an
+  imported module) and fails the test, or the module being collected;
+- wraps `MonkeyPatch.setattr` / `delattr` / `setitem` / `delitem`,
+  `mock.patch` / `patch.object` (`_patch.__enter__`, shared by `with`,
+  `start()` and the decorator) and `mock.patch.dict` — patching an object
+  that is a kairix module or has a kairix `__module__`, a dotted
+  `"kairix..."` monkeypatch target, or a kairix key of `sys.modules` fails
+  the test.
+
+`monkeypatch.setitem(sys.modules, "<third-party dep>", None)` (simulate a
+missing optional dependency) stays allowed. The plugin's end-to-end proof,
+`tests/test_process_state_guard.py`, installs it as the conftest of a
+throwaway pytest run against a fake package and shows each rule failing a
+violating test and passing a clean one.
+
+**Scope.** Both halves catch substitution done through the patch APIs,
+`sys.modules`, module re-execution and (statically) builtin `setattr` /
+`delattr` on an imported kairix reference. A runtime-computed module
+reference with a manual restore (`setattr(importlib.import_module(name), ...)`
+then putting the old value back) is deliberate evasion and is out of scope by
+design — review catches it, the gates do not try to.
 
 #### Examples
 
@@ -439,11 +480,18 @@ If the production class doesn't yet have a constructor seam, **add one**
 following the pattern of `GoldBuilder(llm_judge=..., retriever=...,
 db_path=...)` — one keyword argument per Protocol-shaped collaborator.
 
+To reset module-level singleton state, call the module's public reset
+function (`reset_cross_encoder_cache()`, `reset_api_key_cache()`); to prove
+"importing X behaves" (a version fallback, a missing optional module), import
+it in a fresh interpreter
+(`subprocess.run([sys.executable, "-c", "import kairix"])`); to drive a CLI's
+`__main__` guard, run `python -m <module>` in a subprocess.
+
 #### Allowed exceptions
 
 Patching `os.*`, `builtins.*`, `pathlib.*`, `sys.*` (stdlib boundaries)
 or named external SDKs (`openai.*`, `httpx.*`, `mcp.*`) remains
-allowed. The check explicitly only matches `"kairix.…"` strings.
+allowed. Both halves only match kairix targets.
 
 ---
 
@@ -451,8 +499,12 @@ allowed. The check explicitly only matches `"kairix.…"` strings.
 
 #### Statement
 
-Test files MUST NOT call `monkeypatch.setenv|setattr|delenv` on any
-key starting with `KAIRIX_`.
+Tests MUST NOT write a `KAIRIX_*` process-env variable — by
+`monkeypatch.setenv` / `delenv`, `os.environ[...] =` / `del` / `pop` /
+`update` / `clear`, `patch.dict(os.environ, ...)`, `os.putenv`, or any other
+spelling. The one sanctioned writer is the session env baseline
+(`_hermetic_data_dirs` in `tests/conftest.py`), whose writes sit in a
+`with allow_baseline_writes():` block.
 
 #### Why
 
@@ -468,11 +520,29 @@ explicitly reverted.
 
 #### Detection
 
-`scripts/checks/check-no-env-monkeypatch.sh`:
+F2 has two halves, like F1.
 
-```bash
-grep -rEl 'monkeypatch\.(setenv|setattr|delenv).*KAIRIX_' tests/ --include='*.py'
-```
+**Static half — fast pre-commit feedback.**
+`scripts/checks/check_no_env_monkeypatch.py` is an in-process
+`FitnessRule` over `tests/` (staged-narrowable). It is a small AST match on
+the common spellings with a literal `KAIRIX_` key —
+`monkeypatch.setenv` / `delenv`, `os.environ[...] =` / `+=` / `del`,
+`os.environ.pop` / `setdefault` — reporting `path:line: shape`. Writes
+inside `with allow_baseline_writes():` are exempt, and the block itself
+fails anywhere but `tests/conftest.py`. Tests:
+`tests/checks/test_no_env_monkeypatch_direct_writes.py`.
+
+**Runtime half — exact.** `tests/fixtures/process_state_guard.py` installs
+one `sys.addaudithook`. CPython raises the `os.putenv` / `os.unsetenv` audit
+events for every env write, however it is spelled — subscript, `update`,
+`pop`, `clear`, `os.__dict__["environ"]`, `os.putenv`, `patch.dict`,
+`monkeypatch.setenv`. A `KAIRIX_*` key written while a test item runs
+(setup / call / teardown) or while a test module is collected fails that
+test or module, naming the key. The hook only records (raising inside an
+audit hook would break the interpreter); the item hooks turn records into
+`pytest.fail`. `allow_baseline_writes()` turns recording off for the session
+baseline's own writes; entered from any file but the root `tests/conftest.py`
+it records a violation and exempts nothing.
 
 #### Examples
 
@@ -2822,8 +2892,8 @@ scripts/checks/
 ├── _fitness_rule.py                      # FitnessRule ABC — 3-line check subclasses over tc_fitness.gate()
 ├── generate_catalogue_docs.py            # Regenerates the F-CATALOGUE doc regions (F92 currency gate)
 ├── _lib.sh                               # Shell helper: arch_gate() function
-├── check-no-internal-patches.sh                       # F1
-├── check-no-env-monkeypatch.sh                        # F2
+├── check_no_internal_patches.py                       # F1 static half (runtime: tests/fixtures/process_state_guard.py)
+├── check_no_env_monkeypatch.py                        # F2 static half (runtime: tests/fixtures/process_state_guard.py)
 ├── check-suppressions-have-rationale.sh               # F3 (extended: covers # type: ignore + # nosec)
 ├── check-env-reads-stay-in-paths.sh                   # F4
 ├── check_no_internal_imports.py                       # F5 (AST)
@@ -2909,9 +2979,9 @@ def test_x(monkeypatch):
     monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/tmp/x")
 EOF
 cp /tmp/sabotage.py tests/_sabotage.py
-bash scripts/checks/check-no-env-monkeypatch.sh  # expect FAIL
+python3 scripts/checks/run_checks.py --gate F2  # expect FAIL
 rm tests/_sabotage.py
-bash scripts/checks/check-no-env-monkeypatch.sh  # expect ok
+python3 scripts/checks/run_checks.py --gate F2  # expect ok
 ```
 
 If a check passes the sabotage test on the first commit but starts
@@ -3061,7 +3131,7 @@ Refactor: pass paths as a constructor argument or use FakePaths
 from tests/fakes.py. The production code must not require process-env
 mutation to be testable — that's the test-shaped-API smell #139 reverted.
 
-next: re-run bash scripts/checks/check-no-env-monkeypatch.sh until clean.
+next: re-run python3 scripts/checks/run_checks.py --gate F2 until clean.
 
 === Architecture fitness functions FAILED ===
 ```
@@ -3083,7 +3153,7 @@ bash scripts/checks/run-all.sh
 bash scripts/checks/run-all.sh --skip-coverage
 
 # Run one check only
-bash scripts/checks/check-no-env-monkeypatch.sh
+python3 scripts/checks/run_checks.py --gate F2
 python3 scripts/checks/check_no_internal_imports.py
 python3 scripts/checks/check_per_file_coverage.py coverage.xml
 ```
@@ -3279,13 +3349,13 @@ violation blocks.
 fitness_functions:
   - id: F1
     name: no-internal-patches
-    script: scripts/checks/check-no-internal-patches.sh
+    script: scripts/checks/check_no_internal_patches.py
     precommit_hook: arch-no-internal-patches
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F2
     name: no-env-monkeypatch
-    script: scripts/checks/check-no-env-monkeypatch.sh
+    script: scripts/checks/check_no_env_monkeypatch.py
     precommit_hook: arch-no-env-monkeypatch
     layer: [pre-commit, safe-commit, ci-stage0]
 

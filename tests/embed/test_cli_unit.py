@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import argparse
 import io
-import runpy
+import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -593,13 +593,16 @@ def test_run_post_embed_summarise_swallows_exception(caplog) -> None:
 
 @pytest.mark.unit
 def test_module_main_guard_runs_main() -> None:
-    """Drive ``if __name__ == "__main__": main()`` (the bottom guard)."""
-    old_argv = sys.argv
-    try:
-        sys.argv = ["kairix-embed", "--help"]
-        with pytest.raises(SystemExit) as info:
-            runpy.run_module("kairix.core.embed.cli", run_name="__main__")
-        # argparse --help exits 0.
-        assert int(info.value.code or 0) == 0
-    finally:
-        sys.argv = old_argv
+    """Drive ``if __name__ == "__main__": main()`` (the bottom guard) in a
+    subprocess — a fresh interpreter, so no kairix module body re-executes in
+    the test process (F1)."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "kairix.core.embed.cli", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    # argparse --help exits 0.
+    assert proc.returncode == 0, proc.stderr
+    assert "usage:" in proc.stdout

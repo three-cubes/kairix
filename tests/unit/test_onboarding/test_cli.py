@@ -263,17 +263,22 @@ def test_module_main_guard_imports_cleanly(tmp_path: Path) -> None:
     a future contributor adds top-level print/log statements this
     test catches the regression.
     """
-    _ = tmp_path
-    out = io.StringIO()
-    err = io.StringIO()
-    with redirect_stdout(out), redirect_stderr(err):
-        # Re-importing the already-loaded module is a no-op for side
-        # effects; pin that explicitly.
-        import importlib
+    import subprocess
 
-        importlib.reload(sys.modules["kairix.agents.onboarding.cli"])
-    assert out.getvalue() == ""
-    assert err.getvalue() == ""
+    # A fresh interpreter is the only honest "first import" — reloading the
+    # module inside the shared test process would swap the module object
+    # every other test holds (F1). Executed sabotage: a top-level
+    # ``print("x")`` in onboarding/cli.py makes stdout non-empty; restored.
+    proc = subprocess.run(
+        [sys.executable, "-c", "import kairix.agents.onboarding.cli"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+    assert proc.stderr == ""
 
 
 # Sabotage-proof (executed): swapped the empty-scope return to `return 0` →

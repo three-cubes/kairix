@@ -34,7 +34,6 @@ F1-clean (no monkey-patching of kairix internals), F8 carries
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 
 import httpx
@@ -264,35 +263,27 @@ def test_rate_limit_retries_with_backoff() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_missing_secret_raises_typed_error_with_fix_hint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_missing_secret_raises_typed_error_with_fix_hint() -> None:
     """When the secret is unset, first ``list_changes`` raises a typed error.
 
     The connector still constructs OK at this point — only the
-    operational call raises. F1-friendly: we use monkeypatch.delenv on
-    well-known env vars (the standard secrets resolver paths) rather
-    than substituting kairix internals. The KAIRIX_SECRETS_* deletes
-    are stdlib env operations on resolver inputs, not patches against
-    kairix code; F2 fires on KAIRIX_* setenv only.
+    operational call raises. The unset secret is expressed through
+    ``ApiKeyAuth``'s ``secret_lookup`` seam (a resolver that finds
+    nothing), not by deleting ``KAIRIX_SECRETS_*`` / ``KAIRIX_KV_NAME``
+    from the process env (F2) — so the outcome cannot depend on what
+    the developer's shell happens to export.
+
+    Sabotage proof (executed): make ``ApiKeyAuth.headers`` ignore an
+    empty resolution (drop the ``resolved is None`` raise) and the
+    ``pytest.raises(MissingCredentialsError)`` below fails; restored.
     """
     reset_api_key_cache()
-    # Defensive — clear every env var the secrets chain might read.
-    for var in (
-        "DEX_API_KEY",
-        "CONNECTOR_DEX_API_KEY",
-        "KAIRIX_SECRETS_DIR",
-        "KAIRIX_SECRETS_FILE",
-        "KAIRIX_KV_NAME",
-    ):
-        if var in os.environ:
-            monkeypatch.delenv(var, raising=False)
 
     inner = httpx.Client(transport=httpx.MockTransport(_three_listings_handler))
     client = DexCrmClient(
         config=DexCrmClientConfig(rate_limit_sleep_s=0.0),
         http_client=inner,
-        auth=ApiKeyAuth(),
+        auth=ApiKeyAuth(secret_lookup=lambda _secret_name: None),
         sleep=lambda _s: None,
     )
     connector = DexCrmConnector(client=client)

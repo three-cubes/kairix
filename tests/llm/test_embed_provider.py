@@ -16,12 +16,15 @@ _mock_openai.OpenAI = MagicMock  # type: ignore[attr-defined]  # injecting attr 
 
 @pytest.fixture(autouse=True)
 def _mock_openai_module(monkeypatch):
-    """Ensure openai module is available for import even if not installed."""
+    """Ensure openai module is available for import even if not installed.
+
+    Only the third-party ``openai`` entry is faked (an external SDK edge).
+    ``kairix.platform.llm.embed_provider`` holds no cached provider state —
+    ``get_embed_provider`` builds a fresh client on every call and its
+    collaborators come in through ``EmbedProviderDeps`` / ``env=`` — so the
+    module is never evicted from ``sys.modules`` between tests (F1).
+    """
     monkeypatch.setitem(sys.modules, "openai", _mock_openai)
-    yield
-    # Re-import to clear cached provider instances
-    if "kairix.platform.llm.embed_provider" in sys.modules:
-        del sys.modules["kairix.platform.llm.embed_provider"]
 
 
 from kairix.platform.llm.embed_provider import (  # noqa: E402  # import deferred until after openai mock is installed

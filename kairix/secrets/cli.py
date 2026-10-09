@@ -26,7 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, MutableMapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -162,7 +162,7 @@ def _default_loader_factory() -> SecretsResolver:
     return SecretsLoader()
 
 
-def _ensure_bundle_loaded(bundle_path: Path | None = None) -> None:
+def _ensure_bundle_loaded(bundle_path: Path | None = None, env: MutableMapping[str, str] | None = None) -> None:
     """Hydrate the secrets bundle via the canonical bootstrap_secrets.
 
     Thin shim — kept for backwards-compat with existing tests that
@@ -172,7 +172,7 @@ def _ensure_bundle_loaded(bundle_path: Path | None = None) -> None:
     """
     from kairix.secrets.bootstrap import bootstrap_secrets
 
-    bootstrap_secrets(bundle_path=bundle_path, force=True)
+    bootstrap_secrets(bundle_path=bundle_path, force=True, env=env)
 
 
 def _run_verify(
@@ -181,6 +181,7 @@ def _run_verify(
     loader_factory: Callable[[], SecretsResolver],
     identities_provider: Callable[[], tuple[tuple[Scope, str, str | None, str], ...]],
     bundle_path: Path | None = None,
+    environ: MutableMapping[str, str] | None = None,
 ) -> tuple[str, int]:
     """Build the verify table + return (rendered_output, exit_code).
 
@@ -190,7 +191,7 @@ def _run_verify(
     production callers leave it as None (load_secrets reads
     ``$KAIRIX_SECRETS_FILE`` / the default path).
     """
-    _ensure_bundle_loaded(bundle_path)
+    _ensure_bundle_loaded(bundle_path, environ)
     loader = loader_factory()
     identities = identities_provider()
     rows = [_row(scope, area, instance, leaf, loader) for scope, area, instance, leaf in identities]
@@ -303,6 +304,7 @@ def main(
     ] = _default_identities_provider,
     bundle_path: Path | None = None,
     value_reader: Callable[[], str] = _default_value_reader,
+    environ: MutableMapping[str, str] | None = None,
 ) -> int:
     """Entry point for ``kairix secrets``.
 
@@ -311,7 +313,9 @@ def main(
     ``bundle_path``, ``value_reader``) are the DI surface for tests;
     production callers leave them at their defaults. ``bundle_path``
     names the operator bundle file for both branches: the hydration
-    source for ``verify``, the write target for ``set``.
+    source for ``verify``, the write target for ``set``. ``environ`` is
+    the env mapping ``verify`` hydrates the bundle into (``None``: the live
+    ``os.environ``); pair it with a ``loader_factory`` reading the same map.
     """
     args = build_parser().parse_args(argv if argv is not None else sys.argv[2:])
 
@@ -331,6 +335,7 @@ def main(
         loader_factory=loader_factory,
         identities_provider=identities_provider,
         bundle_path=bundle_path,
+        environ=environ,
     )
 
     print(rendered)

@@ -1,14 +1,22 @@
-"""F2 detector: no monkeypatch.setenv/setattr/delenv on KAIRIX_* env vars.
+"""F2 detector (static half): no test writes a ``KAIRIX_*`` process-env key.
 
-Walks every test file via AST and emits the path of any file that calls
-``monkeypatch.setenv("KAIRIX_X", ...)`` (or setattr/delenv equivalents)
-with a string literal first arg starting with ``KAIRIX_``.
+Fast pre-commit feedback for the common spellings, with a string-literal key
+starting with ``KAIRIX_``:
 
-Resolves #217 (prior grep-based detector matched docstring text
-containing the literal substring ``monkeypatch.setenv ... KAIRIX_``).
+* ``monkeypatch.setenv("KAIRIX_X", ...)`` / ``monkeypatch.delenv("KAIRIX_X")``
+  (any fixture name);
+* ``os.environ["KAIRIX_X"] = ...`` / ``+=`` / ``del os.environ["KAIRIX_X"]``;
+* ``os.environ.pop("KAIRIX_X")`` / ``os.environ.setdefault("KAIRIX_X", ...)``.
 
-Output: one violation file path per line on stdout, sorted, deduplicated.
-Pipes into ``arch_gate`` from ``_lib.sh``, which fails on any path.
+Writes inside ``with allow_baseline_writes():`` in ``tests/conftest.py`` (the
+session env baseline) are exempt, mirroring the runtime guard.
+
+The exact half is the runtime guard ``tests/fixtures/process_state_guard.py``:
+an audit hook sees EVERY env write (any spelling, any computed key) while a
+test runs and fails that test. This file deliberately stays a small AST
+match — it is the fast loop, not the proof.
+
+Output: ``path:line: shape`` per violation; the gate fails on any.
 """
 
 from __future__ import annotations
@@ -17,89 +25,146 @@ import ast
 import sys
 from pathlib import Path
 
-# REMEDIATION text — the shell wrapper ``check-no-env-monkeypatch.sh``
-# owns the user-facing message that prints when the gate fails. This
-# constant exists for F21 (actionable-feedback) compliance and is
-# semantically equivalent to the shell wrapper's REMEDIATION.
-REMEDIATION = """Refactor to constructor-injected FakePaths from tests/fakes.py
-(no monkeypatch.setenv / setattr / delenv on KAIRIX_* keys) — to pass.
+sys.path.insert(0, str(Path(__file__).parent))
 
-fix: replace ``monkeypatch.setenv("KAIRIX_...", ...)`` with explicit
-construction of a ``FakePaths`` from tests/fakes.py and pass it as the
-``paths=`` argument to the use case. If the production function reads
-the env var directly, refactor it to accept ``paths: KairixPaths`` as
-an explicit argument — the boundary-only pattern from #139.
+from _fitness_rule import FitnessRule
+from tc_fitness import gate_keys
+
+REMEDIATION = """KAIRIX_* process-env write found in a test. Refactor to an explicit
+``env=`` mapping / ``paths=FakePaths(...)`` / Deps seam to pass.
+
+fix: pass the value through the production seam instead of the process
+env — ``paths=FakePaths(...)`` from tests/fakes.py, an ``env={...}``
+mapping on the reader (``read_int_env(..., env=...)``,
+``load_secrets(path, env=...)``), or a ``*Deps`` dataclass. If the
+production function reads the env var directly, add an
+``env: Mapping[str, str] | None = None`` parameter that production leaves
+as ``None`` (reads os.environ at the kairix.paths boundary) — the
+boundary-only pattern from #139. A subprocess test passes ``env=`` to the
+child instead.
 next: re-run ``python3 scripts/checks/check_no_env_monkeypatch.py``
-(or ``bash scripts/checks/check-no-env-monkeypatch.sh``) to confirm
-the gate goes green.
-run: bash scripts/safe-commit.sh "test(<area>): use FakePaths instead of env monkeypatch"
+(or ``python3 scripts/checks/run_checks.py --gate F2``). The runtime half
+(tests/fixtures/process_state_guard.py) fails any spelling this static
+check misses when the test runs.
+run: bash scripts/safe-commit.sh "test(<area>): inject env via seam instead of mutating os.environ"
 
 Pass example:
   paths = FakePaths(data_dir=tmp_path, log_dir=tmp_path / 'logs')
   result = some_use_case(paths=paths)
+  assert resolve_dispatch_concurrency(env={'KAIRIX_MAX_CONCURRENCY': '3'}) == 3
 
 Forbidden example:
   monkeypatch.setenv('KAIRIX_DATA_DIR', str(tmp_path))
-  result = some_use_case()
+  os.environ['KAIRIX_DB_PATH'] = str(tmp_path / 'db.sqlite')
+  os.environ.pop('KAIRIX_DB_PATH', None)
+
+The one sanctioned writer is the session baseline in tests/conftest.py,
+whose writes sit in ``with allow_baseline_writes():`` (both halves exempt
+that block; using it anywhere else fails).
 
 KAIRIX_* env-var reads happen ONCE at the boundary inside KairixPaths
 (kairix/paths.py). Tests construct paths directly; they never mutate
 process env to influence the production read."""
 
-_TARGET_METHODS = {"setenv", "setattr", "delenv"}
+_ENV_HELPERS = {"setenv", "delenv"}
+_BASELINE_CONTEXT = "allow_baseline_writes"
+_BASELINE_HOME = (Path(__file__).resolve().parents[2] / "tests" / "conftest.py").resolve()
+_ENVIRON_METHODS = {"pop", "setdefault"}
 
 
-def _is_monkeypatch_call(call: ast.Call) -> bool:
-    """Return True when ``call`` is ``monkeypatch.{setenv,setattr,delenv}(...)``.
+def _is_kairix_literal(node: ast.expr | None) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("KAIRIX_")
 
-    Conservative: only matches the bare receiver name ``monkeypatch``.
-    Fixture-renamed variants (``mp``, ``mpatch``) are not detected — by
-    convention pytest fixtures use the canonical name.
+
+def _is_environ(node: ast.expr) -> bool:
+    """``os.environ`` or a bare ``environ`` name (``from os import environ``)."""
+    if isinstance(node, ast.Attribute):
+        return node.attr == "environ" and isinstance(node.value, ast.Name) and node.value.id == "os"
+    return isinstance(node, ast.Name) and node.id == "environ"
+
+
+def _subscript_write(target: ast.expr) -> bool:
+    return isinstance(target, ast.Subscript) and _is_environ(target.value) and _is_kairix_literal(target.slice)
+
+
+def _shape(node: ast.AST) -> str | None:
+    if isinstance(node, (ast.Assign, ast.AugAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if any(_subscript_write(t) for t in targets):
+            return "assign os.environ[KAIRIX_*]"
+    elif isinstance(node, ast.Delete):
+        if any(_subscript_write(t) for t in node.targets):
+            return "del os.environ[KAIRIX_*]"
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.args:
+        func, first = node.func, node.args[0]
+        if func.attr in _ENV_HELPERS and _is_kairix_literal(first):
+            return f"{func.attr}(KAIRIX_*)"
+        if func.attr in _ENVIRON_METHODS and _is_environ(func.value) and _is_kairix_literal(first):
+            return f"os.environ.{func.attr}(KAIRIX_*)"
+    return None
+
+
+def _baseline_blocks(tree: ast.AST) -> list[ast.With]:
+    """``with allow_baseline_writes():`` blocks — the session baseline's exemption."""
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Name)
+            and item.context_expr.func.id == _BASELINE_CONTEXT
+            for item in node.items
+        )
+    ]
+
+
+def file_violations(path: Path) -> list[str]:
+    """Every ``line: shape`` KAIRIX_* env write in ``path`` (sorted by line).
+
+    Writes inside ``with allow_baseline_writes():`` are the session baseline's
+    (the runtime guard exempts the same block); the block itself is a
+    violation anywhere but the root ``tests/conftest.py``.
     """
-    func = call.func
-    if not isinstance(func, ast.Attribute):
-        return False
-    if func.attr not in _TARGET_METHODS:
-        return False
-    return isinstance(func.value, ast.Name) and func.value.id == "monkeypatch"
-
-
-def _first_arg_targets_kairix(call: ast.Call) -> bool:
-    """First positional arg is a string literal starting with ``KAIRIX_``."""
-    if not call.args:
-        return False
-    first = call.args[0]
-    if isinstance(first, ast.Constant) and isinstance(first.value, str):
-        return first.value.startswith("KAIRIX_")
-    return False
-
-
-def file_has_env_monkeypatch(path: Path) -> bool:
-    """Return True iff ``path`` calls monkeypatch.{setenv,setattr,delenv}("KAIRIX_...")."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (SyntaxError, OSError):
-        return False
+        return []
+    blocks = _baseline_blocks(tree)
+    exempt = {line for b in blocks for line in range(b.lineno, (b.end_lineno or b.lineno) + 1)}
+    found = {(getattr(node, "lineno", 0), shape) for node in ast.walk(tree) if (shape := _shape(node))}
+    found = {(line, shape) for line, shape in found if line not in exempt}
+    if path.resolve() != _BASELINE_HOME:
+        found |= {(b.lineno, f"{_BASELINE_CONTEXT}() outside tests/conftest.py") for b in blocks}
+    return [f"{line}: {shape}" for line, shape in sorted(found)]
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _is_monkeypatch_call(node) and _first_arg_targets_kairix(node):
-            return True
-    return False
+
+def file_has_env_monkeypatch(path: Path) -> bool:
+    """Return True iff ``path`` writes a KAIRIX_* process-env key in a detected spelling."""
+    return bool(file_violations(path))
+
+
+class F2(FitnessRule):
+    """F2 static half as an in-process rule over ``tests/`` (staged runs narrow it)."""
+
+    name = "no-env-monkeypatch"
+    remediation = REMEDIATION
+    roots = ("tests",)
+
+    def file_has_violation(self, path: Path) -> bool:
+        return file_has_env_monkeypatch(path)
+
+    def run(self) -> int:
+        found: set[str] = set()
+        for path in self.enumerate_files():
+            rel = str(self._repo_relative(path))
+            if self.is_in_scope(rel):
+                found.update(f"{rel}:{violation}" for violation in file_violations(path))
+        return int(gate_keys(self.name, found, self.remediation))
 
 
 def main() -> int:
-    root = Path("tests")
-    if not root.is_dir():
-        return 0
-
-    violators: list[str] = []
-    for path in sorted(root.rglob("*.py")):
-        if file_has_env_monkeypatch(path):
-            violators.append(str(path))
-
-    for v in violators:
-        print(v)
-    return 0
+    return F2().run()
 
 
 if __name__ == "__main__":

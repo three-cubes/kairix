@@ -248,12 +248,13 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         check="no_internal_patches",
         category="test-discipline",
         scope="per-file",
-        summary="no @patch / monkeypatch on kairix internals — inject Fake* through a seam",
-        script="check-no-internal-patches.sh",
-        # Shell detector greps tests/ for @patch on kairix.* targets. File-local
-        # (per-test-file), but runs as a subprocess so it can't narrow to staged
-        # files — it runs its full tests/ grep when a tests/ path is staged.
-        staged_scope=("tests",),
+        summary=(
+            "no @patch / monkeypatch, sys.modules swap or importlib.reload of kairix internals"
+            " — inject Fake* through a seam (static: common spellings; runtime:"
+            " tests/fixtures/process_state_guard.py, exact)"
+        ),
+        # Static half: in-process FitnessRule over tests/ — the staged runner
+        # narrows it to staged files. Runtime half: the pytest plugin above.
     ),
     RuleEntry(
         id="F2",
@@ -261,10 +262,13 @@ _ENTRIES: tuple[RuleEntry, ...] = (
         check="no_env_monkeypatch",
         category="test-discipline",
         scope="per-file",
-        summary='no monkeypatch.setenv("KAIRIX_*") — pass deps as kwargs instead',
-        script="check-no-env-monkeypatch.sh",
-        # Shell detector greps tests/ for monkeypatch.setenv("KAIRIX_*").
-        staged_scope=("tests",),
+        summary=(
+            'no monkeypatch.setenv("KAIRIX_*") or any other KAIRIX_* process-env write'
+            " — pass deps as kwargs instead (static: common spellings; runtime:"
+            " tests/fixtures/process_state_guard.py audit hook, exact)"
+        ),
+        # Static half: in-process FitnessRule over tests/ — the staged runner
+        # narrows it to staged files. Runtime half: the pytest plugin above.
     ),
     RuleEntry(
         id="F5",

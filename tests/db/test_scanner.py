@@ -41,25 +41,25 @@ def test_hash_content_different_for_different_text() -> None:
 def test_extract_title_from_frontmatter() -> None:
     """Extracts title from YAML frontmatter."""
     text = "---\ntitle: My Document\ntype: note\n---\n\nBody text here."
-    assert extract_title(text, __import__("pathlib").Path("test.md")) == "My Document"
+    assert extract_title(text, Path("test.md")) == "My Document"
 
 
 @pytest.mark.unit
 def test_extract_title_from_heading() -> None:
     """Falls back to first # heading when no frontmatter title."""
     text = "# Hello World\n\nSome content."
-    assert extract_title(text, __import__("pathlib").Path("test.md")) == "Hello World"
+    assert extract_title(text, Path("test.md")) == "Hello World"
 
 
 @pytest.mark.unit
 def test_extract_title_from_filename() -> None:
     """Falls back to filename when no frontmatter or heading."""
     text = "Just plain text with no heading."
-    assert extract_title(text, __import__("pathlib").Path("my-document.md")) == "My Document"
+    assert extract_title(text, Path("my-document.md")) == "My Document"
 
 
 @pytest.mark.unit
-def test_scan_discovers_new_files(tmp_path: __import__("pathlib").Path) -> None:
+def test_scan_discovers_new_files(tmp_path: Path) -> None:
     """Scanner discovers new markdown files and inserts them."""
     vault = tmp_path / "vault"
     area = vault / "02-Areas"
@@ -85,7 +85,7 @@ def test_scan_discovers_new_files(tmp_path: __import__("pathlib").Path) -> None:
 
 
 @pytest.mark.unit
-def test_scan_detects_unchanged_files(tmp_path: __import__("pathlib").Path) -> None:
+def test_scan_detects_unchanged_files(tmp_path: Path) -> None:
     """Unchanged files are not re-inserted."""
     vault = tmp_path / "vault"
     area = vault / "02-Areas"
@@ -105,7 +105,7 @@ def test_scan_detects_unchanged_files(tmp_path: __import__("pathlib").Path) -> N
 
 
 @pytest.mark.unit
-def test_scan_detects_updated_files(tmp_path: __import__("pathlib").Path) -> None:
+def test_scan_detects_updated_files(tmp_path: Path) -> None:
     """Modified files are detected by hash change."""
     vault = tmp_path / "vault"
     area = vault / "02-Areas"
@@ -126,7 +126,7 @@ def test_scan_detects_updated_files(tmp_path: __import__("pathlib").Path) -> Non
 
 
 @pytest.mark.unit
-def test_scan_skips_empty_markdown_files(tmp_path: __import__("pathlib").Path) -> None:
+def test_scan_skips_empty_markdown_files(tmp_path: Path) -> None:
     """Empty files carry no retrievable content and are not active documents."""
     vault = tmp_path / "vault"
     area = vault / "02-Areas"
@@ -149,7 +149,7 @@ def test_scan_skips_empty_markdown_files(tmp_path: __import__("pathlib").Path) -
 
 @pytest.mark.unit
 def test_scan_deactivates_document_that_becomes_empty(
-    tmp_path: __import__("pathlib").Path,
+    tmp_path: Path,
 ) -> None:
     """An indexed document that is truncated to empty is removed from the active set."""
     vault = tmp_path / "vault"
@@ -176,7 +176,7 @@ def test_scan_deactivates_document_that_becomes_empty(
 
 @pytest.mark.unit
 def test_scan_marks_removed_files_inactive(
-    tmp_path: __import__("pathlib").Path,
+    tmp_path: Path,
 ) -> None:
     """Deleted files are marked as active=0."""
     vault = tmp_path / "vault"
@@ -199,7 +199,7 @@ def test_scan_marks_removed_files_inactive(
 
 
 @pytest.mark.unit
-def test_scan_excludes_patterns(tmp_path: __import__("pathlib").Path) -> None:
+def test_scan_excludes_patterns(tmp_path: Path) -> None:
     """Exclude patterns filter out matching files."""
     vault = tmp_path / "vault"
     area = vault / "02-Areas"
@@ -235,7 +235,7 @@ def test_scan_report_str() -> None:
 
 @pytest.mark.unit
 def test_scan_skips_duplicate_content_across_collections(
-    tmp_path: __import__("pathlib").Path,
+    tmp_path: Path,
 ) -> None:
     """Same content at different paths is only indexed once."""
     vault = tmp_path / "vault"
@@ -269,7 +269,7 @@ def test_scan_skips_duplicate_content_across_collections(
 
 @pytest.mark.unit
 def test_scan_allows_update_to_existing_path(
-    tmp_path: __import__("pathlib").Path,
+    tmp_path: Path,
 ) -> None:
     """Changed content at the same path is updated, not blocked by dedup."""
     vault = tmp_path / "vault"
@@ -337,7 +337,7 @@ def test_scan_reports_unreadable_files_with_remediation(
 
 @pytest.mark.unit
 def test_scan_tags_documents_with_agent_owner(
-    tmp_path: __import__("pathlib").Path,
+    tmp_path: Path,
 ) -> None:
     """Scanner tags rows with agent_owner from the injected resolver.
 
@@ -376,7 +376,7 @@ def test_scan_tags_documents_with_agent_owner(
 
 @pytest.mark.unit
 def test_scan_with_no_resolver_leaves_agent_owner_null(
-    tmp_path: __import__("pathlib").Path,
+    tmp_path: Path,
 ) -> None:
     """When no resolver is injected, agent_owner is NULL for every row."""
     vault = tmp_path / "vault"
@@ -401,7 +401,7 @@ def test_scan_with_no_resolver_leaves_agent_owner_null(
 
 @pytest.mark.unit
 def test_scan_file_indexes_only_the_named_file(
-    tmp_path: __import__("pathlib").Path,
+    tmp_path: Path,
 ) -> None:
     """scan_file upserts ONLY the one file it is given — it never globs the
     tree, so a sibling file present on disk stays out of the index.
@@ -431,7 +431,7 @@ def test_scan_file_indexes_only_the_named_file(
 
 @pytest.mark.unit
 def test_scan_file_skips_a_file_outside_every_collection(
-    tmp_path: __import__("pathlib").Path,
+    tmp_path: Path,
 ) -> None:
     """A file that no collection's walk would reach is not indexed.
 
@@ -457,7 +457,7 @@ def test_scan_file_skips_a_file_outside_every_collection(
 
 @pytest.mark.unit
 def test_scan_file_skips_duplicate_content_already_active(
-    tmp_path: __import__("pathlib").Path,
+    tmp_path: Path,
 ) -> None:
     """scan_file honours the same cross-path dedup as the full scan: identical
     content already active under another path is not re-indexed at the new

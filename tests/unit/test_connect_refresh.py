@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from kairix.connect.protocols import RefreshUnavailableError
@@ -192,28 +194,19 @@ def test_default_refresh_path_handles_missing_expiry(monkeypatch: Any) -> None: 
 
 def test_default_refresh_path_raises_when_library_absent(monkeypatch: Any) -> None:  # type: ignore[name-defined]  # F3 rationale: Any imported later in the file via a deferred-import block (E402-clean)
     """ImportError on google-auth surfaces a typed RefreshUnavailableError via the public surface."""
-    import sys
-
-    for key in list(sys.modules):
-        if key == "google" or key.startswith("google."):
-            monkeypatch.delitem(sys.modules, key, raising=False)
-    import builtins
-
-    original_import = builtins.__import__
-
-    def blocking_import(name: str, *args: object, **kwargs: object) -> object:
-        if name == "google.auth.transport.requests" or name == "google.oauth2.credentials":
-            raise ImportError(f"blocked {name}")
-        return original_import(name, *args, **kwargs)  # type: ignore[arg-type]  # F3 rationale: builtins.__import__ wrapper signature mirrors stdlib but mypy refuses the *args/**kwargs forward
-
-    monkeypatch.setattr(builtins, "__import__", blocking_import)
+    # A None entry in sys.modules makes ``import <dep>`` raise ImportError —
+    # the optional dependency is simulated as not installed (auto-undone).
+    monkeypatch.setitem(sys.modules, "google.auth.transport.requests", None)
+    monkeypatch.setitem(sys.modules, "google.oauth2.credentials", None)
     token = GoogleRefreshableToken(state=_state())
     # The library-missing path raises RuntimeError; the public refresh()
     # wraps it as RefreshUnavailableError per the typed F21 contract.
     from kairix.connect.protocols import RefreshUnavailableError
 
-    with pytest.raises(RefreshUnavailableError, match="refresh failed"):
+    with pytest.raises(RefreshUnavailableError, match="refresh failed") as exc_info:
         token.refresh()
+    # The cause is the missing library, not a token-endpoint / network failure.
+    assert "google-auth is not installed" in str(exc_info.value.__cause__)
 
 
 # Add Any import for the new helpers.

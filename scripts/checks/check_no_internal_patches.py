@@ -1,14 +1,28 @@
-"""F1 detector: flag tests that substitute kairix-internal implementations.
+"""F1 detector (static half): flag tests that substitute kairix-internal implementations.
 
-Walks every test file via AST and reports the path of any file that
-matches one of six shapes:
+Fast pre-commit feedback for the common spellings. Walks every test file via
+AST and reports each line matching one of these shapes:
 
-1. ``@patch("kairix.X.Y", ...)`` — decorator
-2. ``with patch("kairix.X.Y", ...):`` — context manager
+1. ``patch("kairix.X.Y", ...)`` — decorator, ``with``, or ``.start()``
+2. ``patch.object(<kairix ref>, "attr", ...)``
 3. ``kairix.X.Y = <expr>`` — full-path attribute assignment
 4. ``<alias>.Y = <expr>`` where ``<alias>`` resolves to a kairix module
-5. ``monkeypatch.setattr("kairix.X.Y", ...)`` — string-target form
-6. ``monkeypatch.setattr(<kairix module ref>, "attr", fake)`` — ref-target form
+5. ``monkeypatch.setattr / delattr("kairix.X.Y", ...)`` — string-target form
+6. ``monkeypatch.setattr / delattr(<kairix module ref>, "attr", ...)``
+7. ``sys.modules["kairix.X"] = ...`` / ``del sys.modules["kairix.X"]``
+8. ``importlib.reload(<imported kairix module>)``
+9. builtin ``setattr / delattr(<imported kairix module or attribute>, ...)``
+
+The exact half is the runtime guard ``tests/fixtures/process_state_guard.py``:
+it fails a running test that swaps or removes a ``sys.modules`` kairix entry,
+re-executes an imported kairix module, or patches a kairix object through
+``monkeypatch`` / ``mock.patch`` — however it is spelled. This file
+deliberately stays a small AST match — it is the fast loop, not the proof.
+
+Scope: the static half resolves kairix references through the file's imports
+only. A runtime-computed module reference plus a manual restore (e.g.
+``setattr(importlib.import_module(name), ...)``) is deliberate evasion and is
+out of scope for both halves by design.
 
 Stdlib roots (``os``, ``time``, ``pathlib``, ``sys``, ``importlib``,
 ``builtins``, ``threading``, ``functools``, ``re``, ``json``,
@@ -18,13 +32,7 @@ Stdlib roots (``os``, ``time``, ``pathlib``, ``sys``, ``importlib``,
 ``click``, ``unittest``, ``pytest``) are exempt — patching these is
 fixturing genuinely external state at the kairix edge.
 
-To extend with a new shape: add the detection branch to
-``file_has_internal_patch`` and add the matching positive + negative
-tests to ``tests/architecture/test_check_no_internal_patches.py``.
-
-Output: one violation file path per line on stdout, sorted,
-deduplicated. Pipes into ``arch_gate`` from ``_lib.sh``, which fails on
-any path.
+Output: ``path:line: shape`` per violation; the gate fails on any.
 """
 
 from __future__ import annotations
@@ -33,12 +41,25 @@ import ast
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+
+from _fitness_rule import FitnessRule
+from tc_fitness import gate_keys
+
 REMEDIATION = """Refactor to constructor injection with a fake from tests/fakes.py to pass.
 
 fix: rewrite the test to construct the unit under test with a Fake*
 from tests/fakes.py (e.g. ``SearchPipeline(retriever=FakeRetriever(...))``).
 If the production class lacks a constructor seam, add one — same shape
 as ``GoldBuilder(llm_judge=, retriever=, db_path=)``.
+
+A ``sys.modules`` swap / ``importlib.reload`` usually resets module-level
+singleton state or simulates a failed import. Reset the state through the
+module's public reset function (``reset_cross_encoder_cache()``,
+``reset_api_key_cache()``), simulate a missing THIRD-PARTY dependency with
+``monkeypatch.setitem(sys.modules, "yaml", None)``, and test a fresh import
+of kairix itself in a subprocess
+(``subprocess.run([sys.executable, "-c", "import kairix"])``).
 
 When production resolves dependencies via function-local imports at
 call time, move that resolution to construction time via the existing
@@ -47,7 +68,7 @@ call time, move that resolution to construction time via the existing
 canonical shape, then inject the Fake* at construction.
 
 next: re-run ``python3 scripts/checks/check_no_internal_patches.py``
-to confirm the gate goes green.
+(or ``python3 scripts/checks/run_checks.py --gate F1``) to confirm the gate goes green.
 run: bash scripts/safe-commit.sh "refactor(<area>): inject Fake via DI seam"
 
 Pass example:
@@ -55,17 +76,20 @@ Pass example:
   assert pipeline.run(query='x') == ...
 
 Forbidden example:
-  Shapes that fire the gate (all six are the same anti-pattern):
+  Shapes that fire the gate (all the same anti-pattern):
   @patch('kairix.core.search.bm25.bm25_search')
-  with patch('kairix.providers.get_provider'):
+  with patch.object(paths_mod, 'provider_name'):
   kairix.paths.provider_name = lambda: "fake"
   paths_mod.provider_name = lambda: "fake"
   monkeypatch.setattr("kairix.paths.provider_name", ...)
   monkeypatch.setattr(kairix.paths, "provider_name", ...)
+  sys.modules["kairix.core.search.rerank"] = stub
+  importlib.reload(rerank_mod)
 
 Stdlib boundaries (os.*, time.*, etc.) and external SDK boundaries
 (httpx.*, openai.*, boto3.*, etc.) remain allowed — F1 only flags
-kairix.* targets."""
+kairix.* targets. The runtime half (tests/fixtures/process_state_guard.py)
+fails any spelling this static check misses when the test runs."""
 
 
 # Exempt module roots — stdlib and external SDKs whose patching is a
@@ -213,6 +237,60 @@ def _is_patch_call(node: ast.expr) -> bool:
     return False
 
 
+def _is_patch_object_call(node: ast.Call, aliases: dict[str, str]) -> bool:
+    """``patch.object(<kairix ref>, ...)`` / ``mock.patch.object(<kairix ref>, ...)``."""
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "object"):
+        return False
+    owner = func.value
+    is_patch = (isinstance(owner, ast.Name) and owner.id == "patch") or (
+        isinstance(owner, ast.Attribute) and owner.attr == "patch"
+    )
+    return is_patch and bool(node.args) and _resolves_to_kairix(node.args[0], aliases)
+
+
+def _is_sys_modules_kairix_item(target: ast.expr) -> bool:
+    """``sys.modules["kairix..."]`` subscript with a string-literal kairix key."""
+    if not isinstance(target, ast.Subscript):
+        return False
+    value, key = target.value, target.slice
+    is_sys_modules = (
+        isinstance(value, ast.Attribute)
+        and value.attr == "modules"
+        and isinstance(value.value, ast.Name)
+        and value.value.id == "sys"
+    )
+    return (
+        is_sys_modules
+        and isinstance(key, ast.Constant)
+        and isinstance(key.value, str)
+        and (key.value == "kairix" or key.value.startswith("kairix."))
+    )
+
+
+def _is_kairix_reload(node: ast.Call, aliases: dict[str, str]) -> bool:
+    """``importlib.reload(<kairix module ref>)`` / ``reload(<kairix module ref>)``."""
+    func = node.func
+    is_reload = (isinstance(func, ast.Name) and func.id == "reload") or (
+        isinstance(func, ast.Attribute)
+        and func.attr == "reload"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "importlib"
+    )
+    return is_reload and bool(node.args) and _resolves_to_kairix(node.args[0], aliases)
+
+
+def _is_builtin_attr_write(node: ast.Call, aliases: dict[str, str]) -> bool:
+    """Builtin ``setattr(<kairix ref>, ...)`` / ``delattr(<kairix ref>, ...)``."""
+    func = node.func
+    return (
+        isinstance(func, ast.Name)
+        and func.id in ("setattr", "delattr")
+        and bool(node.args)
+        and _resolves_to_kairix(node.args[0], aliases)
+    )
+
+
 def _first_arg_is_kairix_string(call: ast.Call) -> bool:
     """First positional arg of patch(...) / setattr(...) is a string starting with ``kairix.``."""
     if not call.args:
@@ -224,11 +302,11 @@ def _first_arg_is_kairix_string(call: ast.Call) -> bool:
 
 
 def _is_monkeypatch_setattr(node: ast.Call) -> bool:
-    """``node`` is ``monkeypatch.setattr(...)``."""
+    """``node`` is ``monkeypatch.setattr(...)`` / ``monkeypatch.delattr(...)``."""
     func = node.func
     return (
         isinstance(func, ast.Attribute)
-        and func.attr == "setattr"
+        and func.attr in ("setattr", "delattr")
         and isinstance(func.value, ast.Name)
         and func.value.id == "monkeypatch"
     )
@@ -259,69 +337,82 @@ def _is_inside_pytest_raises(parent_map: dict[ast.AST, ast.AST], node: ast.AST) 
     return False
 
 
-def file_has_internal_patch(path: Path) -> bool:
-    """Return True iff ``path`` contains any of the six F1 violation shapes."""
+def _call_shape(node: ast.Call, aliases: dict[str, str]) -> str | None:
+    if _is_patch_call(node) and _first_arg_is_kairix_string(node):
+        return "patch(kairix.*)"
+    if _is_patch_object_call(node, aliases):
+        return "patch.object(<kairix ref>)"
+    if _is_monkeypatch_setattr(node) and (
+        _first_arg_is_kairix_string(node) or (bool(node.args) and _resolves_to_kairix(node.args[0], aliases))
+    ):
+        return "monkeypatch.setattr/delattr(<kairix target>)"
+    if _is_kairix_reload(node, aliases):
+        return "importlib.reload(<kairix module>)"
+    if _is_builtin_attr_write(node, aliases):
+        return "setattr/delattr(<kairix target>)"
+    return None
+
+
+def _node_shape(node: ast.AST, aliases: dict[str, str], parent_map: dict[ast.AST, ast.AST]) -> str | None:
+    if isinstance(node, ast.Call):
+        return _call_shape(node, aliases)
+    if isinstance(node, (ast.Assign, ast.Delete)) and any(_is_sys_modules_kairix_item(t) for t in node.targets):
+        return "sys.modules[kairix.*] swap"
+    if isinstance(node, ast.Assign):
+        # Shape 3 + 4. Skip assignments inside ``with pytest.raises(...):`` —
+        # a frozen-attribute contract test, not a patch.
+        for target in node.targets:
+            if isinstance(target, ast.Attribute) and _resolves_to_kairix(target, aliases):
+                if not _is_inside_pytest_raises(parent_map, node):
+                    return "assignment to a kairix attribute"
+    return None
+
+
+def file_violations(path: Path) -> list[str]:
+    """Every ``line: shape`` F1 violation in ``path`` (sorted by line)."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (SyntaxError, OSError):
-        return False
-
+        return []
     aliases = _resolve_kairix_aliases(tree)
-
-    # Build a child->parent map so we can ask "is this Assign inside a
-    # pytest.raises With block?" without re-traversing the whole tree.
     parent_map: dict[ast.AST, ast.AST] = {}
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
             parent_map[child] = parent
+    found = {
+        (getattr(node, "lineno", 0), shape)
+        for node in ast.walk(tree)
+        if (shape := _node_shape(node, aliases, parent_map))
+    }
+    return [f"{line}: {shape}" for line, shape in sorted(found)]
 
-    for node in ast.walk(tree):
-        # Shape 1: @patch decorator on kairix target
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            for deco in node.decorator_list:
-                if _is_patch_call(deco) and _first_arg_is_kairix_string(deco):
-                    return True
 
-        # Shape 2: with patch(...) on kairix target
-        if isinstance(node, ast.With):
-            for item in node.items:
-                ctx = item.context_expr
-                if _is_patch_call(ctx) and _first_arg_is_kairix_string(ctx):
-                    return True
+def file_has_internal_patch(path: Path) -> bool:
+    """Return True iff ``path`` contains any detected F1 violation shape."""
+    return bool(file_violations(path))
 
-        # Shape 3 + 4: attribute assignment ``<...>.attr = expr`` where root
-        # resolves to a kairix module. Skip when the assignment sits inside
-        # a ``with pytest.raises(...):`` — that's a frozen-attribute
-        # contract test, not a patch.
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Attribute) and _resolves_to_kairix(target, aliases):
-                    if not _is_inside_pytest_raises(parent_map, node):
-                        return True
 
-        # Shape 5 + 6: monkeypatch.setattr(...) on kairix target
-        if isinstance(node, ast.Call) and _is_monkeypatch_setattr(node):
-            if _first_arg_is_kairix_string(node):
-                return True
-            if node.args and _resolves_to_kairix(node.args[0], aliases):
-                return True
+class F1(FitnessRule):
+    """F1 static half as an in-process rule over ``tests/`` (staged runs narrow it)."""
 
-    return False
+    name = "no-internal-patches"
+    remediation = REMEDIATION
+    roots = ("tests",)
+
+    def file_has_violation(self, path: Path) -> bool:
+        return file_has_internal_patch(path)
+
+    def run(self) -> int:
+        found: set[str] = set()
+        for path in self.enumerate_files():
+            rel = str(self._repo_relative(path))
+            if self.is_in_scope(rel):
+                found.update(f"{rel}:{violation}" for violation in file_violations(path))
+        return int(gate_keys(self.name, found, self.remediation))
 
 
 def main() -> int:
-    root = Path("tests")
-    if not root.is_dir():
-        return 0
-
-    violators: list[str] = []
-    for path in sorted(root.rglob("*.py")):
-        if file_has_internal_patch(path):
-            violators.append(str(path))
-
-    for v in violators:
-        print(v)
-    return 0
+    return F1().run()
 
 
 if __name__ == "__main__":

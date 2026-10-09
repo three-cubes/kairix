@@ -1202,11 +1202,9 @@ def test_run_onboard_check_uses_canonical_remediation_strings() -> None:
         return fake_results
 
     # Drive run_onboard_check via a one-shot ALL_CHECKS override
-    import pytest as _pytest
-
-    with _pytest.MonkeyPatch.context() as mp:
-        mp.setattr(check_mod, "run_all_checks", _fake_run_all)
-        result = check_mod.run_onboard_check()
+    # Inject through the public ``checks=`` seam (each check returns one
+    # canned result) rather than monkeypatching ``run_all_checks`` (F1).
+    result = check_mod.run_onboard_check(checks=[(lambda r=r: r) for r in _fake_run_all()])
 
     canonical = check_mod.CANONICAL_REMEDIATIONS
     for failure in result.failures:
@@ -1268,11 +1266,9 @@ def test_run_onboard_check_unknown_check_falls_back_to_fix() -> None:
             ),
         ]
 
-    import pytest as _pytest
-
-    with _pytest.MonkeyPatch.context() as mp:
-        mp.setattr(check_mod, "run_all_checks", _fake_run_all)
-        result = check_mod.run_onboard_check()
+    # Inject through the public ``checks=`` seam (each check returns one
+    # canned result) rather than monkeypatching ``run_all_checks`` (F1).
+    result = check_mod.run_onboard_check(checks=[(lambda r=r: r) for r in _fake_run_all()])
 
     assert len(result.failures) == 1
     # No canonical entry → falls back to the raw fix
@@ -1736,11 +1732,9 @@ def test_run_onboard_check_unknown_and_no_fix_surfaces_bug_hint() -> None:
             ),
         ]
 
-    import pytest as _pytest
-
-    with _pytest.MonkeyPatch.context() as mp:
-        mp.setattr(check_mod, "run_all_checks", _fake_run_all)
-        result = check_mod.run_onboard_check()
+    # Inject through the public ``checks=`` seam (each check returns one
+    # canned result) rather than monkeypatching ``run_all_checks`` (F1).
+    result = check_mod.run_onboard_check(checks=[(lambda r=r: r) for r in _fake_run_all()])
 
     assert len(result.failures) == 1
     assert result.failures[0].remediation

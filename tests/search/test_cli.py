@@ -15,7 +15,7 @@ from dataclasses import field as _field
 
 import pytest
 
-from kairix.core.search.cli import build_parser, format_text, to_json_envelope
+from kairix.core.search.cli import build_parser, format_text, main, to_json_envelope
 from kairix.use_cases.search import SearchHit, SearchOutput
 
 pytestmark = pytest.mark.unit
@@ -308,9 +308,8 @@ def test_main_text_mode_prints_query_and_intent_lines(
     Sabotage: deleting ``print(format_text(out))`` in main() causes
     capsys.readouterr().out to be empty and the "Query:" assertion to fail.
     """
-    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
     with pytest.raises(SystemExit) as exc_info:
-        main_module.main(["my unit test query"])
+        main(["my unit test query"])
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "Query: my unit test query" in captured.out
@@ -328,9 +327,8 @@ def test_main_json_mode_emits_parseable_envelope(
     Sabotage: swapping to_json_envelope for format_text in the --json branch
     makes captured.out non-JSON and json.loads raises ValueError → test fails.
     """
-    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
     with pytest.raises(SystemExit) as exc_info:
-        main_module.main(["another query", "--json"])
+        main(["another query", "--json"])
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
@@ -348,46 +346,37 @@ def test_main_exits_nonzero_when_search_output_has_error(
     #
     # We trigger an error by passing scope=all-agents which surfaces an
     # error inside run_search (the collection resolver path).
-    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
     with pytest.raises(SystemExit) as exc_info:
-        main_module.main(["query", "--scope", "all-agents", "--agent", "shape"])
+        main(["query", "--scope", "all-agents", "--agent", "shape"])
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "Error:" in captured.out
 
 
 @pytest.mark.unit
-def test_main_module_guard_invokes_main(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_main_module_guard_invokes_main() -> None:
     """The ``if __name__ == "__main__"`` guard wires ``main()`` so
     ``python -m kairix.core.search.cli`` works.
 
-    In the test env there's no ``provider:`` in ``kairix.config.yaml``,
-    so the CLI exits 1 via SystemExit after printing the error
-    envelope. We capture the SystemExit and assert the "Query:" line
-    still made it to stdout.
+    Runs in a subprocess — a fresh interpreter — so no kairix module body is
+    re-executed in the shared test process (F1). argparse's ``--help``
+    output proves the guard called ``main()``.
 
     Sabotage: removing ``main()`` under ``if __name__ == "__main__"``
-    makes runpy.run_module return without printing the "Query:" line,
-    so the captured.out assert fails.
-
-    runpy executes the module as __main__ which triggers the guard line.
-    We patch sys.argv (NOT a KAIRIX_ env var, so F2-compliant) to feed argv.
+    makes the module exit 0 with no output, so the usage assert fails.
     """
-    import runpy
+    import subprocess
     import sys as _sys
 
-    saved_argv = _sys.argv
-    _sys.argv = ["kairix-search", "guarded module run"]
-    try:
-        with pytest.raises(SystemExit) as exc_info:
-            runpy.run_module("kairix.core.search.cli", run_name="__main__")
-        assert exc_info.value.code == 1
-    finally:
-        _sys.argv = saved_argv
-    captured = capsys.readouterr()
-    assert "Query: guarded module run" in captured.out
+    proc = subprocess.run(
+        [_sys.executable, "-m", "kairix.core.search.cli", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "usage:" in proc.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -439,8 +428,7 @@ def test_main_with_collection_flag_injects_collections_into_search_call(
 
     from kairix.use_cases.search import SearchDeps
 
-    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
-    main_module.main(
+    main(
         ["q", "--collection", "reference-library", "--no-entity-card"],
         deps=SearchDeps(search_fn=_spy_search),
     )
@@ -470,8 +458,7 @@ def test_main_without_collection_flag_does_not_inject_collections(
 
     from kairix.use_cases.search import SearchDeps
 
-    main_module = __import__("kairix.core.search.cli", fromlist=["main"])
-    main_module.main(["q", "--no-entity-card"], deps=SearchDeps(search_fn=_spy_search))
+    main(["q", "--no-entity-card"], deps=SearchDeps(search_fn=_spy_search))
     _ = capsys.readouterr()
 
     assert "collections" not in captured

@@ -25,7 +25,8 @@ Optional dependency — install via:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+import threading
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kairix.core.search.rrf import FusedResult
@@ -35,45 +36,64 @@ logger = logging.getLogger(__name__)
 RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 RERANK_CANDIDATE_LIMIT: int = 20
 
-_cross_encoder = None  # lazy singleton
-_cross_encoder_checked = False  # True once we've tried to load (even if it failed)
+# Load-once memo: holds the "encoder" key (the loaded encoder, or None for a
+# failed load) once a load has been attempted. The lock serialises the
+# check -> load -> store so concurrent first calls from the shared rerank
+# executor construct (and download) the model exactly once.
+_MEMO: dict[str, Any] = {}
+_MEMO_LOCK = threading.Lock()
 
 
-def _get_cross_encoder(model: str):
-    """Load and cache the cross-encoder model. Returns None on any import/load failure."""
-    global _cross_encoder, _cross_encoder_checked
-    if _cross_encoder_checked:
-        return _cross_encoder
-    _cross_encoder_checked = True
+def load_cross_encoder(model: str = RERANK_MODEL) -> Any:
+    """Load the cross-encoder ``model``. Returns ``None`` on any failure.
+
+    The two failures are reported separately: sentence-transformers itself
+    missing (an ``ImportError`` from the package import) is "not installed";
+    anything raised while the model loads — including an ``ImportError`` from
+    a missing backend — is a load failure. No caching: see
+    :func:`get_cross_encoder`.
+    """
     try:
         from sentence_transformers import (
             CrossEncoder,  # type: ignore[import-untyped] — sentence-transformers has no upstream type stubs
         )
-
-        _cross_encoder = CrossEncoder(model)
-        logger.info("rerank: loaded cross-encoder model %r", model)
-        return _cross_encoder
     except ImportError:
         logger.warning(
             "rerank: sentence-transformers not installed — re-ranking disabled. "
             "Install with: pip install kairix[rerank]"
         )
         return None
+    try:
+        encoder = CrossEncoder(model)
     except Exception as e:
         logger.warning("rerank: failed to load model %r — %s — re-ranking disabled", model, e)
         return None
+    logger.info("rerank: loaded cross-encoder model %r", model)
+    return encoder
 
 
-def get_cross_encoder(model: str = RERANK_MODEL):
-    """Load and cache the cross-encoder model.
+def get_cross_encoder(model: str = RERANK_MODEL) -> Any:
+    """Load and cache the cross-encoder model (process-wide, load-once).
 
-    Public API for dependency injection. Returns None on any import/load failure.
-
-    .. deprecated:: 2025.04
-        ``_get_cross_encoder`` is now ``get_cross_encoder``. The private name
-        remains as an alias.
+    Public API for dependency injection. Returns None on any import/load
+    failure; a failed load is remembered too, so a broken install never
+    retries the ≈300ms load on every query.
     """
-    return _get_cross_encoder(model)
+    if "encoder" in _MEMO:  # fast path once loaded; re-checked under the lock below
+        return _MEMO["encoder"]
+    with _MEMO_LOCK:
+        if "encoder" not in _MEMO:
+            _MEMO["encoder"] = load_cross_encoder(model)
+        return _MEMO["encoder"]
+
+
+def reset_cross_encoder_cache() -> None:
+    """Forget the cached cross-encoder so the next :func:`get_cross_encoder` reloads.
+
+    Mirrors :func:`kairix.transport.auth.api_key.reset_api_key_cache`.
+    """
+    with _MEMO_LOCK:
+        _MEMO.clear()
 
 
 def rerank(
@@ -110,7 +130,7 @@ def rerank(
         return results
 
     if encoder is None:
-        encoder = _get_cross_encoder(model)
+        encoder = get_cross_encoder(model)
     if encoder is None:
         return results
 

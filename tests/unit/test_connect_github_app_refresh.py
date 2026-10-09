@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
@@ -123,20 +124,9 @@ def test_default_refresh_path_raises_when_pyjwt_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The default refresh path (no injection) wraps ImportError as RefreshUnavailableError."""
-    import builtins
-    import sys
-
-    for key in list(sys.modules):
-        if key == "jwt" or key.startswith("jwt."):
-            monkeypatch.delitem(sys.modules, key, raising=False)
-    original_import = builtins.__import__
-
-    def blocking_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "jwt":
-            raise ImportError("blocked jwt")
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", blocking_import)
+    # A None entry in sys.modules makes ``import <dep>`` raise ImportError —
+    # the optional dependency is simulated as not installed (auto-undone).
+    monkeypatch.setitem(sys.modules, "jwt", None)
     # NO token_exchanger — falls through to _default_github_app_refresh.
     token = _token()
     with pytest.raises(RefreshUnavailableError) as exc_info:
@@ -145,6 +135,8 @@ def test_default_refresh_path_raises_when_pyjwt_absent(
     # wrapper — confirms the typed-error contract.
     msg = str(exc_info.value)
     assert "fix:" in msg and "next:" in msg and "run:" in msg
+    # The cause is the missing library, not some other signing / network failure.
+    assert "pyjwt is not installed" in str(exc_info.value.__cause__)
 
 
 def test_default_refresh_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:

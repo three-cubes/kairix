@@ -10,20 +10,22 @@ from __future__ import annotations
 import io
 import json
 from contextlib import redirect_stdout
-from unittest import mock
 
 import pytest
 
 from kairix.platform.warm import cli as warm_cli
+from kairix.platform.warm.cli import WarmCliDeps
 from kairix.platform.warm.runner import WarmFailure, WarmResult, WarmStep
 
 pytestmark = pytest.mark.unit
 
 
-def _capture(argv: list[str]) -> tuple[int, str]:
+def _capture(argv: list[str], result: WarmResult) -> tuple[int, str]:
+    """Run the CLI with ``result`` injected through the ``WarmCliDeps`` seam (F1)."""
     buf = io.StringIO()
+    deps = WarmCliDeps(run_warm=lambda **_kwargs: result)
     with redirect_stdout(buf):
-        rc = warm_cli.main(argv)
+        rc = warm_cli.main(argv, deps=deps)
     return rc, buf.getvalue()
 
 
@@ -55,16 +57,14 @@ def _partial_failure_result() -> WarmResult:
 
 
 def test_all_steps_ok_exits_zero() -> None:
-    with mock.patch.object(warm_cli, "run_warm", return_value=_ok_result()):
-        rc, stdout = _capture([])
+    rc, stdout = _capture([], _ok_result())
     assert rc == 0
     assert "warm-up complete" in stdout
 
 
 def test_partial_failure_exits_one_with_affordance() -> None:
     """A failing step exits 1 and emits the F21 affordance markers."""
-    with mock.patch.object(warm_cli, "run_warm", return_value=_partial_failure_result()):
-        rc, stdout = _capture([])
+    rc, stdout = _capture([], _partial_failure_result())
     assert rc == 1
     assert "warm-up partial" in stdout
     assert "fix:" in stdout
@@ -73,8 +73,7 @@ def test_partial_failure_exits_one_with_affordance() -> None:
 
 
 def test_json_mode_emits_envelope() -> None:
-    with mock.patch.object(warm_cli, "run_warm", return_value=_ok_result()):
-        rc, stdout = _capture(["--json"])
+    rc, stdout = _capture(["--json"], _ok_result())
     assert rc == 0
     payload = json.loads(stdout)
     assert payload["ok"] is True

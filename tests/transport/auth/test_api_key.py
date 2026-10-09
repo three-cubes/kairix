@@ -126,3 +126,49 @@ def test_reset_cache_drops_resolved_values(tmp_path: Path, monkeypatch: pytest.M
     second = auth.headers("rotating-secret")
     assert first.mapping["Authorization"] == "Bearer first"
     assert second.mapping["Authorization"] == "Bearer second"
+
+
+def test_injected_resolver_is_called_every_time_and_never_cached() -> None:
+    """An injected ``secret_lookup`` is not cached by the helper: every
+    ``headers`` call asks it again, so a rotation is seen immediately and
+    nothing it resolved outlives it in module state.
+
+    Sabotage proof (executed): route injected resolvers through the
+    process-wide ``_CACHE`` → the second call returns the stale value and
+    the resolver is asked once; restored.
+    """
+    reset_api_key_cache()
+    calls: list[str] = []
+
+    def lookup(name: str) -> str:
+        calls.append(name)
+        return f"value-{len(calls)}"
+
+    auth = ApiKeyAuth(secret_lookup=lookup)
+    assert auth.headers("rotating").mapping == {"Authorization": "Bearer value-1"}
+    assert auth.headers("rotating").mapping == {"Authorization": "Bearer value-2"}
+    assert calls == ["rotating", "rotating"]
+
+
+def test_resolvers_never_share_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two injected resolvers asking for the SAME secret name each get their
+    own value, and neither leaks into the default resolver's cache.
+
+    Sabotage proof (executed): cache every resolver's value under the secret
+    name alone → tenant B is served tenant A's key; restored.
+    """
+    reset_api_key_cache()
+    secrets_dir = _xdg_secrets_dir(tmp_path, monkeypatch)
+    (secrets_dir / "shared-name").write_text("from-default-chain", encoding="utf-8")
+
+    tenant_a = ApiKeyAuth(secret_lookup=lambda _name: "tenant-a-key")
+    tenant_b = ApiKeyAuth(secret_lookup=lambda _name: "tenant-b-key")
+    assert tenant_a.headers("shared-name").mapping == {"Authorization": "Bearer tenant-a-key"}
+    assert tenant_b.headers("shared-name").mapping == {"Authorization": "Bearer tenant-b-key"}
+    assert ApiKeyAuth().headers("shared-name").mapping == {"Authorization": "Bearer from-default-chain"}
+
+
+def test_injected_resolver_missing_secret_raises_typed_error() -> None:
+    """A resolver that finds nothing raises :class:`MissingCredentialsError`."""
+    with pytest.raises(MissingCredentialsError, match="fix:"):
+        ApiKeyAuth(secret_lookup=lambda _name: None).headers("absent")
