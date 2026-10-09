@@ -20,7 +20,6 @@ contract:
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
@@ -246,36 +245,49 @@ def test_secrets_probe_timeout_reports_budget_in_degraded_reason() -> None:
     must call that out specifically — not the generic 'not resolvable'
     message — so an operator can debug a slow probe vs a missing key."""
 
+    # The probe blocks until released (never a literal 5s sleep), so it is
+    # provably still running when its budget slice expires, and the
+    # abandoned probe thread is released the moment the test is done.
+    release = threading.Event()
+
     def slow_secrets() -> bool:
-        time.sleep(5.0)
+        release.wait(timeout=30.0)
         return True
 
-    out = probe_health(
-        HealthDeps(
-            secrets_loaded_fn=slow_secrets,
-            embed_backend_available_fn=lambda: True,
-            bm25_index_available_fn=lambda: True,
-            neo4j_available_fn=lambda: True,
-        ),
-        budget_s=0.4,
-    )
+    try:
+        out = probe_health(
+            HealthDeps(
+                secrets_loaded_fn=slow_secrets,
+                embed_backend_available_fn=lambda: True,
+                bm25_index_available_fn=lambda: True,
+                neo4j_available_fn=lambda: True,
+            ),
+            budget_s=0.4,
+        )
+    finally:
+        release.set()
     assert "secrets probe exceeded" in out.degraded_reason
 
 
 def test_bm25_probe_timeout_reports_budget_in_degraded_reason() -> None:
+    release = threading.Event()
+
     def slow_bm25() -> bool:
-        time.sleep(5.0)
+        release.wait(timeout=30.0)
         return True
 
-    out = probe_health(
-        HealthDeps(
-            secrets_loaded_fn=lambda: True,
-            embed_backend_available_fn=lambda: True,
-            bm25_index_available_fn=slow_bm25,
-            neo4j_available_fn=lambda: True,
-        ),
-        budget_s=0.4,
-    )
+    try:
+        out = probe_health(
+            HealthDeps(
+                secrets_loaded_fn=lambda: True,
+                embed_backend_available_fn=lambda: True,
+                bm25_index_available_fn=slow_bm25,
+                neo4j_available_fn=lambda: True,
+            ),
+            budget_s=0.4,
+        )
+    finally:
+        release.set()
     assert "BM25 probe exceeded" in out.degraded_reason
 
 

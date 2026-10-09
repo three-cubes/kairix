@@ -41,7 +41,7 @@ from kairix.transport.cache import EmbedCache
 from kairix.transport.coalesce import EmbedCoalescer
 from kairix.transport.retry import AttemptEvent, RetryPolicy
 from kairix.transport.timeout import TimeoutBudget
-from tests.fakes import FakeClock, FakeProvider
+from tests.fakes import FakeClock, FakeCoalesceWindow, FakeProvider
 
 pytestmark = pytest.mark.bdd
 
@@ -74,7 +74,9 @@ def _transport_state() -> Any:
         "cache_wrapper": None,
         # Coalesce
         "coalescer": None,
+        "coalesce_window": None,
         "window_ms": None,
+        "max_batch": None,
         # Retry
         "scripted": None,
         "clock": None,
@@ -128,15 +130,26 @@ def _given_coalesce_wrap(_transport_state: dict[str, Any]) -> None:
     )
 )
 def _given_coalescer_config(_transport_state: dict[str, Any], window_ms: int, max_batch: int) -> None:
-    """Build the coalescer with the scenario's window + batch size."""
+    """Build the coalescer with the scenario's window + batch size.
+
+    The window is a test-held ``FakeCoalesceWindow``: it stays open until a
+    When step has proven every caller of the wave is enqueued, then closes.
+    "All N callers land in one window" is therefore a precondition, not a
+    race against a real 20-50 ms timer on a loaded host. (The configured
+    ``window_ms`` still reaches the seam; window=0 never consults it.)
+    """
     provider: FakeProvider = _transport_state["provider"]
+    window = FakeCoalesceWindow()
     coalescer = EmbedCoalescer(
         embed_batch_fn=provider.embed_batch,
         coalesce_window_ms=window_ms,
         max_batch_size=max_batch,
+        window_wait=window,
     )
     _transport_state["coalescer"] = coalescer
+    _transport_state["coalesce_window"] = window
     _transport_state["window_ms"] = window_ms
+    _transport_state["max_batch"] = max_batch
 
 
 def _fan_out(state: dict[str, Any], n: int, prefix: str = "text") -> None:
@@ -162,9 +175,21 @@ def _fan_out(state: dict[str, Any], n: int, prefix: str = "text") -> None:
         except Exception as exc:
             errors.append(exc)
 
+    already_enqueued = coalescer.stats().requests
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
     for t in threads:
         t.start()
+    window: FakeCoalesceWindow | None = state["coalesce_window"]
+    if window is not None and state["window_ms"]:
+        # Hold the window open until this whole wave is buffered, then close it.
+        provider: FakeProvider = state["provider"]
+        calls_before = len(provider.embed_calls)
+        window.wait_for_requests(coalescer, already_enqueued + n)
+        # While the window is open only a FULL batch (the max-batch early wake)
+        # may dispatch — a partial one means the window was not honoured.
+        partial = [len(c) for c in provider.embed_calls[calls_before:] if len(c) < state["max_batch"]]
+        assert not partial, f"partial batch(es) {partial} dispatched while the window was still open"
+        window.close()
     for t in threads:
         t.join()
     state["results"].extend(results)
@@ -194,13 +219,26 @@ def _when_concurrent_within_window(_transport_state: dict[str, Any], n: str, win
 
 @when("1 caller requests an embedding and no other callers arrive")
 def _when_lonely_caller(_transport_state: dict[str, Any]) -> None:
-    """Single caller → must wait the window before the dispatcher fires."""
+    """Single caller → held by the open window, dispatched alone when it closes.
+
+    Deterministic: once the request is enqueued, the caller is provably
+    still blocked and nothing has reached the provider — the coalescer is
+    waiting on the window, not dispatching instantly. Closing the window
+    must then flush the partial batch.
+    """
     coalescer: EmbedCoalescer = _transport_state["coalescer"]
+    window: FakeCoalesceWindow = _transport_state["coalesce_window"]
+    provider: FakeProvider = _transport_state["provider"]
+    out: list[list[float]] = []
     start = time.monotonic()
-    vec = coalescer.embed("solo")
-    elapsed = (time.monotonic() - start) * 1000
-    _transport_state["results"].append(vec)
-    _transport_state["elapsed_ms"] = elapsed
+    caller = threading.Thread(target=lambda: out.append(coalescer.embed("solo")), daemon=True)
+    caller.start()
+    window.wait_for_requests(coalescer, 1)
+    assert caller.is_alive() and provider.embed_calls == [], "lonely caller dispatched before its window closed"
+    window.close()
+    caller.join(timeout=5.0)  # liveness guard: a never-flushed partial window hangs here
+    _transport_state["elapsed_ms"] = (time.monotonic() - start) * 1000
+    _transport_state["results"].append(out[0] if out else [])
 
 
 @when(parsers.re(r"^(?P<n>\d+) callers concurrently request embeddings$"))
@@ -211,11 +249,13 @@ def _when_concurrent_no_window(_transport_state: dict[str, Any], n: str) -> None
 
 @when(parsers.re(r"^after the window closes (?P<n>\d+) more callers concurrently request embeddings$"))
 def _when_after_window(_transport_state: dict[str, Any], n: str) -> None:
-    """Sleep just past the window then fan-out the second wave."""
-    window_ms = _transport_state["window_ms"]
-    # Two windows of slack so we're certain the first batch dispatched
-    # before the second wave arrives.
-    time.sleep((window_ms / 1000.0) * 2.5)
+    """Open a fresh window, then fan-out the second wave into it.
+
+    No sleep: every first-wave caller has returned (``_fan_out`` joins), so
+    the first batch has provably dispatched before the second wave arrives.
+    """
+    window: FakeCoalesceWindow = _transport_state["coalesce_window"]
+    window.reopen()
     _fan_out(_transport_state, int(n), prefix="wave2")
 
 

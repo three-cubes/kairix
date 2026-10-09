@@ -201,8 +201,9 @@ def test_empty_text_bypasses_both_cache_and_coalescer(
     service = ProviderEmbeddingService(provider)  # type: ignore[arg-type] — _DeterministicProvider satisfies the Protocol structurally; mypy can't see it lives in this test file
     assert service.embed("") == []
     assert service.embed("   ") == []
-    # Wait past the window so any (sabotaged) dispatch would have fired.
-    time.sleep(0.25)
+    # No wait-past-the-window sleep: an empty text that reached the
+    # coalescer would block its caller until its batch dispatched, so any
+    # (sabotaged) dispatch has already been recorded by now.
     assert provider.embed_calls == []
     assert coalescer.stats().requests == 0
 

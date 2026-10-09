@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from kairix.quality.soak import run_soak
+from tests.fakes import FakeLatencyClock
 
 pytestmark = pytest.mark.unit
 
@@ -209,18 +210,16 @@ def test_time_drift_fails_when_later_iteration_exceeds_pct() -> None:
     Sabotage: remove _check_time_drift and the result reports no time_drift
     failure even though iter-1 is 5x the baseline duration.
     """
-    import time
-
     call_count = [0]
+    # Iteration durations are spent on a virtual clock (no real sleeps), so
+    # the 150ms baseline vs 750ms drift is exact on any host.
+    latency = FakeLatencyClock()
 
     def variable_duration(_suite: str) -> dict[str, Any]:
-        # Iter-0: ~150ms (above the 100ms floor so the check is active).
-        # Iter-1: ~750ms (5x drift).
+        # Iter-0: 150ms (above the 100ms floor so the check is active).
+        # Iter-1: 750ms (5x drift).
         call_count[0] += 1
-        if call_count[0] == 1:
-            time.sleep(0.15)
-        else:
-            time.sleep(0.75)
+        latency.spend(0.15 if call_count[0] == 1 else 0.75)
         return {"summary": {"weighted_total": 0.9}, "case_count": 1}
 
     result = run_soak(
@@ -228,7 +227,9 @@ def test_time_drift_fails_when_later_iteration_exceeds_pct() -> None:
         repeat=2,
         max_time_drift_pct=50.0,
         workload_runner=variable_duration,
+        clock=latency.now,
     )
+    assert [it.duration_s for it in result.iterations] == [0.15, 0.75]
     drift_failures = [f for f in result.failures if f.kind == "time_drift"]
     assert len(drift_failures) == 1, (
         f"expected 1 time_drift failure on iter-1; got {[(f.kind, f.detail) for f in result.failures]}"

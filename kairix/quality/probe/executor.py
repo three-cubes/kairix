@@ -76,6 +76,8 @@ class ConcurrentRun(Generic[T]):
 def run_concurrent(
     tasks: Sequence[Callable[[], T]],
     concurrency: int,
+    *,
+    clock: Callable[[], float] = time.perf_counter,
 ) -> ConcurrentRun[T]:
     """Run ``tasks`` through a thread pool of ``concurrency`` workers.
 
@@ -89,6 +91,9 @@ def run_concurrent(
         concurrency: max worker count. ``1`` runs sequentially in worker
             threads (still useful — picks up GIL release in C extensions).
             Values >= 2 enable parallel I/O.
+        clock: monotonic clock (seconds) used for every per-task and
+            wallclock timestamp. Defaults to :func:`time.perf_counter`;
+            deterministic callers inject a controlled virtual timeline.
 
     Returns:
         ConcurrentRun summarising results, wallclock, mean concurrency, and
@@ -104,18 +109,18 @@ def run_concurrent(
         raise ValueError("tasks must contain at least one callable")
 
     def _wrapped(t: Callable[[], T], idx: int) -> TimedResult[T]:
-        t_start = time.perf_counter()
+        t_start = clock()
         try:
             value = t()
         except Exception as exc:
-            duration_ms = (time.perf_counter() - t_start) * 1000.0
+            duration_ms = (clock() - t_start) * 1000.0
             return TimedResult(
                 duration_ms=duration_ms,
                 succeeded=False,
                 error=describe_exception(exc),
                 task_index=idx,
             )
-        duration_ms = (time.perf_counter() - t_start) * 1000.0
+        duration_ms = (clock() - t_start) * 1000.0
         # getattr is the documented seam for non-kairix-shaped results.
         # A dict-returning fake (no .stage_latency_ms attribute) yields
         # None and the runner aggregator skips it cleanly.
@@ -129,13 +134,13 @@ def run_concurrent(
             task_index=idx,
         )
 
-    wall_start = time.perf_counter()
+    wall_start = clock()
     results: list[TimedResult[T]] = []
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = [pool.submit(_wrapped, t, i) for i, t in enumerate(tasks)]
         for fut in as_completed(futures):
             results.append(fut.result())
-    wallclock_s = time.perf_counter() - wall_start
+    wallclock_s = clock() - wall_start
 
     sum_durations_s = sum(r.duration_ms for r in results) / 1000.0
     mean_concurrency = (sum_durations_s / wallclock_s) if wallclock_s > 0 else 0.0

@@ -9,7 +9,7 @@ stays hermetic.
 
 from __future__ import annotations
 
-import time
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -21,6 +21,7 @@ from kairix.quality.probe.burst import (
     run_probe_burst,
 )
 from kairix.quality.probe.runner import ProbeDeps, SampledQuery
+from tests.fakes import FakeLatencyClock
 
 pytestmark = pytest.mark.unit
 
@@ -60,6 +61,11 @@ class FakeFastSearchClient:
 
 
 _fast_client = FakeFastSearchClient()
+
+# Virtual per-query latency (1 ms) for the fast tail of the paced workloads
+# below. Latency is spent on a ``FakeLatencyClock`` injected as the burst
+# ``clock`` — never a real sleep — so bucket geometry is exact on any host.
+_FAST_S = 0.001
 
 
 def test_zero_queries_rejected() -> None:
@@ -163,11 +169,11 @@ def test_sustained_qps_skips_warmup_buckets() -> None:
     out.
     """
     call_counter = {"i": 0}
+    latency = FakeLatencyClock()
 
     def slow_then_fast(_q: SampledQuery) -> int:
         call_counter["i"] += 1
-        if call_counter["i"] <= 4:
-            time.sleep(0.03)
+        latency.spend(0.03 if call_counter["i"] <= 4 else _FAST_S)
         return 0
 
     result = run_probe_burst(
@@ -176,6 +182,7 @@ def test_sustained_qps_skips_warmup_buckets() -> None:
         peak_concurrency=1,
         bucket_ms=20,
         deps=ProbeDeps(load_suite=_suite_loader, search=slow_then_fast),
+        clock=latency.now,
     )
     # We need enough buckets for the warmup-skip logic to kick in.
     assert len(result.buckets) >= 3, f"expected >=3 buckets, got {len(result.buckets)}"
@@ -199,11 +206,14 @@ def test_qps_drop_threshold_gates_pass_synthetic() -> None:
     and a healthy zero-drop run also fails.
     """
     call_counter = {"i": 0}
+    latency = FakeLatencyClock()
+    counter_lock = threading.Lock()
 
     def slow_then_fast(_q: SampledQuery) -> int:
-        call_counter["i"] += 1
-        if call_counter["i"] <= 3:
-            time.sleep(0.05)
+        with counter_lock:
+            call_counter["i"] += 1
+            slow = call_counter["i"] <= 3
+        latency.spend(0.05 if slow else _FAST_S)
         return 0
 
     result = run_probe_burst(
@@ -213,6 +223,7 @@ def test_qps_drop_threshold_gates_pass_synthetic() -> None:
         bucket_ms=80,
         qps_drop_threshold_pct=0.0,  # any drop fails
         deps=ProbeDeps(load_suite=_suite_loader, search=slow_then_fast),
+        clock=latency.now,
     )
     # If the run produced any QPS variance across buckets, the 0% threshold
     # forces a fail. If buckets are perfectly flat (no variance), the run
@@ -336,11 +347,11 @@ def test_cold_start_pre_completion_buckets_are_auto_skipped() -> None:
     the rationale string fails.
     """
     call_counter = {"i": 0}
+    latency = FakeLatencyClock()
 
     def slow_first_then_fast(_q: SampledQuery) -> int:
         call_counter["i"] += 1
-        if call_counter["i"] == 1:
-            time.sleep(0.08)
+        latency.spend(0.08 if call_counter["i"] == 1 else _FAST_S)
         return 0
 
     result = run_probe_burst(
@@ -349,6 +360,7 @@ def test_cold_start_pre_completion_buckets_are_auto_skipped() -> None:
         peak_concurrency=1,
         bucket_ms=20,
         deps=ProbeDeps(load_suite=_suite_loader, search=slow_first_then_fast),
+        clock=latency.now,
     )
     # Cold-start buckets must be detected and surfaced.
     assert result.first_completion_bucket_idx >= 1, (
@@ -422,11 +434,11 @@ def test_skipped_buckets_serialise_in_envelope() -> None:
     rationale — the assertion on the reason string fails.
     """
     call_counter = {"i": 0}
+    latency = FakeLatencyClock()
 
     def slow_first_then_fast(_q: SampledQuery) -> int:
         call_counter["i"] += 1
-        if call_counter["i"] == 1:
-            time.sleep(0.08)
+        latency.spend(0.08 if call_counter["i"] == 1 else _FAST_S)
         return 0
 
     result = run_probe_burst(
@@ -435,6 +447,7 @@ def test_skipped_buckets_serialise_in_envelope() -> None:
         peak_concurrency=1,
         bucket_ms=20,
         deps=ProbeDeps(load_suite=_suite_loader, search=slow_first_then_fast),
+        clock=latency.now,
     )
     env = result.to_envelope()
     assert "skipped_buckets" in env
