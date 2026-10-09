@@ -1262,7 +1262,9 @@ def _log_embed_outcome(all_chunks: list[dict[str, Any]], failed_chunks: list[dic
         logger.warning("%d chunks failed. Affected paths (sample): %s", len(failed_chunks), sample)
 
     chunk_date_count = sum(1 for c in all_chunks if c.get(_KEY_CHUNK_DATE))
-    if chunk_date_count == 0 and total > 0:
+    # ``total > 0`` is the caller's precondition (run_embed returns early on
+    # an empty pending set), so zero dated chunks alone selects the warning.
+    if chunk_date_count == 0:
         logger.warning(
             "embed: 0/%d chunks have chunk_date — temporal boost (TMP-7B) will be inert. "
             "Ensure documents have a date in frontmatter (date: YYYY-MM-DD) or in their filename.",

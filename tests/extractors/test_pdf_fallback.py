@@ -203,9 +203,16 @@ def test_extract_propagates_pdf_metadata() -> None:
         # UTC marker, and the "D:" prefix is optional in practice.
         ("D:20260522143005Z", "2026-05-22T14:30:05+00:00"),
         ("20260522143005Z00'00'", "2026-05-22T14:30:05+00:00"),
+        # Offset fields default independently: hours-only, minutes-only (a
+        # negative sub-hour offset keeps its sign), and a bare sign.
+        ("D:20260522143005+10'", "2026-05-22T14:30:05+10:00"),
+        ("D:20260522-00'45'", "2026-05-22T00:00:00-00:45"),
+        ("D:2026+", "2026-01-01T00:00:00+00:00"),
         # Truncated forms default the missing fields; no offset stays naive.
         ("D:2026", "2026-01-01T00:00:00"),
+        ("D:202605", "2026-05-01T00:00:00"),
         ("D:20260522", "2026-05-22T00:00:00"),
+        ("D:2026052214", "2026-05-22T14:00:00"),
         # Not a PDF date: dropped rather than stored as an unparseable string.
         ("yesterday", None),
         ("D:20261399000000Z", None),
@@ -218,6 +225,17 @@ def test_extract_normalises_pdf_creation_date_to_iso(raw: str, expected: str | N
     Sabotage proof: return ``_clean_string(metadata.get("CreationDate"))`` from
     ``_pdf_metadata_to_doc_metadata`` (the pre-fix behaviour) — every case
     fails. Restored.
+
+    Field-level sabotage proofs in
+    ``kairix/extractors/pdf_fallback/extractor.py::_pdf_date_to_iso`` (each
+    row above is chosen so one field alone decides the output):
+
+    * ``off_h or 0`` -> ``off_h and 0`` — ``+10'00'`` renders ``+00:00``.
+    * ``off_m or 0`` -> ``off_m and 0`` — ``-05'30'`` renders ``-05:00``.
+    * ``sign == "-"`` -> ``sign != "-"`` — every explicit offset flips sign.
+    * ``month/day/hour/minute/second or <default>`` -> ``and`` — a present
+      field collapses to its default (``14:30:05`` -> ``00:00:00``), and an
+      absent one raises ``TypeError`` on ``int(None)`` (``D:2026``).
     """
     extractor, _ = _make_extractor(metadata={"CreationDate": raw})
     doc = extractor.extract(b"%PDF-1.4\n" + b"x" * 64, "application/pdf")

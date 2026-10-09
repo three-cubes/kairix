@@ -20,7 +20,10 @@ from pathlib import Path
 
 import pytest
 
-from kairix.core.maintenance import usearch_parity_check
+# Imported from the defining module (public name) rather than the package
+# re-export so the mutation suite's import-graph heuristic links this file to
+# scheduler.py — its ``return True`` contracts are pinned here.
+from kairix.core.maintenance.scheduler import usearch_parity_check
 
 pytestmark = pytest.mark.unit
 

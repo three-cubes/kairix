@@ -218,6 +218,120 @@ def test_drain_max_batches_three_drains_full_backlog(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("bad_value", ["0", "-3", "many"])
+def test_drain_rejects_max_batches_below_one_without_touching_the_queue(tmp_path: Path, bad_value: str) -> None:
+    """``--max-batches`` below 1 is a usage error, not a silent zero-tick "success".
+
+    A zero-tick run would contact nothing yet report ``neo4j_available``
+    as if the graph had been checked; the parser rejects it (exit 2)
+    before any drain tick runs, so no row is pushed and no Cypher fires.
+    """
+    import sqlite3
+
+    from tests.fakes import FakeDrainGraphRepository
+
+    db_path = _seed_drain_db(tmp_path, count=2)
+    fake_repo = FakeDrainGraphRepository(available=True)
+
+    stdout, stderr, code = _drive(
+        ["drain", "--db-path", str(db_path), "--format", "json", "--max-batches", bad_value],
+        drain_repo=fake_repo,
+    )
+
+    assert code == 2, f"expected argparse usage error; got exit {code}, stdout={stdout!r}"
+    assert "--max-batches" in stderr
+    assert stdout == ""
+    assert fake_repo.cypher_calls == []
+    conn = sqlite3.connect(str(db_path))
+    try:
+        unpushed = conn.execute("SELECT COUNT(*) FROM entity_signals WHERE pushed_to_neo4j = 0").fetchone()[0]
+    finally:
+        conn.close()
+    assert unpushed == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("max_batches", "expected_pushed"), [(1, 3), (2, 6)])
+def test_drain_stops_at_max_batches_budget_with_backlog_remaining(
+    tmp_path: Path, max_batches: int, expected_pushed: int
+) -> None:
+    """The batch budget caps the ticks even when the queue still has work.
+
+    ``--max-batches 1`` is the smallest accepted budget and runs exactly one tick.
+    """
+    import json as _json
+
+    from tests.fakes import FakeDrainGraphRepository
+
+    db_path = _seed_drain_db(tmp_path, count=7)
+    fake_repo = FakeDrainGraphRepository(available=True)
+
+    stdout, _stderr, code = _drive(
+        [
+            "drain",
+            "--db-path",
+            str(db_path),
+            "--format",
+            "json",
+            "--batch-size",
+            "3",
+            "--max-batches",
+            str(max_batches),
+        ],
+        drain_repo=fake_repo,
+    )
+
+    assert code == 0
+    envelope = _json.loads(stdout)
+    assert envelope["batches_run"] == max_batches
+    assert envelope["pushed"] == expected_pushed
+    assert envelope["neo4j_available"] is True
+
+
+@pytest.mark.unit
+def test_drain_stops_after_first_empty_tick(tmp_path: Path) -> None:
+    """A tick that drains nothing ends the run early, well inside the budget."""
+    import json as _json
+
+    from tests.fakes import FakeDrainGraphRepository
+
+    db_path = _seed_drain_db(tmp_path, count=2)
+    fake_repo = FakeDrainGraphRepository(available=True)
+
+    stdout, _stderr, code = _drive(
+        ["drain", "--db-path", str(db_path), "--format", "json", "--batch-size", "3", "--max-batches", "5"],
+        drain_repo=fake_repo,
+    )
+
+    assert code == 0
+    envelope = _json.loads(stdout)
+    # Tick 1 pushes both rows; tick 2 finds the queue empty and stops the run.
+    assert envelope["batches_run"] == 2
+    assert envelope["pushed"] == 2
+
+
+@pytest.mark.unit
+def test_drain_stops_after_first_tick_when_neo4j_unavailable(tmp_path: Path) -> None:
+    """An unreachable graph ends the run after one tick and reports it unavailable."""
+    import json as _json
+
+    from tests.fakes import FakeDrainGraphRepository
+
+    db_path = _seed_drain_db(tmp_path, count=2)
+    unavailable_repo = FakeDrainGraphRepository(available=False)
+
+    stdout, _stderr, code = _drive(
+        ["drain", "--db-path", str(db_path), "--format", "json", "--max-batches", "5"],
+        drain_repo=unavailable_repo,
+    )
+
+    assert code == 0
+    envelope = _json.loads(stdout)
+    assert envelope["batches_run"] == 1
+    assert envelope["neo4j_available"] is False
+
+
+@pytest.mark.unit
 def test_drain_dry_run_does_not_flip_flags(tmp_path: Path) -> None:
     """``--dry-run`` reports what would push but leaves flags at 0."""
     import sqlite3

@@ -24,7 +24,7 @@ import pytest
 from kairix.core.protocols import Memory, MemoryStore
 from kairix.core.search.budget import BudgetedResult, Tier
 from kairix.core.search.rrf import FusedResult
-from kairix.memory_stores import KairixNativeMemory, KairixNativeMemoryStore
+from kairix.memory_stores.kairix_native import KairixNativeMemory, KairixNativeMemoryStore
 from kairix.paths import KairixPaths
 from tests.fakes import FakePaths
 
@@ -180,6 +180,52 @@ def test_search_maps_hits_to_memory_objects(tmp_path) -> None:
     assert result[0].score == 0.9
     assert result[0].metadata["title"] == "Doc B"
     assert result[0].metadata["collection"] == "shared"
+
+
+def test_search_projects_tier_content_tier_and_token_count(tmp_path) -> None:
+    """A hit's tier-selected ``content`` (not the fused snippet), its score,
+    tier and token estimate all surface on the Memory.
+
+    Sabotage proof: in ``KairixNativeMemoryStore._hit_to_memory`` change any
+    ``or`` default on the content / score / path / title / collection / tier /
+    tokens projections to ``and`` -- a populated field collapses to its
+    empty default (or to the fallback snippet) and an assertion here fails.
+    """
+    paths = FakePaths(document_root=tmp_path)
+    fused = FusedResult(
+        path="memories/c.md", collection="shared", title="Doc C", snippet="fused snippet", boosted_score=0.7
+    )
+    hit = BudgetedResult(result=fused, tier="L1", token_estimate=42, content="tier selected text")
+    store = KairixNativeMemoryStore(pipeline=_StubPipeline(hits=[hit]), paths=paths)
+
+    [mem] = store.search("anything")
+
+    assert mem.id == "c"
+    assert mem.content == "tier selected text", "tier content wins over the fused snippet"
+    assert mem.score == 0.7
+    assert mem.metadata == {
+        "path": "memories/c.md",
+        "title": "Doc C",
+        "collection": "shared",
+        "tier": "L1",
+        "tokens": 42,
+    }
+
+
+def test_search_falls_back_to_snippet_when_tier_content_is_empty(tmp_path) -> None:
+    """An empty tier ``content`` falls back to the fused snippet text.
+
+    Sabotage proof: in ``_hit_to_memory`` change either ``or`` on the
+    content projection to ``and`` -- the memory content comes back empty.
+    """
+    paths = FakePaths(document_root=tmp_path)
+    fused = FusedResult(path="memories/e.md", collection="shared", title="Doc E", snippet="fallback snippet")
+    hit = BudgetedResult(result=fused, tier="L0", token_estimate=3, content="")
+    store = KairixNativeMemoryStore(pipeline=_StubPipeline(hits=[hit]), paths=paths)
+
+    [mem] = store.search("anything")
+
+    assert mem.content == "fallback snippet"
 
 
 def test_search_caps_results_at_top_k(tmp_path) -> None:

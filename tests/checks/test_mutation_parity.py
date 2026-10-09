@@ -265,6 +265,152 @@ def test_prioritise_keeps_same_module_test_even_when_cap_would_evict_it() -> Non
     assert len(result) <= mp.MAX_IMPACTED_TEST_FILES  # the long tail stays capped
 
 
+def test_each_mutant_runs_against_its_own_modules_importers_once() -> None:
+    """A wide diff must not share one capped test set across every module."""
+    calls: list[set[Path]] = []
+
+    def find(paths: set[Path]) -> list[str]:
+        calls.append(paths)
+        (only,) = paths
+        return [f"tests/unit/test_{only.stem}.py"]
+
+    cache: dict[Path, list[str]] = {}
+    sheet, cli = Path("kairix/chunkers/sheet_row.py"), Path("kairix/agents/mcp/cli.py")
+    assert mp.tests_for_mutant(sheet, cache, find) == ["tests/unit/test_sheet_row.py"]
+    assert mp.tests_for_mutant(cli, cache, find) == ["tests/unit/test_cli.py"]
+    assert mp.tests_for_mutant(sheet, cache, find) == ["tests/unit/test_sheet_row.py"]
+    assert calls == [{sheet}, {cli}], "each module is searched once, on its own"
+
+
+def test_a_modules_own_test_that_imports_it_through_its_package_is_impacted(tmp_path: Path) -> None:
+    """``from kairix.memory_stores import KairixNativeMemoryStore`` names no
+    module path, yet a test named after the module is that module's own test:
+    it must run against the module's mutants. Another package's test of the
+    same name, and a same-package test with another name, are not selected."""
+    tests = tmp_path / "tests"
+    (tests / "memory_stores").mkdir(parents=True)
+    (tests / "other").mkdir()
+    (tests / "memory_stores" / "test_kairix_native.py").write_text(
+        "from kairix.memory_stores import KairixNativeMemoryStore\n", encoding="utf-8"
+    )
+    (tests / "other" / "test_kairix_native.py").write_text("from kairix.other import thing\n", encoding="utf-8")
+    (tests / "memory_stores" / "test_registry.py").write_text(
+        "from kairix.memory_stores import registry\n", encoding="utf-8"
+    )
+    impacted = mp.impacted_tests({Path("kairix/memory_stores/kairix_native.py")}, root=tmp_path)
+    assert impacted == ["tests/memory_stores/test_kairix_native.py"]
+
+
+def test_a_package_named_test_that_imports_the_package_is_impacted(tmp_path: Path) -> None:
+    """``kairix/secrets/_legacy.py`` is tested through ``kairix.secrets`` by
+    ``tests/test_secrets.py``: a test named after the package that imports it
+    is that module's own test."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_secrets.py").write_text("from kairix.secrets import get_secret\n", encoding="utf-8")
+    (tests / "test_other.py").write_text("from kairix.secrets import get_secret\n", encoding="utf-8")
+    impacted = mp.impacted_tests({Path("kairix/secrets/_legacy.py")}, root=tmp_path)
+    assert impacted == ["tests/test_secrets.py"]
+
+
+def test_a_module_under_a_hyphenated_directory_is_found_by_its_directory_name(tmp_path: Path) -> None:
+    """A hyphenated directory cannot be imported, so its tests load the module
+    by path and name the directory instead."""
+    tests = tmp_path / "tests" / "plugins"
+    tests.mkdir(parents=True)
+    (tests / "test_memory_prompt.py").write_text(
+        "from kairix.plugins.openclaw import memory_prompt_dir\n", encoding="utf-8"
+    )
+    (tests / "test_unrelated.py").write_text("from kairix.plugins.openclaw import other\n", encoding="utf-8")
+    impacted = mp.impacted_tests({Path("kairix/plugins/openclaw/memory-prompt/plugin.py")}, root=tmp_path)
+    assert impacted == ["tests/plugins/test_memory_prompt.py"]
+
+
+def test_the_full_scope_run_has_no_cap_or_budget_and_the_local_run_keeps_both() -> None:
+    """The commit-time run defers what its budget skips to the nightly, so the
+    nightly must run every mutant: an unlimited cap and no time budget."""
+    assert mp.limits(full_scope=True) == (None, None)
+    assert mp.limits(full_scope=False) == (mp.MAX_MUTANTS, mp.TOTAL_BUDGET_S)
+    assert mp.limits(full_scope=False, max_mutants=7) == (7, mp.TOTAL_BUDGET_S)
+
+
+def _mutant(n: int) -> mp.Mutant:
+    return mp.Mutant(
+        path=Path(f"kairix/mod{n}.py"),
+        lineno=n,
+        col=0,
+        original="==",
+        mutation="!=",
+        mutated_source="",
+    )
+
+
+def test_shards_partition_every_mutant_into_exactly_one_shard() -> None:
+    mutants = [_mutant(n) for n in range(11)]
+    shards = [mp.shard(mutants, i, 4) for i in range(4)]
+    flattened = [m for one in shards for m in one]
+    assert sorted(m.lineno for m in flattened) == list(range(11)), "every mutant in exactly one shard"
+    assert len(flattened) == len(mutants)
+    assert mp.shard(mutants, 0, 1) == mutants
+
+
+@pytest.mark.parametrize(("index", "count"), [(4, 4), (-1, 4), (0, 0)])
+def test_a_shard_out_of_range_is_rejected(index: int, count: int) -> None:
+    with pytest.raises(ValueError, match="not in range"):
+        mp.shard([_mutant(1)], index, count)
+
+
+def test_a_full_scope_mutant_with_no_selected_test_fails_the_run(capsys: pytest.CaptureFixture[str]) -> None:
+    """A full-scope run must never report a mutant it could not apply as killed."""
+    assert mp._verdict([], [_mutant(3)]) == 1
+    err = capsys.readouterr().err
+    assert "1 mutant(s) with no selected test" in err
+    assert "kairix/mod3.py:3" in err and "fix:" in err and "next:" in err and "run:" in err
+    assert mp._verdict([], []) == 0
+
+
+def test_the_plan_bounds_every_shard_and_covers_every_mutant() -> None:
+    """More mutants than four shards could run inside the job timeout: the plan
+    adds shards so none exceeds the bound, and the shards still partition all."""
+    mutants = [_mutant(n) for n in range(237)]
+    count = mp.plan_shard_count(len(mutants))
+    shards = [mp.shard(mutants, i, count) for i in range(count)]
+    assert all(len(one) <= mp.MAX_MUTANTS_PER_SHARD for one in shards)
+    assert sorted(m.lineno for one in shards for m in one) == list(range(237))
+    assert mp.MAX_MUTANTS_PER_SHARD * mp.PER_MUTANT_TIMEOUT_S <= 60 * 60, "a full shard fits the job timeout"
+    assert mp.plan_shard_count(0) == 1 and mp.plan_shard_count(50) == 1 and mp.plan_shard_count(51) == 2
+
+
+def test_a_mutant_whose_tests_the_marker_filter_deselects_is_not_killed() -> None:
+    """pytest exits 5 when the marker filter leaves no test (an integration-only
+    file): the mutant was never exercised, so it is reported as not selected."""
+    assert mp.classify_exit(0) == (True, "survived")
+    assert mp.classify_exit(5) == (False, mp.NO_TESTS_SELECTED)
+    assert mp.classify_exit(1) == (False, "killed")
+
+
+@pytest.mark.parametrize(
+    "argv", [["--shard-count", "0"], ["--shard-index", "4", "--shard-count", "4"], ["--shard-index", "-1"]]
+)
+def test_invalid_shard_flags_are_a_usage_error_before_the_diff_is_read(argv: list[str]) -> None:
+    import subprocess as _subprocess
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "checks" / "mutation_parity.py"
+    result = _subprocess.run(
+        [sys.executable, str(script), "--base", "no-such-ref", *argv], capture_output=True, text=True
+    )
+    assert result.returncode == 2
+    assert "is not in range" in result.stderr
+
+
+def test_the_nightly_suite_runs_full_scope() -> None:
+    suite = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation-suite.yml"
+    workflow = suite.read_text(encoding="utf-8")
+    assert '--base "${BASE}" --full-scope --shard-index "${SHARD}" --shard-count "${SHARD_COUNT}"' in workflow
+    assert "shard: ${{ fromJSON(needs.plan.outputs.shards) }}" in workflow and "fail-fast: false" in workflow
+    assert '--base "${BASE}" --plan' in workflow
+
+
 def test_survivor_report_carries_f21_action_markers() -> None:
     """The F21 affordance contract: fix:/next:/run: markers present."""
     report = mp._survivor_report(_result("kairix/a.py", 7, ">", ">="))

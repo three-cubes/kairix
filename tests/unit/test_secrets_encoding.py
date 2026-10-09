@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import pytest
 
-from kairix.secrets.encoding import decode_bundle_value, encode_bundle_value
+from kairix.secrets.encoding import decode_bundle_value, encode_bundle_value, split_bundle_lines
 
 pytestmark = pytest.mark.unit
 
@@ -127,3 +127,27 @@ def test_adversarial_material_round_trips(label: str, value: str) -> None:
     encoded = encode_bundle_value(value)
     assert "\n" not in encoded and "\r" not in encoded, f"{label}: encoded form must stay single-line"
     assert decode_bundle_value(encoded) == value, f"{label}: round-trip lost bytes"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # No trailing newline: the last record is real data and must survive.
+        ("ALPHA=1\nBETA=2", ["ALPHA=1", "BETA=2"]),
+        ("ALPHA=1", ["ALPHA=1"]),
+        # Trailing newline: only the empty tail produced by the final LF is dropped.
+        ("ALPHA=1\nBETA=2\n", ["ALPHA=1", "BETA=2"]),
+        # CRLF tolerated: the trailing CR of each record is stripped.
+        ("ALPHA=1\r\nBETA=2\r\n", ["ALPHA=1", "BETA=2"]),
+        ("", []),
+    ],
+)
+def test_split_bundle_lines_drops_only_the_empty_tail(text: str, expected: list[str]) -> None:
+    """Only the empty string left after a final LF is discarded — a bundle
+    whose last ``KEY=VALUE`` record has no trailing newline keeps it.
+
+    Sabotage-proof (executed): flipped the tail guard to ``lines[-1] != ""``
+    and, separately, ``lines or lines[-1] == ""`` — both drop ``BETA=2`` from
+    the unterminated bundle and this test fails. Restored.
+    """
+    assert split_bundle_lines(text) == expected

@@ -21,6 +21,7 @@ import pytest
 
 import kairix.quality.eval.cli as eval_cli
 from kairix.quality.eval.cli import EvalCliDeps
+from kairix.quality.eval.tune import CorpusHints
 
 pytestmark = pytest.mark.unit
 
@@ -521,6 +522,84 @@ def test_gate_hold(tmp_path: Path) -> None:
     deps = EvalCliDeps(run_gate=lambda scores, **kw: SimpleNamespace(passed=False, format=lambda: "GATE-HOLD"))
     _stdout, _stderr, code = _drive(["gate", "--result", str(result_file)], deps)
     assert code == 2
+
+
+class _ClosableDb:
+    def close(self) -> None:
+        """Test stub — the gate closes the index after profiling; nothing to release."""
+
+
+def _gate_result_file(tmp_path: Path) -> Path:
+    result_file = tmp_path / "r.json"
+    result_file.write_text(
+        json.dumps({"summary": {"category_scores": {"recall": 0.8}, "weighted_total": 0.8}}),
+        encoding="utf-8",
+    )
+    return result_file
+
+
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [
+        # Zero of a kind means the corpus does NOT have that kind — the
+        # boundary every ``count > 0`` hint must respect.
+        ((0, 0, 0), CorpusHints(has_date_files=False, has_procedural_docs=False, has_entity_folders=False)),
+        ((1, 0, 0), CorpusHints(has_date_files=True, has_procedural_docs=False, has_entity_folders=False)),
+        ((0, 1, 0), CorpusHints(has_date_files=False, has_procedural_docs=True, has_entity_folders=False)),
+        ((0, 0, 1), CorpusHints(has_date_files=False, has_procedural_docs=False, has_entity_folders=True)),
+    ],
+)
+def test_gate_passes_corpus_hints_derived_from_the_index(
+    tmp_path: Path, counts: tuple[int, int, int], expected: CorpusHints
+) -> None:
+    """The gate hands ``run_gate`` the hints profiled from the index: a kind
+    is present only when its count is strictly above zero, and a profiled
+    corpus is never replaced by generic hints.
+
+    Sabotage-proof (executed): ``count > 0`` -> ``count >= 0`` on each of the
+    three hint lines flips the zero-count field to True, and the
+    ``_corpus_hints(deps) or CorpusHints()`` -> ``and`` swap discards the
+    profiled hints for the generic defaults — each fails this test. Restored.
+    """
+    date_n, procedural_n, entity_n = counts
+    seen: dict[str, Any] = {}
+
+    def _run_gate(scores: Any, **kw: Any) -> Any:
+        seen.update(kw)
+        return SimpleNamespace(passed=True, format=lambda: "GATE-PASS")
+
+    deps = EvalCliDeps(
+        index_db_path=lambda: str(tmp_path / "k.db"),
+        open_db=lambda p: _ClosableDb(),
+        analyse_corpus=lambda db: SimpleNamespace(
+            date_filename_count=date_n, procedural_count=procedural_n, entity_doc_count=entity_n
+        ),
+        run_gate=_run_gate,
+    )
+
+    _stdout, _stderr, code = _drive(["gate", "--result", str(_gate_result_file(tmp_path))], deps)
+
+    assert code == 0
+    assert seen["hints"] == expected
+
+
+def test_gate_falls_back_to_generic_hints_when_index_unavailable(tmp_path: Path) -> None:
+    """An unreadable index yields generic (all-False) hints, never ``None``."""
+    seen: dict[str, Any] = {}
+
+    def _explode() -> Any:
+        raise RuntimeError("no index")
+
+    def _run_gate(scores: Any, **kw: Any) -> Any:
+        seen.update(kw)
+        return SimpleNamespace(passed=True, format=lambda: "GATE-PASS")
+
+    deps = EvalCliDeps(index_db_path=_explode, run_gate=_run_gate)
+
+    _stdout, _stderr, code = _drive(["gate", "--result", str(_gate_result_file(tmp_path))], deps)
+
+    assert code == 0
+    assert seen["hints"] == CorpusHints()
 
 
 def test_gate_missing_file(tmp_path: Path) -> None:

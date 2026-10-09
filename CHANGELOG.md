@@ -7,6 +7,12 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
+### `kairix curator drain --max-batches` must be at least 1
+
+`--max-batches 0` (or a negative number) used to run no drain at all yet still
+report `neo4j_available: true`, without ever checking the graph. It is now a
+usage error (exit 2), so every drain report reflects at least one real tick.
+
 ### SharePoint documents keep source pages
 
 SharePoint connector configs can now pass per-extractor settings through an

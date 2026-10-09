@@ -57,10 +57,12 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,6 +85,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 #     how many impacted test files each mutant runs against.
 MAX_MUTANTS = 20
 PER_MUTANT_TIMEOUT_S = 60
+# The most mutants one nightly shard may hold: at the per-mutant ceiling
+# (PER_MUTANT_TIMEOUT_S) a full shard takes at most 50 minutes, under the
+# workflow's 60-minute job timeout, so no shard is cut off before its last
+# mutant whatever the size of the since-release diff.
+MAX_MUTANTS_PER_SHARD = 50
+# pytest's exit code when the marker filter leaves no test to run.
+_PYTEST_NO_TESTS_COLLECTED = 5
+NO_TESTS_SELECTED = "no fast-tier test selected"
 TOTAL_BUDGET_S = 150.0
 MAX_IMPACTED_TEST_FILES = 40
 
@@ -360,22 +370,37 @@ def _prioritise(found: set[str], paths: set[Path]) -> list[str]:
     return same_module + rest[:budget]
 
 
-def impacted_tests(paths: set[Path]) -> list[str]:
+def impacted_tests(paths: set[Path], root: Path = REPO_ROOT) -> list[str]:
     """Test files that import any mutated module — the import-graph heuristic
-    ``safe-commit.sh --fast`` uses. Returns repo-relative test-file paths."""
-    tests_dir = REPO_ROOT / "tests"
+    ``safe-commit.sh --fast`` uses. Returns test-file paths relative to ``root``
+    (the repository)."""
+    tests_dir = root / "tests"
     if not tests_dir.exists():
         return []
     found: set[str] = set()
     needles = {_module_path(p) for p in paths}
     needles.update(str(p) for p in paths)  # also match path-string references
+    # A module's own test file may import it through its package's re-export
+    # (``from kairix.memory_stores import KairixNativeStore``), which names no
+    # module path: count a test named after the module, or after its package
+    # (``test_secrets.py`` for ``kairix/secrets/_legacy.py``), that imports
+    # that package.
+    reexports = {(_module_path(p.parent), name) for p in paths for name in (f"test_{p.stem}", f"test_{p.parent.name}")}
+    # A module under a hyphenated directory (``openclaw/memory-prompt/plugin.py``)
+    # cannot be imported by name; its tests load it by path, so they name the
+    # directory (``memory-prompt``) or its importable spelling (``memory_prompt``).
+    needles.update(
+        spelling for p in paths for part in p.parent.parts if "-" in part for spelling in (part, part.replace("-", "_"))
+    )
     for test_file in tests_dir.rglob("test_*.py"):
         try:
             text = test_file.read_text(encoding="utf-8")
         except OSError:
             continue
-        if any(needle in text for needle in needles):
-            found.add(str(test_file.relative_to(REPO_ROOT)))
+        if any(needle in text for needle in needles) or any(
+            test_file.stem.startswith(name) and f"{package} import" in text for package, name in reexports
+        ):
+            found.add(str(test_file.relative_to(root)))
     # Bound the per-mutant pytest cost: a module imported by 60+ test files
     # would make each mutant run a multi-minute suite. The first N (sorted,
     # deterministic) are a representative cover — a mutant that survives all
@@ -386,6 +411,24 @@ def impacted_tests(paths: set[Path]) -> list[str]:
     # tests in-window even when a widely-imported file is co-mutated in the
     # same diff — without it the alphabetical cap silently drops them.
     return _prioritise(found, paths)
+
+
+def tests_for_mutant(
+    path: Path,
+    cache: dict[Path, list[str]],
+    find: Callable[[set[Path]], list[str]] = impacted_tests,
+) -> list[str]:
+    """The fast-tier tests that import ``path`` — the module ONE mutant changed.
+
+    Each mutant runs against its own module's importers, never one set for the
+    whole diff: a diff-wide set is capped across every touched file, so on a
+    wide diff a module's own tests fall out of the window and its killed
+    mutants read as survivors (the 2026-10-08 nightly reported 3 such false
+    survivors over 90 touched files). ``cache`` holds each module's list, so
+    a module is searched once however many mutants it has."""
+    if path not in cache:
+        cache[path] = find({path})
+    return cache[path]
 
 
 def _run_impacted_tests(test_files: list[str], timeout_s: int) -> tuple[bool, str, float]:
@@ -423,9 +466,22 @@ def _run_impacted_tests(test_files: list[str], timeout_s: int) -> tuple[bool, st
     except subprocess.TimeoutExpired:
         return False, f"timeout >{timeout_s}s (treated as killed)", float(timeout_s)
     elapsed = time.monotonic() - start
-    passed = result.returncode == 0
-    detail = "survived" if passed else "killed"
+    passed, detail = classify_exit(result.returncode)
     return passed, detail, elapsed
+
+
+def classify_exit(returncode: int) -> tuple[bool, str]:
+    """``(survived, detail)`` for a pytest exit code over a mutant's tests.
+
+    0 is a survivor. Exit 5 means the marker filter selected no test (an
+    integration-only file, say): the mutant was never exercised, so it is
+    reported as ``NO_TESTS_SELECTED``, never as killed. Anything else (a
+    failure, an error) kills it."""
+    if returncode == 0:
+        return True, "survived"
+    if returncode == _PYTEST_NO_TESTS_COLLECTED:
+        return False, NO_TESTS_SELECTED
+    return False, "killed"
 
 
 # ── orchestration ───────────────────────────────────────────────────────
@@ -469,28 +525,69 @@ def _survivor_report(result: MutantResult) -> str:
     )
 
 
-def run(
-    *,
-    base: str | None,
-    max_mutants: int = MAX_MUTANTS,
-) -> int:
-    """Diff-scoped mutation run. Returns process exit code.
+def limits(*, full_scope: bool, max_mutants: int = MAX_MUTANTS) -> tuple[int | None, float | None]:
+    """``(mutant cap, total-time budget)`` for a run; ``None`` means unlimited.
 
-    * ``base`` — diff ref, or ``None`` for the staged diff.
+    The commit-time run is capped and budgeted to stay inside the local loop,
+    and defers the rest to the nightly full-scope run. That run therefore has
+    neither cap nor budget: otherwise the deferred mutants never run anywhere."""
+    if full_scope:
+        return None, None
+    return max_mutants, TOTAL_BUDGET_S
 
-    Any survivor fails — there is no survivor list to excuse one.
-    """
+
+def shard(mutants: list[Mutant], index: int, count: int) -> list[Mutant]:
+    """The ``index``-th of ``count`` disjoint shards of ``mutants``.
+
+    Mutants are generated in a deterministic order (sorted file, then source
+    order), so taking every ``count``-th one from ``index`` partitions them:
+    each mutant lands in exactly one shard, and the shards together cover all.
+    The nightly suite runs the shards as parallel jobs so each stays well under
+    the job timeout however large the since-release diff is."""
+    if count < 1 or not 0 <= index < count:
+        raise ValueError(f"shard index {index} is not in range for {count} shard(s)")
+    return mutants[index::count]
+
+
+def plan_shard_count(mutant_count: int, max_per_shard: int = MAX_MUTANTS_PER_SHARD) -> int:
+    """How many nightly shards ``mutant_count`` mutants need so none holds
+    more than ``max_per_shard`` (at least one)."""
+    return max(1, -(-mutant_count // max_per_shard))
+
+
+def diff_mutants(base: str | None) -> tuple[dict[Path, set[int]], list[Mutant]]:
+    """The changed lines and every mutant generated from them, in order."""
     touched = changed_lines(base)
-    if not touched:
-        print(f"{_GREEN}PASS mutation_parity{_RESET} — no mutable production-code diff (0 mutants).")
-        return 0
-
-    # Build the in-scope mutant set across all touched files.
     all_mutants: list[Mutant] = []
     for rel, lines_changed in sorted(touched.items()):
         source = (REPO_ROOT / rel).read_text(encoding="utf-8")
         scope = _enclosing_function_lines(source, lines_changed)
         all_mutants.extend(generate_mutants(source, rel, scope))
+    return touched, all_mutants
+
+
+def run(
+    *,
+    base: str | None,
+    max_mutants: int = MAX_MUTANTS,
+    full_scope: bool = False,
+    shard_index: int = 0,
+    shard_count: int = 1,
+) -> int:
+    """Diff-scoped mutation run. Returns process exit code.
+
+    * ``base`` — diff ref, or ``None`` for the staged diff.
+    * ``full_scope`` — every mutant on the diff, with no cap or time budget
+      (the nightly mutation suite). A mutant with no selected test fails a
+      full-scope run: it was never applied, so it cannot count as killed.
+    * ``shard_index`` / ``shard_count`` — run only that shard of the mutants.
+
+    Any survivor fails — there is no survivor list to excuse one.
+    """
+    touched, all_mutants = diff_mutants(base)
+    if not touched:
+        print(f"{_GREEN}PASS mutation_parity{_RESET} — no mutable production-code diff (0 mutants).")
+        return 0
 
     if not all_mutants:
         print(
@@ -499,11 +596,14 @@ def run(
         )
         return 0
 
-    capped = all_mutants[:max_mutants]
-    skipped = len(all_mutants) - len(capped)
+    cap, budget = limits(full_scope=full_scope, max_mutants=max_mutants)
+    pool = all_mutants if cap is None else all_mutants[:cap]
+    skipped = len(all_mutants) - len(pool)
+    capped = shard(pool, shard_index, shard_count)
     test_files = impacted_tests(set(touched))
+    per_module: dict[Path, list[str]] = {}
 
-    if not test_files:
+    if not test_files and not full_scope:
         # No fast-tier test imports the changed module(s). The diff-scoped
         # gate's job is to catch WEAK tests that exist — it does not mandate
         # a unit test for every line (F7 per-file coverage owns "untested
@@ -525,21 +625,31 @@ def run(
     )
 
     survivors: list[MutantResult] = []
+    uncovered: list[Mutant] = []
     total_elapsed = 0.0
     budget_skipped = 0
     for i, mutant in enumerate(capped, start=1):
-        if total_elapsed >= TOTAL_BUDGET_S:
+        if budget is not None and total_elapsed >= budget:
             # Total-time budget hit: stop launching new mutants. The
             # remainder are reported as skipped, never silently dropped —
             # the nightly full-scope run (no budget) covers them.
             budget_skipped = len(capped) - (i - 1)
             print(
-                f"  [budget] {total_elapsed:.0f}s >= {TOTAL_BUDGET_S:.0f}s cap reached — "
+                f"  [budget] {total_elapsed:.0f}s >= {budget:.0f}s cap reached — "
                 f"{budget_skipped} remaining mutant(s) deferred to nightly full-scope."
             )
             break
-        result = _apply_and_test(mutant, test_files)
+        own_tests = tests_for_mutant(mutant.path, per_module)
+        if not own_tests:
+            print(f"  [{i}/{len(capped)}] {mutant.path}:{mutant.lineno} — no fast-tier test imports it; skipped")
+            uncovered.append(mutant)
+            continue
+        result = _apply_and_test(mutant, own_tests)
         total_elapsed += result.elapsed_s
+        if result.detail == NO_TESTS_SELECTED:
+            print(f"  [{i}/{len(capped)}] {mutant.path}:{mutant.lineno} — {NO_TESTS_SELECTED}; not applied")
+            uncovered.append(mutant)
+            continue
         marker = f"{_RED}SURVIVED{_RESET}" if result.survived else f"{_GREEN}killed{_RESET}"
         print(
             f"  [{i}/{len(capped)}] {mutant.path}:{mutant.lineno} "
@@ -548,21 +658,45 @@ def run(
         if result.survived:
             survivors.append(result)
 
-    ran = len(capped) - budget_skipped
-    print(f"--- {len(survivors)} survivor(s) of {ran} mutant(s) run; {total_elapsed:.1f}s total ---")
+    ran = len(capped) - budget_skipped - len(uncovered)
+    print(
+        f"--- {len(survivors)} survivor(s) of {ran} mutant(s) run; "
+        f"{len(uncovered)} with no selected test; {total_elapsed:.1f}s total ---"
+    )
 
-    return _verdict(survivors)
+    return _verdict(survivors, uncovered if full_scope else [])
 
 
-def _verdict(survivors: list[MutantResult]) -> int:
-    """Translate the survivor set into an exit code — any survivor fails."""
-    if not survivors:
+def _uncovered_report(mutant: Mutant) -> str:
+    """F21 operator-outcome block for a mutant a full-scope run could not apply."""
+    return (
+        f"{_RED}mutant not tested{_RESET}: {mutant.path}:{mutant.lineno} "
+        f"`{mutant.original}` -> `{mutant.mutation}` — no fast-tier test was selected for this module, "
+        "so the mutant was never applied.\n"
+        "  fix: add a unit/contract test that imports the module (or name the module's path in an "
+        "existing test that exercises it), so the runner selects it.\n"
+        "  next: re-run `python3 scripts/checks/mutation_parity.py --base <ref> --full-scope`.\n"
+        f'  run: bash scripts/safe-commit.sh "test(mutation): cover {mutant.path.stem}"'
+    )
+
+
+def _verdict(survivors: list[MutantResult], uncovered: list[Mutant] | None = None) -> int:
+    """Translate the run into an exit code: any survivor fails, and so does any
+    mutant a full-scope run could not apply (``uncovered``)."""
+    uncovered = uncovered or []
+    if not survivors and not uncovered:
         print(f"{_GREEN}PASS mutation_parity{_RESET} — 0 survivors (every mutant on the diff was killed).")
         return 0
 
-    print(f"{_RED}FAIL mutation_parity{_RESET} — {len(survivors)} survivor(s):", file=sys.stderr)
+    print(
+        f"{_RED}FAIL mutation_parity{_RESET} — {len(survivors)} survivor(s), "
+        f"{len(uncovered)} mutant(s) with no selected test:",
+        file=sys.stderr,
+    )
     for result in survivors:
         print(_survivor_report(result), file=sys.stderr)
+    for mutant in uncovered:
+        print(_uncovered_report(mutant), file=sys.stderr)
     return 1
 
 
@@ -579,8 +713,36 @@ def main(argv: list[str] | None = None) -> int:
         default=MAX_MUTANTS,
         help=f"hard cap on mutants generated (default {MAX_MUTANTS})",
     )
+    parser.add_argument(
+        "--full-scope",
+        action="store_true",
+        help="run every mutant on the diff, with no cap or time budget (the nightly suite)",
+    )
+    parser.add_argument("--shard-index", type=int, default=0, help="run only this shard (0-based)")
+    parser.add_argument("--shard-count", type=int, default=1, help="split the mutants into this many shards")
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        help="print the diff's mutant count and the shard indices for the nightly matrix (JSON), then exit",
+    )
     args = parser.parse_args(argv)
-    return run(base=args.base, max_mutants=args.max_mutants)
+    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
+        parser.error(
+            f"--shard-index {args.shard_index} is not in range for --shard-count {args.shard_count}; "
+            "use 0 <= index < count and count >= 1"
+        )
+    if args.plan:
+        _touched, all_mutants = diff_mutants(args.base)
+        count = plan_shard_count(len(all_mutants))
+        print(json.dumps({"mutants": len(all_mutants), "shard_count": count, "shards": list(range(count))}))
+        return 0
+    return run(
+        base=args.base,
+        max_mutants=args.max_mutants,
+        full_scope=args.full_scope,
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
+    )
 
 
 if __name__ == "__main__":

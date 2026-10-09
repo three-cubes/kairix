@@ -224,15 +224,26 @@ class _NoopCursor:
 def _run_drain_batches(drain_db: Any, repo: Any, *, max_batches: int, batch_size: int) -> tuple[Any, int]:
     """Run up to ``max_batches`` drain ticks, summing them into one result.
 
-    Stops early when Neo4j is unavailable or a tick reports nothing
-    pushed / failed / skipped (the queue is empty). Returns the aggregate
-    ``NeoDrainResult`` and the number of ticks actually run.
+    ``max_batches`` is at least 1 (``--max-batches`` rejects anything
+    smaller at the parser), so the first tick always runs and seeds the
+    aggregate — the reported ``neo4j_available`` is always an observed
+    value, never an assumed default. Stops early when Neo4j is
+    unavailable or a tick reports nothing pushed / failed / skipped (the
+    queue is empty). Returns the aggregate ``NeoDrainResult`` and the
+    number of ticks actually run.
     """
     from kairix.core.curator.drain import NeoDrainResult, run_neo4j_drain_tick
 
-    aggregate = NeoDrainResult(pushed=0, failed=0, skipped_relationships=0, neo4j_available=True, elapsed_ms=0)
-    batches_run = 0
-    for _ in range(max_batches):
+    tick = run_neo4j_drain_tick(drain_db, repo, batch_size=batch_size)
+    aggregate = tick
+    batches_run = 1
+    # Keep ticking while Neo4j is reachable, the queue still yielded work
+    # last tick, and the batch budget isn't spent.
+    while (
+        batches_run < max_batches
+        and tick.neo4j_available
+        and (tick.pushed or tick.failed or tick.skipped_relationships)
+    ):
         tick = run_neo4j_drain_tick(drain_db, repo, batch_size=batch_size)
         batches_run += 1
         aggregate = NeoDrainResult(
@@ -242,13 +253,18 @@ def _run_drain_batches(drain_db: Any, repo: Any, *, max_batches: int, batch_size
             neo4j_available=tick.neo4j_available,
             elapsed_ms=aggregate.elapsed_ms + tick.elapsed_ms,
         )
-        # Stop early when the queue is empty (and we did at least
-        # one tick), or when Neo4j is unavailable.
-        if not tick.neo4j_available:
-            break
-        if tick.pushed == 0 and tick.failed == 0 and tick.skipped_relationships == 0:
-            break
     return aggregate, batches_run
+
+
+def _positive_int(option_value: str) -> int:
+    """argparse ``type=`` for counts that must be at least 1."""
+    try:
+        value = int(option_value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number >= 1, got {option_value!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+    return value
 
 
 def _drain_cmd(
@@ -345,11 +361,11 @@ def _add_drain_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     )
     drain_parser.add_argument(
         "--max-batches",
-        type=int,
+        type=_positive_int,
         default=1,
         dest="max_batches",
         metavar="N",
-        help="Maximum number of ticks to run before exiting (default: 1)",
+        help="Maximum number of ticks to run before exiting, at least 1 (default: 1)",
     )
     drain_parser.add_argument(
         "--db-path",

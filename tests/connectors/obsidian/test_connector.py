@@ -26,7 +26,10 @@ from pathlib import Path
 
 import pytest
 
-from kairix.connectors.obsidian import ObsidianConnector, make_connector
+# Imported from the defining module (not the package re-export) so the
+# mutation-parity import graph (scripts/checks/mutation_parity.py) selects
+# this file as connector.py's own test when mutating that module.
+from kairix.connectors.obsidian.connector import ObsidianConnector, make_connector
 from kairix.core.protocols import RawArtefact
 from kairix.knowledge.reflib.dedup import hash_content
 from tests.fakes import fake_obsidian_watcher_factory
@@ -554,3 +557,55 @@ def test_load_hierarchy_emits_subdir_folders_in_parent_before_child_order(tmp_pa
     # Parent-id correctness for nested levels.
     assert by_id["alpha/beta"].raw_parent_id == "alpha"
     assert by_id["alpha/beta/gamma"].raw_parent_id == "alpha/beta"
+
+
+# ---------------------------------------------------------------------------
+# metadata_for — frontmatter author / tags normalisation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("frontmatter", "expected_author", "expected_tags"),
+    [
+        # Happy path: a non-blank author string and a list of tags.
+        ("author: agent-alpha\ntags: [alpha, beta]", "agent-alpha", ("alpha", "beta")),
+        # Whitespace-only author is "no author", not an empty string.
+        ('author: "   "', None, ()),
+        # Non-string author (a YAML int) is ignored, never ``.strip()``-ed.
+        ("author: 42", None, ()),
+        # Tag list: blank entries dropped.
+        ('tags: [alpha, "   "]', None, ("alpha",)),
+        # Tag list: non-string entries dropped, never ``.strip()``-ed.
+        ("tags: [alpha, 7]", None, ("alpha",)),
+        # A single non-blank tag string becomes a one-tuple.
+        ("tags: solo", None, ("solo",)),
+        # A whitespace-only tag string yields no tags.
+        ('tags: "   "', None, ()),
+        # Non-list, non-string tags (a YAML int) yield no tags.
+        ("tags: 5", None, ()),
+    ],
+)
+def test_metadata_for_normalises_frontmatter_author_and_tags(
+    tmp_path: Path,
+    frontmatter: str,
+    expected_author: str | None,
+    expected_tags: tuple[str, ...],
+) -> None:
+    """``metadata_for`` surfaces only non-blank string authors / tags.
+
+    Sabotage-proof (executed): flipping any ``isinstance(...) and
+    x.strip()`` guard in ``_frontmatter_author_tags`` to ``or`` either
+    lets a blank value through (``""`` author, ``("   ",)`` / ``("",)``
+    tags) or calls ``.strip()`` on a non-string (``AttributeError``) —
+    each guard is pinned by at least one case below.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"note.md": f"---\n{frontmatter}\n---\n# Note\n\nBody."})
+    connector = _connector_with_known(vault, {})
+
+    meta = connector.metadata_for("note.md")
+
+    assert meta.author == expected_author
+    assert meta.tags == expected_tags
+    assert meta.modified_at is not None
