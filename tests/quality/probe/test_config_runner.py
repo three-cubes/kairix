@@ -302,7 +302,7 @@ def test_raising_snapshotter_yields_degraded_report_instead_of_raising() -> None
     lets the RuntimeError escape and this test errors.
     """
     provider = FakeProvider(name="fake_snap", dim=1536, embed_latency_s=0.001)
-    snapshotter = _RaisingSnapshotter(RuntimeError("coalescer stats unavailable"))
+    snapshotter = _RaisingSnapshotter(RuntimeError("coalescer stats unavailable; token credential-sentinel-7f3a"))
 
     report = run_probe_config(provider, snapshotter=snapshotter, **_fast_runner_kwargs())
 
@@ -316,7 +316,9 @@ def test_raising_snapshotter_yields_degraded_report_instead_of_raising() -> None
     ) == (0.0, 0.0, 0.0)
     assert set(report.stage_latency_ms) == _REQUIRED_STAGE_KEYS
     assert report.tuning_recommendations == []
-    assert any("coalescer stats unavailable" in w for w in report.warnings), report.warnings
+    assert any("transport snapshot failed (raised RuntimeError)" in w for w in report.warnings), report.warnings
+    # The report is persisted (--json): the exception message never lands in it.
+    assert all("credential-sentinel-7f3a" not in w for w in report.warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -495,3 +497,29 @@ def test_flapping_healthcheck_does_not_escape_the_report_builder() -> None:
     assert provider.healthcheck_calls >= 2  # the post-verdict call raised and was contained
     assert report.provider.endpoint_hostname == ""
     assert report.provider.name == "fake_flap"
+
+
+class _RaisingHealthProvider(FakeProvider):
+    """A provider whose healthcheck raises with a credential in the message."""
+
+    def healthcheck(self) -> Any:
+        raise RuntimeError("401 from endpoint; Authorization: Bearer credential-sentinel-7f3a")
+
+
+def test_raising_healthcheck_report_carries_class_only_error() -> None:
+    """A healthcheck that raises yields an unreachable report whose error is
+    class-only — the report is persisted (``--json``), so the exception
+    message (which can echo credentials) never lands in it.
+
+    Sabotage proof: restore ``f"healthcheck raised: {type(exc).__name__}: {exc}"``
+    in ``_healthcheck_ok`` — the sentinel appears in the report dict. Restored.
+    """
+    import json
+
+    provider = _RaisingHealthProvider(name="fake_raise", dim=1536, embed_latency_s=0.001)
+    report = run_probe_config(provider, snapshotter=_StubSnapshotter(TransportSnapshot()), **_fast_runner_kwargs())
+
+    assert report.status == STATUS_UNREACHABLE
+    serialised = json.dumps(report.to_dict())
+    assert "healthcheck raised RuntimeError" in serialised
+    assert "credential-sentinel-7f3a" not in serialised

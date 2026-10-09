@@ -491,3 +491,111 @@ def test_kairix_eval_emits_surface_hint() -> None:
     assert "kairix benchmark run" in text
     assert "conversation-eval" in text
     assert "gold-suite" in text
+
+
+@pytest.mark.unit
+def test_cmd_run_gates_flag_fails_on_incomplete_judge_coverage(tmp_path: Path) -> None:
+    """Every judged case scores 1.0 (all phase gates pass) but one judge call
+    fails: ``--gates`` exits 3 (inconclusive, the shared completeness exit)
+    with a PARTIAL diagnostic. The same suite fully judged exits 0.
+
+    Drives the real ``run_benchmark`` through the CLI's ``run_benchmark``
+    seam with a FakeChatBackend + fake retrieve (no provider, no corpus).
+
+    sabotage: drop the ``judge_failures(result)`` check in ``cmd_run`` — the
+    partial run falls through to the gates and exits 2 (or 0 without the
+    judge_coverage gate) instead of 3. Restored.
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from tests.fakes import FakeChatBackend
+
+    categories = ("recall", "temporal", "entity", "conceptual", "multi_hop", "procedural", "recall")
+    suite = tmp_path / "judged.yaml"
+    suite.write_text(
+        "meta:\n  name: judged\n  version: '1.0'\ncases:\n"
+        + "".join(
+            f"  - id: C{i}\n    category: {cat}\n    query: q{i}\n    score_method: llm\n    gold_title: g{i}\n"
+            for i, cat in enumerate(categories)
+        ),
+    )
+
+    def _retrieve(**_kw: Any) -> tuple[list[str], list[str], dict[str, Any]]:
+        return ["vault/doc.md"], ["snippet"], {}
+
+    def _runner_with(n_replies: int) -> Any:
+        def _run(**kwargs: Any) -> Any:
+            backend = FakeChatBackend(responses=["1.0"] * n_replies)
+            return run_benchmark(**kwargs, deps=BenchmarkDeps(chat_backend=backend, retrieve=_retrieve))
+
+        return _run
+
+    for n_replies, expected_rc in ((len(categories) - 1, 3), (len(categories), 0)):
+        out = io.StringIO()
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(out):
+            rc = cmd_run(_ns(str(suite), gates=True), deps=BenchmarkCLIDeps(run_benchmark=_runner_with(n_replies)))
+        assert rc == expected_rc, f"{n_replies} judge replies: expected exit {expected_rc}, got {rc}"
+        if expected_rc == 3:
+            assert "JUDGE COVERAGE gate (0 judge failures): FAIL" in out.getvalue()
+            assert "PARTIAL" in err.getvalue()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("partial_side", ["baseline", "this run"])
+def test_cmd_run_baseline_compare_skipped_when_either_side_is_partial(
+    bundled_suites: Path, tmp_path: Path, partial_side: str
+) -> None:
+    """The informational ``--baseline`` header prints the PARTIAL warning and
+    then NO delta line when either side had judge failures (display-only:
+    exit stays 0). Two complete results keep the comparison line — see
+    ``test_cmd_run_baseline_emits_compare_line``.
+
+    sabotage: drop the ``return`` after the warning in
+    ``_emit_baseline_compare`` — the "baseline compare: 0.900 → 0.500" delta
+    is printed after the warning and the assertions fail. Restored.
+    """
+
+    class _PartialRunner(_CapturingRunner):
+        def __call__(self, **kwargs: Any) -> Any:
+            result = super().__call__(**kwargs)
+            result.summary["judge_failures"] = 1
+            return result
+
+    baseline_summary: dict[str, Any] = {"weighted_total": 0.9}
+    if partial_side == "baseline":
+        baseline_summary["judge_failures"] = 2
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"summary": baseline_summary}), encoding="utf-8")
+    runner = _PartialRunner() if partial_side == "this run" else _CapturingRunner()
+
+    args = _ns(str(bundled_suites / "unified.yaml"), baseline=str(baseline))
+    out = io.StringIO()
+    with redirect_stderr(io.StringIO()), redirect_stdout(out):
+        rc = cmd_run(args, deps=BenchmarkCLIDeps(run_benchmark=runner))
+    text = out.getvalue()
+    assert rc == 0
+    assert f"PARTIAL RESULT: {partial_side} (baseline compare skipped)" in text
+    assert "baseline compare:" not in text
+    assert "0.900 →" not in text
+
+
+@pytest.mark.unit
+def test_cmd_run_partial_result_is_informational_without_gates(bundled_suites: Path) -> None:
+    """Without ``--gates`` (here: no ``gates`` attribute at all, as from an
+    older caller's Namespace) a partial run is informational: exit 0.
+
+    sabotage: change ``getattr(args, "gates", False)`` to default ``True`` —
+    the partial run exits 3 without the flag. Restored.
+    """
+
+    class _PartialRunner(_CapturingRunner):
+        def __call__(self, **kwargs: Any) -> Any:
+            result = super().__call__(**kwargs)
+            result.summary["judge_failures"] = 1
+            return result
+
+    args = _ns(str(bundled_suites / "unified.yaml"))
+    del args.gates
+    with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+        rc = cmd_run(args, deps=BenchmarkCLIDeps(run_benchmark=_PartialRunner()))
+    assert rc == 0

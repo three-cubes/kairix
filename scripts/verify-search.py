@@ -23,6 +23,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+
+def _describe(exc: BaseException) -> str:
+    """Class-only exception description for the JSON report — never the message."""
+    from kairix.quality.redaction import describe_exception
+
+    return describe_exception(exc)
+
+
 # ---------------------------------------------------------------------------
 # Check definitions
 # ---------------------------------------------------------------------------
@@ -77,7 +85,7 @@ def check_search(
             min_results=min_results,
             latency_ms=(time.time() - t0) * 1000,
             passed=False,
-            note=str(exc)[:120],
+            note=_describe(exc),
         )
 
     latency_ms = (time.time() - t0) * 1000
@@ -142,7 +150,7 @@ def check_curator_health() -> CheckResult:
             min_results=1,
             latency_ms=(time.time() - t0) * 1000,
             passed=False,
-            note=str(exc)[:120],
+            note=_describe(exc),
         )
 
 

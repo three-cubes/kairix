@@ -19,6 +19,9 @@ Gate rules:
   FAIL if overall weighted_total drops by > REGRESSION_THRESHOLD (default 0.02)
   FAIL if any category score drops below CATEGORY_FLOOR (default 0.50)
   WARN (non-failing) if any category delta < -0.01 but overall within threshold
+  INCONCLUSIVE (exit 3) if the current run OR the baseline is partial
+    (``kairix.quality.completeness``: any LLM-judge failure): its totals cover
+    only the judged cases, so they are not compared at all.
 """
 
 from __future__ import annotations
@@ -29,12 +32,19 @@ import sys
 from pathlib import Path
 
 from kairix.paths import agent_cli_roots, confine_to_roots
+from kairix.quality.completeness import EXIT_INCONCLUSIVE as _EXIT_INCONCLUSIVE
+from kairix.quality.completeness import judge_failures as _judge_failures
+from kairix.quality.completeness import partial_diagnostic
 
 logger = logging.getLogger(__name__)
 
 REGRESSION_THRESHOLD: float = 0.02  # fail if weighted_total drops more than this
 CATEGORY_FLOOR: float = 0.50  # fail if any category drops below this
 CATEGORY_WARN_THRESHOLD: float = 0.01  # warn if any category drops more than this
+# Exit code when either result is partial (LLM-judge failures) — the shared
+# ``kairix.quality.completeness.EXIT_INCONCLUSIVE``, distinct from 1 (regression /
+# load failure).
+EXIT_INCONCLUSIVE: int = _EXIT_INCONCLUSIVE
 
 
 def load_result(path: str | Path) -> dict:
@@ -100,6 +110,16 @@ def _build_summary_lines(
     return lines
 
 
+def _inconclusive_summary_lines(current_failures: int, baseline_failures: int) -> list[str]:
+    """Partial on either side: no score table, no PASS / regression verdict —
+    only the inconclusive summary."""
+    lines = ["Benchmark Gate — Contract Suite", "=" * 45]
+    for label, failures in (("the current result", current_failures), ("the baseline", baseline_failures)):
+        if failures:
+            lines.append("❌ " + partial_diagnostic(label, failures))
+    return lines
+
+
 def compare(baseline: dict, current: dict) -> dict:
     """
     Compare current benchmark result to baseline.
@@ -113,6 +133,8 @@ def compare(baseline: dict, current: dict) -> dict:
       category_fails:  list[str] — categories below CATEGORY_FLOOR
       baseline_score:  float
       current_score:   float
+      judge_failures:  int — LLM-judge failures in the current result
+      inconclusive:    bool — True when either result is partial; ``passed`` is then False
       summary_lines:   list[str] — human-readable lines for CI output
     """
     baseline_total = baseline["summary"]["weighted_total"]
@@ -140,20 +162,26 @@ def compare(baseline: dict, current: dict) -> dict:
             category_warns.append(cat)
 
     regression = overall_delta < -REGRESSION_THRESHOLD
-    passed = not regression and not category_fails
+    judge_failures = _judge_failures(current)
+    baseline_judge_failures = _judge_failures(baseline)
+    inconclusive = judge_failures > 0 or baseline_judge_failures > 0
+    passed = not regression and not category_fails and not inconclusive
 
-    lines = _build_summary_lines(
-        baseline_total,
-        current_total,
-        overall_delta,
-        baseline_cats,
-        current_cats,
-        all_cats,
-        category_deltas,
-        category_warns,
-        category_fails,
-        regression,
-    )
+    if inconclusive:
+        lines = _inconclusive_summary_lines(judge_failures, baseline_judge_failures)
+    else:
+        lines = _build_summary_lines(
+            baseline_total,
+            current_total,
+            overall_delta,
+            baseline_cats,
+            current_cats,
+            all_cats,
+            category_deltas,
+            category_warns,
+            category_fails,
+            regression,
+        )
 
     return {
         "passed": passed,
@@ -164,6 +192,8 @@ def compare(baseline: dict, current: dict) -> dict:
         "category_fails": category_fails,
         "baseline_score": baseline_total,
         "current_score": current_total,
+        "judge_failures": judge_failures,
+        "inconclusive": inconclusive,
         "summary_lines": lines,
     }
 
@@ -172,7 +202,9 @@ def run_gate(baseline_path: str, current_path: str) -> int:
     """
     Load baseline and current results, compare, print summary, return exit code.
 
-    Returns 0 (pass) or 1 (fail). Suitable for direct invocation from CI.
+    Returns 0 (pass), 1 (fail / unreadable input) or :data:`EXIT_INCONCLUSIVE`
+    (3) when the current result or the baseline is partial. Suitable for direct
+    invocation from CI.
     """
     try:
         baseline = load_result(baseline_path)
@@ -190,6 +222,8 @@ def run_gate(baseline_path: str, current_path: str) -> int:
     for line in result["summary_lines"]:
         logger.info(line)
 
+    if result["inconclusive"]:
+        return EXIT_INCONCLUSIVE
     return 0 if result["passed"] else 1
 
 

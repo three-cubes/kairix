@@ -9,6 +9,7 @@ import pytest
 from kairix.paths import bundled_suites_root
 from kairix.quality.benchmark.baseline import (
     CATEGORY_FLOOR,
+    EXIT_INCONCLUSIVE,
     compare,
     load_result,
     run_gate,
@@ -255,3 +256,104 @@ class TestMockContractSuite:
             if cat != "classification" and score < CATEGORY_FLOOR
         ]
         assert not failing, f"Categories below floor {CATEGORY_FLOOR}: {failing}"
+
+
+@pytest.mark.unit
+class TestJudgeCoverage:
+    """A partial current result (LLM-judge failures) never passes the CI gate."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "summary_extra",
+        [{"judge_failures": 2}],
+        ids=["judge_failures_count"],
+    )
+    def test_partial_current_result_is_inconclusive(self, tmp_path, summary_extra):
+        """Same totals as the baseline (no regression), but the current run had
+        judge failures: compare reports inconclusive and run_gate exits 3.
+
+        Sabotage-proof: make ``_judge_failures`` return 0 — the partial result
+        passes and both assertions fail. Restored.
+        """
+        baseline = _make_result(0.90)
+        current = _make_result(0.90)
+        current["summary"].update(summary_extra)
+
+        result = compare(baseline, current)
+        assert result["passed"] is False
+        assert result["inconclusive"] is True
+        assert any("INCONCLUSIVE" in line for line in result["summary_lines"])
+
+        bp = tmp_path / "baseline.json"
+        cp = tmp_path / "current.json"
+        bp.write_text(json.dumps(baseline))
+        cp.write_text(json.dumps(current))
+        assert run_gate(str(bp), str(cp)) == EXIT_INCONCLUSIVE == 3
+
+    @pytest.mark.unit
+    def test_fully_judged_non_regressing_result_passes(self, tmp_path):
+        """judge_failures == 0 and judge_coverage True → the gate still passes."""
+        baseline = _make_result(0.90)
+        current = _make_result(0.91)
+        current["summary"].update({"judge_failures": 0, "gates": {"judge_coverage": True}})
+
+        result = compare(baseline, current)
+        assert result["passed"] is True
+        assert result["inconclusive"] is False
+
+        bp = tmp_path / "baseline.json"
+        cp = tmp_path / "current.json"
+        bp.write_text(json.dumps(baseline))
+        cp.write_text(json.dumps(current))
+        assert run_gate(str(bp), str(cp)) == 0
+
+
+@pytest.mark.unit
+def test_partial_baseline_is_inconclusive(tmp_path):
+    """A partial *baseline* (judge failures) is not compared either: exit 3.
+
+    Sabotage-proof: compute ``inconclusive`` from the current side only —
+    the partial baseline is compared and the gate passes. Restored.
+    """
+    baseline = _make_result(0.90)
+    baseline["summary"]["judge_failures"] = 1
+    current = _make_result(0.91)
+
+    result = compare(baseline, current)
+    assert result["inconclusive"] is True
+    assert any("the baseline" in line for line in result["summary_lines"])
+
+    bp = tmp_path / "baseline.json"
+    cp = tmp_path / "current.json"
+    bp.write_text(json.dumps(baseline))
+    cp.write_text(json.dumps(current))
+    assert run_gate(str(bp), str(cp)) == EXIT_INCONCLUSIVE
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("partial_side", ["current", "baseline"])
+def test_partial_comparison_prints_only_the_inconclusive_summary(partial_side):
+    """When either side is partial, the summary carries ONLY the inconclusive
+    diagnostic: no PASS line, no "no regression" verdict, no score table.
+
+    Sabotage-proof: always build the normal ``_build_summary_lines`` table and
+    append the diagnostic after it (the previous behaviour) — "✅ PASS: no
+    regression detected" appears and both legs fail. Restored.
+    """
+    baseline = _make_result(0.90)
+    current = _make_result(0.91)
+    (current if partial_side == "current" else baseline)["summary"]["judge_failures"] = 1
+
+    lines = compare(baseline, current)["summary_lines"]
+    text = "\n".join(lines)
+    assert "INCONCLUSIVE" in text
+    assert "PASS" not in text
+    assert "no regression" not in text.lower()
+    assert "Category breakdown" not in text
+
+
+@pytest.mark.unit
+def test_complete_non_regressing_comparison_keeps_pass_line():
+    """A complete, non-regressing comparison still prints the PASS verdict."""
+    lines = compare(_make_result(0.90), _make_result(0.91))["summary_lines"]
+    assert "✅ PASS: no regression detected" in lines

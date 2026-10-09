@@ -600,3 +600,66 @@ def test_main_resolves_default_log_path_for_report(monkeypatch, tmp_path: Path) 
     _stdout, _stderr, code = _drive(["report"], EvalCliDeps(generate_report=_gen))
     assert code == 0
     assert captured.get("log_path", "").endswith("monitor.jsonl")
+
+
+_PARTIAL_RESULT = {"summary": {"category_scores": {"recall": 0.9}, "weighted_total": 0.9, "judge_failures": 3}}
+
+
+def test_gate_refuses_partial_result(tmp_path: Path) -> None:
+    """``kairix eval gate`` on a result with judge failures exits 3
+    (inconclusive) with a PARTIAL diagnostic and never runs the gate.
+
+    Sabotage: drop the ``judge_failures(data)`` check in ``_cmd_gate`` — the
+    fake gate passes and the command exits 0. Restored.
+    """
+    result_file = tmp_path / "r.json"
+    result_file.write_text(json.dumps(_PARTIAL_RESULT), encoding="utf-8")
+    deps = EvalCliDeps(run_gate=lambda scores, **kw: SimpleNamespace(passed=True, format=lambda: "GATE-PASS"))
+    stdout, stderr, code = _drive(["gate", "--result", str(result_file)], deps)
+    assert code == 3
+    assert "PARTIAL" in stderr
+    assert "GATE-PASS" not in stdout
+
+
+def test_tune_warns_on_partial_result(tmp_path: Path) -> None:
+    """``kairix eval tune`` is advisory: a partial result still gets advice,
+    but with a PARTIAL warning.
+
+    Sabotage: drop the partial warning in ``_cmd_tune`` — no PARTIAL line;
+    or drop the ``if failures:`` branch before "No tuning needed" — the
+    partial result gets the above-floor verdict. Restored.
+    """
+    result_file = tmp_path / "r.json"
+    result_file.write_text(json.dumps(_PARTIAL_RESULT), encoding="utf-8")
+    stdout, _stderr, code = _drive(["tune", "--result", str(result_file)])
+    assert code == 0
+    assert "PARTIAL RESULT" in stdout
+    # The only category scored above the floor, but a partial result never
+    # gets the "above floor / no tuning needed" verdict.
+    assert "No tuning needed" not in stdout
+    assert "INCONCLUSIVE" in stdout
+
+
+def test_monitor_partial_run_returns_inconclusive(tmp_path: Path) -> None:
+    """A canary run with judge failures exits 3 with a PARTIAL diagnostic.
+
+    Sabotage: drop the ``judge_failures`` check in ``_cmd_monitor`` — the
+    partial run reports "No regression detected" and exits 0. Restored.
+    """
+    result = SimpleNamespace(
+        ts="2026-05-14T00:00:00Z",
+        n_cases=10,
+        weighted_ndcg=0.9,
+        vec_failed_count=0,
+        ndcg_by_category={"recall": 0.9},
+        regression=False,
+        regression_detail=None,
+        judge_failures=2,
+    )
+    deps = EvalCliDeps(run_monitor=lambda **kw: result)
+    suite = tmp_path / "canary.yaml"
+    suite.write_text("cases:\n", encoding="utf-8")
+    stdout, stderr, code = _drive(["monitor", "--suite", str(suite), "--log", str(tmp_path / "mon.jsonl")], deps)
+    assert code == 3
+    assert "PARTIAL" in stderr
+    assert "No regression detected" not in stdout

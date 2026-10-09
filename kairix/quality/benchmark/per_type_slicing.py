@@ -190,7 +190,8 @@ def aggregate_canary(
     regression that splits the atomic unit drops the score below the
     bar and the canary fails loudly.
 
-    Cases without ``canary=True`` are skipped; an empty result is
+    Cases without ``canary=True`` are skipped, as are unscored cases
+    (``score`` is ``None`` after an LLM-judge failure); an empty result is
     returned when no canaries are present so callers can treat zero
     canaries as a separate visible state rather than absorbing it into
     a 100% pass-rate.
@@ -208,6 +209,9 @@ def aggregate_canary(
     overall: list[bool] = []
     for case, result in zip(cases, case_results, strict=False):
         if not getattr(case, "canary", False):
+            continue
+        if result.get("score") is None:
+            # Unscored (LLM-judge failure) — neither a pass nor a fail.
             continue
         passed = float(result.get("score", 0.0)) >= _CANARY_PASS_THRESHOLD
         overall.append(passed)

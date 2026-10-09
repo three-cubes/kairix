@@ -1,8 +1,8 @@
 """BenchmarkPipeline — orchestrator for retrieval quality benchmarking.
 
 Wraps the procedural run_benchmark() function in a composable dataclass.
-The search dependency is injectable (SearchPipeline or any callable matching
-the SearchBackendProtocol) so tests can substitute fakes.
+The search dependency is injectable (SearchPipeline or any callable with a
+compatible ``search`` signature) so tests can substitute fakes.
 
 Production code uses build_benchmark_pipeline() from the factory;
 tests construct BenchmarkPipeline directly.

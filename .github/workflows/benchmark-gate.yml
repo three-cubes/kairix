@@ -74,6 +74,9 @@ jobs:
           print(f'weighted_total: {result.summary[\"weighted_total\"]}')
           for cat, score in sorted(result.summary['category_scores'].items()):
               print(f'  {cat:<14} {score:.4f}')
+          from kairix.quality.completeness import judge_failures, partial_warning
+          if judge_failures(result):
+              print(partial_warning('contract suite run', judge_failures(result)))
           "
 
       - name: Compare against baseline
@@ -86,52 +89,16 @@ jobs:
       - name: Build PR comment body
         if: always() && github.event_name == 'pull_request'
         id: comment_body
+        env:
+          GATE_OUTCOME: ${{ steps.compare.outcome }}
+        # Completeness is checked first (shared kairix.quality.completeness):
+        # a partial result renders only the INCONCLUSIVE diagnostic, no table.
         run: |
-          python3 -c "
-          import json, sys
-
-          try:
-              current = json.load(open('/tmp/contract-current.json'))
-              baseline = json.load(open('benchmark-results/contract-baseline.json'))
-          except Exception as e:
-              print(f'Could not read result files: {e}', file=sys.stderr)
-              sys.exit(0)
-
-          cur_total = current['summary']['weighted_total']
-          base_total = baseline['summary']['weighted_total']
-          delta = cur_total - base_total
-          passed = '${{ steps.compare.outcome }}' == 'success'
-          emoji = '✅' if passed else '❌'
-
-          lines = [
-              f'## {emoji} Benchmark Gate — Contract Suite',
-              '',
-              f'**Weighted total:** {base_total:.4f} → {cur_total:.4f} ({delta:+.4f})',
-              '',
-              '| Category | Baseline | Current | Delta |',
-              '|---|---|---|---|',
-          ]
-          cur_cats = current['summary'].get('category_scores', {})
-          base_cats = baseline['summary'].get('category_scores', {})
-          for cat in sorted(set(cur_cats) | set(base_cats)):
-              b = base_cats.get(cat, 0.0)
-              c = cur_cats.get(cat, 0.0)
-              d = c - b
-              flag = ' ⚠️' if c < 0.50 else (' ↓' if d < -0.01 else '')
-              lines.append(f'| {cat} | {b:.4f} | {c:.4f} | {d:+.4f}{flag} |')
-
-          lines += [
-              '',
-              '_No regression detected. Gate passed._' if passed
-              else '_Gate failed: regression detected (threshold ±0.02). Review scores above._',
-          ]
-
-          body = chr(10).join(lines)
-          # Write to env file for next step
-          with open('/tmp/comment-body.txt', 'w') as f:
-              f.write(body)
-          print('Comment body written.')
-          "
+          python3 scripts/ci/benchmark_pr_comment.py \
+            /tmp/contract-current.json \
+            benchmark-results/contract-baseline.json \
+            "$GATE_OUTCOME" \
+            /tmp/comment-body.txt
 
       - name: Post PR comment
         if: always() && github.event_name == 'pull_request'

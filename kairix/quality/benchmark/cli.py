@@ -71,6 +71,12 @@ from pathlib import Path
 from typing import Any
 
 from kairix.core.db import get_db_path, open_db
+from kairix.quality.completeness import (
+    EXIT_INCONCLUSIVE,
+    judge_failures,
+    partial_diagnostic,
+    partial_warning,
+)
 
 # F17 — score-summary key + reserved mode name appear in baseline-compare,
 # rendering, and mode-dispatch sites; extract so renames hit a single edit site.
@@ -400,6 +406,13 @@ def _emit_baseline_compare(result: Any, baseline_path: str) -> None:
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         print(f"  baseline compare skipped: {exc}")
         return
+    partial = [(label, judge_failures(side)) for label, side in (("baseline", baseline), ("this run", result))]
+    partial = [(label, failures) for label, failures in partial if failures]
+    if partial:
+        # Partial on either side: warn and stop — never print a delta after the warning.
+        for label, failures in partial:
+            print("  " + partial_warning(f"{label} (baseline compare skipped)", failures))
+        return
     a = baseline.get("summary", {}).get(_KEY_WEIGHTED_TOTAL, 0.0)
     b = result.summary.get(_KEY_WEIGHTED_TOTAL, 0.0)
     delta = b - a
@@ -611,8 +624,13 @@ def cmd_run(args: argparse.Namespace, deps: BenchmarkCLIDeps | None = None) -> i
     if baseline_path:
         _emit_baseline_compare(result, baseline_path)
 
-    if getattr(args, "gates", False) and not _gates_passed(result):
-        return _emit_gate_failure()
+    if getattr(args, "gates", False):
+        failures = judge_failures(result)
+        if failures:
+            print(partial_diagnostic("this benchmark run", failures), file=sys.stderr)
+            return EXIT_INCONCLUSIVE
+        if not _gates_passed(result):
+            return _emit_gate_failure()
     return 0
 
 
@@ -768,6 +786,13 @@ def cmd_compare(args: argparse.Namespace) -> int:
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         print(f"❌ Error loading results: {exc}", file=sys.stderr)
         return 1
+
+    partial = [(path, judge_failures(data)) for path, data in ((args.result_a, a), (args.result_b, b))]
+    partial = [(path, failures) for path, failures in partial if failures]
+    if partial:
+        for path, failures in partial:
+            print(partial_diagnostic(f"result {path}", failures), file=sys.stderr)
+        return EXIT_INCONCLUSIVE
 
     a_meta = a.get("meta", {})
     b_meta = b.get("meta", {})

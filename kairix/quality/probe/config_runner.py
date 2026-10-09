@@ -102,6 +102,7 @@ from kairix.quality.probe.config_report import (
     TuningRecommendation,
     hostname_from_endpoint,
 )
+from kairix.quality.redaction import describe_exception
 
 #: Number of warm sequential ``embed_batch`` calls in the warm phase.
 #: Picked to give a small but meaningful p95 sample without making
@@ -585,7 +586,7 @@ def _healthcheck_ok(provider: Provider) -> tuple[bool, str | None]:
     try:
         health = provider.healthcheck()
     except Exception as exc:
-        return False, f"healthcheck raised: {type(exc).__name__}: {exc}"
+        return False, f"healthcheck {describe_exception(exc)}"
     if not health.ok:
         return False, health.error or "healthcheck reported endpoint not ok"
     return True, None
@@ -604,7 +605,7 @@ def _safe_snapshot(snapshotter: TransportSnapshotter) -> tuple[TransportSnapshot
         return snapshotter.snapshot(), None
     except Exception as exc:
         return TransportSnapshot(), (
-            f"transport snapshot failed ({type(exc).__name__}: {exc}) — "
+            f"transport snapshot failed ({describe_exception(exc)}) — "
             f"transport stats unavailable; check the coalescer / cache wiring"
         )
 

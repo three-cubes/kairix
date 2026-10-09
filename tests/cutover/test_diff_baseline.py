@@ -319,3 +319,28 @@ def test_json_mode_emits_structured_report(tmp_path: Path, capsys: pytest.Captur
     assert payload["overall"] == "ALL GATES PASS"
     names = {g["name"] for g in payload["gates"]}
     assert names == {"state", "eval", "latency", "sample_journey"}
+
+
+def test_strict_mode_exits_inconclusive_on_partial_eval_capture(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A partial eval capture on either side makes the eval gate
+    INCONCLUSIVE; ``--strict`` exits 3 (the shared inconclusive code).
+
+    Sabotage-proof: drop the ``partial`` check in ``_check_gate_benchmark`` —
+    the partial suite is silently skipped, the gate passes and --strict
+    exits 0. Restored.
+    """
+    pre = _baseline()
+    post = copy.deepcopy(pre)
+    post["eval"]["reflib"] = {"partial": True, "judge_failures": 2}
+    pre_path = tmp_path / "pre.json"
+    post_path = tmp_path / "post.json"
+    _write_baseline(pre_path, pre)
+    _write_baseline(post_path, post)
+
+    rc = main(["--pre", str(pre_path), "--post", str(post_path), "--strict"])
+    assert rc == 3
+    out = capsys.readouterr().out
+    assert "[INCONCLUSIVE] eval" in out
+    assert "INCONCLUSIVE — partial capture" in out

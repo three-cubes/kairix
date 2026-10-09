@@ -1,33 +1,12 @@
-"""Contract: SearchBackendProtocol -- verify SearchPipeline.search signature conformance.
+"""Contract: SearchPipeline.search keeps its public call signature.
 
-Checks that kairix.core.search.pipeline.SearchPipeline.search has parameters
-compatible with the SearchBackendProtocol defined in kairix.quality.contracts.search.
-
-Also verifies the backwards-compatible hybrid.search wrapper retains its public API.
+Checks that ``kairix.core.search.pipeline.SearchPipeline.search`` takes
+``query`` first, plus ``agent`` (default ``None``) and ``budget``.
 """
 
 import inspect
 
 import pytest
-
-from kairix.quality.contracts.search import SearchBackendProtocol
-
-
-@pytest.mark.contract
-def test_search_backend_protocol_has_search_method():
-    """SearchBackendProtocol defines a 'search' method."""
-    assert hasattr(SearchBackendProtocol, "search")
-
-
-@pytest.mark.contract
-def test_search_backend_protocol_search_signature():
-    """SearchBackendProtocol.search has expected parameter names."""
-    sig = inspect.signature(SearchBackendProtocol.search)
-    param_names = list(sig.parameters.keys())
-    assert "self" in param_names
-    assert "query" in param_names
-    assert "agent" in param_names
-    assert "limit" in param_names
 
 
 @pytest.mark.contract
@@ -75,17 +54,3 @@ def test_pipeline_search_query_is_first_positional():
     params = list(sig.parameters.keys())
     # First param is 'self', second should be 'query'
     assert params[1] == "query"
-
-
-@pytest.mark.contract
-def test_search_result_protocol_fields():
-    """SearchResultProtocol defines the expected attributes."""
-    from kairix.quality.contracts.search import SearchResultProtocol
-
-    annotations = (
-        SearchResultProtocol.__protocol_attrs__
-        if hasattr(SearchResultProtocol, "__protocol_attrs__")
-        else list(SearchResultProtocol.__annotations__.keys())
-    )
-    for field_name in ("path", "score", "title", "snippet", "intent"):
-        assert field_name in annotations, f"SearchResultProtocol missing field: {field_name}"

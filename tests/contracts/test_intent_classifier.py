@@ -1,4 +1,4 @@
-"""Contract: SearchBackendProtocol — intent classifier contract tests.
+"""Contract: intent classifier contract tests.
 
 The intent classifier is the most critical contract in the search domain:
 it must never raise, must always return a valid QueryIntent, and must

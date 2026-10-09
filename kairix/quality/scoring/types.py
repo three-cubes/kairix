@@ -13,8 +13,9 @@ runtime-checkable so contract tests can `isinstance(scorer, Scorer)` against
 fakes and concrete implementations alike.
 
 F26-clean: this module imports only from `typing` / `dataclasses` /
-`collections.abc` / stdlib — no provider, no transport, no benchmark/runner
-dependency. Other layers depend on us; we depend on nothing.
+`collections.abc` / stdlib, plus the stdlib-only :mod:`kairix.quality.redaction`
+formatter — no provider, no transport, no benchmark/runner dependency.
+Other layers depend on us.
 """
 
 from __future__ import annotations
@@ -22,6 +23,50 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
+
+from kairix.quality.redaction import describe_exception
+
+
+class JudgeFailedError(RuntimeError):
+    """The LLM judge could not produce a score.
+
+    Raised by every LLM judge — the benchmark relevance judge
+    (:func:`kairix.quality.benchmark.runner.llm_judge`), the conversation
+    suite judge (``SuiteRunner._judge``) and :class:`LLMJudgeScorer` — when
+    the backend fails (auth, timeout, unconfigured provider, empty reply) or
+    replies with something that is not a finite number. A failed judgement
+    is NOT a verdict: callers must record the case as unscored and exclude
+    it from aggregates instead of counting it as 0.0.
+
+    Attributes:
+        reason: Stable machine-readable failure class —
+                :data:`JUDGE_FAILURE_BACKEND_ERROR` or
+                :data:`JUDGE_FAILURE_UNPARSEABLE`.
+        detail: Human-readable detail — the backend exception's class name
+                only (never its message), or the length of the unparseable
+                reply (never the reply text).
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"llm judge failed ({reason}): {detail}")
+        self.reason = reason
+        self.detail = detail
+
+    @classmethod
+    def from_backend_exception(cls, exc: BaseException) -> JudgeFailedError:
+        """``backend_error`` carrying only the exception's class name.
+
+        The exception *message* is never copied: provider errors can carry API
+        keys, auth headers, request payloads or retrieved content, and
+        ``detail`` is persisted into benchmark / eval JSON. The class name is
+        code-defined and stays machine-readable (``backend raised TimeoutError``).
+        """
+        return cls(JUDGE_FAILURE_BACKEND_ERROR, f"backend {describe_exception(exc)}")
+
+
+JUDGE_FAILURE_BACKEND_ERROR = "backend_error"
+JUDGE_FAILURE_UNPARSEABLE = "unparseable_response"
+
 
 LatencyPhase = Literal["cold", "warm", "load"]
 """Latency capture phase.

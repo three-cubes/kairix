@@ -36,6 +36,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kairix.quality.completeness import EXIT_INCONCLUSIVE, is_complete
+
 # Hard-gate thresholds (per spec §4.2 Step 5).
 STATE_TOLERANCE_PCT = 2.0
 RECALL_TOLERANCE_PP = 2.0
@@ -161,6 +163,18 @@ def _check_gate_benchmark(pre: Any, post: Any) -> GateResult:
     """Recall scores within tolerance; reflib +-2pp, LoCoMo +-3pp."""
     if pre is None or post is None:
         return GateResult("eval", "skip", "eval surface missing on one side")
+    partial = sorted(
+        f"{side}.{suite}"
+        for side, surface in (("pre", pre), ("post", post))
+        for suite, payload in surface.items()
+        if isinstance(payload, dict) and not is_complete(payload)
+    )
+    if partial:
+        return GateResult(
+            "eval",
+            "inconclusive",
+            f"partial eval capture (LLM-judge failures) in {partial} — re-run capture_baseline",
+        )
     failures: list[str] = []
     details: dict[str, Any] = {}
     _check_recall_suite(pre, post, "reflib", "recall_at_10", RECALL_TOLERANCE_PP, details, failures)
@@ -329,7 +343,7 @@ def _format_human(report: dict[str, Any]) -> str:
         "gates:",
     ]
     for gate in report["gates"]:
-        marker = {"pass": "PASS", "fail": "FAIL", "skip": "SKIP"}[gate["status"]]
+        marker = {"pass": "PASS", "fail": "FAIL", "skip": "SKIP", "inconclusive": "INCONCLUSIVE"}[gate["status"]]
         lines.append(f"  [{marker}] {gate['name']:<16}  {gate['detail']}")
     lines.append("")
     lines.append(f"overall: {report['overall']}")
@@ -360,6 +374,9 @@ def _overall_verdict(gates: list[GateResult]) -> str:
     failing = [g.name for g in gates if g.status == "fail"]
     if failing:
         return f"ROLLBACK RECOMMENDED — gate(s) failed: {', '.join(failing)}"
+    inconclusive = [g.name for g in gates if g.status == "inconclusive"]
+    if inconclusive:
+        return f"INCONCLUSIVE — partial capture in gate(s): {', '.join(inconclusive)}; re-run capture_baseline."
     skipped = [g.name for g in gates if g.status == "skip"]
     if skipped and not [g for g in gates if g.status == "pass"]:
         return "INCONCLUSIVE — no gate produced a pass; re-run capture_baseline."
@@ -402,6 +419,8 @@ def main(argv: list[str] | None = None) -> int:
     any_failed = any(g["status"] == "fail" for g in report["gates"])
     if args.strict and any_failed:
         return 1
+    if args.strict and any(g["status"] == "inconclusive" for g in report["gates"]):
+        return EXIT_INCONCLUSIVE
     return 0
 
 

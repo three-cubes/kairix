@@ -64,6 +64,7 @@ def _invoke(
     *,
     tmp_path: Path,
     chat_response: str = "1.0",
+    chat_responses: list[str] | None = None,
 ) -> tuple[int, str, str]:
     """Run the use case main and return (exit_code, stdout, stderr).
 
@@ -86,7 +87,11 @@ def _invoke(
         paths=_paths(tmp_path),
         fact_store=FakeFactStore(),
         fact_extractor=FakeFactExtractor(),
-        llm=FakeLLMBackend(chat_response=chat_response),
+        llm=(
+            FakeLLMBackend(chat_responses=chat_responses)
+            if chat_responses is not None
+            else FakeLLMBackend(chat_response=chat_response)
+        ),
     )
     return code, out.getvalue(), err.getvalue()
 
@@ -213,6 +218,41 @@ def test_main_regression_gate_fails_when_below_tolerance(tmp_path: Path) -> None
     assert "engagement-alpha" in err
     assert "fix:" in err
     assert "next:" in err
+
+
+@pytest.mark.unit
+def test_main_regression_gate_inconclusive_when_judge_failed(tmp_path: Path) -> None:
+    """One question judged 1.0 and one judge failure (backend returned
+    ``""``): the partial mean (1.0) would sail past a 1.0 baseline, so the
+    gate refuses to compare and exits 3 (inconclusive) with an affordance.
+    The same suite fully judged and not regressing still exits 0.
+
+    Sabotage-proof: drop the ``if result.judge_failures:`` early return in
+    ``_check_regression`` — the partial mean is compared, the gate exits 0,
+    and the first assertion fails. Restored.
+    """
+    suite = _make_suite_dir(tmp_path)
+    baseline_dir = _write_baseline(tmp_path, "engagement-alpha", mean=1.0)
+
+    code, _, err = _invoke(
+        [str(suite), "--regression-against", str(baseline_dir)],
+        tmp_path=tmp_path,
+        chat_responses=["1.0", ""],
+    )
+    assert code == _use_case.EXIT_REGRESSION_INCONCLUSIVE == 3
+    assert "INCONCLUSIVE" in err
+    assert "failed on 1 case(s)" in err
+    assert "fix:" in err
+    assert "next:" in err
+
+    code, _, err = _invoke(
+        [str(suite), "--regression-against", str(baseline_dir)],
+        tmp_path=tmp_path,
+        chat_responses=["1.0", "1.0"],
+    )
+    assert code == 0
+    assert "INCONCLUSIVE" not in err
+    assert "REGRESSION" not in err
 
 
 def test_main_regression_gate_missing_baseline_is_actionable(tmp_path: Path) -> None:
@@ -564,6 +604,28 @@ def test_main_extractor_f1_reported_when_ground_truth_facts_present(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_main_reports_judge_failures_instead_of_wrong_answers(tmp_path: Path) -> None:
+    """An LLM backend failure (``chat`` returns ``""``) is reported as judge
+    failures in the human output and in ``--json`` — not as 0/2 wrong.
+
+    Sabotage-proof: drop the ``if result.judge_failures:`` block in
+    ``_format_human`` — the "Judge failures: 2" line disappears and the
+    first assertion fails. Restored.
+    """
+    suite = _make_suite_dir(tmp_path)
+    code, out, _ = _invoke([str(suite)], tmp_path=tmp_path, chat_response="")
+    assert code == 0
+    assert "Judge failures: 2 question(s) unscored" in out
+    assert "0/0" in out
+
+    code, out, _ = _invoke([str(suite), "--json"], tmp_path=tmp_path, chat_response="")
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["judge_failures"] == 2
+    assert payload["n_questions"] == 0
+
+
+@pytest.mark.unit
 def test_pct_returns_zero_on_zero_total() -> None:
     """``pct(passed, total=0)`` returns 0 — guards divide-by-zero in
     the human-readable category breakdown.
@@ -891,3 +953,63 @@ def test_resolve_production_fact_extractor_falls_back_on_factory_construction_er
 # "test-shaped API". The branches carry ``# pragma: no cover`` with
 # the rationale documented inline; coverage of the helpers' happy paths
 # is provided by the existing main()-driven tests above.
+
+
+_SENTINEL = "credential-sentinel-7f3a"  # stand-in for a secret a provider error could echo
+
+
+@pytest.mark.unit
+def test_main_json_never_contains_backend_exception_text(tmp_path: Path) -> None:
+    """``kairix eval --json`` with a judge backend whose exception message
+    carries a credential: the sentinel is absent from stdout / stderr, and
+    every row keeps the machine-readable failure class.
+
+    Sabotage-proof: put the message back into
+    ``JudgeFailedError.from_backend_exception`` — the sentinel lands in each
+    row's ``judge_error`` and the first assertion fails. Restored.
+    """
+    suite = _make_suite_dir(tmp_path)
+    out = io.StringIO()
+    err = io.StringIO()
+    code = _use_case.main(
+        [str(suite), "--json", "--legacy-direct"],
+        out=out,
+        err=err,
+        paths=_paths(tmp_path),
+        fact_store=FakeFactStore(),
+        fact_extractor=FakeFactExtractor(),
+        llm=FakeLLMBackend(chat_raises=RuntimeError(f"Authorization: Bearer {_SENTINEL}")),
+    )
+    assert _SENTINEL not in out.getvalue()
+    assert _SENTINEL not in err.getvalue()
+    assert code == 0
+    payload = json.loads(out.getvalue())
+    assert payload["judge_failures"] == 2
+    assert {row["judge_error"] for row in payload["rows"]} == {"backend raised RuntimeError"}
+    assert {row["judge_failure"] for row in payload["rows"]} == {"backend_error"}
+
+
+@pytest.mark.unit
+def test_main_regression_gate_inconclusive_when_baseline_is_partial(tmp_path: Path) -> None:
+    """A fully judged run against a PARTIAL pinned baseline is inconclusive
+    (exit 3): the baseline's mean covers only its judged questions.
+
+    Sabotage-proof: drop the ``if not is_complete(baseline_raw)`` block in
+    ``_check_regression`` — the partial baseline is compared and the gate
+    exits 0. Restored.
+    """
+    suite = _make_suite_dir(tmp_path)
+    baseline_dir = _write_baseline(tmp_path, "engagement-alpha", mean=0.5)
+    baseline_file = baseline_dir / "engagement-alpha.json"
+    baseline = json.loads(baseline_file.read_text(encoding="utf-8"))
+    baseline["judge_failures"] = 4
+    baseline_file.write_text(json.dumps(baseline), encoding="utf-8")
+
+    code, _, err = _invoke(
+        [str(suite), "--regression-against", str(baseline_dir)],
+        tmp_path=tmp_path,
+        chat_response="1.0",
+    )
+    assert code == 3
+    assert "PARTIAL" in err
+    assert "the baseline" in err

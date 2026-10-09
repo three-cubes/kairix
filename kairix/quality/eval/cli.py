@@ -25,6 +25,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kairix.quality.completeness import (
+    EXIT_INCONCLUSIVE,
+    judge_failures,
+    partial_diagnostic,
+    partial_warning,
+)
+
 _DEFAULT_DEPLOYMENT = "gpt-4o-mini"
 _DEFAULT_AGENT = "shape"
 _AGENT_HELP = "Agent for retrieval scoping (default: shape)"
@@ -260,6 +267,11 @@ def _cmd_monitor(args: argparse.Namespace, deps: EvalCliDeps) -> int:
         agent=args.agent,
     )
 
+    failures = int(getattr(result, "judge_failures", 0) or 0)
+    if failures:
+        print(partial_diagnostic("this canary run (not recorded in the trend log)", failures), file=sys.stderr)
+        return EXIT_INCONCLUSIVE
+
     print(f"\nMonitor result ({result.ts[:19]}):")
     print(f"  Cases run: {result.n_cases}")
     print(f"  Weighted NDCG: {result.weighted_ndcg:.4f}")
@@ -462,6 +474,17 @@ def _corpus_hints(deps: EvalCliDeps) -> Any:
     )
 
 
+def _no_weak_categories_verdict(judge_failure_count: int) -> str:
+    """Verdict line when no category is below the floor.
+
+    Never claims "above floor" for a partial result — its scores cover only
+    the judged cases.
+    """
+    if judge_failure_count:
+        return "\nNo weak categories among the judged cases — INCONCLUSIVE (partial result); re-run before tuning."
+    return "\nAll categories above floor. No tuning needed."
+
+
 def _cmd_tune(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     import json
 
@@ -482,13 +505,17 @@ def _cmd_tune(args: argparse.Namespace, deps: EvalCliDeps) -> int:
 
     analysis = analyse_results(scores, floor=args.floor)
 
+    failures = judge_failures(data)
+    if failures:
+        print(partial_warning(f"benchmark result {args.result} (tuning advice may be skewed)", failures))
+
     print(f"Category scores (floor={args.floor}):")
     for cat, score in sorted(scores.items()):
         marker = "  " if score >= args.floor else "!!"
         print(f"  {marker} {cat:12s} {score:.3f}")
 
     if not analysis.weak_categories:
-        print("\nAll categories above floor. No tuning needed.")
+        print(_no_weak_categories_verdict(failures))
         return 0
 
     print(f"\nWeak categories: {', '.join(analysis.weak_categories)}")
@@ -528,6 +555,11 @@ def _cmd_gate(args: argparse.Namespace, deps: EvalCliDeps) -> int:
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+    failures = judge_failures(data)
+    if failures:
+        print(partial_diagnostic(f"benchmark result {args.result}", failures), file=sys.stderr)
+        return EXIT_INCONCLUSIVE
 
     summary = data.get("summary", {})
     scores = summary.get("category_scores", {})

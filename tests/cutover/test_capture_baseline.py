@@ -293,3 +293,25 @@ def test_run_sample_query_accepts_source_and_doc_path_keys() -> None:
     }
     paths = _run_sample_query("anything", runner=lambda _argv: payload)
     assert paths == ["first.md", "second.md", "third.md"]
+
+
+def test_capture_marks_partial_benchmark_suite_instead_of_recording_scores(tmp_path: Path) -> None:
+    """A suite whose benchmark report has judge failures is captured as a
+    ``partial`` marker — its scores are never recorded as a baseline value.
+
+    Sabotage-proof: drop the ``judge_failures(report)`` check in
+    ``_capture_one_benchmark_suite`` — the partial run's scores are projected
+    into the payload. Restored.
+    """
+    import subprocess as _subprocess
+
+    from scripts.cutover.capture_baseline import _capture_one_benchmark_suite
+
+    def _runner(argv: list[str], **_kwargs: object) -> _subprocess.CompletedProcess[str]:
+        out_dir = Path(argv[argv.index("--output") + 1])
+        report = {"summary": {"ndcg_at_10": 0.95, "weighted_total": 0.95, "judge_failures": 2}}
+        (out_dir / "B-reflib-hybrid-2026-01-01.json").write_text(json.dumps(report), encoding="utf-8")
+        return _subprocess.CompletedProcess(argv, 0, "", "")
+
+    payload = _capture_one_benchmark_suite("reflib", _runner)
+    assert payload == {"partial": True, "judge_failures": 2}

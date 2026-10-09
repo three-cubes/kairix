@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kairix.paths import monitor_log_path as _monitor_log_path
+from kairix.quality.completeness import judge_failures as _judge_failures
 from kairix.quality.eval.constants import CATEGORY_WEIGHTS
 
 if TYPE_CHECKING:
@@ -65,6 +66,9 @@ class MonitorResult:
     vec_failed_count: int
     regression: bool
     regression_detail: str | None
+    judge_failures: int = 0
+    """LLM-judge failures in the run; > 0 means a partial run that was NOT
+    appended to the trend log and never flags a regression."""
 
 
 # ---------------------------------------------------------------------------
@@ -271,10 +275,30 @@ def run_monitor(
         # The previous ``case["meta"]["vec_failed"]`` read always returned
         # False (silent dead-zero bug surfaced by contract test).
         vec_failed = sum(1 for case in result.cases if case.get("vec_failed", False))
+        failures = _judge_failures(result)
 
     except Exception as e:
         logger.warning("monitor: benchmark run failed — %s", e)
         return _empty
+
+    if failures:
+        # Partial run: its scores cover only the judged cases. Never trend it
+        # and never compare it against the rolling baseline.
+        logger.warning(
+            "monitor: PARTIAL run — the LLM judge failed on %d case(s); not recorded in the trend log",
+            failures,
+        )
+        return MonitorResult(
+            ts=ts,
+            suite_path=suite_path,
+            n_cases=n_cases,
+            ndcg_by_category=ndcg_by_category,
+            weighted_ndcg=weighted_ndcg,
+            vec_failed_count=vec_failed,
+            regression=False,
+            regression_detail=None,
+            judge_failures=failures,
+        )
 
     # Load existing log and compute baseline
     existing_entries = _load_log(log_path)

@@ -135,7 +135,7 @@ def test_exception_in_one_query_is_captured_others_continue() -> None:
 
     def _exec(sampled: SampledQuery) -> QueryRunResult:
         if sampled.case_id == "BAD":
-            raise RuntimeError("boom")
+            raise RuntimeError("boom; api-key credential-sentinel-7f3a")
         return QueryRunResult(
             query_id=sampled.case_id,
             category=sampled.category,
@@ -158,8 +158,10 @@ def test_exception_in_one_query_is_captured_others_continue() -> None:
     by_id = {r.query_id: r for r in result.per_query_runs}
     assert by_id["OK1"].error is None
     assert by_id["BAD"].error is not None
-    assert "RuntimeError" in by_id["BAD"].error
-    assert "boom" in by_id["BAD"].error
+    # Class-only — the exception message never reaches the per-query row.
+    assert by_id["BAD"].error == "query raised RuntimeError"
+    assert all("credential-sentinel-7f3a" not in e for e in result.errors)
+    assert "credential-sentinel-7f3a" not in str(result.per_query_runs)
     assert by_id["OK2"].error is None
     assert any("BAD" in e for e in result.errors)
 

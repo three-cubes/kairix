@@ -28,6 +28,8 @@ from datetime import date as date_cls
 from pathlib import Path
 from typing import Any
 
+from kairix.quality.completeness import EXIT_INCONCLUSIVE, judge_failures, partial_diagnostic
+
 DEFAULT_HISTORY_DIR = Path("benchmark-results/history")
 INDEX_FILENAME = "INDEX.md"
 
@@ -80,6 +82,10 @@ def _fmt_score(value: Any) -> str:
         return f"{float(value):.3f}"
     except (TypeError, ValueError):
         return "-"
+
+
+class PartialResultError(RuntimeError):
+    """The benchmark result is partial (LLM-judge failures) — never archived."""
 
 
 def format_index_row(tag: str, date: str, summary: dict[str, Any]) -> str:
@@ -171,6 +177,9 @@ def update_history(
     validate_tag(tag)
 
     data = _read_json(result_json_path)
+    failures = judge_failures(data)
+    if failures:
+        raise PartialResultError(partial_diagnostic(f"benchmark result {result_json_path}", failures))
     summary = data.get("summary", {}) or {}
     meta = data.get("meta", {}) or {}
     date = _resolve_date(date_override, meta)
@@ -249,6 +258,9 @@ def main(argv: list[str] | None = None) -> int:
             history_dir=args.history_dir,
             date_override=args.date,
         )
+    except PartialResultError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_INCONCLUSIVE
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

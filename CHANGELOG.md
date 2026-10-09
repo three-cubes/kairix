@@ -15,6 +15,143 @@ Docker. This lets operators run native PPTX/XLSX/PDF extraction first, opt into
 DOCX-to-PDF conversion when page anchors matter, and keep MarkItDown as a
 fallback instead of losing page metadata for every indexed file.
 
+### LLM-judge failures no longer count as "irrelevant" (benchmark numbers may move)
+
+Before, when the LLM judge failed on a benchmark case scored with
+`score_method: llm` (bad credentials, a timeout, a reply that was not a
+number), the case scored 0.0. That looked the same as "the results were
+irrelevant" and quietly pulled scores down.
+
+Now a judge failure leaves the case unscored. It is left out of every
+average (category scores, weighted total, canary pass rates) instead of
+counting as 0. `kairix benchmark run` prints how many cases the judge failed
+on. The JSON output has a `judge_failures` count in `summary`, and each failed
+case has `score: null` plus `judge_failure` and `judge_error` fields that say
+why.
+
+**Your benchmark numbers may go up** compared with earlier runs, if earlier
+runs had judge failures that were counted as 0. Check `judge_failures` before
+comparing a new run against an old baseline. The eval `LLMJudgeScorer` now
+raises `JudgeFailedError` instead of returning 0.0. An empty retrieval still
+scores 0.0.
+
+`kairix eval <suite>` (conversation suites) works the same way now. Before, a
+judge failure (the LLM backend was down, or the reply was empty or not a
+number) scored the question 0.0 and counted it as wrong. A `nan` reply made
+the mean score `nan`, and an `inf` reply counted as a pass. Now those
+questions are unscored. They are left out of `n_questions`, `n_passed`,
+`mean_score` and the per-category numbers, and counted in a new
+`judge_failures` field. The text output prints a "Judge failures" line, and
+in `--json` each failed row has `score: null`, `pass: null`, `judge_failure`
+and `judge_error`. Note that `n_questions` now counts scored questions only.
+**Pass rates and mean scores may go up** compared with earlier runs that had
+judge failures. Check `judge_failures` before comparing against a baseline.
+
+**Partial results are never gated, compared, trended or published.** A
+result is *partial* when the LLM judge failed on any case or question. Its
+scores then cover only the judged cases. Every tool that gates, compares,
+trends or publishes results now checks for this with one shared rule
+(`kairix.quality.completeness`). Results saved before this release don't
+record judge failures, so they count as complete. The gate and compare tools
+stop with exit code **3 (inconclusive)** and say why. Tools that only display
+results print a "PARTIAL RESULT" warning instead.
+
+- `kairix benchmark run --gates` exits 3 if the judge failed on any case.
+  The summary also has a new `judge_coverage` gate that only passes when
+  `judge_failures` is 0, and the report shows a "JUDGE COVERAGE gate" FAIL
+  line. The unscored case rows still say why.
+- `kairix benchmark compare` exits 3 if either result is partial.
+  `kairix benchmark run --baseline` prints a PARTIAL warning and skips the
+  comparison line. `run_dual_benchmark` reports no deltas for a partial run.
+- `kairix eval --regression-against` exits 3 if the run or the pinned
+  baseline is partial. It does not compare the partial mean score, because
+  one good answer could hide a regression. Exit 1 still means a regression,
+  and exit 2 a missing or invalid baseline.
+- `kairix eval gate` exits 3 on a partial result and does not run the gate.
+  `kairix eval tune` still gives advice but prints a PARTIAL warning.
+  `kairix eval monitor` exits 3 on a partial canary run and keeps it out of
+  the trend log, so it can never cause or hide a regression alert.
+- The CI benchmark gate (`python -m kairix.quality.benchmark.baseline`, used
+  by `benchmark-gate.yml`) exits 3 if the current result or the baseline is
+  partial. The pull-request comment says "INCONCLUSIVE". A fully judged run
+  that hasn't regressed still passes.
+- `scripts/run-reflib-contract.py` and `scripts/compare-reflib-baseline.py`
+  exit 3 on a partial run or baseline. `scripts/update_reflib_history.py`
+  exits 3 and archives nothing, and the cutover `capture_baseline.py` records
+  a partial suite as a `partial` marker rather than its scores.
+  `diff_baseline.py --strict` then exits 3.
+- The LoCoMo nightly exits 3, and publishes no JSON or CSV artifact, when
+  the eval run is partial. The nightly comparison skips partial earlier runs
+  and compares against the newest complete one. If there is none, the current
+  complete run becomes the new baseline, so one partial run can't block every
+  later nightly. The conversation-eval CI gate checks every corpus run,
+  including "establishing baseline" runs, and exits 3 if any result is
+  partial, so a partial result is never recorded as a candidate baseline.
+- The benchmark-gate pull-request comment checks completeness first. A
+  partial result gets only the INCONCLUSIVE message, with no score table.
+- A partial result never shows a PASS. The benchmark report shows phase
+  gates, category floors and per-category notes as INCONCLUSIVE. The CI gate
+  summary shows only the inconclusive message. `kairix eval tune` no longer
+  says "No tuning needed" for a partial result.
+- A blank judge reply now counts as a backend failure (`backend_error`) in
+  the benchmark judge, the same as in the other judges.
+- All four LLM judges now use one shared routine to call the backend and
+  read the score (`kairix.quality.scoring.judge_call`). As a result, the
+  benchmark judge now accepts the first number in a reply that has extra
+  text (for example `"0.8 (mostly)"`), as the other judges already did. It
+  used to treat that as a failure.
+- Retrieval metadata can no longer overwrite or fake a case's
+  `judge_failure` / `judge_error` fields in the benchmark output.
+
+**Security: judge errors no longer copy exception text.** When a judge's
+backend raised an exception, the exception's message was stored in
+`judge_error` and saved in the benchmark and eval JSON. Provider errors can
+include API keys, auth headers, request payloads or retrieved content. Every
+judge now stores only the exception's class name (for example
+`judge_error: "backend raised TimeoutError"`, `judge_failure:
+"backend_error"`). The LoCoMo spike's synthesis and search error rows follow
+the same rule. If you shared benchmark or eval JSON produced with an earlier
+build of this branch, check its `judge_error` fields for sensitive text.
+
+The same rule now covers every other place `kairix.quality` saves an error
+from an exception. One shared helper, `kairix.quality.redaction`, writes only
+the class name (for example `"retrieval raised TimeoutError"`). This covers:
+
+- the benchmark case row's `error` field when retrieval fails;
+- single-shot per-query `error` rows;
+- probe concurrent-run rows;
+- the soak result `error`;
+- the probe config report's healthcheck error and transport-snapshot warning;
+- suite generation and enrichment credential-failure `errors`;
+- the `scripts/verify-search.py` JSON report notes.
+
+The soak runner still writes the full exception to its local log, as it
+already did.
+
+The last two judges follow the same rule, so no LLM judge in kairix turns a
+failure into a score any more:
+
+- `kairix.quality.scoring.LLMJudgeScorer` (the unified scorer) now raises
+  `JudgeFailedError` on a backend error or an empty, non-numeric, `nan` or
+  `inf` reply, instead of returning a 0.0 result. `parse_judge_score` raises
+  too. The failed query gets no judge result, so the per-category judge mean
+  covers only the queries that were actually judged. `JudgeFailedError` now
+  lives in `kairix.quality.scoring.types` (still importable from
+  `kairix.quality.benchmark.runner`).
+- The LoCoMo spike's mem0 backend (`scripts/benchmarks/locomo_spike.py`)
+  records judge failures as unscored rows, leaves them out of its numbers,
+  and reports a `judge_failures` count per conversation and in the totals.
+
+**Removed:** the `kairix.quality.contracts` package and its five Protocols:
+`BriefingSourceProtocol`, `EmbedderProtocol`, `EntityResolverProtocol`,
+`SearchBackendProtocol` and `SearchResultProtocol`. There is no replacement,
+because they had no implementation: nothing in kairix implemented or used
+them, no doc listed them, and no plugin entry-point group pointed at them.
+kairix's real boundary and plugin contracts are unchanged. They live in
+`kairix.core.protocols`, plus the plugin Protocols described in
+`docs/architecture/provider-plugin-architecture.md` and
+`docs/architecture/connector-ingestion-architecture.md`.
+
 ### Quality gates hold every file to the same bar (contributors)
 
 This changes how kairix is built and checked, not how it runs. Operators have

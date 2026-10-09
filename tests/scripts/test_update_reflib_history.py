@@ -315,3 +315,24 @@ def test_main_returns_one_when_tag_invalid(
 
     assert rc == 1
     assert "calver" in capsys.readouterr().err.lower()
+
+
+def test_main_refuses_partial_result(tmp_path: Path, history_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A partial benchmark result (judge failures) is never archived or
+    appended to INDEX.md: exit 3 with a PARTIAL diagnostic.
+
+    Sabotage-proof: drop the ``judge_failures(data)`` check in
+    ``update_history`` — the partial result is archived and main exits 0.
+    Restored.
+    """
+    payload = _sample_result()
+    payload["summary"]["judge_failures"] = 2
+    result = _write_result(tmp_path, payload)
+    index_before = (history_dir / "INDEX.md").read_text(encoding="utf-8")
+
+    rc = _mod.main([str(result), "--tag", "v2026.5.10.1", "--history-dir", str(history_dir)])
+
+    assert rc == 3
+    assert "PARTIAL" in capsys.readouterr().err
+    assert (history_dir / "INDEX.md").read_text(encoding="utf-8") == index_before
+    assert not list(history_dir.glob("v2026.5.10.1*.json"))

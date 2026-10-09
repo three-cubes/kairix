@@ -27,6 +27,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
+from kairix.quality.redaction import describe_exception
+
 T = TypeVar("T")
 
 
@@ -115,7 +117,7 @@ def run_concurrent(
             return TimedResult(
                 duration_ms=duration_ms,
                 succeeded=False,
-                error=f"{type(exc).__name__}: {exc}",
+                error=describe_exception(exc),
                 task_index=idx,
             )
         duration_ms = (clock() - t_start) * 1000.0

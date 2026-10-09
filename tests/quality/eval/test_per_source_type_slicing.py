@@ -220,6 +220,24 @@ def test_canary_summary_overall_and_by_unit() -> None:
     assert summary["by_unit"]["row"]["total"] == 2.0
 
 
+def test_canary_summary_skips_unscored_judge_failures() -> None:
+    """An unscored canary (score None after an LLM-judge failure) is neither
+    passed nor failed — it drops out of the totals instead of crashing.
+
+    Sabotage: remove the ``score is None`` skip in ``aggregate_canary`` —
+    ``float(None)`` raises TypeError and the test fails. Restored.
+    """
+    cases = [
+        _make_case("CS1", gold_title="deck.pptx", canary=True, canary_unit="slide"),
+        _make_case("CS2", gold_title="deck.pptx", canary=True, canary_unit="slide"),
+    ]
+    unscored = _make_case_result("CS2", 0.0)
+    unscored["score"] = None
+    summary = aggregate_canary(cases, [_make_case_result("CS1", 0.9), unscored])
+    assert summary["overall"]["total"] == 1.0
+    assert summary["overall"]["passed"] == 1.0
+
+
 def test_canary_summary_empty_when_no_canaries() -> None:
     """No canary-flagged cases → overall total = 0; no unit rows.
 

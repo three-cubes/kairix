@@ -3,7 +3,7 @@ Tests for kairix.quality.benchmark.runner. Covers:
 - exact_match(): gold path matching variants
 - fuzzy_match(): partial path matching
 - classification_score(): rule classifier integration
-- llm_judge(): API call mocked + error paths
+- llm_judge(): API call via FakeChatBackend + typed failure paths
 - score_tier(): tier labels
 - _category_diagnosis(): diagnostic strings
 - format_interpretation(): output structure
@@ -17,7 +17,10 @@ from typing import Any
 import pytest
 
 from kairix.quality.benchmark.runner import (
+    JUDGE_FAILURE_BACKEND_ERROR,
+    JUDGE_FAILURE_UNPARSEABLE,
     BenchmarkResult,
+    JudgeFailedError,
     classification_score,
     exact_match,
     format_interpretation,
@@ -207,13 +210,22 @@ def test_llm_judge_clamps_score_to_unit_interval() -> None:
 
 
 @pytest.mark.unit
-def test_llm_judge_returns_0_when_chat_backend_raises() -> None:
-    """Backend raises → returns 0.0 (never propagates)."""
+def test_llm_judge_raises_typed_failure_when_chat_backend_raises() -> None:
+    """Backend raises → JudgeFailedError(backend_error), never a silent 0.0.
+
+    Sabotage proof: restore ``except Exception: return 0.0`` around the
+    ``complete()`` call in ``llm_judge`` — pytest.raises sees no exception
+    and the test fails. Restored.
+    """
     from tests.fakes import FakeChatBackend
 
-    backend = FakeChatBackend(raise_on_call=OSError("timeout"))
-    score = llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
-    assert score == pytest.approx(0.0)
+    backend = FakeChatBackend(raise_on_call=OSError("timeout talking to provider"))
+    with pytest.raises(JudgeFailedError) as excinfo:
+        llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
+    assert excinfo.value.reason == JUDGE_FAILURE_BACKEND_ERROR
+    # Only the class name survives — never the exception message.
+    assert excinfo.value.detail == "backend raised OSError"
+    assert "timeout talking to provider" not in str(excinfo.value)
 
 
 @pytest.mark.unit
@@ -228,13 +240,27 @@ def test_llm_judge_returns_0_for_empty_paths_without_calling_backend() -> None:
 
 
 @pytest.mark.unit
-def test_llm_judge_returns_0_when_response_not_parseable_as_float() -> None:
-    """Non-numeric backend response → returns 0.0 (the float() raises ValueError)."""
+@pytest.mark.parametrize("reply", ["not a number", "nan", "inf"])
+def test_llm_judge_raises_typed_failure_when_reply_unparseable(reply: str) -> None:
+    """Non-numeric / non-finite reply → JudgeFailedError(unparseable_response).
+
+    The reply text never appears in the failure detail (F76 — only its length).
+
+    Sabotage proof: replace the ``math.isfinite`` guard with ``pass`` — the
+    "nan"/"inf" legs return a clamped number instead of raising and fail.
+    Restored.
+    """
     from tests.fakes import FakeChatBackend
 
-    backend = FakeChatBackend(responses=["not a number"])
-    score = llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
-    assert score == pytest.approx(0.0)
+    backend = FakeChatBackend(responses=[reply])
+    with pytest.raises(JudgeFailedError) as excinfo:
+        llm_judge("q", ["p.md"], ["s"], chat_backend=backend)
+    assert excinfo.value.reason == JUDGE_FAILURE_UNPARSEABLE
+    if reply:
+        assert reply not in excinfo.value.detail
+    if reply == "not a number":
+        # Non-numeric replies report their length (never their text).
+        assert f"({len(reply)} chars)" in excinfo.value.detail
 
 
 # ---------------------------------------------------------------------------
@@ -1037,24 +1063,22 @@ def test_default_content_classifier_classify_with_llm_fires_when_rules_return_un
 
 
 @pytest.mark.unit
-def test_llm_judge_lazy_default_chat_backend_returns_zero_on_credential_failure() -> None:
+def test_llm_judge_lazy_default_chat_backend_reports_credential_failure() -> None:
     """``llm_judge`` without ``chat_backend=`` lazily resolves the provider plugin.
 
     The test environment has no ``provider:`` field in ``kairix.config.yaml``,
-    so ``_default_chat_backend()`` raises ValueError. The wrapping try/except
-    inside ``llm_judge`` swallows it and returns 0.0. The lazy
-    default-construction branch is what's covered — the score being 0.0
-    (rather than ValueError propagating, IndexError, or NameError) is the
-    receipt that the resolution failure is handled gracefully.
+    so the lazy default backend raises ValueError on ``complete()``.
+    ``llm_judge`` converts it into a typed ``JudgeFailedError`` — a
+    credential / config failure must never read as a 0.0 "irrelevant" score.
 
-    Sabotage: remove the outer ``try/except`` in ``llm_judge`` — the
-    ValueError from the unresolved provider would propagate and the test
-    fails with an exception instead of asserting 0.0.
+    Sabotage: drop the ``except Exception`` around ``complete()`` in
+    ``llm_judge`` — the raw ValueError propagates and pytest.raises
+    (JudgeFailedError) fails. Restored.
     """
-    # No chat_backend kwarg → _default_chat_backend() factory runs and raises;
-    # llm_judge's outer try/except returns 0.0.
-    score = llm_judge(query="q", paths=["doc.md"], snippets=["snippet"])
-    assert score == pytest.approx(0.0)
+    with pytest.raises(JudgeFailedError) as excinfo:
+        llm_judge(query="q", paths=["doc.md"], snippets=["snippet"])
+    assert excinfo.value.reason == JUDGE_FAILURE_BACKEND_ERROR
+    assert excinfo.value.detail == "backend raised ValueError"
 
 
 # ---------------------------------------------------------------------------
@@ -1320,6 +1344,11 @@ def test_retrieve_case_returns_error_meta_when_retrieve_callable_raises() -> Non
 
     The wrapper exists precisely so a single failing case doesn't kill the
     whole benchmark. The receipt is (paths=[], snippets=[], meta={"error": "..."}).
+    The error is class-only (``retrieval raised RuntimeError``): the meta lands
+    in the persisted case row, so the exception message never does.
+
+    Sabotage proof: restore ``{"error": str(exc)}`` in ``retrieve_case`` — the
+    credential sentinel appears in the meta and the test fails. Restored.
     """
     from types import SimpleNamespace
 
@@ -1328,7 +1357,7 @@ def test_retrieve_case_returns_error_meta_when_retrieve_callable_raises() -> Non
     case = SimpleNamespace(score_method="exact", query="q", agent=None)
 
     def _boom(**_kw: Any) -> tuple[list[str], list[str], dict[str, Any]]:
-        raise RuntimeError("retrieval down")
+        raise RuntimeError("retrieval down; Authorization: Bearer credential-sentinel-7f3a")
 
     paths, snippets, meta = retrieve_case(
         case,
@@ -1342,8 +1371,8 @@ def test_retrieve_case_returns_error_meta_when_retrieve_callable_raises() -> Non
 
     assert paths == []
     assert snippets == []
-    assert "error" in meta
-    assert "retrieval down" in meta["error"]
+    assert meta == {"error": "retrieval raised RuntimeError"}
+    assert "credential-sentinel-7f3a" not in str(meta)
 
 
 @pytest.mark.unit
@@ -1738,3 +1767,224 @@ def test_run_benchmark_single_shot_mode_emits_per_query_runs() -> None:
     # The legacy summary still matches — mode is additive only.
     assert "weighted_total" in result.summary
     assert result.meta["mode"] == "single-shot"
+
+
+@pytest.mark.unit
+def test_run_benchmark_excludes_judge_failures_from_aggregates() -> None:
+    """A judge failure leaves the case unscored and is counted, not averaged as 0.
+
+    Two ``llm`` cases in one category: the first judge call returns 0.9, the
+    second raises (the FakeChatBackend's responses are exhausted →
+    IndexError). The category average must be 0.9 (the one real verdict),
+    not 0.45 (the failure folded in as "irrelevant"); the failure is counted
+    in ``summary["judge_failures"]`` and named on the case row and in the
+    human-readable output.
+
+    Sabotage proof: in ``run_benchmark`` replace ``if score is None: ...``
+    with appending ``0.0`` for the failed case — the category average drops
+    to 0.45 and the first assertion fails. Restored.
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
+    from tests.fakes import FakeChatBackend
+
+    backend = FakeChatBackend(responses=["0.9"])
+    suite = BenchmarkSuite(
+        meta={"name": "judge-failure", "version": "1.0", "agent": "t"},
+        cases=[
+            BenchmarkCase(id="T01", category="temporal", query="first?", gold_path=None, score_method="llm"),
+            BenchmarkCase(id="T02", category="temporal", query="second?", gold_path=None, score_method="llm"),
+        ],
+    )
+
+    result = run_benchmark(
+        suite,
+        system="hybrid",
+        agent="t",
+        deps=BenchmarkDeps(chat_backend=backend, retrieve=_retrieve_returning(["vault/some-doc.md"])),
+    )
+
+    assert result.summary["category_scores"]["temporal"] == pytest.approx(0.9)
+    assert result.summary["judge_failures"] == 1
+    assert result.diagnostics["category_counts"]["temporal"] == 1
+    failed = result.cases[1]
+    assert failed["score"] is None
+    assert failed["judge_failure"] == JUDGE_FAILURE_BACKEND_ERROR
+    assert failed["judge_error"] == "backend raised IndexError"
+    assert result.cases[0]["score"] == pytest.approx(0.9)
+    assert "LLM judge failed on 1 case(s)" in format_interpretation(result)
+
+
+@pytest.mark.unit
+def test_format_interpretation_omits_judge_failure_block_when_none() -> None:
+    """No judge failures → no warning block (the output stays unchanged)."""
+    result = BenchmarkResult(
+        meta={},
+        summary={
+            "weighted_total": 0.5,
+            "category_scores": {},
+            "gates": {},
+            "judge_failures": 0,
+        },
+        diagnostics={},
+        cases=[],
+    )
+    assert "LLM judge failed" not in format_interpretation(result)
+
+
+@pytest.mark.unit
+def test_score_case_returns_none_with_reason_on_judge_failure() -> None:
+    """``score_case`` maps a JudgeFailedError to (None, reason detail) for ``llm`` cases."""
+    from types import SimpleNamespace
+
+    from kairix.quality.benchmark.runner import BenchmarkDeps, score_case
+    from tests.fakes import FakeChatBackend
+
+    case = SimpleNamespace(score_method="llm", query="q")
+    score, detail = score_case(
+        case,
+        ["p.md"],
+        [],
+        {},
+        BenchmarkDeps(chat_backend=FakeChatBackend(responses=["garbled"])),
+    )
+    assert score is None
+    assert detail["judge_failure"] == JUDGE_FAILURE_UNPARSEABLE
+
+
+_WEIGHTED_CATEGORIES = ("recall", "temporal", "entity", "conceptual", "multi_hop", "procedural")
+
+
+def _all_category_llm_suite_with_one_extra() -> Any:
+    """One ``llm`` case per weighted category, plus one extra recall case last."""
+    from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
+
+    cases = [
+        BenchmarkCase(id=f"C{i}", category=cat, query=f"{cat}?", gold_path=None, score_method="llm")
+        for i, cat in enumerate(_WEIGHTED_CATEGORIES)
+    ]
+    cases.append(BenchmarkCase(id="X1", category="recall", query="extra?", gold_path=None, score_method="llm"))
+    return BenchmarkSuite(meta={"name": "judge-coverage", "version": "1.0", "agent": "t"}, cases=cases)
+
+
+@pytest.mark.unit
+def test_run_benchmark_judge_coverage_gate_fails_on_any_judge_failure() -> None:
+    """Every judged case scores 1.0, so the weighted total clears every
+    phase gate — but the last case's judge failed. The ``judge_coverage``
+    gate fails, the unscored row keeps its diagnostics, and the report
+    names the failing gate. Fully judged, ``judge_coverage`` passes.
+
+    Sabotage proof: delete ``gates[_GATE_JUDGE_COVERAGE] = judge_failures == 0``
+    in ``run_benchmark`` — the gates dict has no ``judge_coverage`` entry
+    and the assertion fails with KeyError. Restored.
+    """
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from tests.fakes import FakeChatBackend
+
+    retrieve = _retrieve_returning(["vault/doc.md"])
+    n_judged = len(_WEIGHTED_CATEGORIES)
+
+    partial = run_benchmark(
+        _all_category_llm_suite_with_one_extra(),
+        deps=BenchmarkDeps(chat_backend=FakeChatBackend(responses=["1.0"] * n_judged), retrieve=retrieve),
+    )
+    gates = partial.summary["gates"]
+    assert all(gates[phase] for phase in ("phase1", "phase2", "phase3"))
+    assert gates["judge_coverage"] is False
+    assert partial.cases[-1]["score"] is None
+    assert partial.cases[-1]["judge_failure"] == JUDGE_FAILURE_BACKEND_ERROR
+    assert "JUDGE COVERAGE gate (0 judge failures): FAIL" in format_interpretation(partial)
+
+    full = run_benchmark(
+        _all_category_llm_suite_with_one_extra(),
+        deps=BenchmarkDeps(chat_backend=FakeChatBackend(responses=["1.0"] * (n_judged + 1)), retrieve=retrieve),
+    )
+    assert full.summary["gates"]["judge_coverage"] is True
+    assert "JUDGE COVERAGE" not in format_interpretation(full)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reply", ["", "   \n"])
+def test_llm_judge_classifies_blank_reply_as_backend_error(reply: str) -> None:
+    """A blank reply is the provider's failure sentinel → ``backend_error``,
+    matching the suite-runner and unified-scorer judges. A non-blank,
+    non-numeric reply stays ``unparseable_response`` (see
+    ``test_llm_judge_raises_typed_failure_when_reply_unparseable``).
+
+    Sabotage proof: delete the blank-reply check before ``float(reply)`` in
+    ``llm_judge`` — a blank reply falls through to the parse and is reported
+    as ``unparseable_response``. Restored.
+    """
+    from tests.fakes import FakeChatBackend
+
+    with pytest.raises(JudgeFailedError) as excinfo:
+        llm_judge("q", ["p.md"], ["s"], chat_backend=FakeChatBackend(responses=[reply]))
+    assert excinfo.value.reason == JUDGE_FAILURE_BACKEND_ERROR
+
+
+_SENTINEL = "credential-sentinel-7f3a"  # stand-in for a secret a provider error could echo
+
+
+@pytest.mark.unit
+def test_run_benchmark_json_never_contains_backend_exception_text(tmp_path: Any) -> None:
+    """A judge backend exception whose message carries a credential never
+    reaches a case row, the summary, or the persisted benchmark JSON; the
+    failure class stays machine-readable.
+
+    Sabotage proof: in ``JudgeFailedError.from_backend_exception`` put the
+    message back (``f"backend raised {type(exc).__name__}: {exc}"``) — the
+    sentinel lands in ``judge_error`` and the written JSON, and the
+    assertions fail. Restored.
+    """
+    import json
+
+    from kairix.quality.benchmark.runner import BenchmarkDeps, run_benchmark
+    from kairix.quality.benchmark.suite import BenchmarkCase, BenchmarkSuite
+    from tests.fakes import FakeChatBackend
+
+    suite = BenchmarkSuite(
+        meta={"name": "redaction", "version": "1.0", "agent": "t"},
+        cases=[BenchmarkCase(id="T1", category="temporal", query="q?", gold_path=None, score_method="llm")],
+    )
+    backend = FakeChatBackend(raise_on_call=RuntimeError(f"401 Unauthorized: Authorization: Bearer {_SENTINEL}"))
+    result = run_benchmark(
+        suite,
+        output_dir=str(tmp_path),
+        deps=BenchmarkDeps(chat_backend=backend, retrieve=_retrieve_returning(["vault/doc.md"])),
+    )
+
+    [case] = result.cases
+    assert case["judge_failure"] == JUDGE_FAILURE_BACKEND_ERROR
+    assert case["judge_error"] == "backend raised RuntimeError"
+    assert _SENTINEL not in json.dumps(result.summary)
+    [written] = list(tmp_path.glob("B-*.json"))
+    assert _SENTINEL not in written.read_text(encoding="utf-8")
+    assert "backend raised RuntimeError" in written.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_format_interpretation_prints_no_pass_verdict_for_partial_run() -> None:
+    """``cmd_run`` prints the report before any ``--gates`` decision, so the
+    report itself must not claim PASS for a partial run: phase gates and
+    category floors are shown as INCONCLUSIVE instead.
+
+    Sabotage proof: make ``_format_verdict_block`` ignore judge failures —
+    the phase-gate "PASS ✅" lines and "All categories above floor ✅" are
+    printed for the partial run and the assertions fail. Restored.
+    """
+    result = BenchmarkResult(
+        meta={},
+        summary={
+            "weighted_total": 0.95,
+            "category_scores": {"recall": 0.95},
+            "gates": {"phase1": True, "phase2": True, "phase3": True, "judge_coverage": False},
+            "judge_failures": 2,
+        },
+        diagnostics={},
+        cases=[],
+    )
+    text = format_interpretation(result)
+    assert "PASS" not in text
+    assert "above floor" not in text
+    assert "INCONCLUSIVE" in text
+    assert "JUDGE COVERAGE gate (0 judge failures): FAIL" in text

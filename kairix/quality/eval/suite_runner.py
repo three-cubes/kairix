@@ -51,6 +51,10 @@ from kairix.core.search.pipeline import SearchPipeline
 from kairix.corpus.ingest import IngestRequest, SessionPayload, ingest_corpus
 from kairix.paths import KairixPaths, agent_cli_roots, confine_to_roots
 from kairix.platform.llm.protocol import LLMBackend
+from kairix.quality.scoring.judge_call import call_judge, parse_judge_score
+from kairix.quality.scoring.types import (
+    JudgeFailedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +111,13 @@ class SuiteResult:
     The shape is JSON-serialisable (every value is a primitive, dict, or
     list). The CLI ``--json`` flag round-trips this dataclass via
     :func:`dataclasses.asdict`.
+
+    LLM-judge failures (backend down, empty / non-numeric / non-finite
+    reply) are NOT scores: those questions keep a row (``score`` /
+    ``pass`` are ``None``, plus ``judge_failure`` / ``judge_error``) but
+    are excluded from ``n_questions``, ``n_passed``, ``mean_score`` and
+    ``per_category``, and counted in ``judge_failures``. ``n_questions``
+    is therefore the number of *scored* questions.
     """
 
     suite_name: str
@@ -118,6 +129,7 @@ class SuiteResult:
     extraction_precision: float | None
     extraction_recall: float | None
     rows: list[dict[str, Any]] = field(default_factory=list)
+    judge_failures: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -249,9 +261,11 @@ class SuiteRunner:
         extracted_facts = self._ingest_sessions(suite)
 
         rows, per_cat = self._score_queries(suite.queries)
-        n_questions = len(rows)
-        n_passed = sum(1 for r in rows if r["pass"])
-        mean_score = (sum(r["score"] for r in rows) / n_questions) if n_questions else 0.0
+        # Judge failures keep their row but are excluded from every aggregate.
+        scored = [r for r in rows if r["score"] is not None]
+        n_questions = len(scored)
+        n_passed = sum(1 for r in scored if r["pass"])
+        mean_score = (sum(r["score"] for r in scored) / n_questions) if n_questions else 0.0
 
         f1, precision, recall = self._score_extraction(extracted_facts, suite.ground_truth_facts)
 
@@ -265,6 +279,7 @@ class SuiteRunner:
             extraction_precision=precision,
             extraction_recall=recall,
             rows=rows,
+            judge_failures=len(rows) - len(scored),
         )
 
     # -----------------------------------------------------------------
@@ -344,7 +359,22 @@ class SuiteRunner:
                 category = "uncategorised"
 
             context = self._retrieve_context(question)
-            score = self._judge(question=question, expected=answer, context=context)
+            try:
+                score = self._judge(question=question, expected=answer, context=context)
+            except JudgeFailedError as exc:
+                # Unscored — never folded into a category as a 0.0 "wrong".
+                rows.append(
+                    {
+                        "question": question,
+                        "answer": answer,
+                        "category": category,
+                        "score": None,
+                        "pass": None,
+                        "judge_failure": exc.reason,
+                        "judge_error": exc.detail,
+                    }
+                )
+                continue
             passed = score >= _PASS_THRESHOLD
 
             rows.append(
@@ -386,10 +416,13 @@ class SuiteRunner:
     def _judge(self, *, question: str, expected: str, context: str) -> float:
         """LLM-judge prompt - returns a graded 0.0-1.0 score.
 
-        The prompt asks the LLM for a single float on its own line. If
-        the response is malformed (no parseable float, value outside
-        [0,1]), the score is treated as 0.0 — degraded-mode fail-safe
-        rather than crash-on-malformed-judge.
+        The prompt asks the LLM for a single float on its own line; an
+        out-of-range value is clamped to [0, 1].
+
+        Raises:
+            JudgeFailedError: the backend raised or returned an empty reply
+                (``LLMBackend.chat`` returns ``""`` on failure), or the reply
+                holds no finite float. A failure is never scored as 0.0.
         """
         prompt = [
             {
@@ -408,8 +441,7 @@ class SuiteRunner:
                 ),
             },
         ]
-        response = self._llm.chat(prompt, max_tokens=8)
-        return _parse_score(response)
+        return parse_judge_score(call_judge(lambda: self._llm.chat(prompt, max_tokens=8)))
 
     def _score_extraction(
         self,
@@ -627,38 +659,6 @@ def _search_result_to_context(result: Any) -> str:
             title = getattr(inner, "title", "") or getattr(inner, "path", "")
             lines.append(f"- [{title}] {snippet[:_CHUNK_SNIPPET_CHARS]}")
     return "\n".join(lines) if lines else "(no relevant facts retrieved)"
-
-
-def _parse_score(response: str) -> float:
-    """Parse the LLM-judge response into a 0.0-1.0 float.
-
-    Robust to leading/trailing whitespace, surrounding text, and
-    malformed responses (return 0.0 rather than raising).
-    """
-    if not response:
-        return 0.0
-    # Try the cleanest case first: the whole response is a float.
-    stripped = response.strip()
-    try:
-        value = float(stripped)
-    except ValueError:
-        # Otherwise scan tokens for the first parseable float.
-        value = _first_float_in(stripped)
-    if value < 0.0:
-        return 0.0
-    if value > 1.0:
-        return 1.0
-    return value
-
-
-def _first_float_in(text: str) -> float:
-    """Return the first parseable float in ``text``, or 0.0 if none."""
-    for token in text.replace(",", " ").split():
-        try:
-            return float(token)
-        except ValueError:
-            continue
-    return 0.0
 
 
 def _has_matching_extracted(gt_fact: dict[str, Any], extracted: list[Any]) -> bool:

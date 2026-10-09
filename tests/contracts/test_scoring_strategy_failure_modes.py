@@ -11,12 +11,11 @@ F43: every test runs ONE assertion body over the real
 :class:`kairix.quality.eval.scorers.NDCGScorer` AND
 :class:`tests.fakes.FakeScoringStrategy`.
 
-Finding (reported, not asserted here): the shipped
-:class:`~kairix.quality.eval.scorers.LLMJudgeScorer` swallows every
-backend / parse failure and returns ``0.0`` (``llm_judge``'s broad
-``except``), i.e. it exhibits exactly the "silent 0.0" shape this
-contract warns callers about. The raises leg therefore pins the
-graded-gold scorer, which propagates a malformed relevance grade.
+The raises leg pins the graded-gold scorer, which propagates a malformed
+relevance grade. :class:`~kairix.quality.eval.scorers.LLMJudgeScorer`
+honours the same contract — a backend / parse failure raises
+``JudgeFailedError`` rather than returning a silent ``0.0`` (pinned in
+``tests/eval/test_scorers_units.py``).
 """
 
 from __future__ import annotations

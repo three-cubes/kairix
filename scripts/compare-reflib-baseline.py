@@ -3,11 +3,14 @@
 
 Exit code 0 if no regression detected or no baseline exists yet.
 Exit code 1 if regression exceeds threshold.
+Exit code 3 (inconclusive) if the committed baseline is partial (LLM-judge failures).
 """
 
 import json
 import sys
 from pathlib import Path
+
+from kairix.quality.completeness import EXIT_INCONCLUSIVE, judge_failures, partial_diagnostic
 
 BASELINE_PATH = Path("benchmark-results/reflib-contract-baseline.json")
 REGRESSION_THRESHOLD = 0.02
@@ -23,6 +26,11 @@ def main() -> int:
     except (json.JSONDecodeError, OSError) as e:
         print(f"Cannot read baseline: {e}")
         return 1
+
+    failures = judge_failures(baseline)
+    if failures:
+        print(partial_diagnostic(f"the committed baseline {BASELINE_PATH}", failures))
+        return EXIT_INCONCLUSIVE
 
     baseline_wt = baseline.get("summary", {}).get("weighted_total", 0)
     if baseline_wt <= 0:

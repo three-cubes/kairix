@@ -301,12 +301,13 @@ def test_run_benchmark_summary_carries_documented_fields() -> None:
 
 @pytest.mark.unit
 def test_run_benchmark_gates_dict_carries_each_phase_gate() -> None:
-    """The summary.gates dict must map every PHASE_GATES key → bool."""
+    """The summary.gates dict maps every PHASE_GATES key + judge_coverage → bool."""
     suite = _suite(BenchmarkCase(id="R1", category="recall", query="q", gold_path="x.md", score_method="exact"))
     result = run_benchmark(suite, deps=BenchmarkDeps(retrieve=_retrieve_fn_returning(["vault/x.md"])))
 
     gates = result.summary["gates"]
-    assert set(gates.keys()) == set(PHASE_GATES.keys())
+    assert set(gates.keys()) == set(PHASE_GATES.keys()) | {"judge_coverage"}
+    assert gates["judge_coverage"] is True
     assert all(isinstance(passed, bool) for passed in gates.values())
 
 
@@ -358,6 +359,50 @@ def test_run_benchmark_case_id_is_not_overwritten_by_retrieval_meta_collision() 
     assert case["score"] != 999, f"case score was overwritten by retrieval_meta: got {case['score']}"
 
 
+@pytest.mark.unit
+def test_run_benchmark_judge_diagnostics_are_not_overwritten_by_retrieval_meta() -> None:
+    """Retrieval metadata cannot replace or fake the judge diagnostics.
+
+    Case J1's judge fails (the fake backend runs out of replies): its
+    ``judge_failure`` / ``judge_error`` must be the real ones, not the
+    adversarial meta's. Case J2 is judged fine: the meta's
+    ``judge_failure`` must not inject a fake failure. Unrelated metadata
+    (``intent``) survives on both rows.
+
+    Sabotage proof: drop ``_KEY_JUDGE_FAILURE`` / ``_KEY_JUDGE_ERROR`` from
+    ``canonical_keys`` in ``run_benchmark`` — the meta's values win the
+    ``{**ndcg_detail, **retrieval_meta}`` merge and the judge-field
+    assertions fail. Restored.
+    """
+    from tests.fakes import FakeChatBackend
+
+    def _evil_retrieve(**_kw: Any) -> tuple[list[str], list[str], dict[str, Any]]:
+        return (
+            ["vault/x.md"],
+            ["s"],
+            {"judge_failure": "FAKE", "judge_error": "FAKE", "intent": "semantic"},
+        )
+
+    suite = _suite(
+        BenchmarkCase(id="J2", category="temporal", query="ok?", gold_path=None, score_method="llm"),
+        BenchmarkCase(id="J1", category="temporal", query="fails?", gold_path=None, score_method="llm"),
+    )
+    # One canned reply: J2 is judged 0.8, J1 exhausts the fake (IndexError → backend_error).
+    result = run_benchmark(
+        suite,
+        deps=BenchmarkDeps(chat_backend=FakeChatBackend(responses=["0.8"]), retrieve=_evil_retrieve),
+    )
+
+    judged, failed = result.cases
+    assert failed["judge_failure"] == "backend_error"
+    assert "IndexError" in failed["judge_error"]
+    assert "judge_failure" not in judged
+    assert "judge_error" not in judged
+    assert judged["score"] == pytest.approx(0.8)
+    assert judged["intent"] == "semantic"
+    assert failed["intent"] == "semantic"
+
+
 # ---------------------------------------------------------------------------
 # Contract: format_interpretation surfaces the weighted_total.
 # ---------------------------------------------------------------------------
@@ -401,7 +446,8 @@ def test_fuzzy_match_returns_zero_for_empty_inputs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Contract: classification_score and llm_judge return 0.0 on any failure.
+# Contract: classification_score returns 0.0 on any failure; llm_judge returns
+# 0.0 only for an empty retrieval (its failures raise JudgeFailedError).
 # ---------------------------------------------------------------------------
 
 

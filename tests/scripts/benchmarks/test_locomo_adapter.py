@@ -21,6 +21,9 @@ from typing import Any
 import pytest
 import yaml
 
+from kairix.quality.scoring.types import JudgeFailedError
+from tests.fakes import FakeLLMBackend
+
 pytestmark = pytest.mark.unit
 
 _SCRIPT_PATH = Path(__file__).parent.parent.parent.parent / "scripts" / "benchmarks" / "locomo_spike.py"
@@ -47,6 +50,8 @@ def _load_locomo_spike() -> ModuleType:
 _mod = _load_locomo_spike()
 convert_locomo_conversation_to_suite = _mod.convert_locomo_conversation_to_suite
 load_locomo_json = _mod.load_locomo_json
+judge_response = _mod._judge_response
+aggregate_rows = _mod._aggregate_rows
 
 
 # ---------------------------------------------------------------------------
@@ -405,3 +410,76 @@ def test_smoke_subprocess_pipeline_does_not_crash(tmp_path: Path) -> None:
     assert aggregate_json.exists(), f"aggregate JSON missing; stderr: {result.stderr[-1000:]}"
     payload = json.loads(aggregate_json.read_text(encoding="utf-8"))
     assert payload["totals"]["n_conversations"] == 1
+
+
+# ---------------------------------------------------------------------------
+# mem0 judge — failures are typed, never scored 0.0
+# ---------------------------------------------------------------------------
+
+
+def test_judge_response_parses_json_verdict() -> None:
+    """A well-formed verdict is parsed (score clamped, reasoning kept)."""
+    backend = FakeLLMBackend(chat_response='{"correct": true, "score": 0.9, "reasoning": "matches"}')
+    score, correct, reasoning = judge_response("q", "a", "resp", backend=backend)
+    assert score == pytest.approx(0.9)
+    assert correct is True
+    assert reasoning == "matches"
+
+
+@pytest.mark.parametrize(
+    ("reply", "reason"),
+    [
+        ("", "backend_error"),
+        ("not json at all", "unparseable_response"),
+        ('{"correct": false, "reasoning": "no score"}', "unparseable_response"),
+        ('{"correct": true, "score": NaN}', "unparseable_response"),
+        ('{"correct": true, "score": Infinity}', "unparseable_response"),
+    ],
+)
+def test_judge_response_raises_typed_failure_instead_of_zero(reply: str, reason: str) -> None:
+    """Empty, non-JSON, score-less and non-finite replies are judge failures.
+
+    Sabotage-proof: restore the old ``return 0.0, False, ...`` fallbacks in
+    ``_judge_response`` (and drop the ``math.isfinite`` guard) — every leg
+    returns a score instead of raising and fails. Restored.
+    """
+    with pytest.raises(JudgeFailedError) as excinfo:
+        judge_response("q", "a", "resp", backend=FakeLLMBackend(chat_response=reply))
+    assert excinfo.value.reason == reason
+
+
+def test_judge_response_reports_raising_backend() -> None:
+    """A raising backend is a ``backend_error`` judge failure.
+
+    Sabotage-proof: return ``0.0, False, ...`` from the ``except`` around
+    ``backend.chat`` — no exception is raised and the test fails. Restored.
+    """
+    with pytest.raises(JudgeFailedError) as excinfo:
+        judge_response(
+            "q",
+            "a",
+            "resp",
+            backend=FakeLLMBackend(chat_raises=TimeoutError("timed out; api-key credential-sentinel-7f3a")),
+        )
+    assert excinfo.value.reason == "backend_error"
+    assert excinfo.value.detail == "backend raised TimeoutError"
+    assert "credential-sentinel-7f3a" not in str(excinfo.value)
+
+
+def test_aggregate_rows_excludes_judge_failures() -> None:
+    """Unscored rows (judge failures) are left out of every aggregate and counted.
+
+    Sabotage-proof: aggregate over all rows (``scored = rows`` with a 0.0
+    for ``None``) — the mean drops to 0.5 and n_questions becomes 2.
+    Restored.
+    """
+    rows = [
+        {"category": "single-hop", "score": 1.0, "pass": True},
+        {"category": "single-hop", "score": None, "pass": None, "judge_failure": "backend_error"},
+    ]
+    summary = aggregate_rows(rows)
+    assert summary["n_questions"] == 1
+    assert summary["n_passed"] == 1
+    assert summary["mean_score"] == pytest.approx(1.0)
+    assert summary["per_category"]["single-hop"]["n"] == pytest.approx(1.0)
+    assert summary["judge_failures"] == 1
