@@ -11,7 +11,9 @@ starting with ``KAIRIX_``:
 * ``os.environ.pop("KAIRIX_X")`` / ``os.environ.setdefault("KAIRIX_X", ...)``.
 
 Writes inside ``with allow_baseline_writes():`` in ``tests/conftest.py`` (the
-session env baseline) are exempt, mirroring the runtime guard.
+session env baseline) are exempt, mirroring the runtime guard. In any
+``conftest.py`` an ``os.environ`` write at module level (import time) fails
+for ANY key: root-conftest code runs before the runtime guard is configured.
 
 The exact half is the runtime guard ``tests/fixtures/process_state_guard.py``:
 an audit hook sees EVERY env write (any spelling, any computed key) while a
@@ -137,6 +139,44 @@ def _shape(node: ast.AST, is_environ: _Environ) -> str | None:
     return None
 
 
+_ENVIRON_WRITE_METHODS = {"pop", "setdefault", "update", "clear", "popitem", "__setitem__", "__delitem__"}
+_CONFTEST_MODULE_WRITE = "module-level os.environ write in conftest.py (any key)"
+
+
+def _any_environ_write(node: ast.AST, is_environ: _Environ) -> bool:
+    """An ``os.environ`` write of ANY key (subscript store / del, a mutating
+    method, ``os.environ = ...``) or an ``os.putenv`` / ``os.unsetenv`` call."""
+    if isinstance(node, (ast.Assign, ast.AugAssign, ast.Delete)):
+        targets = node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
+        return any(is_environ(t) or (isinstance(t, ast.Subscript) and is_environ(t.value)) for t in targets)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        func = node.func
+        if func.attr in _ENVIRON_WRITE_METHODS and is_environ(func.value):
+            return True
+        return func.attr in ("putenv", "unsetenv") and isinstance(func.value, ast.Name) and func.value.id == "os"
+    return False
+
+
+def _conftest_module_level_writes(tree: ast.AST, is_environ: _Environ) -> set[tuple[int, str]]:
+    """Every env write that runs at conftest IMPORT time (outside any function).
+
+    Root-conftest code runs before the runtime guard is configured, so a
+    computed key there is invisible to both halves: in a conftest every
+    module-level write fails, whatever the key. The session baseline writes
+    inside its fixture body (``with allow_baseline_writes():``) instead.
+    """
+    found = set()
+    for node in ast.walk(tree):
+        if not _any_environ_write(node, is_environ):
+            continue
+        scope = is_environ.parents.get(node)
+        while scope is not None and not isinstance(scope, _FUNCTIONS):
+            scope = is_environ.parents.get(scope)
+        if scope is None:
+            found.add((getattr(node, "lineno", 0), _CONFTEST_MODULE_WRITE))
+    return found
+
+
 def _baseline_blocks(tree: ast.AST) -> list[ast.With]:
     """``with allow_baseline_writes():`` blocks — the session baseline's exemption."""
     return [
@@ -168,6 +208,8 @@ def file_violations(path: Path) -> list[str]:
     is_environ = _Environ(tree)
     found = {(getattr(node, "lineno", 0), shape) for node in ast.walk(tree) if (shape := _shape(node, is_environ))}
     found = {(line, shape) for line, shape in found if line not in exempt}
+    if path.name == "conftest.py":
+        found |= _conftest_module_level_writes(tree, is_environ)
     if path.resolve() != _BASELINE_HOME:
         found |= {(b.lineno, f"{_BASELINE_CONTEXT}() outside tests/conftest.py") for b in blocks}
     return [f"{line}: {shape}" for line, shape in sorted(found)]

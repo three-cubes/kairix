@@ -529,7 +529,11 @@ the common spellings with a literal `KAIRIX_` key —
 `monkeypatch.setenv` / `delenv`, `os.environ[...] =` / `+=` / `del`,
 `os.environ.pop` / `setdefault` — reporting `path:line: shape`. Writes
 inside `with allow_baseline_writes():` are exempt, and the block itself
-fails anywhere but `tests/conftest.py`. Tests:
+fails anywhere but `tests/conftest.py`. In any `conftest.py`, an
+`os.environ` write at module level fails for ANY key, computed or not:
+conftest import-time code runs before the runtime guard is configured, so
+every env baseline write belongs inside the session fixture's
+`allow_baseline_writes()` block. Tests:
 `tests/checks/test_no_env_monkeypatch_direct_writes.py`.
 
 **Runtime half — exact.** `tests/fixtures/process_state_guard.py` installs

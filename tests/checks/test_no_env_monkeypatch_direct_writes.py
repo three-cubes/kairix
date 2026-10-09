@@ -148,3 +148,53 @@ def test_rule_gate_reports_line_keys_and_fails(tmp_path: Path, capsys: pytest.Ca
     assert "tests/test_bad.py:2: assign os.environ[KAIRIX_*]" in capsys.readouterr().out
     (tests_dir / "test_bad.py").write_text('import os\nos.environ["PATH"] = "x"\n', encoding="utf-8")
     assert F2(repo_root=tmp_path).run() == 0
+
+
+_CONFTEST_BASELINE = """
+import os
+
+import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _baseline():
+    with allow_baseline_writes():
+        os.environ["KAIRIX_CONNECT_DISABLE_BROWSER"] = "1"
+    yield
+"""
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        'os.environ["KAIRIX_" + "X"] = "1"',
+        'os.environ.setdefault(PREFIX + "X", "1")',
+        'os.environ["PATH"] = "/usr/bin"',
+        "os.environ.update(VALUES)",
+        'os.putenv(NAME, "1")',
+    ],
+)
+def test_module_level_env_write_in_a_conftest_is_flagged_for_any_key(tmp_path: Path, statement: str) -> None:
+    """Conftest import-time code runs before the runtime guard is configured,
+    so a conftest may not write the env at module level at all — computed
+    keys included.
+
+    Sabotage proof (executed): skip the ``conftest.py`` branch → nothing is
+    flagged and every case fails; restored.
+    """
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(f"import os\n\n{statement}\n", encoding="utf-8")
+    assert file_violations(conftest) == ["3: module-level os.environ write in conftest.py (any key)"]
+
+
+def test_fixture_body_baseline_write_in_the_root_conftest_is_clean() -> None:
+    """The session baseline's writes inside its fixture (under
+    ``allow_baseline_writes()``) are not module-level: the root conftest passes."""
+    assert file_violations(_REPO_ROOT / "tests" / "conftest.py") == []
+
+
+def test_fixture_body_write_in_a_conftest_is_not_a_module_level_write(tmp_path: Path) -> None:
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(_CONFTEST_BASELINE, encoding="utf-8")
+    violations = file_violations(conftest)
+    assert not any("module-level" in v for v in violations), violations
