@@ -2892,8 +2892,8 @@ scripts/checks/
 ├── _fitness_rule.py                      # FitnessRule ABC — 3-line check subclasses over tc_fitness.gate()
 ├── generate_catalogue_docs.py            # Regenerates the F-CATALOGUE doc regions (F92 currency gate)
 ├── _lib.sh                               # Shell helper: arch_gate() function
-├── check-no-internal-patches.sh                       # F1
-├── check-no-env-monkeypatch.sh                        # F2
+├── check_no_internal_patches.py                       # F1 static half (runtime: tests/fixtures/process_state_guard.py)
+├── check_no_env_monkeypatch.py                        # F2 static half (runtime: tests/fixtures/process_state_guard.py)
 ├── check-suppressions-have-rationale.sh               # F3 (extended: covers # type: ignore + # nosec)
 ├── check-env-reads-stay-in-paths.sh                   # F4
 ├── check_no_internal_imports.py                       # F5 (AST)
@@ -2979,9 +2979,9 @@ def test_x(monkeypatch):
     monkeypatch.setenv("KAIRIX_DOCUMENT_ROOT", "/tmp/x")
 EOF
 cp /tmp/sabotage.py tests/_sabotage.py
-bash scripts/checks/check-no-env-monkeypatch.sh  # expect FAIL
+python3 scripts/checks/run_checks.py --gate F2  # expect FAIL
 rm tests/_sabotage.py
-bash scripts/checks/check-no-env-monkeypatch.sh  # expect ok
+python3 scripts/checks/run_checks.py --gate F2  # expect ok
 ```
 
 If a check passes the sabotage test on the first commit but starts
@@ -3131,7 +3131,7 @@ Refactor: pass paths as a constructor argument or use FakePaths
 from tests/fakes.py. The production code must not require process-env
 mutation to be testable — that's the test-shaped-API smell #139 reverted.
 
-next: re-run bash scripts/checks/check-no-env-monkeypatch.sh until clean.
+next: re-run python3 scripts/checks/run_checks.py --gate F2 until clean.
 
 === Architecture fitness functions FAILED ===
 ```
@@ -3153,7 +3153,7 @@ bash scripts/checks/run-all.sh
 bash scripts/checks/run-all.sh --skip-coverage
 
 # Run one check only
-bash scripts/checks/check-no-env-monkeypatch.sh
+python3 scripts/checks/run_checks.py --gate F2
 python3 scripts/checks/check_no_internal_imports.py
 python3 scripts/checks/check_per_file_coverage.py coverage.xml
 ```
@@ -3349,13 +3349,13 @@ violation blocks.
 fitness_functions:
   - id: F1
     name: no-internal-patches
-    script: scripts/checks/check-no-internal-patches.sh
+    script: scripts/checks/check_no_internal_patches.py
     precommit_hook: arch-no-internal-patches
     layer: [pre-commit, safe-commit, ci-stage0]
 
   - id: F2
     name: no-env-monkeypatch
-    script: scripts/checks/check-no-env-monkeypatch.sh
+    script: scripts/checks/check_no_env_monkeypatch.py
     precommit_hook: arch-no-env-monkeypatch
     layer: [pre-commit, safe-commit, ci-stage0]
 

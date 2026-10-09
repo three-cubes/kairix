@@ -10,6 +10,7 @@ or a stub in ``sys.modules["sentence_transformers"]`` (a third-party key).
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import threading
 from collections.abc import Iterator
@@ -392,10 +393,11 @@ def test_concurrent_first_calls_construct_the_model_once(fresh_memo: None, monke
     class _SlowCrossEncoder:
         def __init__(self, model_name: str) -> None:
             constructed.append(model_name)
-            try:
-                both_inside.wait(timeout=0.5)  # passes only if a second constructor runs concurrently
-            except threading.BrokenBarrierError:
-                pass
+            # Passes only if a second constructor runs concurrently. Serialised
+            # (the correct behaviour) the wait times out and breaks the barrier,
+            # which is expected — so that one error is suppressed.
+            with contextlib.suppress(threading.BrokenBarrierError):
+                both_inside.wait(timeout=0.5)
 
     monkeypatch.setitem(sys.modules, "sentence_transformers", _stub_module(_SlowCrossEncoder))
     start = threading.Barrier(2)

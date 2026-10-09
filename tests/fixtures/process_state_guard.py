@@ -20,8 +20,9 @@ to shared process state, however it is spelled.
   collected fails it.
 * **F1 — sys.modules swaps.** The guarded ``sys.modules`` entries are
   snapshotted before each item's setup and compared at the end of its setup,
-  call (fixture-applied patches still active) and teardown phases. A replaced
-  or removed entry fails the item. A NEW entry passes only if the import
+  call (fixture-applied patches still active) and teardown phases, and
+  around each collection. A replaced or removed entry fails the item (or
+  the module being collected). A NEW entry passes only if the import
   machinery made it: a module whose ``__spec__`` has a loader and whose
   ``__spec__.origin`` / ``__file__`` lies under the guarded package's
   directory. A bare ``ModuleType`` stub or any other object fails.
@@ -390,11 +391,17 @@ def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None):
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_make_collect_report(collector: pytest.Collector):
+    """Collection runs under the same lifecycle as a test phase: snapshot the
+    guarded sys.modules entries, record while collecting, compare after (and
+    put back whatever snapshot / recording state was in force before)."""
+    prior_modules, prior_active = _STATE.modules, _STATE.active
+    _STATE.modules = _guarded_modules()
     _STATE.active = True
     try:
         report = yield
     finally:
-        _STATE.active = False
+        _end_phase()
+        _STATE.modules, _STATE.active = prior_modules, prior_active
     try:
         _raise_recorded(collector.nodeid or "collection")
     except pytest.fail.Exception as exc:

@@ -31,6 +31,11 @@ GUARDED_PACKAGES = ("fakepkg",)
 GUARDED_ENV_PREFIXES = ("FAKEPKG_",)
 BASELINE_CONFTEST = Path(__file__).resolve()  # this throwaway conftest is the root one
 
+# Imported before collection, so the collection-time cases below replace /
+# remove an entry that existed when their module started collecting.
+import fakepkg.removeme  # noqa: E402
+import fakepkg.swapme  # noqa: E402,F401
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _baseline():
@@ -244,6 +249,37 @@ def test_never_runs():
 """
 
 # Runs last (file name order): its teardown swap leaks into nothing after it.
+# Each collection-time case uses its own submodule, so its leak touches no
+# other test (every module is collected before any test runs).
+_COLLECT_SWAP_TESTS = """
+import sys
+import types
+
+sys.modules["fakepkg." + "swapme"] = types.ModuleType("fakepkg.swapme")  # computed key
+
+
+def test_never_runs():
+    pass
+"""
+
+_COLLECT_REMOVAL_TESTS = """
+import sys
+
+del sys.modules["fakepkg." + "removeme"]
+
+
+def test_never_runs():
+    pass
+"""
+
+_COLLECT_GENUINE_IMPORT_TESTS = """
+import fakepkg.collected
+
+
+def test_collected_module_is_usable():
+    assert fakepkg.collected.COLLECTED == 1
+"""
+
 _TEARDOWN_SWAP_TESTS = """
 import sys
 import types
@@ -307,10 +343,16 @@ def inner_outcomes(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[
     (pkg / "__init__.py").write_text(_FAKEPKG_INIT)
     (pkg / "sub.py").write_text("COUNT = 0\n")
     (pkg / "lazy.py").write_text("LAZY = 1\n")
+    for name in ("swapme", "removeme"):
+        (pkg / f"{name}.py").write_text("X = 1\n")
+    (pkg / "collected.py").write_text("COLLECTED = 1\n")
     (root / "test_inner.py").write_text(_INNER_TESTS)
     (root / "test_collect_env.py").write_text(_COLLECT_ENV_TESTS)
     (root / "test_collect_reload.py").write_text(_COLLECT_RELOAD_TESTS)
     (root / "test_zz_teardown_swap.py").write_text(_TEARDOWN_SWAP_TESTS)
+    (root / "test_collect_swap.py").write_text(_COLLECT_SWAP_TESTS)
+    (root / "test_collect_removal.py").write_text(_COLLECT_REMOVAL_TESTS)
+    (root / "test_collect_genuine_import.py").write_text(_COLLECT_GENUINE_IMPORT_TESTS)
     return _run_inner(root)
 
 
@@ -420,3 +462,19 @@ def test_baseline_exemption_entered_outside_the_root_conftest_fails(
 
 def test_reload_at_collection_time_fails_collection(inner_outcomes: dict[str, tuple[str, str]]) -> None:
     _assert_fails(inner_outcomes, "test_collect_reload", "[F1]", "re-executed already-imported module", "sub.py")
+
+
+def test_sys_modules_replacement_at_collection_time_fails_collection(
+    inner_outcomes: dict[str, tuple[str, str]],
+) -> None:
+    _assert_fails(inner_outcomes, "test_collect_swap", "[F1]", "sys.modules['fakepkg.swapme'] replaced")
+
+
+def test_sys_modules_removal_at_collection_time_fails_collection(
+    inner_outcomes: dict[str, tuple[str, str]],
+) -> None:
+    _assert_fails(inner_outcomes, "test_collect_removal", "[F1]", "sys.modules['fakepkg.removeme'] removed")
+
+
+def test_genuine_import_at_collection_time_is_clean(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    assert inner_outcomes["test_collected_module_is_usable"] == ("passed", "")
