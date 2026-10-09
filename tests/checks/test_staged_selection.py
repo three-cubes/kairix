@@ -26,15 +26,15 @@ monkeypatch of kairix internals: the probe file IS the production scenario, and
 Cost + #504 isolation
 ---------------------
 The file-local single-rule proofs (F8, F26) drive ONE rule through a narrowed
-in-process dispatch (:func:`_run_one_narrowed`) rather than re-running the whole
-~20-50-rule staged gate just to read one ledger line. ``_run_one_narrowed``
+in-process dispatch (:func:`run_one_narrowed`) rather than re-running the whole
+~20-50-rule staged gate just to read one ledger line. ``run_one_narrowed``
 mirrors the real ``_run_staged_one``: it ``decide``s the rule, then runs it
 in-process inside ``restrict_python_files`` + kairix's ``_enumeration_narrower``
 scoped to the decision's ``scope_files``, so the detector walks ONLY the staged
 probe. This is BOTH the cost fix (F8 12s→<0.1s, F26 14s→<0.2s) AND the #504
 closure: a narrowed F8 scan can no longer pick up an orphaned ``zzz_staged_probe_*``
 left by an interrupted run, because it never walks the whole ``tests/`` tree.
-The ``_sweep_staged_probes`` session-autouse fixture below adds belt-and-braces
+The ``sweep_staged_probes`` session-autouse fixture (tests/fixtures/staged_probe.py) adds belt-and-braces
 hygiene, removing any leftover probe before AND after the session so the cluster
 is structurally immune to interrupt-debris. ONE representative end-to-end
 full-dispatch smoke is retained (``test_file_local_f26_forbidden_import_caught``)
@@ -57,12 +57,9 @@ restore runs):
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import importlib.util
-import io
 import sys
-from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 
@@ -81,127 +78,19 @@ from _rule_catalogue import ALL_ENTRIES  # noqa: E402
 # (so ``decide`` / ``resolve_staged_scope`` derive scope via kairix's
 # FitnessRule-aware resolver exactly as the pre-migration local module did).
 from run_checks import decide, resolve_staged_scope, staged_in_scope  # noqa: E402
-from tc_fitness.context import CheckContext  # noqa: E402
-from tc_fitness.staged import restrict_python_files  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
 
-# ── #504 isolation hygiene: sweep interrupt-debris probes ────────────────
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _sweep_staged_probes() -> Iterator[None]:
-    """Remove any ``zzz_staged_probe_*`` debris a prior INTERRUPTED run left in
-    the repo tree, before AND after this session.
-
-    A staged-selection probe that an interrupt orphaned (a hard ``Ctrl-C``
-    between ``write_text`` and the ``finally`` unlink) used to leave a
-    ``zzz_staged_probe_*.py`` under ``tests/`` or ``kairix/`` that a later
-    full-tree scan would pick up — the #504 isolation flake. The single-rule
-    narrowing (:func:`_run_one_narrowed`) already makes the F8/F26 scans
-    structurally immune (they never walk the whole tree), and this fixture is
-    the belt-and-braces complement: it makes the WHOLE cluster idempotent under
-    interrupt by sweeping every orphaned probe file and probe directory at
-    session boundaries. Only ever touches uniquely-named ``zzz_staged_probe*``
-    paths, so it can never delete a real file."""
-    _purge_probe_debris()
-    try:
-        yield
-    finally:
-        _purge_probe_debris()
-
-
-def _purge_probe_debris() -> None:
-    """Delete every ``zzz_staged_probe*`` file or directory under the repo tree
-    (the uniquely-named probe namespace — never a real path)."""
-    import shutil
-
-    for path in sorted(_REPO_ROOT.rglob("zzz_staged_probe*"), key=lambda p: len(p.parts), reverse=True):
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-        else:
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
-
-
-# ── harness ─────────────────────────────────────────────────────────────
-
-
-@contextlib.contextmanager
-def _probe_file(rel: str, content: str) -> Iterator[str]:
-    """Write ``content`` to ``rel`` under the real repo tree, yield the
-    repo-relative path string, and FULLY remove it on exit — the file, any
-    ``__pycache__`` an import created, and any directory the probe itself
-    created (try/finally so a failed assert never leaves a shadow). ``rel``
-    must be a ``zzz_staged_probe*`` path so it can never collide with a real
-    file, and the probe-dir teardown only deletes ``zzz_staged_probe*``
-    directories so it can never touch a real tree."""
-    assert "zzz_staged_probe" in rel, "probe paths must be uniquely named to avoid collisions"
-    path = _REPO_ROOT / rel
-    created_dir = "zzz_staged_probe" in path.parent.name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    try:
-        yield rel
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-        # A staged-mode dispatch may have imported the probe, leaving a
-        # __pycache__ that would keep a probe PLUGIN dir alive (F36/F41/...
-        # treat any dir under kairix/connectors/ as a plugin). Remove the
-        # whole probe dir — but only ever a uniquely-named probe dir.
-        if created_dir and path.parent.exists():
-            import shutil
-
-            shutil.rmtree(path.parent, ignore_errors=True)
-
-
-def _run_staged(staged: list[str]) -> tuple[int, str]:
-    """Drive the real ``_dispatch_staged`` over ``staged``; return
-    ``(exit_code, captured_output)``.
-
-    This runs the FULL ~20-50-rule staged gate — it is reserved for the ONE
-    retained end-to-end smoke that proves the dispatch wiring is intact. The
-    single-rule proofs use :func:`_run_one_narrowed` instead (one rule, narrowed
-    to the staged probe) so they neither pay the whole-gate cost nor walk the
-    whole tree (#504)."""
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        code = run_checks._dispatch_staged(staged, skip_coverage=True)
-    return code, buf.getvalue()
-
-
-def _run_one_narrowed(rule_id: str, staged: list[str]) -> tuple[int, str]:
-    """Dispatch ONLY ``rule_id`` over ``staged`` through the REAL staged path,
-    narrowed to the decision's staged files — the single-rule equivalent of the
-    runner's ``_run_staged_one``.
-
-    Drives kairix's real ``decide`` to get the rule's :class:`StagedDecision`,
-    then runs that one rule in-process inside ``restrict_python_files`` +
-    kairix's ``_enumeration_narrower`` scoped to ``decision.scope_files`` — so a
-    file-local detector walks ONLY the staged probe, exactly as the full staged
-    dispatch would scope it. This is the same code path ``_run_staged_one`` takes
-    for a file-local rule, isolated to one rule so a single-rule proof costs
-    <0.2s instead of re-running the whole gate (and never walks the full tree,
-    closing the #504 stale-probe sensitivity). The decision MUST be ``run`` —
-    these proofs stage a path the rule's scope contains.
-
-    Returns ``(rc, captured_output)`` where ``rc`` is 0 (pass) / 1 (fail)."""
-    entry = next(e for e in run_checks._select_all() if e.id == rule_id)
-    script = run_checks.resolve_script(entry)
-    decision = decide(entry, script, staged)
-    assert decision.run, f"{rule_id} must be selected for staged={staged}; reason: {decision.reason}"
-    buf = io.StringIO()
-    ctx = CheckContext(repo_root=run_checks.REPO_ROOT)
-    with ctx.install(), contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        with contextlib.ExitStack() as stack:
-            if decision.scope_files:
-                scope_files = list(decision.scope_files)
-                stack.enter_context(restrict_python_files(run_checks.REPO_ROOT, scope_files))
-                stack.enter_context(run_checks._enumeration_narrower(run_checks.REPO_ROOT, scope_files))
-            rc = run_checks._run_one_inprocess(entry, ctx)
-    return rc, buf.getvalue()
+# Probe harness (write/clean probe files, dispatch helpers, ledger parsers) and
+# the session-scoped #504 debris sweep live in tests/fixtures/staged_probe.py,
+# shared with the whole-gate dispatch smokes in test_staged_dispatch_smoke.py
+# (integration tier — those pay the full ~40-rule gate, this module never does).
+from tests.fixtures.staged_probe import (  # noqa: E402
+    probe_file,
+    run_one_narrowed,
+    sweep_staged_probes,  # noqa: F401 — session-scoped autouse fixture
+)
 
 
 def _load_detector(script: str, module_name: str) -> ModuleType:
@@ -219,82 +108,6 @@ def _load_detector(script: str, module_name: str) -> ModuleType:
     return module
 
 
-def _failed_rule_ids(output: str) -> set[str]:
-    """The rule ids that FAILED in a staged ledger (the ``FAIL [id]`` lines)."""
-    ids: set[str] = set()
-    for line in output.splitlines():
-        if "FAIL [" in line:
-            ids.add(line.split("FAIL [", 1)[1].split("]", 1)[0])
-    return ids
-
-
-def _ran_rule_ids(output: str) -> set[str]:
-    """The rule ids that RAN (the ``run [id]`` lines) in a staged ledger."""
-    ids: set[str] = set()
-    for line in output.splitlines():
-        if "run [" in line:
-            ids.add(line.split("run [", 1)[1].split("]", 1)[0])
-    return ids
-
-
-def _skipped_rule_ids(output: str) -> set[str]:
-    ids: set[str] = set()
-    for line in output.splitlines():
-        if "skip [" in line:
-            ids.add(line.split("skip [", 1)[1].split("]", 1)[0])
-    return ids
-
-
-# ── file-local: forbidden import (F26) — the retained end-to-end smoke ───
-
-
-def test_file_local_f26_forbidden_import_caught() -> None:
-    """A staged kairix/core file importing kairix.providers → staged mode runs
-    and FAILS F26 (file-local class).
-
-    This is the ONE retained end-to-end full ``_dispatch_staged`` smoke — it
-    proves the real staged-dispatch wiring (selection → narrowing → in-process
-    ledger) is intact end-to-end on the per-commit path, AND it carries the
-    cluster's only clean-arm control through the full gate (the sabotage arm
-    below stages a clean probe and asserts F26 clears). The other file-local
-    proofs (F8) use the cheaper single-rule :func:`_run_one_narrowed`; only this
-    one pays the whole-gate cost, by design, and only ONCE (the clean arm uses
-    the narrowed single-rule path).
-
-    Robustness (#506): the assertions are scoped to **F26's own verdict in the
-    ledger**, never the aggregate exit code. ``_run_staged`` drives the FULL
-    ~40-rule staged gate, several of whose rules (F94 system-path writes,
-    F92 catalogue-currency, F22 path-naming, the token scanners) read
-    whole-tree / git state — so a stray probe or ``__pycache__`` another test
-    left in the tree could flip the aggregate ``exit_code`` to 1 even when this
-    probe's own change is clean, failing a ``code2 == 0`` assertion for reasons
-    that have nothing to do with F26 (the flake this test hit 3x on a pin bump).
-    Asserting F26 specifically RAN and FAILED (violation arm) / RAN and did NOT
-    fail (clean arm) keeps the full e2e dispatch as the subject while making the
-    verdict immune to unrelated whole-tree rule state. The
-    ``_sweep_staged_probes`` session fixture above scrubs the most common
-    debris; this scoping is the structural complement that removes the
-    dependency on a globally-clean tree entirely."""
-    with _probe_file(
-        "kairix/core/zzz_staged_probe_f26.py",
-        "from kairix.providers import something  # forbidden core→providers import\n",
-    ) as rel:
-        _code, out = _run_staged([rel])
-    # Violation arm: F26 must have RUN (dispatch wiring intact) and FAILED on
-    # the forbidden import. Scoped to F26 — independent of any other rule's
-    # whole-tree verdict, so unrelated tree debris cannot make this flake.
-    assert "F26" in _ran_rule_ids(out), f"F26 must run end-to-end through the real dispatch; ledger:\n{out}"
-    assert "F26" in _failed_rule_ids(out), f"F26 must FAIL on the forbidden core→providers import; ledger:\n{out}"
-    # Sabotage + clean-arm control (inline): the SAME probe without the import
-    # must NOT fail F26 — the verdict flips on the one-line edit. Driven through
-    # the single-rule narrowed path, not a second whole-gate dispatch: the full
-    # dispatch above already proves the wiring, and paying the ~40-rule gate
-    # twice pushed this test past the 60s per-test timeout on loaded CI shards.
-    with _probe_file("kairix/core/zzz_staged_probe_f26.py", "x = 1\n") as rel:
-        rc2, out2 = _run_one_narrowed("F26", [rel])
-    assert rc2 == 0, f"removing the forbidden import must clear F26 (sabotage + clean-arm); output:\n{out2}"
-
-
 # ── file-local marker: missing test category marker (F8) ────────────────
 
 
@@ -302,26 +115,26 @@ def test_file_local_f8_missing_marker_caught() -> None:
     """A staged test module with a ``def test_*`` but no category marker →
     staged mode runs and FAILS F8.
 
-    Driven through the narrowed single-rule path (:func:`_run_one_narrowed`):
+    Driven through the narrowed single-rule path (:func:`run_one_narrowed`):
     F8 is dispatched alone, scoped to the staged probe, so it FAILS on the
     unmarked probe in <0.1s without re-running the whole gate and without
     walking the full ``tests/`` tree. This is the SOLE F8 detector coverage in
     the staged-selection battery, so both limbs are load-bearing — the unmarked
     probe MUST fail (no false negative) and the marked probe MUST clear (no
     false positive). Sabotage-proven: see the runner-agent report."""
-    with _probe_file(
+    with probe_file(
         "tests/zzz_staged_probe_f8.py",
         "def test_unmarked_probe():\n    assert True\n",
     ) as rel:
-        code, out = _run_one_narrowed("F8", [rel])
+        code, out = run_one_narrowed("F8", [rel])
     assert code == 1, f"F8 missing-marker must fail staged mode; ledger:\n{out}"
     assert "FAIL [F8]" in out, f"F8 must be the failing rule; ledger:\n{out}"
     # Sabotage: adding the marker clears F8.
-    with _probe_file(
+    with probe_file(
         "tests/zzz_staged_probe_f8.py",
         "import pytest\n\npytestmark = pytest.mark.unit\n\n\ndef test_marked_probe():\n    assert True\n",
     ) as rel:
-        code2, out2 = _run_one_narrowed("F8", [rel])
+        code2, out2 = run_one_narrowed("F8", [rel])
     assert code2 == 0, f"adding the unit marker must clear F8 (sabotage proof); ledger:\n{out2}"
 
 
@@ -564,9 +377,8 @@ def test_always_run_f92_runs_for_any_change() -> None:
     f92 = next(e for e in run_checks._select_all() if e.id == "F92")
     d = decide(f92, run_checks.resolve_script(f92), ["docs/only.md"])
     assert d.run is True, "F92 must always run (trigger is any change)"
-    # And it appears in the ran-set of a real doc-only staged dispatch.
-    _code, out = _run_staged(["docs/architecture/ENGINEERING.md"])
-    assert "F92" in _ran_rule_ids(out), f"F92 must run on a doc-only staged change; ledger:\n{out}"
+    # The real doc-only dispatch proof (F92 in the ran-set) is a whole-gate run:
+    # tests/checks/test_staged_dispatch_smoke.py (integration tier).
 
 
 def test_always_run_f94_runs_for_any_change() -> None:
