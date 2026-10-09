@@ -102,6 +102,8 @@ Forbidden example:
   monkeypatch.setattr(os, 'environ', {'KAIRIX_DB_PATH': '/x'})
   snapshot = dict(os.environ); yield; os.environ.clear(); os.environ.update(snapshot)
   os = FakeOs()   # module-level rebind of a guarded name (os / environ / getattr ...)
+  os.putenv('KAIRIX_DB_PATH', '/x')   # or os.unsetenv / posix.putenv / from os import putenv
+  os.__dict__['environ']   # any dunder on os / os.environ (vars(os.environ) too)
 
 Recognised structurally (not a violation): a statement directly in the
 conftest.py ``@pytest.fixture(scope="session", autouse=True)`` hermetic
@@ -121,7 +123,7 @@ _MARKER = "KAIRIX_*"
 #: ``setattr`` / ``delattr`` / ``getattr`` that could reach ``os.environ``
 #: through a constant-folded name (``"os.en" + "viron"``). A file with none of
 #: these tokens cannot reference the mapping, so it is never parsed.
-_PREFILTER = re.compile(r"environ|setenv|delenv|patch|setattr|delattr|getattr")
+_PREFILTER = re.compile(r"environ|setenv|delenv|putenv|unsetenv|patch|setattr|delattr|getattr|vars|\.__\w+__")
 
 #: Names F2 guards against rebinding at module / class level (or alongside
 #: their own import in a function) — see ``_mapping_writes.guarded_rebinds``.
@@ -140,6 +142,10 @@ class _Ctx:
         self.index = index
         self.environ = ProcessMapping.resolve(index, "os", "environ")
         self.guard = MappingGuard(index, self.environ, _KEYS, ConstantTable(index), _MARKER)
+        # os.putenv / os.unsetenv write the process env by key (posix / nt
+        # export the same functions)
+        self.guard.process_writers = {"putenv": ("key", "value"), "unsetenv": ("key",)}
+        self.guard.process_writer_modules = ("os", "posix", "nt")
         self.parents = index.parents
 
     def is_environ(self, expr: ast.expr) -> bool:

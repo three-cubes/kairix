@@ -80,6 +80,7 @@ from _mapping_writes import (
     ProcessMapping,
     bind_call,
     guarded_rebinds,
+    is_dunder,
 )
 
 REMEDIATION = """kairix-internal substitution found in a test (@patch / monkeypatch.setattr /
@@ -150,6 +151,7 @@ Forbidden example:
   mod = __import__("kairix.paths")
   monkeypatch.setattr(builtins, "__import__", blocking_import)
   sys = FakeSys()   # module-level rebind of a guarded name
+  sys.__dict__['modules']   # any dunder on sys / importlib / sys.modules
 
 Stdlib boundaries (os.*, time.*, etc.) and external SDK boundaries
 (httpx.*, openai.*, boto3.*, etc.) remain allowed — F1 only flags
@@ -315,9 +317,12 @@ _KAIRIX_MODULES = ProtectedKeys(prefixes=("kairix.",), exact=("kairix",))
 #: never on the kairix NAME alone, which constant folding can assemble
 #: (``"kai" + "rix.paths"``): a ``kairix`` import or string, ``sys.modules``,
 #: ``reload`` / ``import_module``, a ``patch`` / ``setattr`` / ``delattr``
-#: helper, or ``__import__`` / ``builtins``. A file with none of these tokens
-#: cannot violate, so it is never parsed.
-_PREFILTER = re.compile(r"kairix|modules|reload|import_module|patch|setattr|delattr|__import__|builtins")
+#: helper, ``__import__`` / ``builtins``, or a ``getattr`` / ``vars`` / ``.__x__``
+#: dunder lookup. A file with none of these tokens cannot violate, so it is
+#: never parsed.
+_PREFILTER = re.compile(
+    r"kairix|modules|reload|import_module|patch|setattr|delattr|getattr|vars|__import__|builtins|\.__\w+__"
+)
 
 #: Names F1 guards against rebinding at module / class level (or alongside
 #: their own import in a function) — see ``_mapping_writes.guarded_rebinds``.
@@ -454,19 +459,20 @@ class _F1Ctx:
             root = _attribute_root_name(expr)
             return root is not None and root in self.external and root not in self.aliases
         if isinstance(expr, ast.Name):
-            return self._provably_external_name(expr.id, seen)
+            return self._provably_external_name(expr, seen)
         if isinstance(expr, ast.Subscript) and self.sys_modules.is_receiver(expr.value):
             return self.provably_not_kairix(expr.slice)
         if isinstance(expr, ast.Call) and self.is_importer(expr.func):
             return self.provably_not_kairix(bind_call(expr, IMPORT_MODULE_SIGNATURE).get("name"))
         return False
 
-    def _provably_external_name(self, name: str, seen: frozenset[str]) -> bool:
-        """Every binding of ``name`` is a non-kairix import or a provably
-        external module expression."""
+    def _provably_external_name(self, expr: ast.Name, seen: frozenset[str]) -> bool:
+        """Every binding of the variable ``expr`` resolves to is a non-kairix
+        import or a provably external module expression."""
+        name = expr.id
         if name in self.aliases or name in seen:
             return False
-        bindings = self.index.value_bindings.get(name, [])
+        bindings = self.index.bindings_of(expr)
         if not bindings:
             return False
         imported = name in self.external
@@ -611,6 +617,8 @@ def _importlib_module_misused(ctx: _F1Ctx) -> bool:
                 continue  # a local / parameter shadows the import
             parent = ctx.index.parents.get(ref)
             if isinstance(parent, ast.Attribute) and parent.value is ref:
+                if is_dunder(parent.attr):
+                    return True  # importlib.__dict__ / __getattribute__ ... — never traced
                 continue
             if id(ref) in ctx.guard_alias_refs():
                 return True
@@ -637,7 +645,7 @@ def _importlib_argument_harmless(call: ast.Call, ref: ast.expr, ctx: _F1Ctx) -> 
         bound = bind_call(call, PATCH_OBJECT_SIGNATURE)
         name = bound.get("attribute") if bound.get("target") is ref else None
     values = ctx.constants.strings(name)
-    return values is not None and "reload" not in values
+    return values is not None and not any(v == "reload" or is_dunder(v) for v in values)
 
 
 def file_has_internal_patch(path: Path) -> bool:

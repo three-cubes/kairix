@@ -83,7 +83,7 @@ BINDING_SITE_TYPES = (
 _FUNCTION_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
 _SCOPE_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 #: attribute names whose references the detectors classify
-INDEXED_ATTRIBUTES = frozenset({"environ", "modules", "reload", "__import__"})
+INDEXED_ATTRIBUTES = frozenset({"environ", "modules", "reload", "__import__", "putenv", "unsetenv"})
 
 #: binding kinds recorded per name
 VALUE, ELEMENT, RETURN, PARAM, UNKNOWN = "value", "element", "return", "param", "unknown"
@@ -177,7 +177,12 @@ class ModuleIndex:
     #: plain ``name = value`` bindings (Assign / AnnAssign / walrus) for alias resolution
     name_bindings: list[tuple[str, ast.expr]] = field(default_factory=list)
     #: every binding of every name, with its kind (VALUE / ELEMENT / RETURN / UNKNOWN)
-    value_bindings: dict[str, list[tuple[str, ast.expr | None]]] = field(default_factory=dict)
+    value_bindings: dict[str, list[tuple[str, ast.expr | None, ScopeInfo]]] = field(default_factory=dict)
+    #: the scope each ``def`` statement binds its name in (by node id)
+    def_scopes: dict[int, ScopeInfo] = field(default_factory=dict)
+    #: the scope the node being classified binds into (set by ``build``)
+    _scope: ScopeInfo | None = None
+    _new_scope: ScopeInfo | None = None
     #: every ``Load``-context name reference, by name
     name_loads: dict[str, list[ast.Name]] = field(default_factory=dict)
     #: references ``<x>.environ`` / ``<x>.modules`` / ``<x>.reload``, by attribute
@@ -217,11 +222,13 @@ class ModuleIndex:
                 index.parents[child] = node
                 stack.append((child, index._scope_for_child(node, child, scope, new)))
             index._record_scope(node, scope)
+            index._scope, index._new_scope = scope, new
             index._classify(node, returns)
         for ret in returns:
             fn = enclosing_function(index.parents, ret)
             if fn is not None:
-                index._bind(fn.name, RETURN if ret.value is not None else UNKNOWN, ret.value)
+                kind = RETURN if ret.value is not None else UNKNOWN
+                index._bind(fn.name, kind, ret.value, index.def_scopes.get(id(fn)))
         index._hoist_globals()
         return index
 
@@ -234,9 +241,30 @@ class ModuleIndex:
             return
         for scope in self.scopes[1:]:
             for name in scope.globals:
-                for binding, node in scope.sites.pop(name, []):
-                    root.bind(name, binding, node)
-                scope.bindings.pop(name, None)
+                self._move_bindings(name, scope, root)
+            for name in scope.nonlocals:
+                target = self._nonlocal_target(scope, name)
+                if target is not None:
+                    self._move_bindings(name, scope, target)
+
+    @staticmethod
+    def _nonlocal_target(scope: ScopeInfo, name: str) -> ScopeInfo | None:
+        """The enclosing function scope a ``nonlocal name`` store rebinds."""
+        outer = scope.parent
+        while outer is not None and not outer.is_module:
+            if not outer.is_class and name in outer.bindings and name not in outer.nonlocals:
+                return outer
+            outer = outer.parent
+        return None
+
+    def _move_bindings(self, name: str, source: ScopeInfo, target: ScopeInfo) -> None:
+        for binding, node in source.sites.pop(name, []):
+            target.bind(name, binding, node)
+        source.bindings.pop(name, None)
+        self.value_bindings[name] = [
+            (kind, value, target if owner is source else owner)
+            for kind, value, owner in self.value_bindings.get(name, [])
+        ]
 
     @staticmethod
     def _scope_for_child(node: ast.AST, child: ast.AST, scope: ScopeInfo, new: ScopeInfo | None) -> ScopeInfo:
@@ -319,6 +347,11 @@ class ModuleIndex:
         its body; ``global`` jumps to the module scope; ``nonlocal`` skips to the
         enclosing function. A name bound anywhere in a scope is local to all of it.
         """
+        scope = self.binding_scope(name)
+        return None if scope is None else scope.bindings[name.id]
+
+    def binding_scope(self, name: ast.Name) -> ScopeInfo | None:
+        """The scope whose binding ``name`` resolves to (see :meth:`resolve`)."""
         scope = self.name_scope.get(id(name))
         first = True
         while scope is not None:
@@ -330,10 +363,19 @@ class ModuleIndex:
                 scope = scope.parent
                 continue
             if name.id in scope.bindings and name.id not in scope.nonlocals:
-                return scope.bindings[name.id]
+                return scope
             scope = scope.parent
             first = False
         return None
+
+    def bindings_of(self, name: ast.Name) -> list[tuple[str, ast.expr | None]]:
+        """The value bindings of exactly the variable ``name`` resolves to —
+        a same-named variable in another function never contributes."""
+        scope = self.binding_scope(name)
+        return [] if scope is None else self.scope_bindings(scope, name.id)
+
+    def scope_bindings(self, scope: ScopeInfo, name: str) -> list[tuple[str, ast.expr | None]]:
+        return [(kind, value) for kind, value, owner in self.value_bindings.get(name, []) if owner is scope]
 
     def resolves_to_module(self, name: ast.expr, module: str) -> bool:
         """``name`` is the stdlib ``module`` object: EVERY binding it resolves to is
@@ -370,8 +412,11 @@ class ModuleIndex:
             return False
         return self.is_builtin(name) or self.resolves_to_from(name, "builtins", name.id)
 
-    def _bind(self, name: str, kind: str, source: ast.expr | None) -> None:
-        self.value_bindings.setdefault(name, []).append((kind, source))
+    def _bind(self, name: str, kind: str, source: ast.expr | None, scope: ScopeInfo | None = None) -> None:
+        owner = scope if scope is not None else self._scope
+        if owner is None:
+            return
+        self.value_bindings.setdefault(name, []).append((kind, source, owner))
 
     def _bind_target(self, target: ast.expr, value: ast.expr | None, kind: str) -> None:
         if isinstance(target, ast.Name):
@@ -453,21 +498,24 @@ class ModuleIndex:
 
     def _on_scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, _returns: list[ast.Return]) -> None:
         args = node.args
+        inner = self._new_scope  # parameters bind in the function's OWN scope
         if isinstance(node, ast.Lambda):
             for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg):
                 if arg is not None:
-                    self._bind(arg.arg, UNKNOWN, None)
+                    self._bind(arg.arg, UNKNOWN, None, inner)
             return
+        if self._scope is not None:
+            self.def_scopes[id(node)] = self._scope
         self.functions.setdefault(node.name, []).append(node)
         for position, arg in enumerate((*args.posonlyargs, *args.args)):
-            self._bind(arg.arg, PARAM, None)
+            self._bind(arg.arg, PARAM, None, inner)
             self.params.setdefault(arg.arg, []).append((node, position))
         for arg in args.kwonlyargs:
-            self._bind(arg.arg, PARAM, None)
+            self._bind(arg.arg, PARAM, None, inner)
             self.params.setdefault(arg.arg, []).append((node, None))
         for arg in (args.vararg, args.kwarg):
             if arg is not None:
-                self._bind(arg.arg, UNKNOWN, None)
+                self._bind(arg.arg, UNKNOWN, None, inner)
 
     def _on_return(self, node: ast.Return, returns: list[ast.Return]) -> None:
         returns.append(node)
@@ -654,8 +702,9 @@ class ConstantTable:
 
     def __init__(self, index: ModuleIndex) -> None:
         self.index = index
-        self._names: dict[str, frozenset[str] | None] = {}
-        self._in_progress: set[str] = set()
+        #: resolved values per VARIABLE — (scope id, name), never the bare name
+        self._names: dict[tuple[int, str], frozenset[str] | None] = {}
+        self._in_progress: set[tuple[int, str]] = set()
 
     # -- strings ------------------------------------------------------------
 
@@ -673,7 +722,12 @@ class ConstantTable:
         return frozenset({expr.value}) if isinstance(expr.value, str) else None
 
     def _name(self, expr: ast.Name) -> frozenset[str] | None:
-        return self.name_strings(expr.id)
+        scope = self.index.binding_scope(expr)
+        return None if scope is None else self.name_strings(expr.id, scope)
+
+    def _key(self, expr: ast.Name) -> tuple[int, str] | None:
+        scope = self.index.binding_scope(expr)
+        return None if scope is None else (id(scope), expr.id)
 
     def _concat(self, expr: ast.BinOp) -> frozenset[str] | None:
         if isinstance(expr.op, ast.Add):
@@ -709,7 +763,7 @@ class ConstantTable:
 
     def _call(self, expr: ast.Call) -> frozenset[str] | None:
         if isinstance(expr.func, ast.Name) and not expr.args and not expr.keywords:
-            bindings = self.index.value_bindings.get(expr.func.id, [])
+            bindings = self.index.bindings_of(expr.func)
             if bindings and all(kind == RETURN for kind, _ in bindings):
                 return self._union_all([source for _, source in bindings])
         folded = fold_string(expr)
@@ -717,24 +771,29 @@ class ConstantTable:
 
     # -- names / containers -------------------------------------------------
 
-    def name_strings(self, name: str) -> frozenset[str] | None:
-        if name in self._names:
-            return self._names[name]
-        if name in self._in_progress:
+    def name_strings(self, name: str, scope: ScopeInfo | None = None) -> frozenset[str] | None:
+        """Values of the variable ``name`` bound in ``scope`` (default: module)."""
+        owner = scope if scope is not None else self.index.module_scope
+        if owner is None:
             return None
-        self._in_progress.add(name)
-        result = self._resolve_name(name)
-        self._in_progress.discard(name)
-        self._names[name] = result
+        key = (id(owner), name)
+        if key in self._names:
+            return self._names[key]
+        if key in self._in_progress:
+            return None
+        self._in_progress.add(key)
+        result = self._resolve_name(name, owner)
+        self._in_progress.discard(key)
+        self._names[key] = result
         return result
 
-    def _resolve_name(self, name: str) -> frozenset[str] | None:
-        bindings = self.index.value_bindings.get(name)
+    def _resolve_name(self, name: str, scope: ScopeInfo) -> frozenset[str] | None:
+        bindings = self.index.scope_bindings(scope, name)
         if not bindings:
             return None
         values: frozenset[str] | None = frozenset()
         if any(kind == PARAM for kind, _ in bindings):
-            values = self._param_values(name)
+            values = self._param_values(name, scope)
             if values is None:
                 return None
         for kind, source in bindings:
@@ -753,12 +812,15 @@ class ConstantTable:
                 return None
         return values
 
-    def _param_values(self, name: str) -> frozenset[str] | None:
+    def _param_values(self, name: str, scope: ScopeInfo) -> frozenset[str] | None:
         """Union of the arguments every call site in this module passes for
-        parameter ``name`` (``None`` if the function escapes, is a method, is
-        defined twice, has no call site, or any argument is unknown)."""
+        parameter ``name`` of the ONE function that owns ``scope`` (``None`` if
+        the function escapes, is a method, is defined twice, has no call site,
+        or any argument is unknown)."""
         values: frozenset[str] | None = frozenset()
         for function, position in self.index.params.get(name, []):
+            if function is not scope.node:
+                continue  # a same-named parameter of another function
             values = _union(values, self._call_site_values(function, position, name))
             if values is None:
                 return None
@@ -769,9 +831,12 @@ class ConstantTable:
     ) -> frozenset[str] | None:
         if isinstance(self.index.parents.get(function), ast.ClassDef):
             return None
-        if len(self.index.functions.get(function.name, [])) != 1:
-            return None
-        loads = self.index.name_loads.get(function.name, [])
+        def_scope = self.index.def_scopes.get(id(function))
+        if def_scope is None or len(def_scope.bindings.get(function.name, [])) != 1:
+            return None  # redefined / rebound in its own scope
+        loads = [
+            load for load in self.index.name_loads.get(function.name, []) if self.index.binding_scope(load) is def_scope
+        ]
         if not loads:
             return None
         default = _parameter_default(function, position, name)
@@ -796,7 +861,7 @@ class ConstantTable:
         """``spec.name`` where ``spec = importlib.util.spec_from_file_location("x", ...)``."""
         if expr.attr != "name" or not isinstance(expr.value, ast.Name):
             return None
-        bindings = self.index.value_bindings.get(expr.value.id, [])
+        bindings = self.index.bindings_of(expr.value)
         if not bindings or any(kind != VALUE for kind, _ in bindings):
             return None
         names: list[ast.expr | None] = []
@@ -827,11 +892,12 @@ class ConstantTable:
             if any(isinstance(e, ast.Starred) for e in expr.elts):
                 return None
             return list(expr.elts)
-        if isinstance(expr, ast.Name) and expr.id not in self._in_progress:
-            bindings = self.index.value_bindings.get(expr.id)
+        key = self._key(expr) if isinstance(expr, ast.Name) else None
+        if isinstance(expr, ast.Name) and key is not None and key not in self._in_progress:
+            bindings = self.index.bindings_of(expr)
             if not bindings or any(kind != VALUE for kind, _ in bindings):
                 return None
-            self._in_progress.add(expr.id)
+            self._in_progress.add(key)
             try:
                 out: list[ast.expr] = []
                 for _, source in bindings:
@@ -841,7 +907,7 @@ class ConstantTable:
                     out.extend(inner)
                 return out
             finally:
-                self._in_progress.discard(expr.id)
+                self._in_progress.discard(key)
         return None
 
     def _union_all(self, exprs: Sequence[ast.expr | None]) -> frozenset[str] | None:
@@ -868,15 +934,16 @@ class ConstantTable:
         folded = fold_string(expr) if expr is not None else None
         if folded is not None and folded[0]:
             return not keys.could_complete(folded[0])
-        if isinstance(expr, ast.Name) and expr.id not in self._in_progress:
-            bindings = self.index.value_bindings.get(expr.id, [])
+        key = self._key(expr) if isinstance(expr, ast.Name) else None
+        if isinstance(expr, ast.Name) and key is not None and key not in self._in_progress:
+            bindings = self.index.bindings_of(expr)
             if not bindings or any(kind != VALUE for kind, _ in bindings):
                 return False
-            self._in_progress.add(expr.id)
+            self._in_progress.add(key)
             try:
                 return all(self.provably_outside(source, keys) for _, source in bindings)
             finally:
-                self._in_progress.discard(expr.id)
+                self._in_progress.discard(key)
         return False
 
     def definitely_object(self, expr: ast.expr | None) -> bool:
@@ -887,7 +954,7 @@ class ConstantTable:
             return not (isinstance(expr, ast.Call) and fold_string(expr) is not None)
         if not isinstance(expr, ast.Name):
             return False
-        bindings = self.index.value_bindings.get(expr.id, [])
+        bindings = self.index.bindings_of(expr)
         return bool(bindings) and all(
             kind == VALUE and source is not None and self.definitely_object(source) for kind, source in bindings
         )

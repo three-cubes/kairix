@@ -194,38 +194,51 @@ class ProcessMapping:
         return self.index is None or self.index.resolves_to_from(expr, self.module, self.attr)
 
 
-def patch_names(index: ModuleIndex) -> set[str]:
-    """Local names bound to ``unittest.mock.patch`` / ``mock.patch``."""
-    return {"patch"} | index.from_imports("unittest.mock", "patch") | index.from_imports("mock", "patch")
+_PATCH_BINDINGS = frozenset({("from", "unittest.mock", "patch"), ("from", "mock", "patch")})
 
 
-def mock_module_names(index: ModuleIndex) -> set[str]:
-    """Local names bound to the ``unittest.mock`` / ``mock`` module."""
-    names = index.from_imports("unittest", "mock") | index.module_aliases("mock")
-    names |= {a.asname for node in index.imports for a in node.names if a.name == "unittest.mock" and a.asname}
-    return names
+def _is_mock_module_binding(binding: tuple[str, ...]) -> bool:
+    """``import mock`` / ``import unittest.mock as m`` / ``from unittest import mock``."""
+    if binding[0] == "import":
+        return binding[1] == "mock" or binding[1].startswith("mock.")
+    if binding[0] == "import_as":
+        return binding[1] in {"mock", "unittest.mock"}
+    return binding == ("from", "unittest", "mock")
 
 
-def is_patch_ref(
-    expr: ast.expr, names: set[str], mock_names: set[str] | None = None, unittest_names: set[str] | None = None
-) -> bool:
-    """``expr`` is ``unittest.mock.patch`` — a bound name, ``<mock>.patch`` or
-    ``unittest.mock.patch``. A bare ``.patch`` attribute on anything else (an
-    HTTP client's ``client.patch(url)``) is not."""
+def _is_unittest_binding(binding: tuple[str, ...]) -> bool:
+    """``import unittest`` / ``import unittest.mock`` / ``import unittest as u``."""
+    if binding[0] == "import":
+        return binding[1] == "unittest" or binding[1].startswith("unittest.")
+    return binding == ("import_as", "unittest")
+
+
+def _any_binding(index: ModuleIndex, name: ast.expr, test: Callable[[tuple[str, ...]], bool]) -> bool:
+    bindings = index.resolve(name) if isinstance(name, ast.Name) else None
+    return bool(bindings) and any(test(binding) for binding in bindings or [])
+
+
+def is_patch_ref(expr: ast.expr, index: ModuleIndex) -> bool:
+    """``expr`` is ``unittest.mock.patch`` — a name, ``<mock>.patch`` or
+    ``unittest.mock.patch`` — resolved through Python's scoping rules, so a
+    local ``def patch(...)``, a parameter named ``patch`` / ``mock`` or an
+    HTTP client's ``client.patch(url)`` is not. A variable ANY of whose
+    bindings is the real one counts (a later rebind does not launder it), and
+    an unbound ``patch`` (a star import) counts too (default-deny)."""
     if isinstance(expr, ast.Name):
-        return expr.id in names
+        bindings = index.resolve(expr)
+        if bindings is None:
+            return expr.id == "patch"
+        return any(binding in _PATCH_BINDINGS for binding in bindings)
     if not (isinstance(expr, ast.Attribute) and expr.attr == "patch"):
         return False
     owner = expr.value
-    if mock_names is None:  # back-compat: any ``.patch`` attribute
-        return True
     if isinstance(owner, ast.Name):
-        return owner.id in mock_names
+        return _any_binding(index, owner, _is_mock_module_binding)
     return (
         isinstance(owner, ast.Attribute)
         and owner.attr == "mock"
-        and isinstance(owner.value, ast.Name)
-        and owner.value.id in (unittest_names or set())
+        and _any_binding(index, owner.value, _is_unittest_binding)
     )
 
 
@@ -249,6 +262,11 @@ _SUBPROCESS_FUNCTIONS = frozenset(
 _OS_LAUNCHER_PREFIXES = ("exec", "spawn", "posix_spawn")
 
 Finding = tuple[ast.AST, str]
+
+
+def is_dunder(name: str) -> bool:
+    """``__x__`` — default-deny on a guarded module: never traced."""
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
 
 
 # ---------------------------------------------------------------------------
@@ -324,20 +342,17 @@ class MappingGuard:
         self.constants = constants
         self.label = mapping.dotted
         self.marker = marker
-        self.patch = patch_names(index)
-        self.mock_modules = mock_module_names(index)
-        self.unittest_modules = index.module_aliases("unittest")
-        self.subprocess_modules = index.module_aliases("subprocess")
-        self.subprocess_functions = {
-            name for fn in _SUBPROCESS_FUNCTIONS for name in index.from_imports("subprocess", fn)
-        }
-        self.os_modules = index.module_aliases("os")
         self.builtin_attr_functions = {"getattr", "setattr", "delattr"} | {
             name for fn in ("getattr", "setattr", "delattr") for name in index.from_imports("builtins", fn)
         }
         self.builtins_modules = index.module_aliases("builtins")
         #: extra guarded objects a detector adds (F1: ``importlib`` / ``reload``)
         self.extra_guarded: Callable[[ast.expr], str | None] = lambda _expr: None
+        #: keyed process-state writers on stdlib modules, as {attr: signature}
+        #: (F2: ``os.putenv`` / ``os.unsetenv``); the ``key`` argument must be
+        #: provably outside the protected keys.
+        self.process_writers: dict[str, tuple[str, ...]] = {}
+        self.process_writer_modules: tuple[str, ...] = ()
 
     # -- public -------------------------------------------------------------
 
@@ -354,7 +369,36 @@ class MappingGuard:
         for node in self.index.candidates:
             if isinstance(node, ast.Call):
                 out.extend(self._helper_writes(node))
+        out.extend(self.process_writer_findings())
         return out
+
+    # -- keyed process-state writers (os.putenv / os.unsetenv) --------------
+
+    def process_writer_findings(self) -> list[Finding]:
+        """Every reference to a configured writer — ``<module>.putenv`` or a
+        ``from <module> import putenv`` name — must be a DIRECT call whose
+        ``key`` is provably outside the protected keys; any other use (an
+        alias, a callback, a protected / unresolved key, a spread) fails."""
+        out: list[Finding] = []
+        for attr, signature in self.process_writers.items():
+            for node in self.index.attributes.get(attr, []):
+                if any(self.index.resolves_to_module(node.value, m) for m in self.process_writer_modules):
+                    out.extend(self._writer_use(node, attr, signature))
+            for module in self.process_writer_modules:
+                for name in self.index.from_imports(module, attr):
+                    for ref in self.index.name_loads.get(name, []):
+                        if self.index.resolves_to_from(ref, module, attr):
+                            out.extend(self._writer_use(ref, attr, signature))
+        return out
+
+    def _writer_use(self, ref: ast.expr, attr: str, signature: tuple[str, ...]) -> list[Finding]:
+        call = self.index.parents.get(ref)
+        if not (isinstance(call, ast.Call) and call.func is ref):
+            return [(self.index.statement_of(ref), f"{attr} used outside a direct call")]
+        bound = bind_call(call, signature)
+        if bound.has_spread or not self.constants.provably_outside(bound.get("key"), self.keys):
+            return [(call, f"{attr}({self.marker})")]
+        return []
 
     def module_references(self) -> list[ast.Name]:
         """Every load of the owning module object (``os`` / ``sys``, by import alias)."""
@@ -374,6 +418,8 @@ class MappingGuard:
         parent = self.index.parents.get(ref)
         module = self.mapping.module
         if isinstance(parent, ast.Attribute) and parent.value is ref:
+            if is_dunder(parent.attr):
+                return [(self.index.statement_of(ref), f"{module}.{parent.attr} (dunder access on a guarded module)")]
             return []
         call = parent
         if isinstance(parent, (ast.keyword, ast.Starred)):
@@ -400,9 +446,12 @@ class MappingGuard:
         return False
 
     def _statically_other_attr(self, name: ast.expr | None) -> bool:
-        """``name`` resolves statically to attribute names, none of them guarded."""
+        """``name`` resolves statically to attribute names, none of them guarded
+        (the mapping, a dunder, or a keyed process-state writer)."""
         values = self.constants.strings(name)
-        return values is not None and self.mapping.attr not in values
+        if values is None:
+            return False
+        return not any(v == self.mapping.attr or is_dunder(v) or v in self.process_writers for v in values)
 
     # -- aliasing is itself a violation -------------------------------------
 
@@ -455,7 +504,7 @@ class MappingGuard:
         return refs
 
     def is_patch(self, expr: ast.expr) -> bool:
-        return is_patch_ref(expr, self.patch, self.mock_modules, self.unittest_modules)
+        return is_patch_ref(expr, self.index)
 
     # -- the classifier -----------------------------------------------------
 
@@ -661,14 +710,15 @@ class MappingGuard:
         return self._could_be_dotted(target) and not self.mapping.is_module(target)
 
     def _is_process_launcher(self, func: ast.expr) -> bool:
+        """A real ``subprocess`` / ``os.exec*`` launcher, resolved through scopes
+        (a local ``def run(env)`` is NOT a launcher)."""
         if isinstance(func, ast.Name):
-            return func.id in self.subprocess_functions
-        if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+            return func.id in _SUBPROCESS_FUNCTIONS and self.index.resolves_to_from(func, "subprocess", func.id)
+        if not isinstance(func, ast.Attribute):
             return False
-        owner = func.value.id
-        if owner in self.subprocess_modules:
-            return True
-        return owner in self.os_modules and func.attr.startswith(_OS_LAUNCHER_PREFIXES)
+        if self.index.resolves_to_module(func.value, "subprocess"):
+            return func.attr in _SUBPROCESS_FUNCTIONS
+        return self.index.resolves_to_module(func.value, "os") and func.attr.startswith(_OS_LAUNCHER_PREFIXES)
 
 
 _CONTEXT_HANDLERS: dict[type, Callable[[MappingGuard, Any, ast.expr], list[Finding] | None]] = {

@@ -440,7 +440,17 @@ such a name and rebinds it, since a reference there means different things
 before and after the rebind. A function-local shadow with no import of the
 name in that function (a parameter named `os`) is not a violation: Python
 makes the name local for the whole body. An augmented assignment
-(`environ |= {...}`) mutates in place and is not a rebind. Every reference to `sys.modules` and to
+(`environ |= {...}`) mutates in place and is not a rebind. The same scope
+resolution decides `patch` / `mock` (a local `def patch(...)` or a parameter
+named `patch` / `mock` is not `unittest.mock`; an unbound `patch` from a star
+import still is), the process launchers that may receive `env=R`, and every
+constant: values are tracked per VARIABLE — (scope, name) — so `key =
+"PATH"` in one test never merges with `key = "KAIRIX_DB_PATH"` in another,
+a parameter resolves only through the call sites of the function that owns
+it, and `global` / `nonlocal` stores count toward the variable they rebind.
+**Dunders are default-deny:** any `__x__` attribute on `os` / `sys` /
+`importlib` (`os.__dict__`, `sys.__getattribute__`, ...), a `getattr` of
+one, and `vars(R)` / `R.__dict__` on the mapping itself fail — never traced. Every reference to `sys.modules` and to
 `importlib.reload` must be an allow-listed READ, or a write PROVEN safe;
 **anything not provably a safe read or a safe write fails.** **Any reference
 to builtin `__import__` fails** — the bare name, `<x>.__import__`
@@ -629,7 +639,10 @@ delitem / setattr / delattr`, every `MutableMapping` write
 (`os.environ["KAIRIX_X"] = v`, `del`, `|=`, `pop`, `setdefault`, `update`,
 `__setitem__`, `__delitem__`, and `clear()` / `popitem()`), wholesale
 replacement of `os.environ`, and `patch.dict` / `patch.object` / `patch`
-on it — positional or keyword, through any alias. The direct forms are the
+on it — positional or keyword, through any alias — plus the keyed writers
+`os.putenv` / `os.unsetenv` (also `posix` / `nt`, and `from os import
+putenv`): a protected or unresolved key fails, as does any use other than a
+direct call. The direct forms are the
 worse evasion: they skip monkeypatch's auto-undo, so a forgotten restore
 leaks the value into every later test in the process (a pytest-bdd step's
 `os.environ["KAIRIX_DB_PATH"] = ...` did exactly that).
@@ -672,7 +685,8 @@ explicitly reverted.
 `scripts/checks/check_no_env_monkeypatch.py` is an in-process
 `FitnessRule` over `tests/` (staged-narrowable like F1) that reports
 `path:line: shape` per violation, after a cheap token prefilter
-(`environ|setenv|delenv|patch|setattr|delattr|getattr`) and one parse + one
+(`environ|setenv|delenv|putenv|unsetenv|patch|setattr|delattr|getattr|vars`
+and attribute dunders `.__x__`) and one parse + one
 traversal per file. The classifier is the shared default-deny guard
 `scripts/checks/_mapping_writes.py` (see the tables under F1); constant
 resolution lives in `scripts/checks/_ast_key_taint.py`. Detector tests:
@@ -705,7 +719,17 @@ such a name and rebinds it, since a reference there means different things
 before and after the rebind. A function-local shadow with no import of the
 name in that function (a parameter named `os`) is not a violation: Python
 makes the name local for the whole body. An augmented assignment
-(`environ |= {...}`) mutates in place and is not a rebind. Every reference to `os.environ` (and every
+(`environ |= {...}`) mutates in place and is not a rebind. The same scope
+resolution decides `patch` / `mock` (a local `def patch(...)` or a parameter
+named `patch` / `mock` is not `unittest.mock`; an unbound `patch` from a star
+import still is), the process launchers that may receive `env=R`, and every
+constant: values are tracked per VARIABLE — (scope, name) — so `key =
+"PATH"` in one test never merges with `key = "KAIRIX_DB_PATH"` in another,
+a parameter resolves only through the call sites of the function that owns
+it, and `global` / `nonlocal` stores count toward the variable they rebind.
+**Dunders are default-deny:** any `__x__` attribute on `os` / `sys` /
+`importlib` (`os.__dict__`, `sys.__getattribute__`, ...), a `getattr` of
+one, and `vars(R)` / `R.__dict__` on the mapping itself fail — never traced. Every reference to `os.environ` (and every
 `setenv` / `delenv`) must be an allow-listed READ, or a write PROVEN safe;
 **anything not provably a safe read or a safe write fails.** A key or patch
 target that cannot be resolved statically (a runtime value,
