@@ -440,3 +440,125 @@ def test_imported_environ_kairix_write_in_a_default_is_flagged_despite_a_body_st
         '    environ["KAIRIX_DB_PATH"] = value\n'
     )
     assert _file_violations(tmp_path, source) == ["4: os.environ.pop(KAIRIX_*)"]
+
+
+def test_os_alias_resolves_in_its_lexical_scope(tmp_path: Path) -> None:
+    """``import os as state`` inside one helper binds ``state`` there only;
+    another function's local ``state`` object is its own mapping. A parameter
+    named ``os`` shadows the module too. The alias still counts inside the
+    function that imports it and at module level.
+
+    Sabotage proof (executed): collect aliases file-wide again → the local
+    ``Holder`` case is flagged and this fails; restored.
+    """
+    source = (
+        "import os\n\n\n"
+        "def helper():\n"
+        "    import os as state\n"
+        '    return state.environ.get("X")\n\n\n'
+        "def test_local_object():\n"
+        "    state = Holder()\n"
+        '    state.environ["KAIRIX_DB_PATH"] = "x"\n\n\n'
+        "def test_shadowing_parameter(os):\n"
+        '    os.environ["KAIRIX_DB_PATH"] = "x"\n\n\n'
+        "def test_alias_in_scope():\n"
+        "    import os as state\n"
+        '    state.environ["KAIRIX_DB_PATH"] = "x"\n\n\n'
+        "def test_module_os():\n"
+        '    os.environ["KAIRIX_DB_PATH"] = "x"\n'
+    )
+    assert _file_violations(tmp_path, source) == [
+        "20: assign os.environ[KAIRIX_*]",
+        "24: assign os.environ[KAIRIX_*]",
+    ]
+
+
+def test_module_dict_environ_replacement_is_flagged_and_reads_are_clean(tmp_path: Path) -> None:
+    """``os.__dict__["environ"] = ...`` / ``vars(os)["environ"] = ...`` replace
+    the mapping with no ``setattr`` and no audit event, and a restore within
+    the phase hides it from the runtime identity check; every such store (and
+    ``del``) is a wholesale replacement, a read is not.
+
+    Sabotage proof (executed): drop ``_module_dict_environ`` from the
+    wholesale branch → no violations and this fails; restored.
+    """
+    source = (
+        "import os\n\n\n"
+        "def test_x():\n"
+        '    original = os.__dict__["environ"]\n'
+        '    os.__dict__["environ"] = {}\n'
+        '    vars(os)["envi" + "ron"] = original\n'
+        '    del os.__dict__["environ"]\n'
+        '    os.__dict__["sep"] = "/"\n'
+        '    state.__dict__["environ"] = {}\n'
+    )
+    assert _file_violations(tmp_path, source) == [
+        "6: os.environ replaced wholesale",
+        "7: os.environ replaced wholesale",
+        "8: os.environ replaced wholesale",
+    ]
+
+
+def test_helper_imported_at_conftest_import_is_held_to_the_module_level_rule(tmp_path: Path) -> None:
+    """A module the conftest imports at module level executes before the
+    runtime guard is configured, exactly like the conftest's own top level,
+    so its module-level env writes (any key, transitively) fail — reported
+    against the conftest's import line. A helper imported inside a function
+    is deferred to guarded time and left to the runtime hook.
+
+    Sabotage proof (executed): skip ``_imported_helper_writes`` → nothing is
+    flagged and this fails; restored.
+    """
+    (tmp_path / "helper.py").write_text('import os\n\nos.environ["FAKEPKG_" + "EARLY"] = "1"\n', encoding="utf-8")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("import os\n\n\ndef setup():\n    os.putenv('A', '1')\n", encoding="utf-8")
+    (pkg / "sub.py").write_text("from os import environ\n\nfrom . import deeper\n", encoding="utf-8")
+    (pkg / "deeper.py").write_text("from os import environ as e\n\ne.update(VALUES)\n", encoding="utf-8")
+    (tmp_path / "lazy.py").write_text('import os\n\nos.environ["X"] = "1"\n', encoding="utf-8")
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(
+        "from helper import X\nimport pkg.sub\nimport os\n\n\ndef pytest_configure(config):\n    import lazy\n",
+        encoding="utf-8",
+    )
+    assert file_violations(conftest) == [
+        "1: module-level os.environ write in imported helper.py:3 (any key)",
+        "2: module-level os.environ write in imported pkg/deeper.py:3 (any key)",
+    ]
+
+
+def test_in_place_environ_union_is_a_key_write_not_a_replacement(tmp_path: Path) -> None:
+    """``os.environ |= {...}`` mutates the same mapping (``__ior__``), so it
+    is judged by its keys like any other write: a literal ``KAIRIX_*`` key
+    fails, other keys are clean in a test (the runtime hook still sees them)
+    and still a module-level write in a conftest.
+
+    Sabotage proof (executed): keep ``AugAssign`` in the wholesale branch →
+    the other-keys case is flagged and this fails; restored.
+    """
+    assert _violations(tmp_path, 'os.environ |= {"KAIRIX_DB_PATH": "x"}') == ["5: os.environ |= {KAIRIX_*}"]
+    assert _violations(tmp_path, 'environ |= {"OTHER": "1", "KAIRIX_DB_PATH": "x"}') == ["5: os.environ |= {KAIRIX_*}"]
+    assert _violations(tmp_path, 'os.environ |= {"OTHER_TEST_KEY": "1"}') == []
+    assert _violations(tmp_path, "os.environ |= extra") == []
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text('import os\n\nos.environ |= {"OTHER_TEST_KEY": "1"}\n', encoding="utf-8")
+    assert file_violations(conftest) == ["3: module-level os.environ write in conftest.py (any key)"]
+
+
+def test_lazy_type_alias_value_is_not_an_import_time_write(tmp_path: Path) -> None:
+    """A PEP 695 ``type`` alias value is evaluated only when ``__value__`` is
+    read, so the alias statement itself writes nothing at conftest import;
+    reading ``__value__`` at module level does run it and is flagged there.
+
+    Sabotage proof (executed): drop the ``ast.TypeAlias`` branch from the
+    deferral walk → the alias statement is flagged and this fails; restored.
+    """
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text('import os\n\ntype Deferred = os.environ.pop("X", None)\n', encoding="utf-8")
+    assert file_violations(conftest) == []
+    conftest.write_text(
+        'import os\n\ntype Deferred = os.environ.pop("X", None)\n\n\ndef later():\n    return Deferred.__value__\n\n\n'
+        "EAGER = Deferred.__value__\n",
+        encoding="utf-8",
+    )
+    assert file_violations(conftest) == ["10: module-level os.environ write in conftest.py (any key)"]

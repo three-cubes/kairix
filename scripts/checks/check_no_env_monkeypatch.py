@@ -82,98 +82,21 @@ process env to influence the production read."""
 
 _ENV_HELPERS = {"setenv", "delenv"}
 _BASELINE_CONTEXT = "allow_baseline_writes"
-_BASELINE_HOME = (Path(__file__).resolve().parents[2] / "tests" / "conftest.py").resolve()
-_GUARD_HOME = (Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "process_state_guard.py").resolve()
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_BASELINE_HOME = (_REPO_ROOT / "tests" / "conftest.py").resolve()
+_GUARD_HOME = (_REPO_ROOT / "tests" / "fixtures" / "process_state_guard.py").resolve()
 _REPLACED = "os.environ replaced wholesale"
 _ENVIRON_METHODS = {"pop", "setdefault"}
+_OS_MUTATORS = frozenset({"putenv", "unsetenv"})
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_Scope = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
 
 
 def _is_kairix_literal(node: ast.expr | None) -> bool:
     return isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("KAIRIX_")
 
 
-_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
-
-
-class _Environ:
-    """Decides whether an expression is ``os.environ`` in one parsed file.
-
-    ``<os>.environ`` counts for ``os`` and every ``import os as <alias>``.
-    A bare name counts only when the file binds it with ``from os import
-    environ [as name]`` and the scope that evaluates it does not rebind it (a
-    parameter or an assignment of that name in the function) — a simple
-    local check, not a scope engine. A decorator, parameter default or
-    annotation is evaluated in the scope that DEFINES the function, so a
-    store in the function body cannot rebind a name used there.
-
-    ``mutators`` are the bare names bound by ``from os import putenv /
-    unsetenv [as name]``; ``is_mutator`` applies the same rebinding rule.
-    """
-
-    def __init__(self, tree: ast.AST) -> None:
-        from_os = [
-            alias
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "os"
-            for alias in node.names
-        ]
-        self.names = {alias.asname or alias.name for alias in from_os if alias.name == "environ"}
-        self.mutators = {alias.asname or alias.name for alias in from_os if alias.name in _OS_MUTATORS}
-        self.os_names = {"os"} | {
-            alias.asname or alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-            if alias.name == "os"
-        }
-        self.parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-        self.deferred_annotations = any(
-            isinstance(node, ast.ImportFrom)
-            and node.module == "__future__"
-            and any(alias.name == "annotations" for alias in node.names)
-            for node in ast.walk(tree)
-        )
-
-    def is_os(self, node: ast.expr) -> bool:
-        return isinstance(node, ast.Name) and node.id in self.os_names
-
-    def evaluating_scope(self, node: ast.AST) -> ast.AST | None:
-        """The function or lambda whose BODY evaluates ``node``; ``None`` at module level.
-
-        A node in a function's decorators, defaults, annotations or return
-        annotation is evaluated by the enclosing scope when the ``def`` runs,
-        so that function is skipped and the walk continues upward.
-        """
-        child, scope = node, self.parents.get(node)
-        while scope is not None:
-            if isinstance(scope, _FUNCTIONS) and _in_body(scope, child):
-                return scope
-            child, scope = scope, self.parents.get(scope)
-        return None
-
-    def _rebound_locally(self, node: ast.Name) -> bool:
-        scope = self.evaluating_scope(node)
-        if scope is None:
-            return False
-        args = scope.args
-        params = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg) if a}
-        stores = {n.id for n in ast.walk(scope) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
-        return node.id in params | stores
-
-    def is_mutator(self, node: ast.expr) -> bool:
-        """``putenv(...)`` / ``unsetenv(...)`` through a ``from os import`` name."""
-        return isinstance(node, ast.Name) and node.id in self.mutators and not self._rebound_locally(node)
-
-    def __call__(self, node: ast.expr) -> bool:
-        if isinstance(node, ast.Attribute):
-            return node.attr == "environ" and self.is_os(node.value)
-        return isinstance(node, ast.Name) and node.id in self.names and not self._rebound_locally(node)
-
-
-_OS_MUTATORS = frozenset({"putenv", "unsetenv"})
-
-
-def _in_body(scope: ast.AST, child: ast.AST) -> bool:
+def _in_body(scope: _Scope, child: ast.AST) -> bool:
     if isinstance(scope, ast.Lambda):
         return child is scope.body
     return child in scope.body
@@ -188,9 +111,131 @@ def _folded_str(node: ast.expr) -> str | None:
         left, right = _folded_str(node.left), _folded_str(node.right)
         return None if left is None or right is None else left + right
     if isinstance(node, ast.JoinedStr):
-        parts = [_folded_str(v.value if isinstance(v, ast.FormattedValue) else v) for v in node.values]
-        return None if any(part is None for part in parts) else "".join(parts)
+        parts: list[str] = []
+        for value in node.values:
+            part = _folded_str(value.value if isinstance(value, ast.FormattedValue) else value)
+            if part is None:
+                return None
+            parts.append(part)
+        return "".join(parts)
     return None
+
+
+class _Environ:
+    """Decides whether an expression is ``os.environ`` in one parsed file.
+
+    ``<os>.environ`` counts for ``os`` and every ``import os as <alias>``; a
+    bare name counts when bound by ``from os import environ [as name]``. A
+    binding is visible in the scope that holds the import (module level, or
+    the function / lambda whose body holds it) and the scopes nested in it,
+    and not where the evaluating scope rebinds the name (a parameter or an
+    assignment of that name in the function) — a simple local check, not a
+    scope engine. A decorator, parameter default or annotation is evaluated
+    in the scope that DEFINES the function, so a store in the function body
+    cannot rebind a name used there.
+
+    ``is_mutator`` applies the same rules to the bare names bound by ``from
+    os import putenv / unsetenv [as name]``.
+    """
+
+    def __init__(self, tree: ast.AST) -> None:
+        self.parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        self.environ_bindings: dict[str, set[ast.AST | None]] = {}
+        self.mutator_bindings: dict[str, set[ast.AST | None]] = {}
+        self.os_bindings: dict[str, set[ast.AST | None]] = {"os": {None}}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "os":
+                for alias in node.names:
+                    if alias.name == "environ":
+                        self._bind(self.environ_bindings, alias.asname or alias.name, node)
+                    elif alias.name in _OS_MUTATORS:
+                        self._bind(self.mutator_bindings, alias.asname or alias.name, node)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "os" or (alias.asname is None and alias.name.startswith("os.")):
+                        self._bind(self.os_bindings, alias.asname or "os", node)
+        self.deferred_annotations = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "__future__"
+            and any(alias.name == "annotations" for alias in node.names)
+            for node in ast.walk(tree)
+        )
+
+    def _bind(self, bindings: dict[str, set[ast.AST | None]], name: str, node: ast.AST) -> None:
+        bindings.setdefault(name, set()).add(self.evaluating_scope(node))
+
+    def evaluating_scope(self, node: ast.AST) -> _Scope | None:
+        """The function or lambda whose BODY evaluates ``node``; ``None`` at module level.
+
+        A node in a function's decorators, defaults, annotations or return
+        annotation is evaluated by the enclosing scope when the ``def`` runs,
+        so that function is skipped and the walk continues upward.
+        """
+        child, scope = node, self.parents.get(node)
+        while scope is not None:
+            if isinstance(scope, _FUNCTIONS) and _in_body(scope, child):
+                return scope
+            child, scope = scope, self.parents.get(scope)
+        return None
+
+    def _bound(self, node: ast.expr, bindings: dict[str, set[ast.AST | None]]) -> bool:
+        """``node`` is a name bound by one of ``bindings`` in a scope that
+        encloses its evaluation and not rebound in the evaluating scope."""
+        if not isinstance(node, ast.Name) or node.id not in bindings:
+            return False
+        scope = self.evaluating_scope(node)
+        enclosing: set[ast.AST | None] = {scope}
+        while scope is not None:
+            scope = self.evaluating_scope(scope)
+            enclosing.add(scope)
+        return bool(bindings[node.id] & enclosing) and not self._rebound_locally(node)
+
+    def _rebound_locally(self, node: ast.Name) -> bool:
+        scope = self.evaluating_scope(node)
+        if scope is None:
+            return False
+        args = scope.args
+        params = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg) if a}
+        stores = {n.id for n in ast.walk(scope) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        return node.id in params | stores
+
+    def is_os(self, node: ast.expr) -> bool:
+        return self._bound(node, self.os_bindings)
+
+    def is_mutator(self, node: ast.expr) -> bool:
+        """``putenv(...)`` / ``unsetenv(...)`` through a ``from os import`` name."""
+        return self._bound(node, self.mutator_bindings)
+
+    def __call__(self, node: ast.expr) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr == "environ" and self.is_os(node.value)
+        return self._bound(node, self.environ_bindings)
+
+
+def _module_dict(node: ast.expr, is_environ: _Environ) -> bool:
+    """``<os>.__dict__`` or ``vars(<os>)``."""
+    if isinstance(node, ast.Attribute):
+        return node.attr == "__dict__" and is_environ.is_os(node.value)
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "vars"
+        and len(node.args) == 1
+        and is_environ.is_os(node.args[0])
+    )
+
+
+def _replaces_environ(target: ast.expr, is_environ: _Environ) -> bool:
+    """An assignment / ``del`` target that rebinds ``os.environ`` itself:
+    ``os.environ``, ``os.__dict__["environ"]`` or ``vars(os)["environ"]``
+    (the name literal or constant-folded)."""
+    if isinstance(target, ast.Attribute):
+        return is_environ(target)
+    return (
+        isinstance(target, ast.Subscript)
+        and _module_dict(target.value, is_environ)
+        and _folded_str(target.slice) == "environ"
+    )
 
 
 def _setattr_environ(node: ast.AST, is_environ: _Environ) -> bool:
@@ -206,19 +251,37 @@ def _setattr_environ(node: ast.AST, is_environ: _Environ) -> bool:
     )
 
 
+def _union_writes_kairix(node: ast.AugAssign, is_environ: _Environ) -> bool:
+    """``os.environ |= {...}`` with a literal ``KAIRIX_*`` key — an in-place
+    key write (``__ior__`` keeps the same mapping), not a replacement."""
+    return (
+        isinstance(node.op, ast.BitOr)
+        and is_environ(node.target)
+        and isinstance(node.value, ast.Dict)
+        and any(_is_kairix_literal(key) for key in node.value.keys)
+    )
+
+
 def _shape(node: ast.AST, is_environ: _Environ) -> str | None:
     def subscript_write(target: ast.expr) -> bool:
         return isinstance(target, ast.Subscript) and is_environ(target.value) and _is_kairix_literal(target.slice)
 
-    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+    if isinstance(node, ast.AugAssign):
+        if _union_writes_kairix(node, is_environ):
+            return "os.environ |= {KAIRIX_*}"
+        if subscript_write(node.target):
+            return "assign os.environ[KAIRIX_*]"
+    elif isinstance(node, (ast.Assign, ast.AnnAssign)):
         if isinstance(node, ast.AnnAssign) and node.value is None:
             return None  # a bare annotation assigns nothing
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        if any(isinstance(t, ast.Attribute) and is_environ(t) for t in targets):
+        if any(_replaces_environ(t, is_environ) for t in targets):
             return _REPLACED
         if any(subscript_write(t) for t in targets):
             return "assign os.environ[KAIRIX_*]"
     elif isinstance(node, ast.Delete):
+        if any(_replaces_environ(t, is_environ) for t in node.targets):
+            return _REPLACED
         if any(subscript_write(t) for t in node.targets):
             return "del os.environ[KAIRIX_*]"
     elif _setattr_environ(node, is_environ):
@@ -237,15 +300,18 @@ _CONFTEST_MODULE_WRITE = "module-level os.environ write in conftest.py (any key)
 
 
 def _any_environ_write(node: ast.AST, is_environ: _Environ) -> bool:
-    """An ``os.environ`` write of ANY key (subscript store / del, a mutating
-    method, ``os.environ = ...``, ``setattr(os, "environ", ...)``) or an
-    ``os.putenv`` / ``os.unsetenv`` call — through ``<os>.`` or a ``from os
-    import putenv [as name]`` name."""
+    """An ``os.environ`` write of ANY key (subscript store / del / ``|=``, a
+    mutating method, ``os.environ = ...``, ``setattr(os, "environ", ...)``,
+    ``os.__dict__["environ"] = ...``) or an ``os.putenv`` / ``os.unsetenv``
+    call — through ``<os>.`` or a ``from os import putenv [as name]`` name."""
     if isinstance(node, ast.AnnAssign) and node.value is None:
         return False  # a bare annotation assigns nothing
     if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
         targets = node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
-        return any(is_environ(t) or (isinstance(t, ast.Subscript) and is_environ(t.value)) for t in targets)
+        return any(
+            is_environ(t) or _replaces_environ(t, is_environ) or (isinstance(t, ast.Subscript) and is_environ(t.value))
+            for t in targets
+        )
     if _setattr_environ(node, is_environ):
         return True
     if isinstance(node, ast.Call):
@@ -267,36 +333,139 @@ def _conftest_module_level_writes(tree: ast.AST, is_environ: _Environ) -> set[tu
     inside its fixture body (``with allow_baseline_writes():``) instead.
     """
     found = set()
+    lazy_aliases = {
+        node.name.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.TypeAlias) and any(_any_environ_write(n, is_environ) for n in ast.walk(node.value))
+    }
     for node in ast.walk(tree):
         if _any_environ_write(node, is_environ) and _runs_at_import(node, is_environ):
+            found.add((getattr(node, "lineno", 0), _CONFTEST_MODULE_WRITE))
+        elif _evaluates_lazy_alias(node, lazy_aliases) and _runs_at_import(node, is_environ):
             found.add((getattr(node, "lineno", 0), _CONFTEST_MODULE_WRITE))
     return found
 
 
+def _evaluates_lazy_alias(node: ast.AST, lazy_aliases: set[str]) -> bool:
+    """``<alias>.__value__`` — the read that runs a ``type`` alias's value."""
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "__value__"
+        and isinstance(node.value, ast.Name)
+        and node.value.id in lazy_aliases
+    )
+
+
 def _runs_at_import(node: ast.AST, is_environ: _Environ) -> bool:
     """True unless ``node`` sits inside a function or lambda BODY — or inside
-    an annotation under ``from __future__ import annotations``.
+    a lazily evaluated expression: a ``type`` alias value or type parameter,
+    or an annotation under ``from __future__ import annotations``.
 
     Decorators, parameter defaults and annotations are evaluated when the
     ``def`` / ``lambda`` executes, i.e. at module import, so they count as
     import-time code; only the body is deferred to call time. With postponed
     evaluation every annotation is kept as a string and never runs.
     """
-    if is_environ.deferred_annotations and _in_annotation(node, is_environ.parents):
+    if _in_lazy_expression(node, is_environ.parents, is_environ.deferred_annotations):
         return False
     return is_environ.evaluating_scope(node) is None
 
 
-def _in_annotation(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
-    """``node`` is (inside) a parameter, return or variable annotation."""
+def _in_lazy_expression(node: ast.AST, parents: dict[ast.AST, ast.AST], deferred_annotations: bool) -> bool:
     child, parent = node, parents.get(node)
     while parent is not None:
-        if isinstance(parent, (ast.arg, ast.AnnAssign)) and child is parent.annotation:
+        if isinstance(parent, ast.TypeAlias) and child is parent.value:
             return True
-        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)) and child is parent.returns:
+        if child in getattr(parent, "type_params", ()):
             return True
+        if deferred_annotations:
+            if isinstance(parent, (ast.arg, ast.AnnAssign)) and child is parent.annotation:
+                return True
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)) and child is parent.returns:
+                return True
         child, parent = parent, parents.get(parent)
     return False
+
+
+def _import_time_modules(tree: ast.AST, is_environ: _Environ, base: Path) -> list[tuple[int, Path]]:
+    """``(import line, file)`` for every repository module an import that runs
+    at module level brings in — a package's ``__init__.py`` files included —
+    resolved from the importing file's directory and the repository root."""
+    found: list[tuple[int, Path]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)) or not _runs_at_import(node, is_environ):
+            continue
+        targets: list[tuple[int, str, str | None]]
+        if isinstance(node, ast.Import):
+            targets = [(0, alias.name, None) for alias in node.names]
+        else:
+            targets = [(node.level, node.module or "", alias.name) for alias in node.names]
+        for level, module, name in targets:
+            roots = [_relative_root(base, level)] if level else [base, _REPO_ROOT]
+            for root in dict.fromkeys(roots):
+                for path in _module_files(root, module.split(".") if module else [], name):
+                    found.append((node.lineno, path))
+    return found
+
+
+def _relative_root(base: Path, level: int) -> Path:
+    """The package directory a ``from .[.] import`` of ``level`` dots names, from the importing module's directory."""
+    return base if level == 1 else base.parents[level - 2]
+
+
+def _module_files(root: Path, parts: list[str], name: str | None) -> list[Path]:
+    """The files executed by importing ``parts`` (and ``name`` under it) from ``root``."""
+    files: list[Path] = []
+    here = root
+    for part in parts:
+        here = here / part
+        if (here / "__init__.py").is_file():
+            files.append(here / "__init__.py")
+        elif here.with_suffix(".py").is_file():
+            files.append(here.with_suffix(".py"))
+            break
+        else:
+            return []
+    if name is not None:
+        if (here / name / "__init__.py").is_file():
+            files.append(here / name / "__init__.py")
+        elif (here / name).with_suffix(".py").is_file():
+            files.append((here / name).with_suffix(".py"))
+    return files
+
+
+def _imported_helper_writes(tree: ast.AST, path: Path, is_environ: _Environ) -> set[tuple[int, str]]:
+    """Module-level env writes in every module a conftest imports at import
+    time, transitively: those modules run in the same pre-configuration
+    window as the conftest's own top level. Keyed by the conftest import line."""
+    found: set[tuple[int, str]] = set()
+    seen = {path.resolve()}
+    pending = _import_time_modules(tree, is_environ, path.resolve().parent)
+    while pending:
+        line, helper = pending.pop()
+        helper = helper.resolve()
+        if helper in seen:
+            continue
+        seen.add(helper)
+        try:
+            helper_tree = ast.parse(helper.read_text(encoding="utf-8"), filename=str(helper))
+        except (SyntaxError, OSError):
+            continue
+        helper_environ = _Environ(helper_tree)
+        rel = _display_path(helper, path.resolve().parent)
+        for write_line, _ in _conftest_module_level_writes(helper_tree, helper_environ):
+            found.add((line, f"module-level os.environ write in imported {rel}:{write_line} (any key)"))
+        pending.extend((line, nested) for _, nested in _import_time_modules(helper_tree, helper_environ, helper.parent))
+    return found
+
+
+def _display_path(path: Path, base: Path) -> str:
+    for root in (base, _REPO_ROOT):
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return str(path)
 
 
 def _baseline_blocks(tree: ast.AST) -> list[ast.With]:
@@ -336,6 +505,7 @@ def file_violations(path: Path) -> list[str]:
         found = {(line, shape) for line, shape in found if shape != _REPLACED}
     if path.name == "conftest.py":
         found |= _conftest_module_level_writes(tree, is_environ)
+        found |= _imported_helper_writes(tree, path, is_environ)
     if path.resolve() != _BASELINE_HOME:
         found |= {(b.lineno, f"{_BASELINE_CONTEXT}() outside tests/conftest.py") for b in blocks}
     return [f"{line}: {shape}" for line, shape in sorted(found)]
