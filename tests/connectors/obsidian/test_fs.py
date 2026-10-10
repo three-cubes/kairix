@@ -15,6 +15,7 @@ import pytest
 
 from kairix.connectors.obsidian.fs import (
     DEFAULT_MIME,
+    collection_accepts,
     iter_collection_files,
     mime_for_bytes,
     mime_for_path,
@@ -244,3 +245,106 @@ def test_read_text_for_hash_handles_binary_payload(tmp_path: Path) -> None:
     # the exact decoded form is implementation-defined.
     assert isinstance(out, str)
     assert "PDF-1.7" in out
+
+
+# ---------------------------------------------------------------------------
+# collection_accepts — predicate twin of iter_collection_files
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "rel_path,collection_path,glob,exclude,expected",
+    [
+        ("a.md", ".", "**/*.md", (), True),
+        ("x/y/a.md", "", "**/*.md", (), True),
+        ("a.json", ".", "**/*.md", (), False),
+        (".obsidian/workspace.json", ".", "**/*.md", (), False),
+        ("notes/a.md", "notes", "**/*.md", (), True),
+        ("notes/deep/a.md", "notes/", "**/*.md", (), True),
+        ("notes-old/a.md", "notes", "**/*.md", (), False),
+        ("other/a.md", "notes", "**/*.md", (), False),
+        ("drafts/a.md", ".", "**/*.md", ("drafts",), False),
+        ("x/a.md", ".", "*.md", (), False),
+        ("a.md", ".", "*.md", (), True),
+        ("x/a.md", ".", "x/*.md", (), True),
+        ("y/a.md", ".", "x/*.md", (), False),
+        ("x/a.md", ".", "x/**/a.md", (), True),
+        ("a.md", ".", "**/*.md", ("",), True),
+        ("notes/a.md", "./notes", "**/*.md", (), True),
+        ("notes/a.md", "notes/.", "**/*.md", (), True),
+        ("x/a.md", ".", "./**/*.md", (), True),
+        ("secret.md", ".", "*/**", (), False),
+        ("a.md", ".", "*.md/", (), False),
+        ("notes/a.md", "notes/a.md", ".", (), False),
+        ("x/a.md", ".", "x/a.md/b", (), False),
+        ("Notes/a.md", "notes", "**/*.md", (), False),
+    ],
+)
+def test_collection_accepts_cases(
+    rel_path: str, collection_path: str, glob: str, exclude: tuple[str, ...], expected: bool
+) -> None:
+    """Base path, glob (``**`` spans directories) and substring exclude decide membership.
+
+    Sabotage-proof: make the non-trailing ``**`` branch of ``_parts_match`` try
+    ``range(i + 1, ...)`` (one-or-more directories); the ``a.md`` / ``**/*.md``
+    row fails. Let a trailing ``**`` match zero components; the ``*/**`` row
+    fails. Split ``_parts`` with ``text.split("/")``; the ``./notes`` rows fail.
+    Let ``_parts_under`` accept ``len(child) == len(parent)``; the row whose
+    path is its own collection fails.
+    Drop the exclude check; the ``drafts`` row fails. Drop the trailing
+    ``/`` in the base-prefix check; the ``notes-old`` row fails.
+    """
+    assert collection_accepts(rel_path, collection_path=collection_path, glob=glob, exclude=exclude) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "collection_path,glob,exclude",
+    [
+        (".", "**/*.md", ()),
+        ("notes", "**/*.md", ("wip",)),
+        (".", "*.md", ()),
+        ("notes", "sub/*.txt", ()),
+        ("./notes", "**/*.md", ()),
+        ("notes/.", "**/*.md", ()),
+        (".", "./**/*.md", ()),
+        (".", "*/**", ()),
+        (".", "*.md/**", ()),
+        ("notes", "**", ()),
+        (".", "*.md/", ()),
+    ],
+)
+def test_collection_accepts_agrees_with_iter_collection_files(
+    tmp_path: Path, collection_path: str, glob: str, exclude: tuple[str, ...]
+) -> None:
+    """Every file in a mixed tree is matched exactly when the walk yields it.
+
+    Sabotage-proof: make ``collection_accepts`` ignore ``collection_path``;
+    the ``notes`` rows fail because root-level files now match.
+    """
+    rels = [
+        "top.md",
+        "top.txt",
+        ".obsidian/workspace.json",
+        ".obsidian/hidden.md",
+        "notes/a.md",
+        "notes/sub/b.md",
+        "notes/sub/c.txt",
+        "notes/wip/d.md",
+        "notes-old/e.md",
+        "dir.md/inner.md",
+    ]
+    for rel in rels:
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x", encoding="utf-8")
+
+    walked = {
+        p.relative_to(tmp_path).as_posix()
+        for p in iter_collection_files(vault_root=tmp_path, collection_path=collection_path, glob=glob, exclude=exclude)
+    }
+    matched = {
+        rel for rel in rels if collection_accepts(rel, collection_path=collection_path, glob=glob, exclude=exclude)
+    }
+    assert matched == walked
