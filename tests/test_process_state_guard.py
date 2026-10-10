@@ -242,6 +242,12 @@ def test_mock_patch_of_a_missing_attribute_changes_nothing_and_is_clean():
             pass
 
 
+def test_patch_dict_of_a_guarded_key_that_raises_before_writing_is_clean():
+    with pytest.raises(TypeError):
+        with mock.patch.dict(os.environ, {"KAIRIX_BAD": object()}):
+            pass
+
+
 def test_env_patch_dict_of_other_keys_is_clean():
     with mock.patch.dict(os.environ, {"OTHER": "1"}):
         assert os.environ["OTHER"] == "1"
@@ -648,6 +654,14 @@ def test_patch_that_raises_before_applying_is_not_an_f1_violation(
     both fail with ``[F1]``; restored.
     """
     assert inner_outcomes[name] == ("passed", "")
+
+
+def test_patch_dict_that_raises_before_writing_is_not_an_f2_violation(
+    inner_outcomes: dict[str, tuple[str, str]],
+) -> None:
+    """``patch.dict(os.environ, {KAIRIX_BAD: object()})`` raises ``TypeError`` before
+    the mapping changes; the detail is recorded only once the patch applied."""
+    assert inner_outcomes["test_patch_dict_of_a_guarded_key_that_raises_before_writing_is_clean"] == ("passed", "")
 
 
 def test_real_module_inserted_under_another_name_fails(inner_outcomes: dict[str, tuple[str, str]]) -> None:

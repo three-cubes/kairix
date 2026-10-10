@@ -345,7 +345,10 @@ def _check_mock_patch_dict(patcher: Any) -> str | None:
     if _is_environ_target(in_dict):
         env_keys = [k for k in dict(values) if _guarded_key(k)]
         if patcher.clear or env_keys:
-            _STATE.env.append(f"patch.dict(os.environ) of {env_keys[0] if env_keys else 'every key (clear=True)'}")
+            # Deferred like the replacement details: recorded once the patch applied.
+            _STATE.deferred_env.append(
+                f"patch.dict(os.environ) of {env_keys[0] if env_keys else 'every key (clear=True)'}"
+            )
         return None
     if in_dict != "sys.modules" and in_dict is not sys.modules:
         return None
