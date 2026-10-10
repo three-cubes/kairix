@@ -534,14 +534,17 @@ itself: assignment, a well-formed `setattr(os, "environ", ...)` /
 `delattr`, `os.__dict__["environ"] = ...` / `vars(os)[...]`, the name
 literal or constant-folded (a wholesale
 replacement, even one restored within the same phase, which the runtime
-identity check cannot see), reporting `path:line: shape`. `os` includes
-every `import os as <alias>`, and a bare `environ` / `putenv` / `unsetenv`
-counts through `from os import ... [as name]`; each binding is visible in
-the scope holding the import (a function, lambda or class body) and the
-scopes nested in it — a class namespace is no closure for its methods — and
-not where the evaluating scope rebinds the name (a decorator, default or
-annotation is evaluated in the defining scope, so a store in the function
-body does not rebind it). Writes inside `with
+identity check cannot see), reporting `path:line: shape`. `os` is the
+module only through a live `import os [as <alias>]` / `import os.<sub>`
+binding, and a bare `environ` / `putenv` / `unsetenv` only through `from os
+import ... [as name]`: every binding of a name (import, store, parameter,
+`def` / `class`) is an event in the scope that performs it; a function's
+names are local throughout its body, a module or class body runs top to
+bottom (a direct use resolves to the last event before it, a use inside a
+nested function to the module's last event), and a class namespace is no
+closure for its methods. A decorator, default or annotation is evaluated in
+the defining scope, so a store in the function body does not rebind it.
+Writes inside `with
 allow_baseline_writes():` are exempt, and the block itself fails anywhere
 but `tests/conftest.py`; the runtime guard's own restore of the snapshotted
 `os.environ` — the one `F2-RESTORE`-marked assignment inside a function body
@@ -557,7 +560,10 @@ pre-configuration window. Decorators, parameter defaults and annotations run
 when the `def` executes and count as module level, as does a class body;
 annotations under `from __future__ import
 annotations`, `type` alias values and type parameters are lazy and clean
-(reading an alias's `__value__` at module level is not). Tests:
+(reading an alias's `__value__` at module level is not), as is code a
+constant test rules out (`if False` / `if TYPE_CHECKING` bodies, the dead
+arm of a constant `if`, operands short-circuited by `False and` / `True
+or`). Tests:
 `tests/checks/test_no_env_monkeypatch_direct_writes.py`.
 
 **Runtime half — exact.** `tests/fixtures/process_state_guard.py` installs

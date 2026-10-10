@@ -14,8 +14,9 @@ starting with ``KAIRIX_``:
   wholesale replacement — even one restored within the same phase, which the
   runtime identity check misses).
 
-``os`` includes every ``import os as <alias>``; names resolve in the scope
-that binds them (functions, lambdas and class bodies).
+``os`` is the module only through a live ``import os [as <alias>]`` /
+``import os.<sub>`` binding, resolved in execution order per scope
+(functions, lambdas, class bodies and the module).
 
 Writes inside ``with allow_baseline_writes():`` in ``tests/conftest.py`` (the
 session env baseline) are exempt, mirroring the runtime guard, as is the
@@ -26,7 +27,8 @@ names included), and so does one in any module the conftest imports or names
 in ``pytest_plugins``: that code runs before the runtime guard is
 configured. Decorators, defaults and annotations run at ``def`` time (a class
 body with its ``class`` statement), except annotations under ``from
-__future__ import annotations`` and ``type`` alias values, which never run.
+__future__ import annotations`` and ``type`` alias values, which never run,
+and code behind a constant-false test (``if False`` / ``if TYPE_CHECKING``).
 
 The exact half is the runtime guard ``tests/fixtures/process_state_guard.py``:
 an audit hook sees EVERY env write (any spelling, any computed key) while a
@@ -107,15 +109,6 @@ def _in_body(scope: _Scope, child: ast.AST) -> bool:
     return child in scope.body
 
 
-def _shallow_walk(scope: ast.AST) -> Iterator[ast.AST]:
-    """``scope``'s body nodes, not descending into nested functions / classes."""
-    for child in ast.iter_child_nodes(scope):
-        if isinstance(child, _SCOPES):
-            continue
-        yield child
-        yield from _shallow_walk(child)
-
-
 def _leaf_targets(target: ast.expr) -> Iterator[ast.expr]:
     """The individual store targets inside a (nested) tuple / list / starred target."""
     if isinstance(target, (ast.Tuple, ast.List)):
@@ -176,40 +169,58 @@ def _folded_str(node: ast.expr) -> str | None:
     return None
 
 
+_Position = tuple[int, int]
+_FUNCTION_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
 class _Environ:
     """Decides whether an expression is ``os.environ`` in one parsed file.
 
-    ``<os>.environ`` counts for ``os`` and every ``import os as <alias>``; a
-    bare name counts when bound by ``from os import environ [as name]``. A
-    binding is visible in the scope that holds the import (module level, or
-    the function / lambda / class whose body holds it) and the scopes nested
-    in it — a class body being no closure for its methods — and not where the
-    evaluating scope rebinds the name (a parameter or an assignment of that
-    name in the function, a store in the class body) — a simple local check,
-    not a scope engine. A decorator, parameter default or annotation is evaluated
-    in the scope that DEFINES the function, so a store in the function body
-    cannot rebind a name used there.
+    Every binding of a name is an event in the scope that performs it: an
+    import (``import os [as alias]`` / ``import os.<sub>`` bind ``os``; ``from
+    os import environ / putenv / unsetenv [as name]`` bind those), a plain
+    store, a parameter, a ``def`` / ``class`` name. A function's names are
+    local throughout its body, so a name there is ``os.environ`` only when
+    every event for it in the function is the matching import. Module and
+    class bodies run top to bottom, so a name used directly in one resolves
+    to the last event before the use, and a name used inside a nested
+    function resolves to the module's last event; a class namespace is no
+    closure for its methods. A simple local check, not a scope engine.
 
-    ``is_mutator`` applies the same rules to the bare names bound by ``from
-    os import putenv / unsetenv [as name]``.
+    A decorator, parameter default or annotation is evaluated in the scope
+    that DEFINES the function, so a store in the function body cannot rebind
+    a name used there.
     """
 
     def __init__(self, tree: ast.AST) -> None:
         self.parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-        self.environ_bindings: dict[str, set[ast.AST | None]] = {}
-        self.mutator_bindings: dict[str, set[ast.AST | None]] = {}
-        self.os_bindings: dict[str, set[ast.AST | None]] = {"os": {None}}
+        self.events: dict[ast.AST | None, list[tuple[_Position, str, str]]] = {}
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "os":
+            if isinstance(node, ast.ImportFrom):
                 for alias in node.names:
-                    if alias.name == "environ":
-                        self._bind(self.environ_bindings, alias.asname or alias.name, node)
-                    elif alias.name in _OS_MUTATORS:
-                        self._bind(self.mutator_bindings, alias.asname or alias.name, node)
+                    kind = "store"
+                    if node.module == "os":
+                        kind = (
+                            "environ"
+                            if alias.name == "environ"
+                            else "mutator"
+                            if alias.name in _OS_MUTATORS
+                            else "store"
+                        )
+                    self._event(node, alias.asname or alias.name, kind)
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name == "os" or (alias.asname is None and alias.name.startswith("os.")):
-                        self._bind(self.os_bindings, alias.asname or "os", node)
+                    root = alias.name.split(".")[0]
+                    is_os = alias.name == "os" if alias.asname else root == "os"
+                    self._event(node, alias.asname or root, "os" if is_os else "store")
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                self._event(node, node.id, "store")
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                self._event(node, node.name, "store")
+            elif isinstance(node, ast.arg):
+                function = self.parents[self.parents[node]]  # arg -> arguments -> function
+                position = (getattr(function, "lineno", 0), getattr(function, "col_offset", 0))
+                self.events.setdefault(function, []).append((position, node.arg, "store"))
         self.deferred_annotations = any(
             isinstance(node, ast.ImportFrom)
             and node.module == "__future__"
@@ -217,8 +228,9 @@ class _Environ:
             for node in ast.walk(tree)
         )
 
-    def _bind(self, bindings: dict[str, set[ast.AST | None]], name: str, node: ast.AST) -> None:
-        bindings.setdefault(name, set()).add(self.evaluating_scope(node))
+    def _event(self, node: ast.AST, name: str, kind: str) -> None:
+        position = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+        self.events.setdefault(self.evaluating_scope(node), []).append((position, name, kind))
 
     def evaluating_scope(self, node: ast.AST) -> _Scope | None:
         """The function, lambda or class whose BODY evaluates ``node``; ``None`` at module level.
@@ -235,44 +247,39 @@ class _Environ:
             child, scope = scope, self.parents.get(scope)
         return None
 
-    def _bound(self, node: ast.expr, bindings: dict[str, set[ast.AST | None]]) -> bool:
-        """``node`` is a name bound by one of ``bindings`` in a scope that
-        encloses its evaluation and not rebound in the evaluating scope."""
-        if not isinstance(node, ast.Name) or node.id not in bindings:
+    def _bound(self, node: ast.expr, kind: str) -> bool:
+        """``node`` is a name whose live binding, where it is evaluated, is the ``kind`` import."""
+        if not isinstance(node, ast.Name):
             return False
-        scope = self.evaluating_scope(node)
-        enclosing: set[ast.AST | None] = {scope}
-        while scope is not None:
-            scope = self.evaluating_scope(scope)
-            if not isinstance(scope, ast.ClassDef):  # a class namespace is no closure
-                enclosing.add(scope)
-        return bool(bindings[node.id] & enclosing) and not self._rebound_locally(node)
-
-    def _rebound_locally(self, node: ast.Name) -> bool:
-        scope = self.evaluating_scope(node)
-        if scope is None:
-            return False
-        if isinstance(scope, ast.ClassDef):
-            class_stores = {
-                n.id for n in _shallow_walk(scope) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
-            }
-            return node.id in class_stores
-        args = scope.args
-        params = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg) if a}
-        stores = {n.id for n in ast.walk(scope) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
-        return node.id in params | stores
+        scope: _Scope | None = self.evaluating_scope(node)
+        direct = True
+        while True:
+            if direct or not isinstance(scope, ast.ClassDef):  # a class namespace is no closure
+                events = [e for e in self.events.get(scope, ()) if e[1] == node.id]
+                if isinstance(scope, _FUNCTION_SCOPES):
+                    if events:  # local throughout the function
+                        return all(e[2] == kind for e in events)
+                else:  # module / class body: sequential
+                    if direct:
+                        position = (node.lineno, node.col_offset)
+                        events = [e for e in events if e[0] < position]
+                    if events:
+                        return max(events)[2] == kind
+            if scope is None:
+                return False
+            scope, direct = self.evaluating_scope(scope), False
 
     def is_os(self, node: ast.expr) -> bool:
-        return self._bound(node, self.os_bindings)
+        return self._bound(node, "os")
 
     def is_mutator(self, node: ast.expr) -> bool:
         """``putenv(...)`` / ``unsetenv(...)`` through a ``from os import`` name."""
-        return self._bound(node, self.mutator_bindings)
+        return self._bound(node, "mutator")
 
     def __call__(self, node: ast.expr) -> bool:
         if isinstance(node, ast.Attribute):
             return node.attr == "environ" and self.is_os(node.value)
-        return self._bound(node, self.environ_bindings)
+        return self._bound(node, "environ")
 
 
 def _module_dict(node: ast.expr, is_environ: _Environ) -> bool:
@@ -424,7 +431,7 @@ def _evaluates_lazy_alias(node: ast.AST, lazy_aliases: set[str]) -> bool:
 
 def _runs_at_import(node: ast.AST, is_environ: _Environ) -> bool:
     """True unless ``node`` sits inside a function or lambda BODY (a class
-    body runs with the ``class`` statement) — or inside
+    body runs with the ``class`` statement), in a statically dead branch — or inside
     a lazily evaluated expression: a ``type`` alias value or type parameter,
     or an annotation under ``from __future__ import annotations``.
 
@@ -435,10 +442,54 @@ def _runs_at_import(node: ast.AST, is_environ: _Environ) -> bool:
     """
     if _in_lazy_expression(node, is_environ.parents, is_environ.deferred_annotations):
         return False
+    if _in_dead_branch(node, is_environ.parents):
+        return False
     scope = is_environ.evaluating_scope(node)
     while isinstance(scope, ast.ClassDef):  # a class body runs when the ``class`` statement does
         scope = is_environ.evaluating_scope(scope)
     return scope is None
+
+
+def _static_truth(expr: ast.expr) -> bool | None:
+    """The truth of a constant test (``False``, ``0``, ``TYPE_CHECKING``, ``not`` of such); ``None`` when unknown."""
+    if isinstance(expr, ast.Constant):
+        return bool(expr.value)
+    if (
+        isinstance(expr, (ast.Name, ast.Attribute))
+        and (expr.id if isinstance(expr, ast.Name) else expr.attr) == "TYPE_CHECKING"
+    ):
+        return False
+    if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+        inner = _static_truth(expr.operand)
+        return None if inner is None else not inner
+    return None
+
+
+def _in_dead_branch(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    """``node`` sits in code a constant test rules out: the body of ``if
+    False`` / ``if TYPE_CHECKING`` / ``while False``, the ``else`` of ``if
+    True``, the dead arm of a constant conditional expression, or an operand
+    short-circuited by an earlier ``False and`` / ``True or``."""
+    child, parent = node, parents.get(node)
+    while parent is not None:
+        if isinstance(parent, (ast.If, ast.While)):
+            truth = _static_truth(parent.test)
+            if (truth is False and child in parent.body) or (
+                truth is True and isinstance(parent, ast.If) and child in parent.orelse
+            ):
+                return True
+        elif isinstance(parent, ast.IfExp):
+            truth = _static_truth(parent.test)
+            if (truth is False and child is parent.body) or (truth is True and child is parent.orelse):
+                return True
+        elif isinstance(parent, ast.BoolOp) and child in parent.values:
+            earlier = [_static_truth(value) for value in parent.values[: parent.values.index(child)]]
+            if (isinstance(parent.op, ast.And) and False in earlier) or (
+                isinstance(parent.op, ast.Or) and True in earlier
+            ):
+                return True
+        child, parent = parent, parents.get(parent)
+    return False
 
 
 def _in_lazy_expression(node: ast.AST, parents: dict[ast.AST, ast.AST], deferred_annotations: bool) -> bool:

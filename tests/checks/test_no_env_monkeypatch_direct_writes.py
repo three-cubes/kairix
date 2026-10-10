@@ -723,3 +723,108 @@ def test_guard_exemption_covers_only_the_marked_restore_inside_a_function(tmp_pa
         f"import os\n\n\ndef test_x():\n    os.environ = {{}}  # {_GUARD_RESTORE_MARKER}\n", encoding="utf-8"
     )
     assert file_violations(other) == ["5: os.environ replaced wholesale"]
+
+
+def test_class_body_shadowing_counts_only_after_the_store_executes(tmp_path: Path) -> None:
+    """A class body runs top to bottom: a write before ``os = Fake()`` still
+    resolves the module ``os``; one after it writes the fake's mapping.
+
+    Sabotage proof (executed): use the whole class's store set again → the
+    write before the store is clean and this fails; restored.
+    """
+    source = (
+        "import os\n\n\n"
+        "class Early:\n"
+        '    os.environ["KAIRIX_DB_PATH"] = "x"\n'
+        "    os = Fake()\n"
+        '    os.environ["KAIRIX_DB_PATH"] = "x"\n'
+    )
+    assert _file_violations(tmp_path, source) == ["5: assign os.environ[KAIRIX_*]"]
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(source.replace("KAIRIX_DB_PATH", "X"), encoding="utf-8")
+    assert file_violations(conftest) == ["5: module-level os.environ write in conftest.py (any key)"]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('os = FakeState()\nos.environ["KAIRIX_DB_PATH"] = "1"\n', []),
+        ('import os\nos = FakeState()\n\n\ndef test_x():\n    os.environ["KAIRIX_DB_PATH"] = "1"\n', []),
+        (
+            'import os\nos.environ["KAIRIX_DB_PATH"] = "1"\nos = FakeState()\nos.environ["KAIRIX_DB_PATH"] = "1"\n',
+            ["2: assign os.environ[KAIRIX_*]"],
+        ),
+        ('os = FakeState()\nimport os\nos.environ["KAIRIX_DB_PATH"] = "1"\n', ["3: assign os.environ[KAIRIX_*]"]),
+        (
+            'import os.path\n\n\ndef test_x():\n    os.environ["KAIRIX_DB_PATH"] = "1"\n',
+            ["5: assign os.environ[KAIRIX_*]"],
+        ),
+        ('import os.path as p\n\n\ndef test_x():\n    p.environ["KAIRIX_DB_PATH"] = "1"\n', []),
+        ('from fakes import os\n\n\ndef test_x():\n    os.environ["KAIRIX_DB_PATH"] = "1"\n', []),
+        ('def os():\n    pass\n\n\nos.environ["KAIRIX_DB_PATH"] = "1"\n', []),
+    ],
+    ids=[
+        "no-import",
+        "rebound-before-function-runs",
+        "rebound-after-direct-write",
+        "import-after-store",
+        "import-os-path-binds-os",
+        "os-path-alias-is-not-os",
+        "os-from-elsewhere",
+        "def-named-os",
+    ],
+)
+def test_module_level_os_binding_comes_from_a_real_import_in_execution_order(
+    tmp_path: Path, source: str, expected: list[str]
+) -> None:
+    """``os`` is the module only through a live ``import os`` / ``import
+    os.<sub>`` binding: with no import, or after a module-level rebinding, a
+    bare ``os`` is somebody's object. Module code is sequential for a direct
+    use; a function sees the module's last binding.
+
+    Sabotage proof (executed): restore the synthetic ``{"os": {None}}``
+    binding → the no-import case is flagged and this fails; restored.
+    """
+    assert _file_violations(tmp_path, source) == expected
+
+
+def test_statically_dead_conftest_branches_are_not_import_time(tmp_path: Path) -> None:
+    """``if False:`` / ``if TYPE_CHECKING:`` bodies, the dead arm of a
+    constant ``if`` / conditional expression, a ``while False:`` body and the
+    short-circuited operands of ``False and`` / ``True or`` never execute, so
+    neither their writes nor their imports run at conftest import.
+
+    Sabotage proof (executed): drop ``_in_dead_branch`` from
+    ``_runs_at_import`` → every dead write is flagged and this fails; restored.
+    """
+    (tmp_path / "helper.py").write_text('import os\n\nos.environ["EARLY"] = "1"\n', encoding="utf-8")
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(
+        "import os\nimport typing\nfrom typing import TYPE_CHECKING\n\n"
+        "if False:\n"
+        '    os.environ["A"] = "1"\n'
+        "if TYPE_CHECKING:\n"
+        "    from helper import X\n"
+        "if typing.TYPE_CHECKING:\n"
+        '    os.environ["B"] = "1"\n'
+        "while False:\n"
+        '    os.environ["C"] = "1"\n'
+        'VALUE = 1 if True else os.environ.pop("D", None)\n'
+        'False and os.environ.pop("E", None)\n'
+        'True or os.environ.pop("F", None)\n'
+        "if True:\n"
+        "    pass\n"
+        "else:\n"
+        '    os.environ["G"] = "1"\n'
+        "if not False:\n"
+        '    os.environ["H"] = "1"\n'
+        "if FLAG:\n"
+        '    os.environ["I"] = "1"\n'
+        'os.environ.pop("J", None) or True\n',
+        encoding="utf-8",
+    )
+    assert file_violations(conftest) == [
+        "21: module-level os.environ write in conftest.py (any key)",
+        "23: module-level os.environ write in conftest.py (any key)",
+        "24: module-level os.environ write in conftest.py (any key)",
+    ]
