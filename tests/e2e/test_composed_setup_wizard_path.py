@@ -277,7 +277,7 @@ def _wizard_service_deps(world: _WizardWorld) -> SetupServiceDeps:
         # tmp bundle file. Hydration into os.environ is the one skipped
         # side effect (F2 — tests must not mutate the process env).
         persist_credentials_fn=lambda key, endpoint, model: persist_llm_credentials(
-            key, endpoint, model, bundle_path=world.bundle, hydrate_fn=lambda _p, _environ: 0
+            key, endpoint, model, bundle_path=world.bundle, hydrate_fn=lambda _p: 0
         ),
         credentials_probe=lambda: world.bundle.exists(),
         configured_document_root_fn=lambda: world.docs,

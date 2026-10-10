@@ -527,10 +527,58 @@ F2 has two halves, like F1.
 `FitnessRule` over `tests/` (staged-narrowable). It is a small AST match on
 the common spellings with a literal `KAIRIX_` key —
 `monkeypatch.setenv` / `delenv`, `os.environ[...] =` / `+=` / `del`,
-`os.environ.pop` / `setdefault` — reporting `path:line: shape`. Writes
-inside `with allow_baseline_writes():` are exempt, and the block itself
-fails anywhere but `tests/conftest.py`. Tests:
+`os.environ.pop` / `setdefault`, `os.environ |= {...}` with a literal key —
+through any store target (tuple / starred unpacking, `for`, comprehension
+and `with ... as` targets included) — plus any rebinding of `os.environ`
+itself: assignment, a well-formed `setattr(os, "environ", ...)` /
+`delattr`, `os.__dict__["environ"] = ...` / `vars(os)[...]`, the name
+literal or constant-folded (a wholesale
+replacement, even one restored within the same phase, which the runtime
+identity check cannot see), reporting `path:line: shape`. `os` is the
+module only through a live `import os [as <alias>]` / `import os.<sub>`
+binding, and a bare `environ` / `putenv` / `unsetenv` only through `from os
+import ... [as name]`: every binding of a name (import, store, parameter,
+`def` / `class`) is an event in the scope that performs it; a function's
+names are local throughout its body, a module or class body runs top to
+bottom (a direct use resolves to the last event before it, a use inside a
+nested function to the module's last event), and a class namespace is no
+closure for its methods. A decorator, default or annotation is evaluated in
+the defining scope, so a store in the function body does not rebind it.
+Writes inside `with
+allow_baseline_writes():` are exempt, and the block itself fails anywhere
+but `tests/conftest.py`; the runtime guard's own restore of the snapshotted
+`os.environ` — the one `F2-RESTORE`-marked assignment inside a function body
+of `tests/fixtures/process_state_guard.py` — is the one exempt wholesale
+assignment. In any `conftest.py`,
+an `os.environ` write at module level fails for ANY key, computed or not:
+conftest import-time code runs before the runtime guard is configured, so
+every env baseline write belongs inside the session fixture's
+`allow_baseline_writes()` block. The same rule covers every module the
+conftest imports at module level or names in `pytest_plugins`, transitively
+(reported against the conftest's import line): those run in the same
+pre-configuration window. Decorators, parameter defaults and annotations run
+when the `def` executes and count as module level, as does a class body;
+annotations under `from __future__ import
+annotations`, `type` alias values and type parameters are lazy and clean
+(reading an alias's `__value__` at module level is not), as is code a
+constant test rules out (`if False` / `if TYPE_CHECKING` bodies, the dead
+arm of a constant `if`, operands short-circuited by `False and` / `True
+or`). Tests:
 `tests/checks/test_no_env_monkeypatch_direct_writes.py`.
+
+**The static conftest import-time check is a best-effort pre-screen, not
+the boundary.** It models the common shapes only: direct `os.environ`
+writes and `monkeypatch` calls, `os` / `environ` aliases, `from os import`
+names, literal `import` / `from ... import` and `pytest_plugins`
+registrations followed transitively, decorators / defaults / class bodies
+at `def` time, and constant-false guards (`if False`, `typing.TYPE_CHECKING`,
+`if __name__ == "__main__"`). Python scoping has more corners than a static
+pass can enumerate (comprehension scopes, computed or dynamic imports,
+module-level calls to local helpers, execution-order rebinding of `os`), and
+the check does not chase them. The runtime process-state guard
+(`tests/fixtures/process_state_guard.py`), which snapshots and verifies
+`os.environ` across every phase and collection, is the enforced boundary for
+anything the static pass cannot model.
 
 **Runtime half — exact.** `tests/fixtures/process_state_guard.py` installs
 one `sys.addaudithook`. CPython raises the `os.putenv` / `os.unsetenv` audit
@@ -543,6 +591,16 @@ audit hook would break the interpreter); the item hooks turn records into
 `pytest.fail`. `allow_baseline_writes()` turns recording off for the session
 baseline's own writes; entered from any file but the root `tests/conftest.py`
 it records a violation and exempts nothing.
+
+**Known gap — the configuration phase.** The runtime guard watches test
+items and collection only. An env write made by a registered plugin's
+`pytest_configure` hook (for example a module named in `pytest_plugins`) runs
+outside both the static conftest import-time scan, which does not model hook
+bodies, and the runtime hook, which records only inside an item phase or a
+collection, so it is not audited. Plugin hook ordering also makes a
+configure-time watcher unreliable: a plugin registered after the guard
+configures after it. Keep env writes out of `pytest_configure` hooks; the
+session baseline belongs in `allow_baseline_writes()`.
 
 #### Examples
 

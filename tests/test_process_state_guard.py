@@ -179,6 +179,117 @@ def test_sys_modules_computed_key_insertion(injected_entry):
     sys.modules[injected_entry] = types.ModuleType(injected_entry)
 
 
+@pytest.fixture
+def restore_environ():
+    original = os.environ
+    yield dict(original)
+    os.environ = original
+
+
+def test_env_replaced_directly(restore_environ):
+    os.environ = restore_environ
+
+
+def test_env_replaced_by_monkeypatch(monkeypatch):
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+
+
+def test_env_replaced_by_mock_patch():
+    with mock.patch("os.environ", dict(os.environ)):
+        pass
+
+
+def test_env_deleted_by_monkeypatch(monkeypatch):
+    monkeypatch.delattr(os, "environ")
+
+
+def test_env_is_back_after_the_deletion():
+    assert isinstance(os.environ, os._Environ)
+    assert "PATH" in os.environ or "Path" in os.environ
+
+
+def test_env_patch_dict_enclosing_a_deletion(monkeypatch):
+    with mock.patch.dict(os.environ, {"OTHER_LEAK": "1"}):
+        monkeypatch.delattr(os, "environ")
+
+
+def test_patch_dict_contents_are_restored_after_the_deletion():
+    assert isinstance(os.environ, os._Environ)
+    assert "OTHER_LEAK" not in os.environ
+
+
+def test_malformed_monkeypatch_of_environ_changes_nothing_and_is_clean(monkeypatch):
+    with pytest.raises(TypeError):
+        monkeypatch.setattr(os, "environ")
+
+
+def test_malformed_mock_patch_of_environ_changes_nothing_and_is_clean():
+    with pytest.raises(TypeError):
+        with mock.patch("os.environ", {}, foo=1):
+            pass
+
+
+def test_monkeypatch_of_a_missing_attribute_changes_nothing_and_is_clean(monkeypatch):
+    import fakepkg
+
+    with pytest.raises(AttributeError):
+        monkeypatch.setattr(fakepkg, "MISSING", 1)
+
+
+def test_mock_patch_of_a_missing_attribute_changes_nothing_and_is_clean():
+    with pytest.raises(AttributeError):
+        with mock.patch("fakepkg.MISSING", 1):
+            pass
+
+
+def test_patch_dict_of_a_guarded_key_that_raises_before_writing_is_clean():
+    with pytest.raises(TypeError):
+        with mock.patch.dict(os.environ, {"FAKEPKG_BAD": object()}):  # the guarded prefix here is FAKEPKG_
+            pass
+
+
+def test_patch_dict_clear_that_raises_after_clearing_is_a_violation():
+    with pytest.raises(TypeError):
+        with mock.patch.dict(os.environ, {"FAKEPKG_BAD": object()}, clear=True):
+            pass
+
+
+def test_the_cleared_baseline_was_restored():
+    assert os.environ["FAKEPKG_BASELINE"] == "1"
+
+
+def test_patch_dict_that_writes_one_guarded_key_before_raising_is_a_violation():
+    with pytest.raises(TypeError):
+        with mock.patch.dict(os.environ, [("FAKEPKG_GOOD", "1"), ("FAKEPKG_BAD", object())]):
+            pass
+
+
+def test_the_partial_write_was_restored():
+    assert "FAKEPKG_GOOD" not in os.environ
+
+
+def test_patch_dict_rewriting_an_existing_value_before_raising_is_still_a_violation():
+    # FAKEPKG_BASELINE is "1" already: the same-value write leaves no diff, yet it was attempted.
+    with pytest.raises(TypeError):
+        with mock.patch.dict(os.environ, [("FAKEPKG_BASELINE", "1"), ("FAKEPKG_BAD", object())]):
+            pass
+
+
+def test_env_patch_dict_of_other_keys_is_clean():
+    with mock.patch.dict(os.environ, {"OTHER": "1"}):
+        assert os.environ["OTHER"] == "1"
+
+
+@pytest.fixture
+def misnamed_entry():
+    yield "fakepkg.computed"
+    sys.modules.pop("fakepkg.computed", None)
+
+
+def test_sys_modules_real_module_under_another_name(misnamed_entry):
+    sys.modules[misnamed_entry] = fakepkg
+
+
 def test_baseline_exemption_from_a_test_module(monkeypatch):
     from conftest import allow_baseline_writes as exempt
 
@@ -223,6 +334,22 @@ def test_patching_non_guarded_objects_is_clean(monkeypatch):
     ns = types.SimpleNamespace(a=1)
     monkeypatch.setattr(ns, "a", 2)
     with mock.patch.object(ns, "a", 3):
+        pass
+
+
+class _EqualityRaises:
+    a = 1
+
+    def __eq__(self, other):
+        raise RuntimeError("__eq__ must not be called by the guard")
+
+    __hash__ = object.__hash__
+
+
+def test_patching_an_object_whose_eq_raises_is_clean(monkeypatch):
+    target = _EqualityRaises()
+    monkeypatch.setattr(target, "a", 2)
+    with mock.patch.object(target, "a", 3):
         pass
 """
 
@@ -394,6 +521,8 @@ def test_env_write_at_module_import_fails_collection(inner_outcomes: dict[str, t
         "test_sys_modules_third_party_none_is_clean",
         "test_first_import_is_clean",
         "test_patching_non_guarded_objects_is_clean",
+        "test_env_patch_dict_of_other_keys_is_clean",
+        "test_patching_an_object_whose_eq_raises_is_clean",
     ],
 )
 def test_clean_tests_pass(inner_outcomes: dict[str, tuple[str, str]], name: str) -> None:
@@ -478,3 +607,122 @@ def test_sys_modules_removal_at_collection_time_fails_collection(
 
 def test_genuine_import_at_collection_time_is_clean(inner_outcomes: dict[str, tuple[str, str]]) -> None:
     assert inner_outcomes["test_collected_module_is_usable"] == ("passed", "")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["test_env_replaced_directly", "test_env_replaced_by_monkeypatch", "test_env_replaced_by_mock_patch"],
+)
+def test_wholesale_environ_replacement_fails(inner_outcomes: dict[str, tuple[str, str]], name: str) -> None:
+    _assert_fails(inner_outcomes, name, "[F2]", "os.environ replaced wholesale")
+
+
+def test_deleting_environ_fails_as_f2_and_is_restored(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    """``monkeypatch.delattr(os, "environ")`` leaves no ``os.environ`` for the
+    end-of-phase identity check (or pytest's own reporting) to read: the guard
+    puts the snapshotted mapping back and fails the test normally, and the
+    next inner test still sees the real ``os.environ``.
+
+    Sabotage proof (executed): read ``os.environ`` directly in ``_end_phase``
+    → the inner run dies with an AttributeError traceback, the junit entry is
+    an internal error without the F2 message and this fails; restored.
+    """
+    _assert_fails(inner_outcomes, "test_env_deleted_by_monkeypatch", "[F2]", "os.environ deleted")
+    assert inner_outcomes["test_env_is_back_after_the_deletion"] == ("passed", "")
+
+
+def test_patch_dict_around_an_environ_deletion_is_restored(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    """``mock.patch.dict(os.environ, ...)`` enclosing ``monkeypatch.delattr(os,
+    "environ")`` still unpatches the real mapping, so the key it set does not
+    leak into the next test.
+
+    Sabotage proof (executed): read ``os.environ`` directly in
+    ``_is_environ_target`` → the wrapper raises before the real unpatch,
+    ``OTHER_LEAK`` survives and this fails; restored.
+    """
+    _assert_fails(inner_outcomes, "test_env_patch_dict_enclosing_a_deletion", "[F2]", "os.environ deleted")
+    assert inner_outcomes["test_patch_dict_contents_are_restored_after_the_deletion"] == ("passed", "")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "test_malformed_monkeypatch_of_environ_changes_nothing_and_is_clean",
+        "test_malformed_mock_patch_of_environ_changes_nothing_and_is_clean",
+    ],
+)
+def test_patch_that_raises_before_replacing_environ_is_clean(
+    inner_outcomes: dict[str, tuple[str, str]], name: str
+) -> None:
+    """A replacement is recorded only once the patch applied; a call that
+    raised ``TypeError`` before changing anything is not an F2 violation.
+
+    Sabotage proof (executed): append the detail in the checks again, before
+    the real call → both fail with ``[F2]``; restored.
+    """
+    assert inner_outcomes[name] == ("passed", "")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "test_monkeypatch_of_a_missing_attribute_changes_nothing_and_is_clean",
+        "test_mock_patch_of_a_missing_attribute_changes_nothing_and_is_clean",
+    ],
+)
+def test_patch_that_raises_before_applying_is_not_an_f1_violation(
+    inner_outcomes: dict[str, tuple[str, str]], name: str
+) -> None:
+    """An F1 detail is recorded only once the patch applied; ``monkeypatch.setattr``
+    and ``mock.patch`` of a missing attribute raise ``AttributeError`` before
+    changing anything, so the test asserting that error passes clean.
+
+    Sabotage proof (executed): append the detail before the real call again →
+    both fail with ``[F1]``; restored.
+    """
+    assert inner_outcomes[name] == ("passed", "")
+
+
+def test_patch_dict_that_raises_before_writing_is_not_an_f2_violation(
+    inner_outcomes: dict[str, tuple[str, str]],
+) -> None:
+    """``patch.dict(os.environ, {KAIRIX_BAD: object()})`` raises ``TypeError`` before
+    the mapping changes; the detail is recorded only once the patch applied."""
+    assert inner_outcomes["test_patch_dict_of_a_guarded_key_that_raises_before_writing_is_clean"] == ("passed", "")
+
+
+def test_partial_patch_dict_write_is_restored_and_reported(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    """``patch.dict(os.environ, [(FAKEPKG_GOOD, "1"), (FAKEPKG_BAD, object())])`` applies the
+    first entry before raising; the guard restores the mapping and reports the write."""
+    _assert_fails(
+        inner_outcomes,
+        "test_patch_dict_that_writes_one_guarded_key_before_raising_is_a_violation",
+        "[F2]",
+        "wrote FAKEPKG_GOOD before raising (restored)",
+    )
+    assert inner_outcomes["test_the_partial_write_was_restored"] == ("passed", "")
+    _assert_fails(
+        inner_outcomes,
+        "test_patch_dict_rewriting_an_existing_value_before_raising_is_still_a_violation",
+        "[F2]",
+        "wrote FAKEPKG_BASELINE before raising (restored)",
+    )
+    # clear=True unsets every guarded key before the invalid value raises: a write, restored and
+    # reported (the first key cleared is whichever the mapping yields first).
+    _assert_fails(
+        inner_outcomes,
+        "test_patch_dict_clear_that_raises_after_clearing_is_a_violation",
+        "[F2]",
+        "patch.dict(os.environ) wrote FAKEPKG_",
+        "before raising (restored)",
+    )
+    assert inner_outcomes["test_the_cleared_baseline_was_restored"] == ("passed", "")
+
+
+def test_real_module_inserted_under_another_name_fails(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    _assert_fails(
+        inner_outcomes,
+        "test_sys_modules_real_module_under_another_name",
+        "[F1]",
+        "sys.modules['fakepkg.computed'] inserted without the import machinery",
+    )
