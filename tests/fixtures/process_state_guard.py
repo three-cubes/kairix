@@ -281,8 +281,30 @@ def _wrap(owner: type, attr: str, check: Any, *, quiet_on_environ: bool = False)
             if _recording() and check is not None:
                 detail = check(self, *args, **kwargs)
             if quiet_on_environ and _is_environ_target(self.in_dict):
-                with _exempt():
-                    result = original(self, *args, **kwargs)
+                # An exempted patch.dict that raises midway (one entry applied, the next
+                # invalid) must not leave the partial write behind: restore the mapping and
+                # keep a violation for any guarded key it touched.
+                current = getattr(os, "environ", None)  # absent after a delattr; nothing to snapshot then
+                before = dict(current) if current is not None else None
+                try:
+                    with _exempt():
+                        result = original(self, *args, **kwargs)
+                except BaseException:
+                    current = getattr(os, "environ", None)
+                    after = dict(current) if current is not None else None
+                    touched = (
+                        sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+                        if before is not None and after is not None
+                        else []
+                    )
+                    if touched:
+                        with _exempt():
+                            os.environ.clear()
+                            os.environ.update(before)
+                        guarded = [k for k in touched if _guarded_key(k)]
+                        if guarded:
+                            _STATE.env.append(f"patch.dict(os.environ) wrote {guarded[0]} before raising (restored)")
+                    raise
             else:
                 result = original(self, *args, **kwargs)
             # Only an applied patch is a violation (F1 detail and F2 replacement

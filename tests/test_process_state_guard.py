@@ -248,6 +248,16 @@ def test_patch_dict_of_a_guarded_key_that_raises_before_writing_is_clean():
             pass
 
 
+def test_patch_dict_that_writes_one_guarded_key_before_raising_is_a_violation():
+    with pytest.raises(TypeError):
+        with mock.patch.dict(os.environ, [("FAKEPKG_GOOD", "1"), ("FAKEPKG_BAD", object())]):
+            pass
+
+
+def test_the_partial_write_was_restored():
+    assert "FAKEPKG_GOOD" not in os.environ
+
+
 def test_env_patch_dict_of_other_keys_is_clean():
     with mock.patch.dict(os.environ, {"OTHER": "1"}):
         assert os.environ["OTHER"] == "1"
@@ -662,6 +672,18 @@ def test_patch_dict_that_raises_before_writing_is_not_an_f2_violation(
     """``patch.dict(os.environ, {KAIRIX_BAD: object()})`` raises ``TypeError`` before
     the mapping changes; the detail is recorded only once the patch applied."""
     assert inner_outcomes["test_patch_dict_of_a_guarded_key_that_raises_before_writing_is_clean"] == ("passed", "")
+
+
+def test_partial_patch_dict_write_is_restored_and_reported(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    """``patch.dict(os.environ, [(FAKEPKG_GOOD, "1"), (FAKEPKG_BAD, object())])`` applies the
+    first entry before raising; the guard restores the mapping and reports the write."""
+    _assert_fails(
+        inner_outcomes,
+        "test_patch_dict_that_writes_one_guarded_key_before_raising_is_a_violation",
+        "[F2]",
+        "wrote FAKEPKG_GOOD before raising (restored)",
+    )
+    assert inner_outcomes["test_the_partial_write_was_restored"] == ("passed", "")
 
 
 def test_real_module_inserted_under_another_name_fails(inner_outcomes: dict[str, tuple[str, str]]) -> None:
