@@ -229,6 +229,19 @@ def test_malformed_mock_patch_of_environ_changes_nothing_and_is_clean():
             pass
 
 
+def test_monkeypatch_of_a_missing_attribute_changes_nothing_and_is_clean(monkeypatch):
+    import fakepkg
+
+    with pytest.raises(AttributeError):
+        monkeypatch.setattr(fakepkg, "MISSING", 1)
+
+
+def test_mock_patch_of_a_missing_attribute_changes_nothing_and_is_clean():
+    with pytest.raises(AttributeError):
+        with mock.patch("fakepkg.MISSING", 1):
+            pass
+
+
 def test_env_patch_dict_of_other_keys_is_clean():
     with mock.patch.dict(os.environ, {"OTHER": "1"}):
         assert os.environ["OTHER"] == "1"
@@ -613,6 +626,26 @@ def test_patch_that_raises_before_replacing_environ_is_clean(
 
     Sabotage proof (executed): append the detail in the checks again, before
     the real call → both fail with ``[F2]``; restored.
+    """
+    assert inner_outcomes[name] == ("passed", "")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "test_monkeypatch_of_a_missing_attribute_changes_nothing_and_is_clean",
+        "test_mock_patch_of_a_missing_attribute_changes_nothing_and_is_clean",
+    ],
+)
+def test_patch_that_raises_before_applying_is_not_an_f1_violation(
+    inner_outcomes: dict[str, tuple[str, str]], name: str
+) -> None:
+    """An F1 detail is recorded only once the patch applied; ``monkeypatch.setattr``
+    and ``mock.patch`` of a missing attribute raise ``AttributeError`` before
+    changing anything, so the test asserting that error passes clean.
+
+    Sabotage proof (executed): append the detail before the real call again →
+    both fail with ``[F1]``; restored.
     """
     assert inner_outcomes[name] == ("passed", "")
 

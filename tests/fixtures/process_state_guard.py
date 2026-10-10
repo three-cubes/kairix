@@ -276,18 +276,20 @@ def _wrap(owner: type, attr: str, check: Any, *, quiet_on_environ: bool = False)
 
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         mark = len(_STATE.deferred_env)
+        detail = None
         try:
             if _recording() and check is not None:
                 detail = check(self, *args, **kwargs)
-                if detail:
-                    _STATE.patches.append(detail)
             if quiet_on_environ and _is_environ_target(self.in_dict):
                 with _exempt():
                     result = original(self, *args, **kwargs)
             else:
                 result = original(self, *args, **kwargs)
-            # Only an applied replacement is a violation; a call that raised
-            # before changing anything is left to the end-of-phase identity check.
+            # Only an applied patch is a violation (F1 detail and F2 replacement
+            # alike); a call that raised before changing anything is left to the
+            # end-of-phase checks.
+            if detail:
+                _STATE.patches.append(detail)
             _STATE.env.extend(_STATE.deferred_env[mark:])
             return result
         finally:
