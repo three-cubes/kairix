@@ -528,28 +528,34 @@ F2 has two halves, like F1.
 the common spellings with a literal `KAIRIX_` key —
 `monkeypatch.setenv` / `delenv`, `os.environ[...] =` / `+=` / `del`,
 `os.environ.pop` / `setdefault`, `os.environ |= {...}` with a literal key —
-plus any rebinding of `os.environ` itself: assignment, `setattr(os,
-"environ", ...)` / `delattr`, `os.__dict__["environ"] = ...` /
-`vars(os)[...]`, the name literal or constant-folded (a wholesale
+through any store target (tuple / starred unpacking, `for`, comprehension
+and `with ... as` targets included) — plus any rebinding of `os.environ`
+itself: assignment, a well-formed `setattr(os, "environ", ...)` /
+`delattr`, `os.__dict__["environ"] = ...` / `vars(os)[...]`, the name
+literal or constant-folded (a wholesale
 replacement, even one restored within the same phase, which the runtime
 identity check cannot see), reporting `path:line: shape`. `os` includes
 every `import os as <alias>`, and a bare `environ` / `putenv` / `unsetenv`
 counts through `from os import ... [as name]`; each binding is visible in
-the scope holding the import and the scopes nested in it, and not where the
-evaluating scope rebinds the name (a decorator, default or annotation is
-evaluated in the defining scope, so a store in the function body does not
-rebind it). Writes inside `with
+the scope holding the import (a function, lambda or class body) and the
+scopes nested in it — a class namespace is no closure for its methods — and
+not where the evaluating scope rebinds the name (a decorator, default or
+annotation is evaluated in the defining scope, so a store in the function
+body does not rebind it). Writes inside `with
 allow_baseline_writes():` are exempt, and the block itself fails anywhere
 but `tests/conftest.py`; the runtime guard's own restore of the snapshotted
-`os.environ` is the one exempt wholesale assignment. In any `conftest.py`,
+`os.environ` — the one `F2-RESTORE`-marked assignment inside a function body
+of `tests/fixtures/process_state_guard.py` — is the one exempt wholesale
+assignment. In any `conftest.py`,
 an `os.environ` write at module level fails for ANY key, computed or not:
 conftest import-time code runs before the runtime guard is configured, so
 every env baseline write belongs inside the session fixture's
 `allow_baseline_writes()` block. The same rule covers every module the
-conftest imports at module level, transitively (reported against the
-conftest's import line): those run in the same pre-configuration window.
-Decorators, parameter defaults and annotations run when the `def` executes
-and count as module level; annotations under `from __future__ import
+conftest imports at module level or names in `pytest_plugins`, transitively
+(reported against the conftest's import line): those run in the same
+pre-configuration window. Decorators, parameter defaults and annotations run
+when the `def` executes and count as module level, as does a class body;
+annotations under `from __future__ import
 annotations`, `type` alias values and type parameters are lazy and clean
 (reading an alias's `__value__` at module level is not). Tests:
 `tests/checks/test_no_env_monkeypatch_direct_writes.py`.

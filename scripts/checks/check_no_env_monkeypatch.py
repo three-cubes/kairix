@@ -14,16 +14,19 @@ starting with ``KAIRIX_``:
   wholesale replacement — even one restored within the same phase, which the
   runtime identity check misses).
 
-``os`` includes every ``import os as <alias>``.
+``os`` includes every ``import os as <alias>``; names resolve in the scope
+that binds them (functions, lambdas and class bodies).
 
 Writes inside ``with allow_baseline_writes():`` in ``tests/conftest.py`` (the
 session env baseline) are exempt, mirroring the runtime guard, as is the
 runtime guard's own restore of the snapshotted ``os.environ``. In any
 ``conftest.py`` an ``os.environ`` write at module level (import time) fails
 for ANY key (``os.putenv`` / ``os.unsetenv`` and their ``from os import``
-names included): root-conftest code runs before the runtime guard is
-configured. Decorators, defaults and annotations run at ``def`` time, except
-annotations under ``from __future__ import annotations``, which never run.
+names included), and so does one in any module the conftest imports or names
+in ``pytest_plugins``: that code runs before the runtime guard is
+configured. Decorators, defaults and annotations run at ``def`` time (a class
+body with its ``class`` statement), except annotations under ``from
+__future__ import annotations`` and ``type`` alias values, which never run.
 
 The exact half is the runtime guard ``tests/fixtures/process_state_guard.py``:
 an audit hook sees EVERY env write (any spelling, any computed key) while a
@@ -37,6 +40,7 @@ from __future__ import annotations
 
 import ast
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -88,8 +92,9 @@ _GUARD_HOME = (_REPO_ROOT / "tests" / "fixtures" / "process_state_guard.py").res
 _REPLACED = "os.environ replaced wholesale"
 _ENVIRON_METHODS = {"pop", "setdefault"}
 _OS_MUTATORS = frozenset({"putenv", "unsetenv"})
-_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
-_Scope = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_Scope = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
+_GUARD_RESTORE_MARKER = "F2-RESTORE"
 
 
 def _is_kairix_literal(node: ast.expr | None) -> bool:
@@ -100,6 +105,56 @@ def _in_body(scope: _Scope, child: ast.AST) -> bool:
     if isinstance(scope, ast.Lambda):
         return child is scope.body
     return child in scope.body
+
+
+def _shallow_walk(scope: ast.AST) -> Iterator[ast.AST]:
+    """``scope``'s body nodes, not descending into nested functions / classes."""
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, _SCOPES):
+            continue
+        yield child
+        yield from _shallow_walk(child)
+
+
+def _leaf_targets(target: ast.expr) -> Iterator[ast.expr]:
+    """The individual store targets inside a (nested) tuple / list / starred target."""
+    if isinstance(target, (ast.Tuple, ast.List)):
+        for elt in target.elts:
+            yield from _leaf_targets(elt)
+    elif isinstance(target, ast.Starred):
+        yield from _leaf_targets(target.value)
+    else:
+        yield target
+
+
+def _store_targets(node: ast.AST) -> list[ast.expr]:
+    """Every leaf store target a statement or expression binds: assignment
+    targets, ``for`` / comprehension targets, ``with ... as`` targets, ``del``."""
+    if isinstance(node, (ast.Assign, ast.Delete)):
+        targets: list[ast.expr] = list(node.targets)
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
+        targets = [node.target]
+    elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+        targets = [g.target for g in node.generators]
+    elif isinstance(node, (ast.With, ast.AsyncWith)):
+        targets = [item.optional_vars for item in node.items if item.optional_vars is not None]
+    else:
+        return []
+    return [leaf for target in targets for leaf in _leaf_targets(target)]
+
+
+_ASSIGNING = (
+    ast.Assign,
+    ast.AnnAssign,
+    ast.For,
+    ast.AsyncFor,
+    ast.ListComp,
+    ast.SetComp,
+    ast.GeneratorExp,
+    ast.DictComp,
+    ast.With,
+    ast.AsyncWith,
+)
 
 
 def _folded_str(node: ast.expr) -> str | None:
@@ -127,10 +182,11 @@ class _Environ:
     ``<os>.environ`` counts for ``os`` and every ``import os as <alias>``; a
     bare name counts when bound by ``from os import environ [as name]``. A
     binding is visible in the scope that holds the import (module level, or
-    the function / lambda whose body holds it) and the scopes nested in it,
-    and not where the evaluating scope rebinds the name (a parameter or an
-    assignment of that name in the function) — a simple local check, not a
-    scope engine. A decorator, parameter default or annotation is evaluated
+    the function / lambda / class whose body holds it) and the scopes nested
+    in it — a class body being no closure for its methods — and not where the
+    evaluating scope rebinds the name (a parameter or an assignment of that
+    name in the function, a store in the class body) — a simple local check,
+    not a scope engine. A decorator, parameter default or annotation is evaluated
     in the scope that DEFINES the function, so a store in the function body
     cannot rebind a name used there.
 
@@ -165,15 +221,16 @@ class _Environ:
         bindings.setdefault(name, set()).add(self.evaluating_scope(node))
 
     def evaluating_scope(self, node: ast.AST) -> _Scope | None:
-        """The function or lambda whose BODY evaluates ``node``; ``None`` at module level.
+        """The function, lambda or class whose BODY evaluates ``node``; ``None`` at module level.
 
         A node in a function's decorators, defaults, annotations or return
-        annotation is evaluated by the enclosing scope when the ``def`` runs,
-        so that function is skipped and the walk continues upward.
+        annotation (a class's decorators, bases or keywords) is evaluated by
+        the enclosing scope when the ``def`` / ``class`` runs, so that scope
+        is skipped and the walk continues upward.
         """
         child, scope = node, self.parents.get(node)
         while scope is not None:
-            if isinstance(scope, _FUNCTIONS) and _in_body(scope, child):
+            if isinstance(scope, _SCOPES) and _in_body(scope, child):
                 return scope
             child, scope = scope, self.parents.get(scope)
         return None
@@ -187,13 +244,19 @@ class _Environ:
         enclosing: set[ast.AST | None] = {scope}
         while scope is not None:
             scope = self.evaluating_scope(scope)
-            enclosing.add(scope)
+            if not isinstance(scope, ast.ClassDef):  # a class namespace is no closure
+                enclosing.add(scope)
         return bool(bindings[node.id] & enclosing) and not self._rebound_locally(node)
 
     def _rebound_locally(self, node: ast.Name) -> bool:
         scope = self.evaluating_scope(node)
         if scope is None:
             return False
+        if isinstance(scope, ast.ClassDef):
+            class_stores = {
+                n.id for n in _shallow_walk(scope) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+            }
+            return node.id in class_stores
         args = scope.args
         params = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg) if a}
         stores = {n.id for n in ast.walk(scope) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
@@ -245,7 +308,8 @@ def _setattr_environ(node: ast.AST, is_environ: _Environ) -> bool:
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id in ("setattr", "delattr")
-        and len(node.args) >= 2
+        and len(node.args) == (3 if node.func.id == "setattr" else 2)
+        and not node.keywords
         and is_environ.is_os(node.args[0])
         and _folded_str(node.args[1]) == "environ"
     )
@@ -271,18 +335,19 @@ def _shape(node: ast.AST, is_environ: _Environ) -> str | None:
             return "os.environ |= {KAIRIX_*}"
         if subscript_write(node.target):
             return "assign os.environ[KAIRIX_*]"
-    elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+    elif isinstance(node, _ASSIGNING):
         if isinstance(node, ast.AnnAssign) and node.value is None:
             return None  # a bare annotation assigns nothing
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        targets = _store_targets(node)
         if any(_replaces_environ(t, is_environ) for t in targets):
             return _REPLACED
         if any(subscript_write(t) for t in targets):
             return "assign os.environ[KAIRIX_*]"
     elif isinstance(node, ast.Delete):
-        if any(_replaces_environ(t, is_environ) for t in node.targets):
+        targets = _store_targets(node)
+        if any(_replaces_environ(t, is_environ) for t in targets):
             return _REPLACED
-        if any(subscript_write(t) for t in node.targets):
+        if any(subscript_write(t) for t in targets):
             return "del os.environ[KAIRIX_*]"
     elif _setattr_environ(node, is_environ):
         return _REPLACED
@@ -300,14 +365,15 @@ _CONFTEST_MODULE_WRITE = "module-level os.environ write in conftest.py (any key)
 
 
 def _any_environ_write(node: ast.AST, is_environ: _Environ) -> bool:
-    """An ``os.environ`` write of ANY key (subscript store / del / ``|=``, a
+    """An ``os.environ`` write of ANY key (subscript store — through any
+    assignment, ``for``, comprehension or ``with`` target — / del / ``|=``, a
     mutating method, ``os.environ = ...``, ``setattr(os, "environ", ...)``,
     ``os.__dict__["environ"] = ...``) or an ``os.putenv`` / ``os.unsetenv``
     call — through ``<os>.`` or a ``from os import putenv [as name]`` name."""
     if isinstance(node, ast.AnnAssign) and node.value is None:
         return False  # a bare annotation assigns nothing
-    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
-        targets = node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
+    if isinstance(node, (*_ASSIGNING, ast.AugAssign, ast.Delete)):
+        targets = _store_targets(node)
         return any(
             is_environ(t) or _replaces_environ(t, is_environ) or (isinstance(t, ast.Subscript) and is_environ(t.value))
             for t in targets
@@ -357,7 +423,8 @@ def _evaluates_lazy_alias(node: ast.AST, lazy_aliases: set[str]) -> bool:
 
 
 def _runs_at_import(node: ast.AST, is_environ: _Environ) -> bool:
-    """True unless ``node`` sits inside a function or lambda BODY — or inside
+    """True unless ``node`` sits inside a function or lambda BODY (a class
+    body runs with the ``class`` statement) — or inside
     a lazily evaluated expression: a ``type`` alias value or type parameter,
     or an annotation under ``from __future__ import annotations``.
 
@@ -368,7 +435,10 @@ def _runs_at_import(node: ast.AST, is_environ: _Environ) -> bool:
     """
     if _in_lazy_expression(node, is_environ.parents, is_environ.deferred_annotations):
         return False
-    return is_environ.evaluating_scope(node) is None
+    scope = is_environ.evaluating_scope(node)
+    while isinstance(scope, ast.ClassDef):  # a class body runs when the ``class`` statement does
+        scope = is_environ.evaluating_scope(scope)
+    return scope is None
 
 
 def _in_lazy_expression(node: ast.AST, parents: dict[ast.AST, ast.AST], deferred_annotations: bool) -> bool:
@@ -390,22 +460,54 @@ def _in_lazy_expression(node: ast.AST, parents: dict[ast.AST, ast.AST], deferred
 def _import_time_modules(tree: ast.AST, is_environ: _Environ, base: Path) -> list[tuple[int, Path]]:
     """``(import line, file)`` for every repository module an import that runs
     at module level brings in — a package's ``__init__.py`` files included —
-    resolved from the importing file's directory and the repository root."""
+    resolved from the importing file's directory and the repository root.
+    Modules named in ``pytest_plugins`` count: pytest imports them before
+    ``pytest_configure``."""
     found: list[tuple[int, Path]] = []
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.Import, ast.ImportFrom)) or not _runs_at_import(node, is_environ):
+        if not _runs_at_import(node, is_environ):
             continue
         targets: list[tuple[int, str, str | None]]
         if isinstance(node, ast.Import):
             targets = [(0, alias.name, None) for alias in node.names]
-        else:
+        elif isinstance(node, ast.ImportFrom):
             targets = [(node.level, node.module or "", alias.name) for alias in node.names]
+        else:
+            targets = [(0, name, None) for name in _pytest_plugin_names(node)]
         for level, module, name in targets:
             roots = [_relative_root(base, level)] if level else [base, _REPO_ROOT]
             for root in dict.fromkeys(roots):
                 for path in _module_files(root, module.split(".") if module else [], name):
-                    found.append((node.lineno, path))
+                    found.append((getattr(node, "lineno", 0), path))
     return found
+
+
+def _pytest_plugin_names(node: ast.AST) -> list[str]:
+    """Literal module names a ``pytest_plugins = [...]`` / ``+= [...]`` /
+    ``.append(...)`` / ``.extend(...)`` statement registers."""
+    if isinstance(node, (ast.Assign, ast.AugAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if any(isinstance(t, ast.Name) and t.id == "pytest_plugins" for t in targets):
+            return _str_literals(node.value)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("append", "extend")
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pytest_plugins"
+    ):
+        return [name for arg in node.args for name in _str_literals(arg)]
+    return []
+
+
+def _str_literals(node: ast.expr) -> list[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return [name for elt in node.elts for name in _str_literals(elt)]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _str_literals(node.left) + _str_literals(node.right)
+    return []
 
 
 def _relative_root(base: Path, level: int) -> Path:
@@ -459,6 +561,20 @@ def _imported_helper_writes(tree: ast.AST, path: Path, is_environ: _Environ) -> 
     return found
 
 
+def _marked_restores(tree: ast.AST, source: str, is_environ: _Environ) -> set[int]:
+    """Lines of the guard's own restore: a wholesale assignment inside a
+    function body whose source line carries ``F2-RESTORE``."""
+    marked = {number for number, text in enumerate(source.splitlines(), 1) if _GUARD_RESTORE_MARKER in text}
+    return {
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.stmt)
+        and node.lineno in marked
+        and _shape(node, is_environ) == _REPLACED
+        and not _runs_at_import(node, is_environ)
+    }
+
+
 def _display_path(path: Path, base: Path) -> str:
     for root in (base, _REPO_ROOT):
         try:
@@ -483,17 +599,19 @@ def _baseline_blocks(tree: ast.AST) -> list[ast.With]:
     ]
 
 
-def file_violations(path: Path) -> list[str]:
+def file_violations(path: Path, *, guard_home: Path = _GUARD_HOME) -> list[str]:
     """Every ``line: shape`` KAIRIX_* env write in ``path`` (sorted by line).
 
     Writes inside ``with allow_baseline_writes():`` are the session baseline's
     (the runtime guard exempts the same block); the block itself is a
     violation anywhere but the root ``tests/conftest.py``. The runtime guard
-    itself puts the snapshotted ``os.environ`` back after a test deleted or
-    replaced it, so that one file's wholesale assignment is exempt.
+    (``guard_home``) puts the snapshotted ``os.environ`` back after a test
+    deleted or replaced it: in that file alone, a wholesale assignment inside
+    a function body whose line carries the ``F2-RESTORE`` marker is exempt.
     """
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
     except (SyntaxError, OSError):
         return []
     blocks = _baseline_blocks(tree)
@@ -501,8 +619,8 @@ def file_violations(path: Path) -> list[str]:
     is_environ = _Environ(tree)
     found = {(getattr(node, "lineno", 0), shape) for node in ast.walk(tree) if (shape := _shape(node, is_environ))}
     found = {(line, shape) for line, shape in found if line not in exempt}
-    if path.resolve() == _GUARD_HOME:
-        found = {(line, shape) for line, shape in found if shape != _REPLACED}
+    if path.resolve() == guard_home.resolve():
+        found -= {(line, _REPLACED) for line in _marked_restores(tree, source, is_environ)}
     if path.name == "conftest.py":
         found |= _conftest_module_level_writes(tree, is_environ)
         found |= _imported_helper_writes(tree, path, is_environ)

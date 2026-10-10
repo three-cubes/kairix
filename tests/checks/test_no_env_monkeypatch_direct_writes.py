@@ -24,6 +24,7 @@ if str(_CHECKS_DIR) not in sys.path:
     sys.path.insert(0, str(_CHECKS_DIR))
 
 from check_no_env_monkeypatch import (  # noqa: E402 — see _CHECKS_DIR sys.path insert above
+    _GUARD_RESTORE_MARKER,
     F2,
     REMEDIATION,
     file_has_env_monkeypatch,
@@ -562,3 +563,163 @@ def test_lazy_type_alias_value_is_not_an_import_time_write(tmp_path: Path) -> No
         encoding="utf-8",
     )
     assert file_violations(conftest) == ["10: module-level os.environ write in conftest.py (any key)"]
+
+
+def test_pytest_plugins_modules_are_held_to_the_module_level_rule(tmp_path: Path) -> None:
+    """pytest imports every module named in a conftest's ``pytest_plugins``
+    before ``pytest_configure`` installs the runtime hook, so those modules
+    are import-time code like an explicit import: a literal list, a bare
+    string, ``+=`` and ``.append`` / ``.extend`` all resolve.
+
+    Sabotage proof (executed): accept only ``Import`` / ``ImportFrom`` nodes
+    in ``_import_time_modules`` → nothing is flagged and this fails; restored.
+    """
+    (tmp_path / "plug_a.py").write_text('import os\n\nos.environ["KAIRIX_PLUGIN_EARLY"] = "1"\n', encoding="utf-8")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "plug_b.py").write_text("import os\n\n\ndef step():\n    os.environ.pop('X', None)\n", encoding="utf-8")
+    (tmp_path / "plug_c.py").write_text('from os import putenv\n\nputenv("A", "1")\n', encoding="utf-8")
+    (tmp_path / "plug_d.py").write_text("import os\n\nos.environ.update(V)\n", encoding="utf-8")
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(
+        'pytest_plugins = ["plug_a", "pkg.plug_b"]\n'
+        'pytest_plugins += ["plug_c"]\n'
+        "if FLAG:\n"
+        '    pytest_plugins.append("plug_d")\n',
+        encoding="utf-8",
+    )
+    assert file_violations(conftest) == [
+        "1: module-level os.environ write in imported plug_a.py:3 (any key)",
+        "2: module-level os.environ write in imported plug_c.py:3 (any key)",
+        "4: module-level os.environ write in imported plug_d.py:3 (any key)",
+    ]
+    conftest.write_text('pytest_plugins = "plug_a"\n', encoding="utf-8")
+    assert file_violations(conftest) == ["1: module-level os.environ write in imported plug_a.py:3 (any key)"]
+
+
+def test_class_bodies_are_binding_scopes_but_not_closures(tmp_path: Path) -> None:
+    """A class body that rebinds ``os`` (or imports its own alias) writes its
+    own mapping; a method does not see the class namespace, so a name bound
+    there is not ``os`` inside the method. Module ``os`` used in a class body
+    is still the process env — and in a conftest, a class body runs at import.
+
+    Sabotage proof (executed): drop ``ast.ClassDef`` from the scope kinds →
+    the ``Holder`` case is flagged and this fails; restored.
+    """
+    source = (
+        "import os\n\n\n"
+        "class Holder:\n"
+        "    os = Fake()\n"
+        '    os.environ["KAIRIX_DB_PATH"] = "x"\n\n\n'
+        "class Writes:\n"
+        '    os.environ["KAIRIX_DB_PATH"] = "x"\n\n\n'
+        "class WithAlias:\n"
+        "    import os as state\n\n"
+        '    state.environ["KAIRIX_DB_PATH"] = "x"\n\n'
+        "    def method(self):\n"
+        '        state.environ["KAIRIX_DB_PATH"] = "x"\n\n'
+        "    def uses_module_os(self):\n"
+        '        os.environ["KAIRIX_DB_PATH"] = "x"\n'
+    )
+    assert _file_violations(tmp_path, source) == [
+        "10: assign os.environ[KAIRIX_*]",
+        "16: assign os.environ[KAIRIX_*]",
+        "22: assign os.environ[KAIRIX_*]",
+    ]
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text('import os\n\n\nclass Early:\n    os.environ["X"] = "1"\n', encoding="utf-8")
+    assert file_violations(conftest) == ["5: module-level os.environ write in conftest.py (any key)"]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        'os.environ["X"], value = "1", 2',
+        'first, *os.environ["X"] = 1, 2, 3',
+        'for os.environ["X"] in ["1"]:\n    pass',
+        '[0 for os.environ["X"] in ["1"]]',
+        'with ctx() as os.environ["X"]:\n    pass',
+        "for os.environ in [{}]:\n    pass",
+    ],
+    ids=["tuple", "starred", "for", "comprehension", "with", "for-wholesale"],
+)
+def test_compound_and_loop_store_targets_in_a_conftest_are_flagged(tmp_path: Path, statement: str) -> None:
+    """A store reaches ``os.environ`` through a tuple / starred unpacking, a
+    ``for`` target, a comprehension target or a ``with ... as`` target just as
+    through a plain assignment.
+
+    Sabotage proof (executed): inspect only the outer target node → every
+    case is clean and fails; restored.
+    """
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(f"import os\n\n{statement}\n", encoding="utf-8")
+    assert "3: module-level os.environ write in conftest.py (any key)" in file_violations(conftest)
+
+
+def test_compound_targets_on_other_mappings_are_clean_and_kairix_targets_are_shaped(tmp_path: Path) -> None:
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(
+        'import os\n\nmapping["X"], value = "1", 2\nfor mapping["X"] in ["1"]:\n    pass\n', encoding="utf-8"
+    )
+    assert file_violations(conftest) == []
+    assert _violations(tmp_path, 'os.environ["KAIRIX_DB_PATH"], value = "x", 2') == ["5: assign os.environ[KAIRIX_*]"]
+    assert _violations(tmp_path, 'for os.environ["KAIRIX_DB_PATH"] in ["x"]:\n    pass') == [
+        "5: assign os.environ[KAIRIX_*]"
+    ]
+    assert _violations(tmp_path, "for os.environ in [{}]:\n    pass") == ["5: os.environ replaced wholesale"]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        'setattr(os, "environ")',
+        'delattr(os, "environ", None)',
+        'setattr(os, "environ", {}, extra)',
+        'setattr(os, "environ", value={})',
+    ],
+    ids=["setattr-short", "delattr-long", "setattr-long", "setattr-keyword"],
+)
+def test_malformed_setattr_calls_are_clean(tmp_path: Path, statement: str) -> None:
+    """A ``setattr`` / ``delattr`` with the wrong arity raises ``TypeError``
+    before touching ``os``; only a well-formed call replaces the mapping.
+
+    Sabotage proof (executed): accept ``len(args) >= 2`` again → every case
+    is flagged and this fails; restored.
+    """
+    assert _violations(tmp_path, statement) == []
+
+
+def test_guard_exemption_covers_only_the_marked_restore_inside_a_function(tmp_path: Path) -> None:
+    """The runtime guard's exemption is the one ``F2-RESTORE``-marked
+    assignment in a function body; any other wholesale replacement in the
+    guard source — module level or not — is a violation, and the marker
+    exempts nothing in any other file.
+
+    Sabotage proof (executed): restore the file-wide ``_REPLACED`` filter →
+    the inserted module-level replacement is accepted and this fails;
+    restored.
+    """
+    real_guard = _REPO_ROOT / "tests" / "fixtures" / "process_state_guard.py"
+    source = real_guard.read_text(encoding="utf-8")
+    assert source.count(_GUARD_RESTORE_MARKER) == 1
+    copy = tmp_path / "process_state_guard.py"
+    copy.write_text(source, encoding="utf-8")
+    assert file_violations(copy, guard_home=copy) == []
+    assert file_violations(copy) == ["412: os.environ replaced wholesale"]
+    extra = source + '\nos.environ = {}\nsetattr(os, "environ", {})\nos.__dict__["environ"] = {}\n'
+    copy.write_text(extra, encoding="utf-8")
+    lines = extra.count("\n")
+    assert file_violations(copy, guard_home=copy) == [
+        f"{lines - 2}: os.environ replaced wholesale",
+        f"{lines - 1}: os.environ replaced wholesale",
+        f"{lines}: os.environ replaced wholesale",
+    ]
+    marked_at_module_level = f"import os\n\nos.environ = {{}}  # {_GUARD_RESTORE_MARKER}\n"
+    copy.write_text(marked_at_module_level, encoding="utf-8")
+    assert file_violations(copy, guard_home=copy) == ["3: os.environ replaced wholesale"]
+    other = tmp_path / "test_other.py"
+    other.write_text(
+        f"import os\n\n\ndef test_x():\n    os.environ = {{}}  # {_GUARD_RESTORE_MARKER}\n", encoding="utf-8"
+    )
+    assert file_violations(other) == ["5: os.environ replaced wholesale"]

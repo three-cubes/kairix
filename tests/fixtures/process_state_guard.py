@@ -409,7 +409,7 @@ def _end_phase() -> None:
             # Put the real mapping back first: pytest's own reporting reads
             # os.environ, so a deleted / replaced attribute would otherwise
             # turn this into an internal error instead of an [F2] failure.
-            os.environ = _STATE.environ  # type: ignore[assignment]  # noqa: B003 — put the snapshotted mapping back
+            os.environ = _STATE.environ  # type: ignore[assignment]  # noqa: B003  # F2-RESTORE: snapshot back
             _STATE.env.append("os.environ deleted" if current is _MISSING else "os.environ replaced wholesale")
 
 
