@@ -616,12 +616,44 @@ def _module_files(root: Path, parts: list[str], name: str | None) -> list[Path]:
             break
         else:
             return []
-    if name is not None:
+    if name is not None and not _package_binds(here / "__init__.py", name):
         if (here / name / "__init__.py").is_file():
             files.append(here / name / "__init__.py")
         elif (here / name).with_suffix(".py").is_file():
             files.append((here / name).with_suffix(".py"))
     return files
+
+
+def _package_binds(init: Path, name: str) -> bool:
+    """Whether ``init`` statically binds ``name`` at module level (assignment,
+    ``def`` / ``class``, import). ``from pkg import name`` then returns that
+    attribute and never imports a ``pkg/name.py`` submodule; an import the
+    ``__init__`` itself makes is followed from the ``__init__`` as any other."""
+    try:
+        tree = ast.parse(init.read_text(encoding="utf-8"), filename=str(init))
+    except (SyntaxError, OSError):
+        return False
+    pending: list[ast.stmt] = list(tree.body)
+    while pending:
+        stmt = pending.pop()
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if stmt.name == name:
+                return True
+            continue
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            if any((alias.asname or alias.name.split(".")[0]) == name for alias in stmt.names):
+                return True
+            continue
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            if any(isinstance(n, ast.Name) and n.id == name for t in targets for n in ast.walk(t)):
+                return True
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            pending.extend(getattr(stmt, field, []))
+        for handler in getattr(stmt, "handlers", []):
+            pending.extend(handler.body)
+    return False
 
 
 def _imported_helper_writes(tree: ast.AST, path: Path, is_environ: _Environ) -> set[tuple[int, str]]:

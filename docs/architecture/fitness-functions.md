@@ -592,6 +592,16 @@ audit hook would break the interpreter); the item hooks turn records into
 baseline's own writes; entered from any file but the root `tests/conftest.py`
 it records a violation and exempts nothing.
 
+**Known gap — the configuration phase.** The runtime guard watches test
+items and collection only. An env write made by a registered plugin's
+`pytest_configure` hook (for example a module named in `pytest_plugins`) runs
+outside both the static conftest import-time scan, which does not model hook
+bodies, and the runtime hook, which records only inside an item phase or a
+collection, so it is not audited. Plugin hook ordering also makes a
+configure-time watcher unreliable: a plugin registered after the guard
+configures after it. Keep env writes out of `pytest_configure` hooks; the
+session baseline belongs in `allow_baseline_writes()`.
+
 #### Examples
 
 ```python

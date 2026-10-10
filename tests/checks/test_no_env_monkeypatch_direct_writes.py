@@ -528,6 +528,27 @@ def test_helper_imported_at_conftest_import_is_held_to_the_module_level_rule(tmp
     ]
 
 
+def test_from_import_of_a_package_attribute_does_not_scan_a_same_named_submodule(tmp_path: Path) -> None:
+    """``from pkg import helper`` returns the attribute ``pkg/__init__.py``
+    binds and never imports ``pkg/helper.py``; only a name the package does
+    not supply is a submodule that runs at conftest import.
+
+    Sabotage proof (executed): drop the ``_package_binds`` guard in
+    ``_module_files`` → the shadowed ``helper.py`` is flagged and this fails;
+    restored.
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    (pkg / "helper.py").write_text('import os\n\nos.environ["X"] = "1"\n', encoding="utf-8")
+    (pkg / "real.py").write_text('import os\n\nos.environ["X"] = "1"\n', encoding="utf-8")
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text("from pkg import helper\n", encoding="utf-8")
+    assert file_violations(conftest) == []
+    conftest.write_text("from pkg import real\n", encoding="utf-8")
+    assert file_violations(conftest) == ["1: module-level os.environ write in imported pkg/real.py:3 (any key)"]
+
+
 def test_in_place_environ_union_is_a_key_write_not_a_replacement(tmp_path: Path) -> None:
     """``os.environ |= {...}`` mutates the same mapping (``__ior__``), so it
     is judged by its keys like any other write: a literal ``KAIRIX_*`` key
@@ -706,7 +727,7 @@ def test_guard_exemption_covers_only_the_marked_restore_inside_a_function(tmp_pa
     copy = tmp_path / "process_state_guard.py"
     copy.write_text(source, encoding="utf-8")
     assert file_violations(copy, guard_home=copy) == []
-    assert file_violations(copy) == ["412: os.environ replaced wholesale"]
+    assert file_violations(copy) == ["424: os.environ replaced wholesale"]
     extra = source + '\nos.environ = {}\nsetattr(os, "environ", {})\nos.__dict__["environ"] = {}\n'
     copy.write_text(extra, encoding="utf-8")
     lines = extra.count("\n")
@@ -948,3 +969,6 @@ def test_docs_state_the_static_check_is_a_pre_screen_and_the_runtime_guard_the_b
     assert "best-effort pre-screen, not the boundary" in flat
     assert "is the enforced boundary for anything the static pass cannot model" in flat
     assert "tests/fixtures/process_state_guard.py" in flat.split("best-effort pre-screen")[1]
+    # The configuration phase is a named gap, not a promise.
+    assert "Known gap — the configuration phase" in flat
+    assert "so it is not audited" in flat

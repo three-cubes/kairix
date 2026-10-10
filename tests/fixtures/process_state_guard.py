@@ -107,6 +107,7 @@ class _State:
         self.exempt = 0  # depth of allow_baseline_writes()
         self.env: list[str] = []
         self.patches: list[str] = []
+        self.deferred_env: list[str] = []  # replacement details awaiting a successful patch apply
         self.modules: dict[str, Any] | None = None  # pre-setup snapshot
         self.environ: object | None = None  # the os.environ object at the snapshot
         self.module_files: set[str] = set()  # guarded module files executed so far
@@ -274,14 +275,23 @@ def _wrap(owner: type, attr: str, check: Any, *, quiet_on_environ: bool = False)
     _ORIGINALS[(owner, attr)] = original
 
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-        if _recording() and check is not None:
-            detail = check(self, *args, **kwargs)
-            if detail:
-                _STATE.patches.append(detail)
-        if quiet_on_environ and _is_environ_target(self.in_dict):
-            with _exempt():
-                return original(self, *args, **kwargs)
-        return original(self, *args, **kwargs)
+        mark = len(_STATE.deferred_env)
+        try:
+            if _recording() and check is not None:
+                detail = check(self, *args, **kwargs)
+                if detail:
+                    _STATE.patches.append(detail)
+            if quiet_on_environ and _is_environ_target(self.in_dict):
+                with _exempt():
+                    result = original(self, *args, **kwargs)
+            else:
+                result = original(self, *args, **kwargs)
+            # Only an applied replacement is a violation; a call that raised
+            # before changing anything is left to the end-of-phase identity check.
+            _STATE.env.extend(_STATE.deferred_env[mark:])
+            return result
+        finally:
+            del _STATE.deferred_env[mark:]
 
     wrapper.__wrapped__ = original  # type: ignore[attr-defined]  # introspection aid only
     setattr(owner, attr, wrapper)
@@ -296,7 +306,7 @@ def _environ_replacement(owner: object, name: object) -> bool:
 
 def _check_monkeypatch_attr(_mp: Any, target: object, name: object = None, *_a: Any, **_k: Any) -> str | None:
     if _environ_replacement(target, name):
-        _STATE.env.append("os.environ replaced wholesale")
+        _STATE.deferred_env.append("os.environ replaced wholesale")
     if isinstance(target, str):
         return f"monkeypatch of dotted target {target!r}" if _guarded_name(target) else None
     if _guarded_object(target):
@@ -316,14 +326,16 @@ def _check_mock_patch(patcher: Any) -> str | None:
     except Exception:
         return None  # an unresolvable target: let mock raise its own error
     if _environ_replacement(target, patcher.attribute):
-        _STATE.env.append("os.environ replaced wholesale")
+        _STATE.deferred_env.append("os.environ replaced wholesale")
     if _guarded_object(target):
         return f"mock.patch of {getattr(target, '__name__', type(target).__name__)}.{patcher.attribute}"
     return None
 
 
 def _is_environ_target(in_dict: object) -> bool:
-    return in_dict is os.environ or (isinstance(in_dict, str) and in_dict == "os.environ")
+    # os.environ may be deleted mid-phase: fall back to the phase snapshot.
+    current = getattr(os, "environ", _MISSING)
+    return in_dict is current or in_dict is _STATE.environ or (isinstance(in_dict, str) and in_dict == "os.environ")
 
 
 def _check_mock_patch_dict(patcher: Any) -> str | None:

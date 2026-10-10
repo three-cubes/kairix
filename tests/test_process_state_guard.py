@@ -208,6 +208,27 @@ def test_env_is_back_after_the_deletion():
     assert "PATH" in os.environ or "Path" in os.environ
 
 
+def test_env_patch_dict_enclosing_a_deletion(monkeypatch):
+    with mock.patch.dict(os.environ, {"OTHER_LEAK": "1"}):
+        monkeypatch.delattr(os, "environ")
+
+
+def test_patch_dict_contents_are_restored_after_the_deletion():
+    assert isinstance(os.environ, os._Environ)
+    assert "OTHER_LEAK" not in os.environ
+
+
+def test_malformed_monkeypatch_of_environ_changes_nothing_and_is_clean(monkeypatch):
+    with pytest.raises(TypeError):
+        monkeypatch.setattr(os, "environ")
+
+
+def test_malformed_mock_patch_of_environ_changes_nothing_and_is_clean():
+    with pytest.raises(TypeError):
+        with mock.patch("os.environ", {}, foo=1):
+            pass
+
+
 def test_env_patch_dict_of_other_keys_is_clean():
     with mock.patch.dict(os.environ, {"OTHER": "1"}):
         assert os.environ["OTHER"] == "1"
@@ -562,6 +583,38 @@ def test_deleting_environ_fails_as_f2_and_is_restored(inner_outcomes: dict[str, 
     """
     _assert_fails(inner_outcomes, "test_env_deleted_by_monkeypatch", "[F2]", "os.environ deleted")
     assert inner_outcomes["test_env_is_back_after_the_deletion"] == ("passed", "")
+
+
+def test_patch_dict_around_an_environ_deletion_is_restored(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    """``mock.patch.dict(os.environ, ...)`` enclosing ``monkeypatch.delattr(os,
+    "environ")`` still unpatches the real mapping, so the key it set does not
+    leak into the next test.
+
+    Sabotage proof (executed): read ``os.environ`` directly in
+    ``_is_environ_target`` → the wrapper raises before the real unpatch,
+    ``OTHER_LEAK`` survives and this fails; restored.
+    """
+    _assert_fails(inner_outcomes, "test_env_patch_dict_enclosing_a_deletion", "[F2]", "os.environ deleted")
+    assert inner_outcomes["test_patch_dict_contents_are_restored_after_the_deletion"] == ("passed", "")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "test_malformed_monkeypatch_of_environ_changes_nothing_and_is_clean",
+        "test_malformed_mock_patch_of_environ_changes_nothing_and_is_clean",
+    ],
+)
+def test_patch_that_raises_before_replacing_environ_is_clean(
+    inner_outcomes: dict[str, tuple[str, str]], name: str
+) -> None:
+    """A replacement is recorded only once the patch applied; a call that
+    raised ``TypeError`` before changing anything is not an F2 violation.
+
+    Sabotage proof (executed): append the detail in the checks again, before
+    the real call → both fail with ``[F2]``; restored.
+    """
+    assert inner_outcomes[name] == ("passed", "")
 
 
 def test_real_module_inserted_under_another_name_fails(inner_outcomes: dict[str, tuple[str, str]]) -> None:
