@@ -8,9 +8,10 @@ not re-export anything from this module.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable, Iterator
-from fnmatch import fnmatchcase
-from pathlib import Path
+from functools import cache, lru_cache
+from pathlib import Path, PurePath, PureWindowsPath
 
 # Extension → mime mapping for the file families an Obsidian vault
 # typically holds. ``.md`` is the canonical Obsidian note; the rest are
@@ -100,40 +101,100 @@ def iter_collection_files(
         yield abs_path
 
 
-def matches_collection(
+# The host's path flavour — ``PurePosixPath`` or ``PureWindowsPath`` — whose
+# separator and case rules ``pathlib.Path.glob`` applies on this platform.
+NATIVE_FLAVOUR: type[PurePath] = type(PurePath())
+
+# Python 3.13 changed ``Path.glob``: a pattern ending in ``**`` now yields
+# files as well as directories (3.12 yields directories only). The rule
+# follows the running interpreter so the predicate agrees with the
+# ``Path.glob`` that drives :func:`iter_collection_files`.
+TRAILING_RECURSIVE_MATCHES_FILES: bool = sys.version_info >= (3, 13)
+
+
+def collection_accepts(
     rel_path: str,
     *,
     collection_path: str,
     glob: str,
     exclude: Iterable[str],
+    flavour: type[PurePath] = NATIVE_FLAVOUR,
 ) -> bool:
-    """Return whether vault-relative ``rel_path`` is in one configured collection.
+    """True when one configured collection indexes the file at ``rel_path``.
 
-    The predicate twin of :func:`iter_collection_files`, for paths that
-    may no longer exist (a watchdog ``deleted`` event): same base-path,
-    glob and substring-exclude semantics, no filesystem access. The glob
-    is matched segment-wise, ``**`` spanning zero or more directories,
-    as :meth:`pathlib.Path.glob` does.
+    The predicate twin of :func:`iter_collection_files`, for watchdog events
+    whose path may no longer exist: no filesystem access, same answer as the
+    walk. ``rel_path`` is the file's vault-root-relative POSIX path. It is
+    accepted when it sits under ``collection_path`` (``""`` or ``"."`` is the
+    whole vault; ``./notes`` and ``notes/.`` normalise to ``notes``), the part
+    below the collection matches ``glob`` as :meth:`pathlib.Path.glob` would,
+    and no non-empty ``exclude`` token is a substring of ``rel_path``. A glob
+    ending in a separator (``*.md/``) selects directories only, so it accepts
+    no file. ``flavour`` sets the separator and case rules; it defaults to the
+    host's, which is what ``Path.glob`` uses.
     """
-    if any(token and token in rel_path for token in exclude):
+    if _directory_only(glob, flavour) or any(token and token in rel_path for token in exclude):
         return False
-    base = collection_path.strip("/")
-    if base in ("", "."):
-        rest = rel_path
-    elif rel_path.startswith(base + "/"):
-        rest = rel_path[len(base) + 1 :]
-    else:
+    parts = _parts(rel_path, flavour)
+    base = _parts(collection_path, flavour)
+    if not _parts_under(parts, base, flavour):
         return False
-    return _glob_segments_match(glob.split("/"), rest.split("/"))
+    return _parts_match(parts[len(base) :], _parts(glob, flavour), flavour)
 
 
-def _glob_segments_match(pattern: list[str], parts: list[str]) -> bool:
-    if not pattern:
-        return not parts
-    head, tail = pattern[0], pattern[1:]
-    if head == "**":
-        return any(_glob_segments_match(tail, parts[i:]) for i in range(len(parts) + 1))
-    return bool(parts) and fnmatchcase(parts[0], head) and _glob_segments_match(tail, parts[1:])
+def _directory_only(glob: str, flavour: type[PurePath]) -> bool:
+    """True when ``glob`` ends in a separator, so ``Path.glob`` selects directories only."""
+    separators = ("/", "\\") if issubclass(flavour, PureWindowsPath) else ("/",)
+    return glob.endswith(separators)
+
+
+@lru_cache(maxsize=128)
+def _parts(text: str, flavour: type[PurePath]) -> tuple[str, ...]:
+    """Split a path or glob into components under ``flavour``'s separator rules.
+
+    ``pathlib`` drops ``.`` and empty components, so ``""``, ``"."``,
+    ``"./notes"`` and ``"notes/."`` normalise to ``()``, ``()``, ``("notes",)``
+    and ``("notes",)`` — the same spellings ``Path.glob`` accepts.
+    """
+    return flavour(text).parts
+
+
+def _parts_under(child: tuple[str, ...], parent: tuple[str, ...], flavour: type[PurePath]) -> bool:
+    """True when ``child`` is strictly beneath ``parent``, comparing with ``flavour``'s case rules.
+
+    Strictly: a file is never its own collection directory, which
+    :func:`iter_collection_files` walks as a directory.
+    """
+    return len(child) > len(parent) and flavour(*child[: len(parent)]) == flavour(*parent)
+
+
+def _parts_match(parts: tuple[str, ...], patterns: tuple[str, ...], flavour: type[PurePath]) -> bool:
+    """Match path components against glob components, ``pathlib.Path.glob`` style.
+
+    ``*`` and ``?`` stay inside one component and match dotfiles. A ``**``
+    component matches zero or more whole directories, so a segment before it
+    must name a directory: ``*/**`` never matches a root-level file. A
+    trailing ``**`` selects directories only on Python 3.12, so it matches no
+    file; from 3.13 it also selects every file beneath
+    (:data:`TRAILING_RECURSIVE_MATCHES_FILES`).
+
+    Memoised on ``(path index, pattern index)``, so repeated ``**``
+    components cost O(len(parts)² · len(patterns)) rather than branching
+    combinatorially on a deep non-matching path.
+    """
+
+    @cache
+    def match(i: int, j: int) -> bool:
+        if j == len(patterns):
+            return i == len(parts)
+        head = patterns[j]
+        if head == "**":
+            if j + 1 == len(patterns):
+                return TRAILING_RECURSIVE_MATCHES_FILES and i < len(parts)
+            return any(match(k, j + 1) for k in range(i, len(parts)))
+        return i < len(parts) and flavour(parts[i]).match(head) and match(i + 1, j + 1)
+
+    return match(0, 0)
 
 
 def read_text_for_hash(abs_path: Path) -> str:

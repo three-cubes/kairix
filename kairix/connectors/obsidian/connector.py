@@ -44,7 +44,7 @@ from urllib.parse import quote
 
 from kairix.connectors.obsidian.fs import (
     DEFAULT_MIME,
-    matches_collection,
+    collection_accepts,
     mime_for_bytes,
     mime_for_path,
 )
@@ -642,7 +642,7 @@ def _filter_to_specs(changes: list[FileChange], specs: list[CollectionScanSpec])
         c
         for c in changes
         if any(
-            matches_collection(c.item_id, collection_path=spec.path, glob=spec.glob, exclude=spec.exclude)
+            collection_accepts(c.item_id, collection_path=spec.path, glob=spec.glob, exclude=spec.exclude)
             for spec in specs
         )
     ]

@@ -15,8 +15,8 @@ import pytest
 
 from kairix.connectors.obsidian.fs import (
     DEFAULT_MIME,
+    collection_accepts,
     iter_collection_files,
-    matches_collection,
     mime_for_bytes,
     mime_for_path,
     read_text_for_hash,
@@ -248,7 +248,7 @@ def test_read_text_for_hash_handles_binary_payload(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# matches_collection — predicate twin of iter_collection_files
+# collection_accepts — predicate twin of iter_collection_files
 # ---------------------------------------------------------------------------
 
 
@@ -271,32 +271,56 @@ def test_read_text_for_hash_handles_binary_payload(tmp_path: Path) -> None:
         ("y/a.md", ".", "x/*.md", (), False),
         ("x/a.md", ".", "x/**/a.md", (), True),
         ("a.md", ".", "**/*.md", ("",), True),
+        ("notes/a.md", "./notes", "**/*.md", (), True),
+        ("notes/a.md", "notes/.", "**/*.md", (), True),
+        ("x/a.md", ".", "./**/*.md", (), True),
+        ("secret.md", ".", "*/**", (), False),
+        ("a.md", ".", "*.md/", (), False),
+        ("notes/a.md", "notes/a.md", ".", (), False),
+        ("x/a.md", ".", "x/a.md/b", (), False),
+        ("Notes/a.md", "notes", "**/*.md", (), False),
     ],
 )
-def test_matches_collection_cases(
+def test_collection_accepts_cases(
     rel_path: str, collection_path: str, glob: str, exclude: tuple[str, ...], expected: bool
 ) -> None:
     """Base path, glob (``**`` spans directories) and substring exclude decide membership.
 
-    Sabotage-proof: make the ``**`` branch of ``_glob_segments_match`` only try
-    ``parts[1:]`` (one-or-more directories); the ``a.md`` / ``**/*.md`` row fails.
+    Sabotage-proof: make the non-trailing ``**`` branch of ``_parts_match`` try
+    ``range(i + 1, ...)`` (one-or-more directories); the ``a.md`` / ``**/*.md``
+    row fails. Let a trailing ``**`` match zero components; the ``*/**`` row
+    fails. Split ``_parts`` with ``text.split("/")``; the ``./notes`` rows fail.
+    Let ``_parts_under`` accept ``len(child) == len(parent)``; the row whose
+    path is its own collection fails.
     Drop the exclude check; the ``drafts`` row fails. Drop the trailing
     ``/`` in the base-prefix check; the ``notes-old`` row fails.
     """
-    assert matches_collection(rel_path, collection_path=collection_path, glob=glob, exclude=exclude) is expected
+    assert collection_accepts(rel_path, collection_path=collection_path, glob=glob, exclude=exclude) is expected
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "collection_path,glob,exclude",
-    [(".", "**/*.md", ()), ("notes", "**/*.md", ("wip",)), (".", "*.md", ()), ("notes", "sub/*.txt", ())],
+    [
+        (".", "**/*.md", ()),
+        ("notes", "**/*.md", ("wip",)),
+        (".", "*.md", ()),
+        ("notes", "sub/*.txt", ()),
+        ("./notes", "**/*.md", ()),
+        ("notes/.", "**/*.md", ()),
+        (".", "./**/*.md", ()),
+        (".", "*/**", ()),
+        (".", "*.md/**", ()),
+        ("notes", "**", ()),
+        (".", "*.md/", ()),
+    ],
 )
-def test_matches_collection_agrees_with_iter_collection_files(
+def test_collection_accepts_agrees_with_iter_collection_files(
     tmp_path: Path, collection_path: str, glob: str, exclude: tuple[str, ...]
 ) -> None:
     """Every file in a mixed tree is matched exactly when the walk yields it.
 
-    Sabotage-proof: make ``matches_collection`` ignore ``collection_path``;
+    Sabotage-proof: make ``collection_accepts`` ignore ``collection_path``;
     the ``notes`` rows fail because root-level files now match.
     """
     rels = [
@@ -309,6 +333,7 @@ def test_matches_collection_agrees_with_iter_collection_files(
         "notes/sub/c.txt",
         "notes/wip/d.md",
         "notes-old/e.md",
+        "dir.md/inner.md",
     ]
     for rel in rels:
         target = tmp_path / rel
@@ -320,7 +345,6 @@ def test_matches_collection_agrees_with_iter_collection_files(
         for p in iter_collection_files(vault_root=tmp_path, collection_path=collection_path, glob=glob, exclude=exclude)
     }
     matched = {
-        rel for rel in rels if matches_collection(rel, collection_path=collection_path, glob=glob, exclude=exclude)
+        rel for rel in rels if collection_accepts(rel, collection_path=collection_path, glob=glob, exclude=exclude)
     }
-    assert walked, "the walk must yield something for the comparison to mean anything"
     assert matched == walked
