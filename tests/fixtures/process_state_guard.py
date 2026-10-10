@@ -108,6 +108,7 @@ class _State:
         self.env: list[str] = []
         self.patches: list[str] = []
         self.deferred_env: list[str] = []  # replacement details awaiting a successful patch apply
+        self.capture: list[str] | None = None  # guarded keys written while a patch.dict applies
         self.modules: dict[str, Any] | None = None  # pre-setup snapshot
         self.environ: object | None = None  # the os.environ object at the snapshot
         self.module_files: set[str] = set()  # guarded module files executed so far
@@ -145,9 +146,12 @@ def _audit(event: str, args: tuple[Any, ...]) -> None:
         if _STATE.enabled and getattr(code, "co_name", None) == "<module>":
             _record_module_exec(code.co_filename)
         return
-    if event in ("os.putenv", "os.unsetenv") and _recording() and args and _guarded_key(args[0]):
+    if event in ("os.putenv", "os.unsetenv") and args and _guarded_key(args[0]):
         key = args[0].decode("utf-8", "surrogateescape") if isinstance(args[0], bytes) else args[0]
-        _STATE.env.append(f"{'set' if event == 'os.putenv' else 'unset'} {key}")
+        if _STATE.capture is not None:  # a patch.dict is applying: what it writes is judged afterwards
+            _STATE.capture.append(key)
+        elif _recording():
+            _STATE.env.append(f"{'set' if event == 'os.putenv' else 'unset'} {key}")
 
 
 def _under_package_dirs(path: object) -> bool:
@@ -185,6 +189,16 @@ def allow_baseline_writes() -> contextlib.AbstractContextManager[None]:
             _STATE.env.append(f"allow_baseline_writes() entered from {caller} (only {BASELINE_CONFTEST} may)")
         return contextlib.nullcontext()
     return _exempt()
+
+
+@contextlib.contextmanager
+def _capturing() -> Iterator[list[str]]:
+    """Route guarded env writes into a buffer instead of the audit log while a patch.dict applies."""
+    previous, _STATE.capture = _STATE.capture, []
+    try:
+        yield _STATE.capture
+    finally:
+        _STATE.capture = previous
 
 
 @contextlib.contextmanager
@@ -287,8 +301,9 @@ def _wrap(owner: type, attr: str, check: Any, *, quiet_on_environ: bool = False)
                 # violation for the guarded keys it attempted, same-value writes included.
                 target = _resolved_mapping(self.in_dict)
                 before = dict(target) if target is not None else None
+                written: list[str] = []
                 try:
-                    with _exempt():
+                    with _exempt(), _capturing() as written:
                         result = original(self, *args, **kwargs)
                 except BaseException:
                     if before is not None:
@@ -297,9 +312,10 @@ def _wrap(owner: type, attr: str, check: Any, *, quiet_on_environ: bool = False)
                             with _exempt():
                                 target.clear()
                                 target.update(before)
-                        attempted = [k for k in _attempted_keys(getattr(self, "values", None)) if _guarded_key(k)]
-                        if attempted and _recording():
-                            _STATE.env.append(f"patch.dict(os.environ) wrote {attempted[0]} before raising (restored)")
+                        # `written` holds exactly the guarded keys the apply put or unset before it
+                        # raised (same-value writes included; a value refused before any write, excluded).
+                        if written and _recording():
+                            _STATE.env.append(f"patch.dict(os.environ) wrote {written[0]} before raising (restored)")
                     raise
             else:
                 result = original(self, *args, **kwargs)
@@ -322,14 +338,6 @@ def _resolved_mapping(in_dict: object) -> Any:
     if isinstance(in_dict, str):
         return getattr(os, "environ", None)
     return in_dict
-
-
-def _attempted_keys(values: object) -> list[object]:
-    """The keys a ``patch.dict`` tried to write, from its ``values`` (a mapping or an iterable of pairs)."""
-    try:
-        return list(dict(values).keys())  # type: ignore[call-overload]  # mock accepts both shapes
-    except (TypeError, ValueError):
-        return []
 
 
 def _environ_replacement(owner: object, name: object) -> bool:

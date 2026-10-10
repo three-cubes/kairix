@@ -244,8 +244,18 @@ def test_mock_patch_of_a_missing_attribute_changes_nothing_and_is_clean():
 
 def test_patch_dict_of_a_guarded_key_that_raises_before_writing_is_clean():
     with pytest.raises(TypeError):
-        with mock.patch.dict(os.environ, {"KAIRIX_BAD": object()}):
+        with mock.patch.dict(os.environ, {"FAKEPKG_BAD": object()}):  # the guarded prefix here is FAKEPKG_
             pass
+
+
+def test_patch_dict_clear_that_raises_after_clearing_is_a_violation():
+    with pytest.raises(TypeError):
+        with mock.patch.dict(os.environ, {"FAKEPKG_BAD": object()}, clear=True):
+            pass
+
+
+def test_the_cleared_baseline_was_restored():
+    assert os.environ["FAKEPKG_BASELINE"] == "1"
 
 
 def test_patch_dict_that_writes_one_guarded_key_before_raising_is_a_violation():
@@ -697,6 +707,16 @@ def test_partial_patch_dict_write_is_restored_and_reported(inner_outcomes: dict[
         "[F2]",
         "wrote FAKEPKG_BASELINE before raising (restored)",
     )
+    # clear=True unsets every guarded key before the invalid value raises: a write, restored and
+    # reported (the first key cleared is whichever the mapping yields first).
+    _assert_fails(
+        inner_outcomes,
+        "test_patch_dict_clear_that_raises_after_clearing_is_a_violation",
+        "[F2]",
+        "patch.dict(os.environ) wrote FAKEPKG_",
+        "before raising (restored)",
+    )
+    assert inner_outcomes["test_the_cleared_baseline_was_restored"] == ("passed", "")
 
 
 def test_real_module_inserted_under_another_name_fails(inner_outcomes: dict[str, tuple[str, str]]) -> None:
