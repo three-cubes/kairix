@@ -258,6 +258,13 @@ def test_the_partial_write_was_restored():
     assert "FAKEPKG_GOOD" not in os.environ
 
 
+def test_patch_dict_rewriting_an_existing_value_before_raising_is_still_a_violation():
+    # FAKEPKG_BASELINE is "1" already: the same-value write leaves no diff, yet it was attempted.
+    with pytest.raises(TypeError):
+        with mock.patch.dict(os.environ, [("FAKEPKG_BASELINE", "1"), ("FAKEPKG_BAD", object())]):
+            pass
+
+
 def test_env_patch_dict_of_other_keys_is_clean():
     with mock.patch.dict(os.environ, {"OTHER": "1"}):
         assert os.environ["OTHER"] == "1"
@@ -684,6 +691,12 @@ def test_partial_patch_dict_write_is_restored_and_reported(inner_outcomes: dict[
         "wrote FAKEPKG_GOOD before raising (restored)",
     )
     assert inner_outcomes["test_the_partial_write_was_restored"] == ("passed", "")
+    _assert_fails(
+        inner_outcomes,
+        "test_patch_dict_rewriting_an_existing_value_before_raising_is_still_a_violation",
+        "[F2]",
+        "wrote FAKEPKG_BASELINE before raising (restored)",
+    )
 
 
 def test_real_module_inserted_under_another_name_fails(inner_outcomes: dict[str, tuple[str, str]]) -> None:

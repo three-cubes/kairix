@@ -282,28 +282,24 @@ def _wrap(owner: type, attr: str, check: Any, *, quiet_on_environ: bool = False)
                 detail = check(self, *args, **kwargs)
             if quiet_on_environ and _is_environ_target(self.in_dict):
                 # An exempted patch.dict that raises midway (one entry applied, the next
-                # invalid) must not leave the partial write behind: restore the mapping and
-                # keep a violation for any guarded key it touched.
-                current = getattr(os, "environ", None)  # absent after a delattr; nothing to snapshot then
-                before = dict(current) if current is not None else None
+                # invalid) must not leave the partial write behind: restore the mapping the
+                # patcher targets (not whatever os.environ is at the time) and keep a
+                # violation for the guarded keys it attempted, same-value writes included.
+                target = _resolved_mapping(self.in_dict)
+                before = dict(target) if target is not None else None
                 try:
                     with _exempt():
                         result = original(self, *args, **kwargs)
                 except BaseException:
-                    current = getattr(os, "environ", None)
-                    after = dict(current) if current is not None else None
-                    touched = (
-                        sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
-                        if before is not None and after is not None
-                        else []
-                    )
-                    if touched:
-                        with _exempt():
-                            os.environ.clear()
-                            os.environ.update(before)
-                        guarded = [k for k in touched if _guarded_key(k)]
-                        if guarded:
-                            _STATE.env.append(f"patch.dict(os.environ) wrote {guarded[0]} before raising (restored)")
+                    if before is not None:
+                        after = dict(target)
+                        if after != before:
+                            with _exempt():
+                                target.clear()
+                                target.update(before)
+                        attempted = [k for k in _attempted_keys(getattr(self, "values", None)) if _guarded_key(k)]
+                        if attempted and _recording():
+                            _STATE.env.append(f"patch.dict(os.environ) wrote {attempted[0]} before raising (restored)")
                     raise
             else:
                 result = original(self, *args, **kwargs)
@@ -319,6 +315,21 @@ def _wrap(owner: type, attr: str, check: Any, *, quiet_on_environ: bool = False)
 
     wrapper.__wrapped__ = original  # type: ignore[attr-defined]  # introspection aid only
     setattr(owner, attr, wrapper)
+
+
+def _resolved_mapping(in_dict: object) -> Any:
+    """The mapping a ``patch.dict`` targets: the object it holds, or ``os.environ`` for the dotted name."""
+    if isinstance(in_dict, str):
+        return getattr(os, "environ", None)
+    return in_dict
+
+
+def _attempted_keys(values: object) -> list[object]:
+    """The keys a ``patch.dict`` tried to write, from its ``values`` (a mapping or an iterable of pairs)."""
+    try:
+        return list(dict(values).keys())  # type: ignore[call-overload]  # mock accepts both shapes
+    except (TypeError, ValueError):
+        return []
 
 
 def _environ_replacement(owner: object, name: object) -> bool:
