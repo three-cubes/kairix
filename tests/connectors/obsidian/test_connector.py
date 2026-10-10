@@ -22,17 +22,25 @@ callable default), F8 carries ``@pytest.mark.unit``.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
+from watchdog.events import FileCreatedEvent, FileDeletedEvent, FileModifiedEvent
 
 # Imported from the defining module (not the package re-export) so the
 # mutation-parity import graph (scripts/checks/mutation_parity.py) selects
 # this file as connector.py's own test when mutating that module.
 from kairix.connectors.obsidian.connector import ObsidianConnector, make_connector
-from kairix.core.protocols import RawArtefact
+from kairix.connectors.obsidian.watcher import FileChange, WatchdogSource
+from kairix.core.protocols import Container, RawArtefact
 from kairix.knowledge.reflib.dedup import hash_content
-from tests.fakes import fake_obsidian_watcher_factory
+from tests.fakes import FakeWatchdogObserver, fake_obsidian_watcher_factory
+
+# A cursor before any event the tests produce, so a tick runs with
+# ``cursor is not None`` without filtering anything out.
+_PAST_CURSOR = "2000-01-01T00:00:00Z"
 
 
 def _seed_vault(vault: Path, payloads: dict[str, str]) -> None:
@@ -352,7 +360,7 @@ def test_make_connector_accepts_collections_as_dicts(vault: Path) -> None:
 def test_cursor_filters_out_old_events(vault: Path) -> None:
     """Events with ``modified_at <= cursor`` are filtered out.
 
-    Sabotage-proof: remove the ``ev.modified_at <= cursor`` filter;
+    Sabotage-proof: make ``_after_cursor`` return ``events`` unfiltered;
     this test fails because the reconciler's events fire on every call.
     """
     known_before = _hash_snapshot(vault)
@@ -360,8 +368,18 @@ def test_cursor_filters_out_old_events(vault: Path) -> None:
 
     # Pass a cursor in the future — every reconciliation event has
     # ``modified_at == now``, which is strictly less than the cursor.
+    # ``reconcile_every=1`` makes this call reconcile, so the drift on
+    # ``alpha.md`` reaches the cursor filter (and the past-cursor control
+    # proves it is the filter, not a skipped reconcile, that empties it).
     future_cursor = "2099-01-01T00:00:00Z"
-    with _connector_with_known(vault, known_before) as connector:
+    connector = ObsidianConnector(
+        vault_root=vault,
+        known_state_resolver=lambda _c: known_before,
+        watcher_factory=fake_obsidian_watcher_factory(),
+        reconcile_every=1,
+    )
+    with connector:
+        assert [e.item_id for e in connector.list_changes(cursor=_PAST_CURSOR)] == ["alpha.md"]
         events = list(connector.list_changes(cursor=future_cursor))
     assert events == [], f"future cursor must filter all events, got {events!r}"
 
@@ -487,20 +505,20 @@ def test_list_changes_for_container_dedups_and_filters_by_cursor(tmp_path: Path)
     """v2 per-container path dedups duplicate item_ids + filters events at-or-before cursor.
 
     The scoped path mirrors the legacy ``list_changes`` merge semantics
-    (watchdog wins over reconciler on duplicates; ``modified_at <= cursor``
-    drops the event) but scopes everything to one Container's subtree.
+    (one event per item_id; ``modified_at <= cursor`` drops the event) but scopes everything to one Container's subtree.
     Pinning these branches keeps the v2 ingest equivalence.
 
-    Sabotage-proof: remove the ``if cursor is not None and ev.modified_at
-    <= cursor: continue`` filter in ``_list_changes_scoped``; this test
+    Sabotage-proof: make ``_after_cursor`` return ``events`` unfiltered;
+    this test
     fails because a future-cursor returns the reconciler's events instead
     of being filtered to empty.
     """
-    from kairix.core.protocols import Container
 
     vault = tmp_path / "vault"
     _seed_vault(vault, {"alpha/note.md": "a", "alpha/sub/deep.md": "deep"})
     known = _hash_snapshot(vault)
+    # Drift the reconciler will report, so the cursor filter has work to do.
+    (vault / "alpha" / "note.md").write_text("edited", encoding="utf-8")
     connector = _connector_with_known(vault, known)
 
     container = Container(
@@ -510,7 +528,10 @@ def test_list_changes_for_container_dedups_and_filters_by_cursor(tmp_path: Path)
         cursor_token="2099-01-01T00:00:00Z",  # future cursor — filters everything
         last_synced_at=None,
     )
-    events = list(connector.list_changes_for_container(container))
+    with connector:
+        unfiltered = list(connector.list_changes_for_container(replace(container, cursor_token=None)))
+        events = list(connector.list_changes_for_container(container))
+    assert [e.item_id for e in unfiltered] == ["alpha/note.md"]
     assert events == [], f"future cursor must filter all events on scoped path; got {events!r}"
 
 
@@ -609,3 +630,223 @@ def test_metadata_for_normalises_frontmatter_author_and_tags(
     assert meta.author == expected_author
     assert meta.tags == expected_tags
     assert meta.modified_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Watchdog + reconciler merge rule — one event per item_id
+# ---------------------------------------------------------------------------
+
+
+class _ReplayingObserver(FakeWatchdogObserver):
+    """Fake observer that replays queued events the moment it starts.
+
+    Models the macOS FSEvents observer delivering history for files written
+    just before the stream started: the replayed events land in the queue
+    before the connector's first drain, deterministically.
+    """
+
+    def __init__(self, replay: list[Any]) -> None:
+        super().__init__()
+        self._replay = replay
+
+    def start(self) -> None:
+        super().start()
+        for event in self._replay:
+            self.emit(event)
+
+
+def _replaying_connector(vault: Path, known: Mapping[str, str], replay: list[Any]) -> ObsidianConnector:
+    def _factory(root: Path) -> WatchdogSource:
+        return WatchdogSource(root, observer_factory=lambda: _ReplayingObserver(replay))
+
+    return ObsidianConnector(vault_root=vault, known_state_resolver=lambda _c: known, watcher_factory=_factory)
+
+
+@pytest.mark.unit
+def test_watchdog_edit_then_delete_between_ticks_emits_tombstone(vault: Path) -> None:
+    """A note edited then deleted between ticks surfaces as ``deleted``, not ``modified``.
+
+    No reconcile runs on the second tick, so the watchdog drain alone
+    decides; its run for ``bravo.md`` must collapse to the LAST op.
+
+    Sabotage-proof: make the watchdog loop in ``_merge_change_events`` keep
+    ``prior`` (first event wins); this test fails because ``modified`` is
+    emitted for a file that no longer exists.
+    """
+    observers: list[FakeWatchdogObserver] = []
+    connector = ObsidianConnector(
+        vault_root=vault,
+        known_state_resolver=lambda _c: _hash_snapshot(vault),
+        watcher_factory=fake_obsidian_watcher_factory(observers),
+        reconcile_every=100,
+    )
+    with connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        bravo = str(vault / "bravo.md")
+        (vault / "bravo.md").write_text("# Bravo\n\nEdited.", encoding="utf-8")
+        observers[0].emit(FileModifiedEvent(bravo))
+        (vault / "bravo.md").unlink()
+        observers[0].emit(FileDeletedEvent(bravo))
+        events = list(connector.list_changes(cursor=_PAST_CURSOR))
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "bravo.md")]
+
+
+@pytest.mark.unit
+def test_watchdog_create_then_edit_between_ticks_stays_created(vault: Path) -> None:
+    """A note created then edited between ticks surfaces once, as ``created``.
+
+    Sabotage-proof: make ``_collapse_watchdog`` always take ``later.op``;
+    this test fails because the op becomes ``modified``.
+    """
+    observers: list[FakeWatchdogObserver] = []
+    connector = ObsidianConnector(
+        vault_root=vault,
+        known_state_resolver=lambda _c: _hash_snapshot(vault),
+        watcher_factory=fake_obsidian_watcher_factory(observers),
+        reconcile_every=100,
+    )
+    with connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        delta = str(vault / "delta.md")
+        (vault / "delta.md").write_text("# Delta", encoding="utf-8")
+        observers[0].emit(FileCreatedEvent(delta))
+        observers[0].emit(FileModifiedEvent(delta))
+        events = list(connector.list_changes(cursor=_PAST_CURSOR))
+
+    assert [(e.op, e.item_id) for e in events] == [("created", "delta.md")]
+
+
+@pytest.mark.unit
+def test_cold_start_replayed_create_does_not_mask_reconciled_delete(vault: Path) -> None:
+    """A replayed FSEvents ``created`` for a deleted note loses to the reconciler's tombstone.
+
+    Sabotage-proof: make the reconcile loop in ``_merge_change_events`` keep
+    ``prior`` when the watchdog already reported the item; this test fails
+    because ``created bravo.md`` is emitted with no ``deleted`` event.
+    """
+    known = _hash_snapshot(vault)
+    (vault / "bravo.md").unlink()
+    replay = [FileCreatedEvent(str(vault / "bravo.md"))]
+
+    with _replaying_connector(vault, known, replay) as connector:
+        events = list(connector.list_changes(cursor=None))
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "bravo.md")]
+
+
+@pytest.mark.unit
+def test_cold_start_replayed_create_does_not_mask_reconciled_modify(vault: Path) -> None:
+    """The reconciler's ``modified`` verdict wins over a replayed ``created``.
+
+    Sabotage-proof: same mutation as the delete case (reconcile loop keeps
+    ``prior``); this test fails because the op is ``created``.
+    """
+    known = _hash_snapshot(vault)
+    (vault / "alpha.md").write_text("# Alpha\n\nEdited.", encoding="utf-8")
+    replay = [FileCreatedEvent(str(vault / "alpha.md"))]
+
+    with _replaying_connector(vault, known, replay) as connector:
+        events = list(connector.list_changes(cursor=None))
+
+    assert [(e.op, e.item_id) for e in events] == [("modified", "alpha.md")]
+
+
+@pytest.mark.unit
+def test_container_scoped_path_reconciled_delete_beats_replayed_create(tmp_path: Path) -> None:
+    """The per-container path applies the same merge rule as ``list_changes``.
+
+    Sabotage-proof: point ``_list_changes_scoped`` back at a first-event-wins
+    dedup; this test fails because ``created alpha/gone.md`` is emitted.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"alpha/note.md": "a", "alpha/gone.md": "g"})
+    known = _hash_snapshot(vault)
+    (vault / "alpha" / "gone.md").unlink()
+    replay = [FileCreatedEvent(str(vault / "alpha" / "gone.md"))]
+    container = Container(
+        cc_pair_id=1,
+        container_id="alpha",
+        access_state="ACCESSIBLE",
+        cursor_token=None,
+        last_synced_at=None,
+    )
+
+    with _replaying_connector(vault, known, replay) as connector:
+        events = list(connector.list_changes_for_container(container))
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "alpha/gone.md")]
+
+
+@pytest.mark.unit
+def test_watchdog_create_then_delete_between_ticks_emits_tombstone(vault: Path) -> None:
+    """A scratch note created then deleted between ticks surfaces as ``deleted``.
+
+    Sabotage-proof: change the ``and`` in ``_collapse_watchdog`` to ``or``;
+    this test fails because the run keeps ``created`` for a file that is gone.
+    """
+    observers: list[FakeWatchdogObserver] = []
+    connector = ObsidianConnector(
+        vault_root=vault,
+        known_state_resolver=lambda _c: _hash_snapshot(vault),
+        watcher_factory=fake_obsidian_watcher_factory(observers),
+        reconcile_every=100,
+    )
+    with connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        scratch = str(vault / "scratch.md")
+        (vault / "scratch.md").write_text("tmp", encoding="utf-8")
+        observers[0].emit(FileCreatedEvent(scratch))
+        (vault / "scratch.md").unlink()
+        observers[0].emit(FileDeletedEvent(scratch))
+        events = list(connector.list_changes(cursor=_PAST_CURSOR))
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "scratch.md")]
+
+
+class _PinnedStampSource(WatchdogSource):
+    """``WatchdogSource`` over the fake observer whose drained events all carry ``stamp``.
+
+    Events still arrive through :meth:`FakeWatchdogObserver.emit` and the real
+    queueing handler; only ``observed_at`` is pinned so a test can place an
+    event exactly on the cursor.
+    """
+
+    def __init__(self, root: Path, observers: list[FakeWatchdogObserver], stamp: str) -> None:
+        def _observer() -> FakeWatchdogObserver:
+            observer = FakeWatchdogObserver()
+            observers.append(observer)
+            return observer
+
+        super().__init__(root, observer_factory=_observer)
+        self._stamp = stamp
+
+    def drain(self) -> list[FileChange]:
+        return [replace(c, observed_at=self._stamp) for c in super().drain()]
+
+
+@pytest.mark.unit
+def test_watchdog_event_exactly_at_cursor_is_filtered(vault: Path) -> None:
+    """An event stamped exactly at the cursor was already processed — it is dropped.
+
+    Sabotage-proof: change ``>`` to ``>=`` in ``_after_cursor``; this test
+    fails because the at-cursor event is emitted again.
+    """
+    stamp = "2026-01-01T00:00:00Z"
+    observers: list[FakeWatchdogObserver] = []
+    connector = ObsidianConnector(
+        vault_root=vault,
+        known_state_resolver=lambda _c: _hash_snapshot(vault),
+        watcher_factory=lambda root: _PinnedStampSource(root, observers, stamp),
+        reconcile_every=100,
+    )
+    alpha = str(vault / "alpha.md")
+    with connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        observers[0].emit(FileModifiedEvent(alpha))
+        at_cursor = list(connector.list_changes(cursor=stamp))
+        observers[0].emit(FileModifiedEvent(alpha))
+        before_cursor = list(connector.list_changes(cursor="2025-12-31T23:59:59Z"))
+
+    assert at_cursor == []
+    assert [(e.op, e.item_id) for e in before_cursor] == [("modified", "alpha.md")]
