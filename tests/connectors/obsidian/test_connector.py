@@ -34,6 +34,7 @@ from watchdog.events import FileCreatedEvent, FileDeletedEvent, FileModifiedEven
 # this file as connector.py's own test when mutating that module.
 from kairix.connectors.obsidian.connector import ObsidianConnector, make_connector
 from kairix.connectors.obsidian.watcher import FileChange, WatchdogSource
+from kairix.core.db.scanner import CollectionConfig
 from kairix.core.protocols import Container, RawArtefact
 from kairix.knowledge.reflib.dedup import hash_content
 from tests.fakes import FakeWatchdogObserver, fake_obsidian_watcher_factory
@@ -850,3 +851,105 @@ def test_watchdog_event_exactly_at_cursor_is_filtered(vault: Path) -> None:
 
     assert at_cursor == []
     assert [(e.op, e.item_id) for e in before_cursor] == [("modified", "alpha.md")]
+
+
+def _watchdog_only_connector(vault: Path, observers: list[FakeWatchdogObserver], **kwargs: Any) -> ObsidianConnector:
+    """Connector whose ticks after the first never reconcile — the watchdog alone decides."""
+    return ObsidianConnector(
+        vault_root=vault,
+        known_state_resolver=lambda _c: _hash_snapshot(vault),
+        watcher_factory=fake_obsidian_watcher_factory(observers),
+        reconcile_every=100,
+        **kwargs,
+    )
+
+
+@pytest.mark.unit
+def test_watchdog_create_for_missing_file_settles_to_deleted(vault: Path) -> None:
+    """A watchdog ``created`` for a file that no longer exists is emitted as ``deleted``.
+
+    Models a late or replayed event on a tick with no reconcile, so the
+    connector never hands the pipeline a fetch that would dead-letter.
+
+    Sabotage-proof: make ``_settle_against_fs`` return ``ev`` unchanged;
+    this test fails because ``created bravo.md`` is emitted.
+    """
+    observers: list[FakeWatchdogObserver] = []
+    with _watchdog_only_connector(vault, observers) as connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        (vault / "bravo.md").unlink()
+        observers[0].emit(FileCreatedEvent(str(vault / "bravo.md")))
+        events = list(connector.list_changes(cursor=_PAST_CURSOR))
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "bravo.md")]
+
+
+@pytest.mark.unit
+def test_watchdog_delete_for_existing_file_settles_to_modified(vault: Path) -> None:
+    """A watchdog ``deleted`` for a file that exists again is emitted as ``modified``.
+
+    Sabotage-proof: drop the ``live and ev.op == "deleted"`` branch of
+    ``_settle_against_fs``; this test fails because the live note is
+    tombstoned.
+    """
+    observers: list[FakeWatchdogObserver] = []
+    with _watchdog_only_connector(vault, observers) as connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        observers[0].emit(FileDeletedEvent(str(vault / "alpha.md")))
+        events = list(connector.list_changes(cursor=_PAST_CURSOR))
+
+    assert [(e.op, e.item_id) for e in events] == [("modified", "alpha.md")]
+
+
+@pytest.mark.unit
+def test_watchdog_events_outside_collections_are_dropped(vault: Path) -> None:
+    """Editor state, non-matching extensions and excluded paths never surface.
+
+    The reconciler only walks the configured collections; the watchdog sees
+    the whole vault. Without the filter, every Obsidian ``workspace.json``
+    write became a change event.
+
+    Sabotage-proof: make ``_filter_to_specs`` return ``changes`` unchanged;
+    this test fails because the out-of-scope paths are emitted.
+    """
+    _seed_vault(
+        vault,
+        {".obsidian/workspace.json": "{}", "notes/wip/draft.md": "d", "notes/kept.md": "k", "notes/data.csv": "c"},
+    )
+    observers: list[FakeWatchdogObserver] = []
+    collections = [CollectionConfig(name="notes", path="notes", exclude=["wip"])]
+    with _watchdog_only_connector(vault, observers, collections=collections) as connector:
+        list(connector.list_changes(cursor=None))
+        for rel in (".obsidian/workspace.json", "notes/wip/draft.md", "notes/data.csv", "alpha.md", "notes/kept.md"):
+            observers[0].emit(FileModifiedEvent(str(vault / rel)))
+        events = list(connector.list_changes(cursor=_PAST_CURSOR))
+
+    assert [(e.op, e.item_id) for e in events] == [("modified", "notes/kept.md")]
+
+
+@pytest.mark.unit
+def test_container_scoped_watchdog_events_outside_collections_are_dropped(tmp_path: Path) -> None:
+    """The per-container path applies the same collection filter to watchdog events.
+
+    Sabotage-proof: drop the ``_filter_to_specs`` call in
+    ``_list_changes_scoped``; this test fails because ``alpha/data.json``
+    is emitted.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"alpha/note.md": "a", "alpha/data.json": "{}"})
+    container = Container(
+        cc_pair_id=1,
+        container_id="alpha",
+        access_state="ACCESSIBLE",
+        cursor_token=None,
+        last_synced_at=None,
+    )
+    observers: list[FakeWatchdogObserver] = []
+    with _watchdog_only_connector(vault, observers) as connector:
+        list(connector.list_changes_for_container(container))
+        (vault / "alpha" / "note.md").write_text("edited", encoding="utf-8")
+        for rel in ("alpha/data.json", "alpha/note.md"):
+            observers[0].emit(FileModifiedEvent(str(vault / rel)))
+        events = list(connector.list_changes_for_container(container))
+
+    assert [(e.op, e.item_id) for e in events] == [("modified", "alpha/note.md")]

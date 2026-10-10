@@ -44,6 +44,7 @@ from urllib.parse import quote
 
 from kairix.connectors.obsidian.fs import (
     DEFAULT_MIME,
+    matches_collection,
     mime_for_bytes,
     mime_for_path,
 )
@@ -171,7 +172,8 @@ class ObsidianConnector:
 
         # Drain whatever the watchdog observer pushed since the last call.
         drained = self._watcher.drain() if self._watcher is not None else []
-        watchdog_events = _to_change_events(drained)
+        scan_specs = _to_scan_specs(self._collections)
+        watchdog_events = _to_change_events(_filter_to_specs(drained, scan_specs))
 
         # Reconcile on cold-start AND every Nth call.
         reconcile_events: list[ChangeEvent] = []
@@ -180,7 +182,7 @@ class ObsidianConnector:
             reconcile_events = self._reconciler.reconcile(known)
 
         # One event per item_id: see _merge_change_events for the rule.
-        merged = _merge_change_events(watchdog_events, reconcile_events, cursor)
+        merged = _merge_change_events(watchdog_events, reconcile_events, cursor, is_live=self._is_live)
         # Track the max modified_at observed so next_cursor() can return
         # the high-water-mark to persist. When the drain yields no
         # events but cursor was non-None, preserve cursor so the next
@@ -410,15 +412,17 @@ class ObsidianConnector:
         cursor = container.cursor_token
         container_prefix = container.container_id
 
-        # Drain watchdog events; keep only those under this container.
+        # Drain watchdog events; keep only those under this container
+        # that the container's collections index.
+        container_specs = _scoped_specs_for_container(self._collections, container_prefix)
         drained = self._watcher.drain() if self._watcher is not None else []
-        watchdog_events = _to_change_events(_filter_to_container(drained, container_prefix))
+        in_container = _filter_to_container(drained, container_prefix)
+        watchdog_events = _to_change_events(_filter_to_specs(in_container, container_specs))
 
         # Build a per-container reconciler scoped to this container's
         # subtree only. Empty known-state forces the reconciler to emit
         # one event per file under the container; the framework's
         # known-state resolver populates this from the documents table.
-        container_specs = _scoped_specs_for_container(self._collections, container_prefix)
         reconciler = FullScanReconciler(
             vault_root=self._vault_root,
             collections=container_specs,
@@ -427,12 +431,16 @@ class ObsidianConnector:
         reconcile_events = reconciler.reconcile(known)
 
         # One event per item_id: see _merge_change_events for the rule.
-        merged = _merge_change_events(watchdog_events, reconcile_events, cursor)
+        merged = _merge_change_events(watchdog_events, reconcile_events, cursor, is_live=self._is_live)
         # High-water-mark tracking matches the legacy list_changes path
         # so next_cursor() returns the correct token regardless of
         # which path was taken last.
         self._last_max_modified_at = _max_modified_at(merged, fallback=cursor)
         return iter(merged)
+
+    def _is_live(self, item_id: str) -> bool:
+        """Whether ``item_id`` is a regular file in the vault right now."""
+        return (self._vault_root / item_id).is_file()
 
     def _safe_resolve(self, item_id: str) -> Path:
         """Resolve ``vault_root / item_id`` and reject path traversal.
@@ -564,6 +572,8 @@ def _merge_change_events(
     watchdog_events: list[ChangeEvent],
     reconcile_events: list[ChangeEvent],
     cursor: Cursor | None,
+    *,
+    is_live: Callable[[str], bool],
 ) -> list[ChangeEvent]:
     """Merge the watchdog drain and the reconciler pass into one event per item.
 
@@ -579,7 +589,12 @@ def _merge_change_events(
       3. When the reconciler also reports the item, its op wins: it
          read the live filesystem, whereas the watchdog may replay
          stale events (macOS FSEvents history on observer start).
-      4. The merged event keeps the EARLIEST surviving timestamp, so the
+      4. An item only the watchdog reports is checked against the live
+         filesystem with ``is_live``: a non-delete op for a missing file
+         becomes ``deleted``, and a ``deleted`` for a file that exists
+         becomes ``modified``. This covers replayed or reordered events
+         on ticks where the reconciler has no verdict for the item.
+      5. The merged event keeps the EARLIEST surviving timestamp, so the
          cursor high-water-mark stays conservative.
 
     Output order is first appearance, watchdog events first.
@@ -588,6 +603,7 @@ def _merge_change_events(
     for ev in _after_cursor(watchdog_events, cursor):
         prior = merged.get(ev.item_id)
         merged[ev.item_id] = ev if prior is None else _collapse_watchdog(prior, ev)
+    merged = {item_id: _settle_against_fs(ev, is_live(item_id)) for item_id, ev in merged.items()}
     for ev in _after_cursor(reconcile_events, cursor):
         prior = merged.get(ev.item_id)
         merged[ev.item_id] = ev if prior is None else _with_earliest(ev, prior.modified_at)
@@ -604,6 +620,32 @@ def _collapse_watchdog(prior: ChangeEvent, later: ChangeEvent) -> ChangeEvent:
     """Fold a later watchdog event for the same item onto the earlier one."""
     op = "created" if prior.op == "created" and later.op == "modified" else later.op
     return _with_earliest(replace(later, op=op), prior.modified_at)
+
+
+def _settle_against_fs(ev: ChangeEvent, live: bool) -> ChangeEvent:
+    """Correct a watchdog op that contradicts whether the file exists now."""
+    if live and ev.op == "deleted":
+        return replace(ev, op="modified")
+    if not live and ev.op != "deleted":
+        return replace(ev, op="deleted")
+    return ev
+
+
+def _filter_to_specs(changes: list[FileChange], specs: list[CollectionScanSpec]) -> list[FileChange]:
+    """Keep only the file changes a configured collection indexes.
+
+    Mirrors the reconciler's walk, so editor state (``.obsidian/…``),
+    non-matching extensions and excluded paths never surface from the
+    watchdog when the reconciler would never report them.
+    """
+    return [
+        c
+        for c in changes
+        if any(
+            matches_collection(c.item_id, collection_path=spec.path, glob=spec.glob, exclude=spec.exclude)
+            for spec in specs
+        )
+    ]
 
 
 def _with_earliest(ev: ChangeEvent, other_modified_at: str) -> ChangeEvent:

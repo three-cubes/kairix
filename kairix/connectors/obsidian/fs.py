@@ -9,6 +9,7 @@ not re-export anything from this module.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 # Extension → mime mapping for the file families an Obsidian vault
@@ -97,6 +98,42 @@ def iter_collection_files(
         if any(token and token in rel_str for token in exclude_tuple):
             continue
         yield abs_path
+
+
+def matches_collection(
+    rel_path: str,
+    *,
+    collection_path: str,
+    glob: str,
+    exclude: Iterable[str],
+) -> bool:
+    """Return whether vault-relative ``rel_path`` is in one configured collection.
+
+    The predicate twin of :func:`iter_collection_files`, for paths that
+    may no longer exist (a watchdog ``deleted`` event): same base-path,
+    glob and substring-exclude semantics, no filesystem access. The glob
+    is matched segment-wise, ``**`` spanning zero or more directories,
+    as :meth:`pathlib.Path.glob` does.
+    """
+    if any(token and token in rel_path for token in exclude):
+        return False
+    base = collection_path.strip("/")
+    if base in ("", "."):
+        rest = rel_path
+    elif rel_path.startswith(base + "/"):
+        rest = rel_path[len(base) + 1 :]
+    else:
+        return False
+    return _glob_segments_match(glob.split("/"), rest.split("/"))
+
+
+def _glob_segments_match(pattern: list[str], parts: list[str]) -> bool:
+    if not pattern:
+        return not parts
+    head, tail = pattern[0], pattern[1:]
+    if head == "**":
+        return any(_glob_segments_match(tail, parts[i:]) for i in range(len(parts) + 1))
+    return bool(parts) and fnmatchcase(parts[0], head) and _glob_segments_match(tail, parts[1:])
 
 
 def read_text_for_hash(abs_path: Path) -> str:
