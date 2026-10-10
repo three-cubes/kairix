@@ -727,7 +727,7 @@ def test_guard_exemption_covers_only_the_marked_restore_inside_a_function(tmp_pa
     copy = tmp_path / "process_state_guard.py"
     copy.write_text(source, encoding="utf-8")
     assert file_violations(copy, guard_home=copy) == []
-    assert file_violations(copy) == ["424: os.environ replaced wholesale"]
+    assert file_violations(copy) == ["426: os.environ replaced wholesale"]
     extra = source + '\nos.environ = {}\nsetattr(os, "environ", {})\nos.__dict__["environ"] = {}\n'
     copy.write_text(extra, encoding="utf-8")
     lines = extra.count("\n")
