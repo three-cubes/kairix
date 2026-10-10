@@ -828,3 +828,123 @@ def test_statically_dead_conftest_branches_are_not_import_time(tmp_path: Path) -
         "23: module-level os.environ write in conftest.py (any key)",
         "24: module-level os.environ write in conftest.py (any key)",
     ]
+
+
+def test_type_checking_is_dead_only_through_the_typing_binding(tmp_path: Path) -> None:
+    """Only the real ``typing.TYPE_CHECKING`` (imported name or attribute of
+    the imported module) is statically false; a local ``TYPE_CHECKING = True``
+    or another object's ``TYPE_CHECKING`` attribute is reachable.
+
+    Sabotage proof (executed): judge ``TYPE_CHECKING`` by spelling again →
+    the local-name case is clean and this fails; restored.
+    """
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(
+        "import os\nimport typing\nimport typing as t\nfrom typing import TYPE_CHECKING\n\n"
+        'if TYPE_CHECKING:\n    os.environ["A"] = "1"\n'
+        'if typing.TYPE_CHECKING:\n    os.environ["B"] = "1"\n'
+        'if t.TYPE_CHECKING:\n    os.environ["C"] = "1"\n'
+        "TYPE_CHECKING = True\n"
+        'if TYPE_CHECKING:\n    os.environ["D"] = "1"\n'
+        'if flags.TYPE_CHECKING:\n    os.environ["E"] = "1"\n',
+        encoding="utf-8",
+    )
+    assert file_violations(conftest) == [
+        "14: module-level os.environ write in conftest.py (any key)",
+        "16: module-level os.environ write in conftest.py (any key)",
+    ]
+    conftest.write_text(
+        'import os\n\nTYPE_CHECKING = False\nif TYPE_CHECKING:\n    os.environ["F"] = "1"\n', encoding="utf-8"
+    )
+    assert file_violations(conftest) == ["5: module-level os.environ write in conftest.py (any key)"]
+
+
+def test_main_guard_bodies_do_not_run_on_import(tmp_path: Path) -> None:
+    """``if __name__ == "__main__":`` (either spelling) never runs when a
+    conftest or a helper is imported; its ``else`` and ``!=`` form do.
+
+    Sabotage proof (executed): drop the ``__name__`` comparison from
+    ``_static_truth`` → the guarded writes are flagged and this fails;
+    restored.
+    """
+    (tmp_path / "helper.py").write_text(
+        'import os\n\nif __name__ == "__main__":\n    os.environ["OTHER"] = "1"\n', encoding="utf-8"
+    )
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(
+        "import os\nimport helper\n\n"
+        'if __name__ == "__main__":\n    os.environ["A"] = "1"\n'
+        'if "__main__" == __name__:\n    os.environ["B"] = "1"\nelse:\n    os.environ["C"] = "1"\n'
+        'if __name__ != "__main__":\n    os.environ["D"] = "1"\n',
+        encoding="utf-8",
+    )
+    assert file_violations(conftest) == [
+        "9: module-level os.environ write in conftest.py (any key)",
+        "11: module-level os.environ write in conftest.py (any key)",
+    ]
+
+
+def test_shadowed_builtin_helpers_are_not_the_builtins(tmp_path: Path) -> None:
+    """``setattr`` / ``delattr`` / ``vars`` count only through the real
+    builtins — the bare name with no local binding, or ``builtins.<name>``;
+    a parameter or local function of that name is somebody's callback.
+
+    Sabotage proof (executed): match the helper names by spelling again →
+    the parameter case is flagged and this fails; restored.
+    """
+    source = (
+        "import builtins\nimport os\n\n\n"
+        "def test_parameter(setattr):\n"
+        '    setattr(os, "environ", {})\n\n\n'
+        "def test_local():\n"
+        "    def vars(obj):\n"
+        "        return {}\n\n"
+        '    vars(os)["environ"] = {}\n\n\n'
+        "def test_real():\n"
+        '    setattr(os, "environ", {})\n'
+        '    builtins.delattr(os, "environ")\n'
+    )
+    assert _file_violations(tmp_path, source) == [
+        "17: os.environ replaced wholesale",
+        "18: os.environ replaced wholesale",
+    ]
+
+
+def test_class_local_pytest_plugins_is_not_a_registration(tmp_path: Path) -> None:
+    """Only the module-level ``pytest_plugins`` is read by pytest; a class
+    attribute of that name registers nothing, so its modules are not walked.
+
+    Sabotage proof (executed): accept any ``pytest_plugins`` target → the
+    class-local case walks ``pkg.plug`` and this fails; restored.
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "plug.py").write_text('import os\n\nos.environ["X"] = "1"\n', encoding="utf-8")
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(
+        'class Metadata:\n    pytest_plugins = "pkg.plug"\n\n'
+        '    def add(self):\n        pytest_plugins.append("pkg.plug")\n',
+        encoding="utf-8",
+    )
+    assert file_violations(conftest) == []
+    conftest.write_text('pytest_plugins = "pkg.plug"\n', encoding="utf-8")
+    assert file_violations(conftest) == ["1: module-level os.environ write in imported pkg/plug.py:3 (any key)"]
+
+
+def test_docs_state_the_static_check_is_a_pre_screen_and_the_runtime_guard_the_boundary() -> None:
+    """§F2 says the static conftest import-time check is a best-effort
+    pre-screen over listed common shapes and that the runtime process-state
+    guard is the enforced boundary for anything it cannot model, so the
+    static pass is never mistaken for the complete check.
+
+    Sabotage proof (executed): delete the paragraph from the doc → this
+    fails; restored.
+    """
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "architecture" / "fitness-functions.md").read_text(
+        encoding="utf-8"
+    )
+    flat = " ".join(doc.split())
+    assert "best-effort pre-screen, not the boundary" in flat
+    assert "is the enforced boundary for anything the static pass cannot model" in flat
+    assert "tests/fixtures/process_state_guard.py" in flat.split("best-effort pre-screen")[1]

@@ -198,7 +198,7 @@ class _Environ:
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 for alias in node.names:
-                    kind = "store"
+                    kind = "typing_tc" if node.module == "typing" and alias.name == "TYPE_CHECKING" else "store"
                     if node.module == "os":
                         kind = (
                             "environ"
@@ -212,7 +212,9 @@ class _Environ:
                 for alias in node.names:
                     root = alias.name.split(".")[0]
                     is_os = alias.name == "os" if alias.asname else root == "os"
-                    self._event(node, alias.asname or root, "os" if is_os else "store")
+                    kind = alias.name if alias.name in ("builtins", "typing") else "store"
+                    kind = "os" if is_os else kind
+                    self._event(node, alias.asname or root, kind)
             elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
                 self._event(node, node.id, "store")
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -249,8 +251,17 @@ class _Environ:
 
     def _bound(self, node: ast.expr, kind: str) -> bool:
         """``node`` is a name whose live binding, where it is evaluated, is the ``kind`` import."""
-        if not isinstance(node, ast.Name):
-            return False
+        return isinstance(node, ast.Name) and self._resolve(node) == kind
+
+    def is_builtin(self, node: ast.expr, name: str) -> bool:
+        """``node`` is the builtin ``name``: the bare name with no binding in any
+        enclosing scope, or ``builtins.<name>`` through ``import builtins``."""
+        if isinstance(node, ast.Attribute):
+            return node.attr == name and self._bound(node.value, "builtins")
+        return isinstance(node, ast.Name) and node.id == name and self._resolve(node) is None
+
+    def _resolve(self, node: ast.Name) -> str | None:
+        """The kind of the live binding of ``node``, or ``None`` when it has none (a builtin or global lookup)."""
         scope: _Scope | None = self.evaluating_scope(node)
         direct = True
         while True:
@@ -258,15 +269,16 @@ class _Environ:
                 events = [e for e in self.events.get(scope, ()) if e[1] == node.id]
                 if isinstance(scope, _FUNCTION_SCOPES):
                     if events:  # local throughout the function
-                        return all(e[2] == kind for e in events)
+                        kinds = {e[2] for e in events}
+                        return kinds.pop() if len(kinds) == 1 else "mixed"
                 else:  # module / class body: sequential
                     if direct:
                         position = (node.lineno, node.col_offset)
                         events = [e for e in events if e[0] < position]
                     if events:
-                        return max(events)[2] == kind
+                        return max(events)[2]
             if scope is None:
-                return False
+                return None
             scope, direct = self.evaluating_scope(scope), False
 
     def is_os(self, node: ast.expr) -> bool:
@@ -288,8 +300,7 @@ def _module_dict(node: ast.expr, is_environ: _Environ) -> bool:
         return node.attr == "__dict__" and is_environ.is_os(node.value)
     return (
         isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "vars"
+        and is_environ.is_builtin(node.func, "vars")
         and len(node.args) == 1
         and is_environ.is_os(node.args[0])
     )
@@ -308,14 +319,18 @@ def _replaces_environ(target: ast.expr, is_environ: _Environ) -> bool:
     )
 
 
+def _builtin_name(func: ast.expr, is_environ: _Environ, names: tuple[str, ...]) -> str | None:
+    """Which of the builtin ``names`` ``func`` is, resolved through lexical bindings."""
+    return next((name for name in names if is_environ.is_builtin(func, name)), None)
+
+
 def _setattr_environ(node: ast.AST, is_environ: _Environ) -> bool:
     """``setattr(<os>, "environ", ...)`` / ``delattr(<os>, "environ")`` — the
     attribute name literal or constant-folded (``"envi" + "ron"``)."""
     return (
         isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in ("setattr", "delattr")
-        and len(node.args) == (3 if node.func.id == "setattr" else 2)
+        and (name := _builtin_name(node.func, is_environ, ("setattr", "delattr"))) is not None
+        and len(node.args) == (3 if name == "setattr" else 2)
         and not node.keywords
         and is_environ.is_os(node.args[0])
         and _folded_str(node.args[1]) == "environ"
@@ -442,7 +457,7 @@ def _runs_at_import(node: ast.AST, is_environ: _Environ) -> bool:
     """
     if _in_lazy_expression(node, is_environ.parents, is_environ.deferred_annotations):
         return False
-    if _in_dead_branch(node, is_environ.parents):
+    if _in_dead_branch(node, is_environ):
         return False
     scope = is_environ.evaluating_scope(node)
     while isinstance(scope, ast.ClassDef):  # a class body runs when the ``class`` statement does
@@ -450,40 +465,59 @@ def _runs_at_import(node: ast.AST, is_environ: _Environ) -> bool:
     return scope is None
 
 
-def _static_truth(expr: ast.expr) -> bool | None:
-    """The truth of a constant test (``False``, ``0``, ``TYPE_CHECKING``, ``not`` of such); ``None`` when unknown."""
+def _is_type_checking(expr: ast.expr, is_environ: _Environ) -> bool:
+    """``TYPE_CHECKING`` bound by ``from typing import TYPE_CHECKING`` or ``<typing>.TYPE_CHECKING``."""
+    if isinstance(expr, ast.Attribute):
+        return expr.attr == "TYPE_CHECKING" and is_environ._bound(expr.value, "typing")
+    return is_environ._bound(expr, "typing_tc")
+
+
+def _is_main_guard(expr: ast.Compare, is_environ: _Environ) -> bool:
+    """``__name__ == "__main__"`` (either operand order, ``==`` or ``!=``) with ``__name__`` unshadowed."""
+    if len(expr.ops) != 1 or not isinstance(expr.ops[0], (ast.Eq, ast.NotEq)):
+        return False
+    operands = [expr.left, expr.comparators[0]]
+    names = [o for o in operands if isinstance(o, ast.Name) and o.id == "__name__"]
+    literals = [o for o in operands if isinstance(o, ast.Constant) and o.value == "__main__"]
+    return len(names) == 1 and len(literals) == 1 and is_environ._resolve(names[0]) is None
+
+
+def _static_truth(expr: ast.expr, is_environ: _Environ) -> bool | None:
+    """The truth of a constant test (``False``, ``0``, ``typing.TYPE_CHECKING``,
+    ``__name__ == "__main__"`` — never true on import — ``not`` of such);
+    ``None`` when unknown."""
     if isinstance(expr, ast.Constant):
         return bool(expr.value)
-    if (
-        isinstance(expr, (ast.Name, ast.Attribute))
-        and (expr.id if isinstance(expr, ast.Name) else expr.attr) == "TYPE_CHECKING"
-    ):
+    if isinstance(expr, (ast.Name, ast.Attribute)) and _is_type_checking(expr, is_environ):
         return False
+    if isinstance(expr, ast.Compare) and _is_main_guard(expr, is_environ):
+        return isinstance(expr.ops[0], ast.NotEq)
     if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
-        inner = _static_truth(expr.operand)
+        inner = _static_truth(expr.operand, is_environ)
         return None if inner is None else not inner
     return None
 
 
-def _in_dead_branch(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+def _in_dead_branch(node: ast.AST, is_environ: _Environ) -> bool:
     """``node`` sits in code a constant test rules out: the body of ``if
     False`` / ``if TYPE_CHECKING`` / ``while False``, the ``else`` of ``if
     True``, the dead arm of a constant conditional expression, or an operand
     short-circuited by an earlier ``False and`` / ``True or``."""
+    parents = is_environ.parents
     child, parent = node, parents.get(node)
     while parent is not None:
         if isinstance(parent, (ast.If, ast.While)):
-            truth = _static_truth(parent.test)
+            truth = _static_truth(parent.test, is_environ)
             if (truth is False and child in parent.body) or (
                 truth is True and isinstance(parent, ast.If) and child in parent.orelse
             ):
                 return True
         elif isinstance(parent, ast.IfExp):
-            truth = _static_truth(parent.test)
+            truth = _static_truth(parent.test, is_environ)
             if (truth is False and child is parent.body) or (truth is True and child is parent.orelse):
                 return True
         elif isinstance(parent, ast.BoolOp) and child in parent.values:
-            earlier = [_static_truth(value) for value in parent.values[: parent.values.index(child)]]
+            earlier = [_static_truth(value, is_environ) for value in parent.values[: parent.values.index(child)]]
             if (isinstance(parent.op, ast.And) and False in earlier) or (
                 isinstance(parent.op, ast.Or) and True in earlier
             ):
@@ -524,7 +558,7 @@ def _import_time_modules(tree: ast.AST, is_environ: _Environ, base: Path) -> lis
         elif isinstance(node, ast.ImportFrom):
             targets = [(node.level, node.module or "", alias.name) for alias in node.names]
         else:
-            targets = [(0, name, None) for name in _pytest_plugin_names(node)]
+            targets = [(0, name, None) for name in _pytest_plugin_names(node, is_environ)]
         for level, module, name in targets:
             roots = [_relative_root(base, level)] if level else [base, _REPO_ROOT]
             for root in dict.fromkeys(roots):
@@ -533,9 +567,12 @@ def _import_time_modules(tree: ast.AST, is_environ: _Environ, base: Path) -> lis
     return found
 
 
-def _pytest_plugin_names(node: ast.AST) -> list[str]:
+def _pytest_plugin_names(node: ast.AST, is_environ: _Environ) -> list[str]:
     """Literal module names a ``pytest_plugins = [...]`` / ``+= [...]`` /
-    ``.append(...)`` / ``.extend(...)`` statement registers."""
+    ``.append(...)`` / ``.extend(...)`` statement registers. Pytest reads only
+    the module-level name, so a class- or function-local one registers nothing."""
+    if is_environ.evaluating_scope(node) is not None:
+        return []
     if isinstance(node, (ast.Assign, ast.AugAssign)):
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         if any(isinstance(t, ast.Name) and t.id == "pytest_plugins" for t in targets):

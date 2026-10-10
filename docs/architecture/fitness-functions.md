@@ -566,6 +566,20 @@ arm of a constant `if`, operands short-circuited by `False and` / `True
 or`). Tests:
 `tests/checks/test_no_env_monkeypatch_direct_writes.py`.
 
+**The static conftest import-time check is a best-effort pre-screen, not
+the boundary.** It models the common shapes only: direct `os.environ`
+writes and `monkeypatch` calls, `os` / `environ` aliases, `from os import`
+names, literal `import` / `from ... import` and `pytest_plugins`
+registrations followed transitively, decorators / defaults / class bodies
+at `def` time, and constant-false guards (`if False`, `typing.TYPE_CHECKING`,
+`if __name__ == "__main__"`). Python scoping has more corners than a static
+pass can enumerate (comprehension scopes, computed or dynamic imports,
+module-level calls to local helpers, execution-order rebinding of `os`), and
+the check does not chase them. The runtime process-state guard
+(`tests/fixtures/process_state_guard.py`), which snapshots and verifies
+`os.environ` across every phase and collection, is the enforced boundary for
+anything the static pass cannot model.
+
 **Runtime half — exact.** `tests/fixtures/process_state_guard.py` installs
 one `sys.addaudithook`. CPython raises the `os.putenv` / `os.unsetenv` audit
 events for every env write, however it is spelled — subscript, `update`,
