@@ -284,3 +284,159 @@ def test_conftest_write_inside_a_lambda_body_is_deferred(tmp_path: Path) -> None
     conftest = tmp_path / "conftest.py"
     conftest.write_text('import os\n\nhook = lambda: os.environ.pop("X", None)\n', encoding="utf-8")
     assert not any("module-level" in v for v in file_violations(conftest))
+
+
+def test_setattr_environ_replacement_is_flagged_even_when_restored(tmp_path: Path) -> None:
+    """``setattr(os, "environ", ...)`` replaces the mapping without an
+    assignment target, and a constant-folded name (``"envi" + "ron"``) hides
+    it from a literal match; a replace-and-restore inside one phase is
+    invisible to the runtime identity check, so the static half flags every
+    such call (``delattr`` included).
+
+    Sabotage proof (executed): drop the ``setattr`` branch in ``_shape`` → no
+    violations and this fails; restored.
+    """
+    source = (
+        "import os\nimport os as _os\n\n\n"
+        "def test_x():\n"
+        "    original = os.environ\n"
+        '    setattr(os, "envi" + "ron", {})\n'
+        '    setattr(_os, "environ", original)\n'
+        '    delattr(os, "environ")\n'
+        '    setattr(os, f"envi{"ron"}", original)\n'
+        '    setattr(os, "sep", "/")\n'
+        '    setattr(config, "environ", {})\n'
+        '    setattr(os, "envi" + name, {})\n'
+    )
+    assert _file_violations(tmp_path, source) == [
+        "7: os.environ replaced wholesale",
+        "8: os.environ replaced wholesale",
+        "9: os.environ replaced wholesale",
+        "10: os.environ replaced wholesale",
+    ]
+
+
+def test_runtime_guard_restore_is_the_one_exempt_wholesale_assignment(tmp_path: Path) -> None:
+    """The runtime guard puts the snapshotted mapping back after a test
+    deleted or replaced ``os.environ``; that file alone may assign it. The
+    same statement anywhere else is a violation, and a KAIRIX_* write in the
+    guard file would still be one.
+
+    Sabotage proof (executed): drop the ``_GUARD_HOME`` filter → the guard's
+    restore is flagged and this fails; restored.
+    """
+    guard = _REPO_ROOT / "tests" / "fixtures" / "process_state_guard.py"
+    assert "os.environ = _STATE.environ" in guard.read_text(encoding="utf-8")
+    assert file_violations(guard) == []
+    assert _file_violations(tmp_path, "import os\n\nos.environ = _STATE.environ\n") == [
+        "3: os.environ replaced wholesale"
+    ]
+
+
+def test_setattr_environ_replacement_at_conftest_import_is_a_module_level_write(tmp_path: Path) -> None:
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text('import os\n\nsetattr(os, "environ", {})\n', encoding="utf-8")
+    assert file_violations(conftest) == [
+        "3: module-level os.environ write in conftest.py (any key)",
+        "3: os.environ replaced wholesale",
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'from os import putenv as write_env\n\nwrite_env("X", "1")\n',
+        'from os import putenv, unsetenv\n\nunsetenv("X")\n',
+        'from os import unsetenv as drop\n\ndrop("X")\n',
+    ],
+    ids=["putenv-alias", "unsetenv", "unsetenv-alias"],
+)
+def test_directly_imported_putenv_at_conftest_import_is_flagged(tmp_path: Path, source: str) -> None:
+    """``from os import putenv [as name]`` is still ``os.putenv``: at conftest
+    import it runs before the audit hook exists.
+
+    Sabotage proof (executed): recognise only ``<os>.putenv`` attribute calls →
+    nothing is flagged and every case fails; restored.
+    """
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(source, encoding="utf-8")
+    assert file_violations(conftest) == ["3: module-level os.environ write in conftest.py (any key)"]
+
+
+def test_other_imported_functions_at_conftest_import_are_clean(tmp_path: Path) -> None:
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(
+        'from os import getcwd, putenv\nfrom shutil import putenv as other\n\nHERE = getcwd()\nother("X", "1")\n'
+        "\n\ndef putenv_later():\n    putenv('X', '1')\n",
+        encoding="utf-8",
+    )
+    assert file_violations(conftest) == []
+
+
+def test_postponed_annotations_are_not_import_time_writes(tmp_path: Path) -> None:
+    """Under ``from __future__ import annotations`` a parameter or return
+    annotation is a string that never runs; the same expression as a default
+    or a decorator still runs at ``def`` time.
+
+    Sabotage proof (executed): ignore the ``__future__`` import in
+    ``_runs_at_import`` → the postponed case is flagged and this fails;
+    restored.
+    """
+    postponed = (
+        "from __future__ import annotations\n\nimport os\n\n\n"
+        'def fixture(x: os.environ.pop("X", None)) -> os.environ.pop("Y", None):\n'
+        "    return x\n"
+    )
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text(postponed, encoding="utf-8")
+    assert file_violations(conftest) == []
+    eager = postponed.replace("from __future__ import annotations\n\n", "")
+    conftest.write_text(eager, encoding="utf-8")
+    assert file_violations(conftest) == ["4: module-level os.environ write in conftest.py (any key)"]
+    still_eager = (
+        "from __future__ import annotations\n\nimport os\n\n\n"
+        '@register(os.environ.setdefault("X", "1"))\n'
+        'def fixture(x: int = os.environ.pop("X", None)) -> None:\n'
+        "    return x\n"
+    )
+    conftest.write_text(still_eager, encoding="utf-8")
+    assert file_violations(conftest) == [
+        "6: module-level os.environ write in conftest.py (any key)",
+        "7: module-level os.environ write in conftest.py (any key)",
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def fixture(value=environ.pop("X", None)):\n    environ = {}\n    return value\n',
+        '@register(environ.pop("X", None))\ndef fixture():\n    environ = {}\n    return 1\n',
+        'def fixture(value: environ.pop("X", None)):\n    environ = {}\n    return value\n',
+        'def fixture(environ=environ.pop("X", None)):\n    return environ\n',
+        'hook = lambda environ=environ.pop("X", None): environ\n',
+    ],
+    ids=["default", "decorator", "annotation", "shadowing-parameter", "lambda-default"],
+)
+def test_imported_environ_in_defaults_and_decorators_resolves_in_the_defining_scope(
+    tmp_path: Path, source: str
+) -> None:
+    """A decorator, default or annotation runs in the scope that defines the
+    function, so a same-named store in the body (or the parameter the default
+    initialises) does not rebind the name it uses.
+
+    Sabotage proof (executed): resolve against the ``FunctionDef`` the name
+    sits under → every case is clean and fails; restored.
+    """
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text("from os import environ\n\n\n" + source, encoding="utf-8")
+    assert file_violations(conftest) == ["4: module-level os.environ write in conftest.py (any key)"]
+
+
+def test_imported_environ_kairix_write_in_a_default_is_flagged_despite_a_body_store(tmp_path: Path) -> None:
+    source = (
+        "from os import environ\n\n\n"
+        'def test_x(value=environ.pop("KAIRIX_DB_PATH", None)):\n'
+        "    environ = {}\n"
+        '    environ["KAIRIX_DB_PATH"] = value\n'
+    )
+    assert _file_violations(tmp_path, source) == ["4: os.environ.pop(KAIRIX_*)"]

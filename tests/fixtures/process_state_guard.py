@@ -19,8 +19,9 @@ to shared process state, however it is spelled.
   while a test item runs (setup / call / teardown) or a test module is
   collected fails it. Replacing ``os.environ`` wholesale raises no such
   event, so the ``os.environ`` object is also identity-checked at the end of
-  every phase and collection (and the patch wrappers reject ``os`` +
-  ``"environ"`` targets up front).
+  every phase and collection — a deleted or replaced attribute is put back
+  before the failure is raised, so pytest's own reporting still finds it
+  (and the patch wrappers reject ``os`` + ``"environ"`` targets up front).
 * **F1 — sys.modules swaps.** The guarded ``sys.modules`` entries are
   snapshotted before each item's setup and compared at the end of its setup,
   call (fixture-applied patches still active) and teardown phases, and
@@ -402,8 +403,14 @@ def _end_phase() -> None:
     _STATE.active = False
     if _STATE.enabled and _STATE.modules is not None:
         _STATE.patches.extend(_module_swaps())
-    if _STATE.enabled and _STATE.environ is not None and os.environ is not _STATE.environ:
-        _STATE.env.append("os.environ replaced wholesale")
+    if _STATE.enabled and _STATE.environ is not None:
+        current = getattr(os, "environ", _MISSING)
+        if current is not _STATE.environ:
+            # Put the real mapping back first: pytest's own reporting reads
+            # os.environ, so a deleted / replaced attribute would otherwise
+            # turn this into an internal error instead of an [F2] failure.
+            os.environ = _STATE.environ  # type: ignore[assignment]  # noqa: B003 — put the snapshotted mapping back
+            _STATE.env.append("os.environ deleted" if current is _MISSING else "os.environ replaced wholesale")
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)

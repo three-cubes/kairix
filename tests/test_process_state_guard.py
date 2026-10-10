@@ -199,6 +199,15 @@ def test_env_replaced_by_mock_patch():
         pass
 
 
+def test_env_deleted_by_monkeypatch(monkeypatch):
+    monkeypatch.delattr(os, "environ")
+
+
+def test_env_is_back_after_the_deletion():
+    assert isinstance(os.environ, os._Environ)
+    assert "PATH" in os.environ or "Path" in os.environ
+
+
 def test_env_patch_dict_of_other_keys_is_clean():
     with mock.patch.dict(os.environ, {"OTHER": "1"}):
         assert os.environ["OTHER"] == "1"
@@ -539,6 +548,20 @@ def test_genuine_import_at_collection_time_is_clean(inner_outcomes: dict[str, tu
 )
 def test_wholesale_environ_replacement_fails(inner_outcomes: dict[str, tuple[str, str]], name: str) -> None:
     _assert_fails(inner_outcomes, name, "[F2]", "os.environ replaced wholesale")
+
+
+def test_deleting_environ_fails_as_f2_and_is_restored(inner_outcomes: dict[str, tuple[str, str]]) -> None:
+    """``monkeypatch.delattr(os, "environ")`` leaves no ``os.environ`` for the
+    end-of-phase identity check (or pytest's own reporting) to read: the guard
+    puts the snapshotted mapping back and fails the test normally, and the
+    next inner test still sees the real ``os.environ``.
+
+    Sabotage proof (executed): read ``os.environ`` directly in ``_end_phase``
+    → the inner run dies with an AttributeError traceback, the junit entry is
+    an internal error without the F2 message and this fails; restored.
+    """
+    _assert_fails(inner_outcomes, "test_env_deleted_by_monkeypatch", "[F2]", "os.environ deleted")
+    assert inner_outcomes["test_env_is_back_after_the_deletion"] == ("passed", "")
 
 
 def test_real_module_inserted_under_another_name_fails(inner_outcomes: dict[str, tuple[str, str]]) -> None:

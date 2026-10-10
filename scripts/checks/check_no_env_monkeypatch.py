@@ -9,15 +9,21 @@ starting with ``KAIRIX_``:
   (or the name bound by ``from os import environ [as e]``, unless the
   enclosing function rebinds it);
 * ``os.environ.pop("KAIRIX_X")`` / ``os.environ.setdefault("KAIRIX_X", ...)``;
-* ``os.environ = ...`` with ANY value (a wholesale replacement — even one
-  restored within the same phase, which the runtime identity check misses).
+* ``os.environ = ...`` with ANY value, and ``setattr(os, "environ", ...)`` /
+  ``delattr(os, "environ")`` with a literal or constant-folded name (a
+  wholesale replacement — even one restored within the same phase, which the
+  runtime identity check misses).
 
 ``os`` includes every ``import os as <alias>``.
 
 Writes inside ``with allow_baseline_writes():`` in ``tests/conftest.py`` (the
-session env baseline) are exempt, mirroring the runtime guard. In any
+session env baseline) are exempt, mirroring the runtime guard, as is the
+runtime guard's own restore of the snapshotted ``os.environ``. In any
 ``conftest.py`` an ``os.environ`` write at module level (import time) fails
-for ANY key: root-conftest code runs before the runtime guard is configured.
+for ANY key (``os.putenv`` / ``os.unsetenv`` and their ``from os import``
+names included): root-conftest code runs before the runtime guard is
+configured. Decorators, defaults and annotations run at ``def`` time, except
+annotations under ``from __future__ import annotations``, which never run.
 
 The exact half is the runtime guard ``tests/fixtures/process_state_guard.py``:
 an audit hook sees EVERY env write (any spelling, any computed key) while a
@@ -77,6 +83,8 @@ process env to influence the production read."""
 _ENV_HELPERS = {"setenv", "delenv"}
 _BASELINE_CONTEXT = "allow_baseline_writes"
 _BASELINE_HOME = (Path(__file__).resolve().parents[2] / "tests" / "conftest.py").resolve()
+_GUARD_HOME = (Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "process_state_guard.py").resolve()
+_REPLACED = "os.environ replaced wholesale"
 _ENVIRON_METHODS = {"pop", "setdefault"}
 
 
@@ -92,19 +100,25 @@ class _Environ:
 
     ``<os>.environ`` counts for ``os`` and every ``import os as <alias>``.
     A bare name counts only when the file binds it with ``from os import
-    environ [as name]`` and the enclosing function does not rebind it (a
+    environ [as name]`` and the scope that evaluates it does not rebind it (a
     parameter or an assignment of that name in the function) — a simple
-    local check, not a scope engine.
+    local check, not a scope engine. A decorator, parameter default or
+    annotation is evaluated in the scope that DEFINES the function, so a
+    store in the function body cannot rebind a name used there.
+
+    ``mutators`` are the bare names bound by ``from os import putenv /
+    unsetenv [as name]``; ``is_mutator`` applies the same rebinding rule.
     """
 
     def __init__(self, tree: ast.AST) -> None:
-        self.names = {
-            alias.asname or alias.name
+        from_os = [
+            alias
             for node in ast.walk(tree)
             if isinstance(node, ast.ImportFrom) and node.module == "os"
             for alias in node.names
-            if alias.name == "environ"
-        }
+        ]
+        self.names = {alias.asname or alias.name for alias in from_os if alias.name == "environ"}
+        self.mutators = {alias.asname or alias.name for alias in from_os if alias.name in _OS_MUTATORS}
         self.os_names = {"os"} | {
             alias.asname or alias.name
             for node in ast.walk(tree)
@@ -113,14 +127,32 @@ class _Environ:
             if alias.name == "os"
         }
         self.parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        self.deferred_annotations = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "__future__"
+            and any(alias.name == "annotations" for alias in node.names)
+            for node in ast.walk(tree)
+        )
 
     def is_os(self, node: ast.expr) -> bool:
         return isinstance(node, ast.Name) and node.id in self.os_names
 
+    def evaluating_scope(self, node: ast.AST) -> ast.AST | None:
+        """The function or lambda whose BODY evaluates ``node``; ``None`` at module level.
+
+        A node in a function's decorators, defaults, annotations or return
+        annotation is evaluated by the enclosing scope when the ``def`` runs,
+        so that function is skipped and the walk continues upward.
+        """
+        child, scope = node, self.parents.get(node)
+        while scope is not None:
+            if isinstance(scope, _FUNCTIONS) and _in_body(scope, child):
+                return scope
+            child, scope = scope, self.parents.get(scope)
+        return None
+
     def _rebound_locally(self, node: ast.Name) -> bool:
-        scope = self.parents.get(node)
-        while scope is not None and not isinstance(scope, _FUNCTIONS):
-            scope = self.parents.get(scope)
+        scope = self.evaluating_scope(node)
         if scope is None:
             return False
         args = scope.args
@@ -128,10 +160,50 @@ class _Environ:
         stores = {n.id for n in ast.walk(scope) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
         return node.id in params | stores
 
+    def is_mutator(self, node: ast.expr) -> bool:
+        """``putenv(...)`` / ``unsetenv(...)`` through a ``from os import`` name."""
+        return isinstance(node, ast.Name) and node.id in self.mutators and not self._rebound_locally(node)
+
     def __call__(self, node: ast.expr) -> bool:
         if isinstance(node, ast.Attribute):
             return node.attr == "environ" and self.is_os(node.value)
         return isinstance(node, ast.Name) and node.id in self.names and not self._rebound_locally(node)
+
+
+_OS_MUTATORS = frozenset({"putenv", "unsetenv"})
+
+
+def _in_body(scope: ast.AST, child: ast.AST) -> bool:
+    if isinstance(scope, ast.Lambda):
+        return child is scope.body
+    return child in scope.body
+
+
+def _folded_str(node: ast.expr) -> str | None:
+    """The value of a string expression the compiler folds to a constant:
+    a literal, ``+`` of such, or an f-string whose every part is a literal."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _folded_str(node.left), _folded_str(node.right)
+        return None if left is None or right is None else left + right
+    if isinstance(node, ast.JoinedStr):
+        parts = [_folded_str(v.value if isinstance(v, ast.FormattedValue) else v) for v in node.values]
+        return None if any(part is None for part in parts) else "".join(parts)
+    return None
+
+
+def _setattr_environ(node: ast.AST, is_environ: _Environ) -> bool:
+    """``setattr(<os>, "environ", ...)`` / ``delattr(<os>, "environ")`` — the
+    attribute name literal or constant-folded (``"envi" + "ron"``)."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in ("setattr", "delattr")
+        and len(node.args) >= 2
+        and is_environ.is_os(node.args[0])
+        and _folded_str(node.args[1]) == "environ"
+    )
 
 
 def _shape(node: ast.AST, is_environ: _Environ) -> str | None:
@@ -143,12 +215,14 @@ def _shape(node: ast.AST, is_environ: _Environ) -> str | None:
             return None  # a bare annotation assigns nothing
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         if any(isinstance(t, ast.Attribute) and is_environ(t) for t in targets):
-            return "os.environ replaced wholesale"
+            return _REPLACED
         if any(subscript_write(t) for t in targets):
             return "assign os.environ[KAIRIX_*]"
     elif isinstance(node, ast.Delete):
         if any(subscript_write(t) for t in node.targets):
             return "del os.environ[KAIRIX_*]"
+    elif _setattr_environ(node, is_environ):
+        return _REPLACED
     elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.args:
         func, first = node.func, node.args[0]
         if func.attr in _ENV_HELPERS and _is_kairix_literal(first):
@@ -164,17 +238,23 @@ _CONFTEST_MODULE_WRITE = "module-level os.environ write in conftest.py (any key)
 
 def _any_environ_write(node: ast.AST, is_environ: _Environ) -> bool:
     """An ``os.environ`` write of ANY key (subscript store / del, a mutating
-    method, ``os.environ = ...``) or an ``os.putenv`` / ``os.unsetenv`` call."""
+    method, ``os.environ = ...``, ``setattr(os, "environ", ...)``) or an
+    ``os.putenv`` / ``os.unsetenv`` call — through ``<os>.`` or a ``from os
+    import putenv [as name]`` name."""
     if isinstance(node, ast.AnnAssign) and node.value is None:
         return False  # a bare annotation assigns nothing
     if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
         targets = node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
         return any(is_environ(t) or (isinstance(t, ast.Subscript) and is_environ(t.value)) for t in targets)
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+    if _setattr_environ(node, is_environ):
+        return True
+    if isinstance(node, ast.Call):
         func = node.func
-        if func.attr in _ENVIRON_WRITE_METHODS and is_environ(func.value):
-            return True
-        return func.attr in ("putenv", "unsetenv") and is_environ.is_os(func.value)
+        if isinstance(func, ast.Attribute):
+            if func.attr in _ENVIRON_WRITE_METHODS and is_environ(func.value):
+                return True
+            return func.attr in _OS_MUTATORS and is_environ.is_os(func.value)
+        return is_environ.is_mutator(func)
     return False
 
 
@@ -188,26 +268,35 @@ def _conftest_module_level_writes(tree: ast.AST, is_environ: _Environ) -> set[tu
     """
     found = set()
     for node in ast.walk(tree):
-        if _any_environ_write(node, is_environ) and _runs_at_import(node, is_environ.parents):
+        if _any_environ_write(node, is_environ) and _runs_at_import(node, is_environ):
             found.add((getattr(node, "lineno", 0), _CONFTEST_MODULE_WRITE))
     return found
 
 
-def _runs_at_import(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
-    """True unless ``node`` sits inside a function or lambda BODY.
+def _runs_at_import(node: ast.AST, is_environ: _Environ) -> bool:
+    """True unless ``node`` sits inside a function or lambda BODY — or inside
+    an annotation under ``from __future__ import annotations``.
 
     Decorators, parameter defaults and annotations are evaluated when the
     ``def`` / ``lambda`` executes, i.e. at module import, so they count as
-    import-time code; only the body is deferred to call time.
+    import-time code; only the body is deferred to call time. With postponed
+    evaluation every annotation is kept as a string and never runs.
     """
-    child, scope = node, parents.get(node)
-    while scope is not None:
-        if isinstance(scope, ast.Lambda) and child is scope.body:
-            return False
-        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) and child in scope.body:
-            return False
-        child, scope = scope, parents.get(scope)
-    return True
+    if is_environ.deferred_annotations and _in_annotation(node, is_environ.parents):
+        return False
+    return is_environ.evaluating_scope(node) is None
+
+
+def _in_annotation(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    """``node`` is (inside) a parameter, return or variable annotation."""
+    child, parent = node, parents.get(node)
+    while parent is not None:
+        if isinstance(parent, (ast.arg, ast.AnnAssign)) and child is parent.annotation:
+            return True
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)) and child is parent.returns:
+            return True
+        child, parent = parent, parents.get(parent)
+    return False
 
 
 def _baseline_blocks(tree: ast.AST) -> list[ast.With]:
@@ -230,7 +319,9 @@ def file_violations(path: Path) -> list[str]:
 
     Writes inside ``with allow_baseline_writes():`` are the session baseline's
     (the runtime guard exempts the same block); the block itself is a
-    violation anywhere but the root ``tests/conftest.py``.
+    violation anywhere but the root ``tests/conftest.py``. The runtime guard
+    itself puts the snapshotted ``os.environ`` back after a test deleted or
+    replaced it, so that one file's wholesale assignment is exempt.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -241,6 +332,8 @@ def file_violations(path: Path) -> list[str]:
     is_environ = _Environ(tree)
     found = {(getattr(node, "lineno", 0), shape) for node in ast.walk(tree) if (shape := _shape(node, is_environ))}
     found = {(line, shape) for line, shape in found if line not in exempt}
+    if path.resolve() == _GUARD_HOME:
+        found = {(line, shape) for line, shape in found if shape != _REPLACED}
     if path.name == "conftest.py":
         found |= _conftest_module_level_writes(tree, is_environ)
     if path.resolve() != _BASELINE_HOME:
