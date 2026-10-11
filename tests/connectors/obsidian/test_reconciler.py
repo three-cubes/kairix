@@ -274,3 +274,38 @@ def test_a_note_whose_directory_becomes_unreadable_during_read_is_kept(tmp_path:
         locked.chmod(0o755)
 
     assert ops == []
+
+
+# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unreadable directory",
+)
+def test_an_out_of_vault_alias_whose_target_becomes_unreadable_during_read_is_tombstoned(tmp_path: Path) -> None:
+    """An indeterminate ``stat`` failure keeps a note only inside the vault.
+
+    The alias points outside the vault, whose directory becomes unreadable
+    between the walk and the read; ``fetch`` refuses the path, so it is
+    absent.
+
+    Sabotage-proof: drop ``and self._inside_vault(abs_path)`` from the
+    ``except`` branch of ``_still_present``; this test fails because the
+    out-of-vault alias keeps its stale index.
+    """
+    vault = _vault(tmp_path, {"alpha.md": "a"})
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "target.md").write_text("t", encoding="utf-8")
+    (vault / "alias.md").symlink_to(elsewhere / "target.md")
+    known = {**_known({"alpha.md": "a"}), "alias.md": hash_content("t")}
+    reconciler = FullScanReconciler(
+        vault,
+        [CollectionScanSpec(path=".")],
+        read_text=_replacing_reader(vault / "alias.md", lambda _p: elsewhere.chmod(0o000)),
+    )
+    try:
+        ops = _ops(reconciler, known)
+    finally:
+        elsewhere.chmod(0o755)
+
+    assert ops == [("deleted", "alias.md")]

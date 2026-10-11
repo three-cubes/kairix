@@ -135,12 +135,13 @@ class FullScanReconciler:
         that is gone, sits under a non-directory or loops (``ENOENT``,
         ``ENOTDIR``, ``ELOOP``) or is no longer a regular file (replaced by a
         directory) is absent, and is tombstoned. Any other ``stat`` failure
-        (a parent that became unreadable) proves nothing, so the note is kept.
+        (a parent that became unreadable) proves nothing, so the note is kept
+        — unless the path resolves outside the vault, which ``fetch`` refuses.
         """
         try:
             mode = abs_path.stat().st_mode
         except OSError as exc:
-            return exc.errno not in _ABSENT_ERRNOS
+            return exc.errno not in _ABSENT_ERRNOS and self._inside_vault(abs_path)
         return stat.S_ISREG(mode) and self._inside_vault(abs_path)
 
     def _inside_vault(self, abs_path: Path) -> bool:
