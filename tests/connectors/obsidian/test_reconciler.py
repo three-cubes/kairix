@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from kairix.connectors.obsidian.fs import read_text_for_hash
-from kairix.connectors.obsidian.reconciler import CollectionScanSpec, FullScanReconciler
+from kairix.connectors.obsidian.reconciler import CollectionScanSpec, FullScanReconciler, IncompleteScanError
 from kairix.knowledge.reflib.dedup import hash_content
 
 pytestmark = pytest.mark.unit
@@ -315,3 +315,31 @@ def test_an_out_of_vault_alias_whose_target_becomes_unreadable_during_read_is_to
         elsewhere.chmod(0o755)
 
     assert ops == [("deleted", "alias.md")]
+
+
+# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unlistable directory",
+)
+def test_the_prune_enumeration_refuses_a_partial_walk(tmp_path: Path) -> None:
+    """``item_ids`` raises rather than omit the notes beneath a directory it cannot list.
+
+    Sabotage-proof: make ``_unlistable_directories`` return ``[]``; this test
+    fails because ``item_ids`` returns a list without ``listless/alias.md``,
+    which a prune cycle would retire.
+    """
+    vault = _vault(tmp_path, {"alpha.md": "a"})
+    listless = vault / "listless"
+    listless.mkdir()
+    (listless / "alias.md").symlink_to(vault / "alpha.md")
+    reconciler = FullScanReconciler(vault, [CollectionScanSpec(path=".")])
+    listless.chmod(0o111)
+    try:
+        with pytest.raises(IncompleteScanError) as raised:
+            reconciler.item_ids()
+    finally:
+        listless.chmod(0o755)
+
+    assert raised.value.directories == ("listless",)
+    assert "fix:" in str(raised.value)

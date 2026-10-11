@@ -36,6 +36,24 @@ from kairix.connectors.obsidian.fs import (
 from kairix.core.protocols import ChangeEvent
 from kairix.knowledge.reflib.dedup import hash_content
 
+
+class IncompleteScanError(OSError):
+    """The walk could not list every directory, so its enumeration is partial.
+
+    Raised by :meth:`FullScanReconciler.item_ids` so a prune cycle aborts
+    instead of retiring the notes beneath an unlistable directory.
+    """
+
+    def __init__(self, directories: list[str]) -> None:
+        self.directories = tuple(directories)
+        super().__init__(
+            f"obsidian: could not list {len(directories)} directory(ies) under the vault "
+            f"({', '.join(directories[:5])}); the enumeration is incomplete, so nothing is pruned. "
+            "fix: give the worker read and execute permission on those directories. "
+            "next: re-run the prune cycle."
+        )
+
+
 # ``stat`` errors that prove a walked path no longer holds a note.
 _ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
 
@@ -159,10 +177,31 @@ class FullScanReconciler:
         """Every file the walk finds, readable or not, sorted.
 
         The enumeration the prune cycle diffs against the store: an
-        unreadable file is still present, so it must not be pruned.
+        unreadable file is still present, so it must not be pruned. A walk
+        that could not list some directory under a collection is not a
+        complete enumeration — every note beneath it would look deleted — so
+        it raises :class:`IncompleteScanError` instead of returning a partial
+        list, and the prune cycle stages nothing.
         """
+        unlistable = self._unlistable_directories()
+        if unlistable:
+            raise IncompleteScanError(unlistable)
         live, unreadable = self._discover()
         return sorted(live.keys() | unreadable)
+
+    def _unlistable_directories(self) -> list[str]:
+        """Directories under the collections that could not be listed, vault-relative.
+
+        ``os.walk`` without following symlinks reaches what the scan's
+        ``Path.glob`` reaches, and reports each listing failure that the
+        glob silently skips.
+        """
+        failures: list[OSError] = []
+        for spec in self._collections:
+            base = self._vault_root if spec.path in ("", ".") else self._vault_root / spec.path
+            for _ in os.walk(base, onerror=failures.append):
+                pass
+        return sorted(Path(str(f.filename)).relative_to(self._vault_root).as_posix() for f in failures)
 
     def _present_but_unlisted(self, item_id: str) -> bool:
         """A known file the walk should have found but did not: absence unproven.

@@ -34,6 +34,7 @@ from watchdog.events import FileCreatedEvent, FileDeletedEvent, FileModifiedEven
 # mutation-parity import graph (scripts/checks/mutation_parity.py) selects
 # this file as connector.py's own test when mutating that module.
 from kairix.connectors.obsidian.connector import ObsidianConnector, make_connector
+from kairix.connectors.obsidian.reconciler import IncompleteScanError
 from kairix.connectors.obsidian.watcher import FileChange, WatchdogSource
 from kairix.core.db.scanner import CollectionConfig
 from kairix.core.protocols import Container, RawArtefact
@@ -1655,3 +1656,28 @@ def test_dot_prefixed_container_path_keeps_its_collections_exclusions(tmp_path: 
         events = list(connector.list_changes_for_container(container))
 
     assert [(e.op, e.item_id) for e in events] == [("created", "notes/kept.md")]
+
+
+@pytest.mark.unit
+@_NEEDS_UNREADABLE_FILE
+def test_slim_docs_refuse_a_partial_walk(vault: Path) -> None:
+    """The prune cycle's enumeration raises when a directory cannot be listed, so nothing is pruned.
+
+    Sabotage-proof: make ``FullScanReconciler._unlistable_directories``
+    return ``[]``; this test fails because ``retrieve_all_slim_docs`` returns
+    the vault without ``listless/note.md``.
+    """
+    _seed_vault(vault, {"listless/note.md": "n"})
+    listless = vault / "listless"
+    listless.chmod(0o111)
+    try:
+        with _reconciling_connector(vault, {}) as connector, pytest.raises(IncompleteScanError):
+            list(
+                connector.retrieve_all_slim_docs(
+                    Container(
+                        cc_pair_id=1, container_id="", access_state="ACCESSIBLE", cursor_token=None, last_synced_at=None
+                    )
+                )
+            )
+    finally:
+        listless.chmod(0o755)
