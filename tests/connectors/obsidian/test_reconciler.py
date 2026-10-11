@@ -254,11 +254,14 @@ def test_a_note_replaced_during_read_is_tombstoned(tmp_path: Path, replace: Call
     reason="needs a non-root POSIX user for an unreadable directory",
 )
 def test_a_note_whose_directory_becomes_unreadable_during_read_is_kept(tmp_path: Path) -> None:
-    """A note whose parent becomes unreadable between the walk and the read proves nothing: no event.
+    """A note whose parent becomes unreadable between the walk and the read proves nothing.
+
+    No event, and the note stays in ``item_ids()`` — the prune cycle's
+    enumeration — although neither its read nor its ``stat`` can complete.
 
     Sabotage-proof: treat every ``stat`` failure as absent in
     ``_still_present`` (``return False``); this test fails because the note
-    is tombstoned on an indeterminate error.
+    is tombstoned and drops out of the enumeration on an indeterminate error.
     """
     files = {"locked/note.md": "n"}
     vault = _vault(tmp_path, files)
@@ -270,10 +273,13 @@ def test_a_note_whose_directory_becomes_unreadable_during_read_is_kept(tmp_path:
     )
     try:
         ops = _ops(reconciler, _known(files))
+        locked.chmod(0o755)  # list it again; the reader locks it during the read
+        enumerated = reconciler.item_ids()
     finally:
         locked.chmod(0o755)
 
     assert ops == []
+    assert enumerated == ["locked/note.md"]
 
 
 # Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
