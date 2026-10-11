@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from kairix.connectors.obsidian.fs import read_text_for_hash
+from kairix.connectors.obsidian.fs import collection_accepts, read_text_for_hash
 from kairix.connectors.obsidian.reconciler import CollectionScanSpec, FullScanReconciler, IncompleteScanError
 from kairix.knowledge.reflib.dedup import hash_content
 
@@ -367,8 +367,9 @@ def test_a_missing_collection_directory_enumerates_as_empty(tmp_path: Path) -> N
         (CollectionScanSpec(path="notes", exclude=("WIP/",)), "notes/WIP"),
         (CollectionScanSpec(path="notes", glob="*.md"), "notes/sub"),
         (CollectionScanSpec(path="notes", glob="daily/*.md"), "notes/other"),
+        (CollectionScanSpec(path="notes", glob="daily/*.md/"), "notes/daily"),
     ],
-    ids=["excluded", "below-a-flat-glob", "off-the-glob-path"],
+    ids=["excluded", "below-a-flat-glob", "off-the-glob-path", "directory-only-glob"],
 )
 def test_an_unlistable_directory_out_of_scope_does_not_block_the_enumeration(
     tmp_path: Path, spec: CollectionScanSpec, locked: str
@@ -385,7 +386,12 @@ def test_an_unlistable_directory_out_of_scope_does_not_block_the_enumeration(
     finally:
         (vault / locked).chmod(0o755)
 
-    assert "notes/kept.md" in enumerated or "notes/daily/d.md" in enumerated
+    in_scope = ("notes/kept.md", "notes/daily/d.md")
+    assert enumerated == sorted(
+        rel
+        for rel in in_scope
+        if collection_accepts(rel, collection_path=spec.path, glob=spec.glob, exclude=spec.exclude)
+    )
 
 
 # Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.

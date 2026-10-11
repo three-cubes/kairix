@@ -26,13 +26,13 @@ import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from fnmatch import fnmatchcase
 from pathlib import Path
 
 from kairix.connectors.obsidian.fs import (
     collection_accepts,
     iter_collection_files,
     read_text_for_hash,
+    rebase_glob,
 )
 from kairix.core.protocols import ChangeEvent
 from kairix.knowledge.reflib.dedup import hash_content
@@ -193,26 +193,22 @@ class FullScanReconciler:
     def _unlistable_directories(self) -> list[str]:
         """In-scope directories under the collections that could not be listed, vault-relative.
 
-        ``os.walk`` without following symlinks reaches what the scan's
-        ``Path.glob`` reaches, and reports each listing failure that the
-        glob silently skips. A missing collection directory is an empty
-        collection, as it is to the scan; a failure counts only for a
-        directory the collection could index files beneath — not excluded,
-        and reachable by its glob.
+        A top-down ``os.walk`` without following symlinks — the scan's
+        reach — that prunes before descending: it lists only directories the
+        collection could index files beneath (not excluded, reachable by its
+        glob), so its cost follows the configured scope and every listing
+        failure it reports is in scope. A missing collection directory is an
+        empty collection, as it is to the scan.
         """
-        unlistable: set[str] = set()
+        failures: list[OSError] = []
         for spec in self._collections:
             base = self._vault_root if spec.path in ("", ".") else self._vault_root / spec.path
             if not base.is_dir():
                 continue
-            failures: list[OSError] = []
-            for _ in os.walk(base, onerror=failures.append):
-                pass
-            for failure in failures:
-                directory = Path(str(failure.filename))
-                if _could_hold_indexed_files(directory.relative_to(base).parts, spec):
-                    unlistable.add(directory.relative_to(self._vault_root).as_posix())
-        return sorted(unlistable)
+            for dirpath, dirnames, _files in os.walk(base, onerror=failures.append):
+                here = Path(dirpath).relative_to(base).parts
+                dirnames[:] = [d for d in dirnames if _could_hold_indexed_files((*here, d), spec)]
+        return sorted({Path(str(f.filename)).relative_to(self._vault_root).as_posix() for f in failures})
 
     def _present_but_unlisted(self, item_id: str) -> bool:
         """A known file the walk should have found but did not: absence unproven.
@@ -282,19 +278,11 @@ def _could_hold_indexed_files(directory: tuple[str, ...], spec: CollectionScanSp
     """Whether ``spec`` could index a file beneath ``directory`` (parts relative to its base).
 
     Not when an exclude token already matches the directory, nor when the
-    glob cannot reach it: each directory component must match the glob's
-    directory segment at that depth, and a ``**`` segment reaches anything
-    below it.
+    collection's glob selects nothing beneath it — decided by
+    :func:`rebase_glob`, the scanner's own rule (directory-only globs and the
+    platform's case rules included).
     """
     as_path = "/".join((*Path(spec.path).parts, *directory)) + "/"
     if any(token and token in as_path for token in spec.exclude):
         return False
-    segments = Path(spec.glob).parts[:-1]  # the last segment names files
-    for depth, part in enumerate(directory):
-        if depth >= len(segments):
-            return False
-        if segments[depth] == "**":
-            return True
-        if not fnmatchcase(part, segments[depth]):
-            return False
-    return True
+    return bool(rebase_glob(spec.glob, "/".join(directory)))

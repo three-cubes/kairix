@@ -9,7 +9,7 @@ F8 carries ``@pytest.mark.unit``.
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -20,6 +20,7 @@ from kairix.connectors.obsidian.fs import (
     mime_for_bytes,
     mime_for_path,
     read_text_for_hash,
+    rebase_glob,
 )
 
 # ---------------------------------------------------------------------------
@@ -348,3 +349,52 @@ def test_collection_accepts_agrees_with_iter_collection_files(
         rel for rel in rels if collection_accepts(rel, collection_path=collection_path, glob=glob, exclude=exclude)
     }
     assert matched == walked
+
+
+# ---------------------------------------------------------------------------
+# rebase_glob — the scanner's rule for what a glob selects under a subdirectory
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("glob", "prefix", "expected"),
+    [
+        ("notes/**/*.md", "notes", ("**/*.md",)),
+        ("**/*.md", "notes", ("**/*.md",)),
+        ("*/deep/*.md", "notes", ("deep/*.md",)),
+        ("**/deep/*.md", "notes", ("**/deep/*.md",)),
+        ("**/notes/**/*.md", "notes", ("**/*.md", "**/notes/**/*.md")),
+        ("notes/*.md", "notes/deep", ()),
+        ("archive/**/*.md", "notes", ()),
+        ("notes", "notes", ()),
+        ("daily/*.md/", "daily", ()),
+        ("*.md", "", ("*.md",)),
+    ],
+)
+def test_rebase_glob_re_roots_a_glob_at_a_subdirectory(glob: str, prefix: str, expected: tuple[str, ...]) -> None:
+    """Sabotage-proof: drop the ``**`` absorb branch; the ``**`` rows fail. Drop the
+    directory-only guard; the ``daily/*.md/`` row fails."""
+    assert rebase_glob(glob, prefix, flavour=PurePosixPath) == expected
+
+
+@pytest.mark.unit
+def test_rebase_glob_follows_the_platform_flavour() -> None:
+    """Windows matches case-insensitively, POSIX does not."""
+    assert rebase_glob("Notes/**/*.md", "notes", flavour=PureWindowsPath) == ("**/*.md",)
+    assert rebase_glob("Notes/**/*.md", "notes", flavour=PurePosixPath) == ()
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(10)
+def test_rebasing_repeated_recursive_globs_onto_a_deep_prefix_stays_fast() -> None:
+    """Each (pattern, prefix) state is derived once.
+
+    Sabotage-proof: remove the ``@cache`` on ``derive``; this test runs past
+    the timeout.
+    """
+    glob = "/".join(["**"] * 14 + ["*.md"])
+    prefix = "/".join(f"d{i}" for i in range(24))
+    assert rebase_glob(glob, prefix, flavour=PurePosixPath) == tuple(
+        sorted("/".join(["**"] * k + ["*.md"]) for k in range(1, 15))
+    )

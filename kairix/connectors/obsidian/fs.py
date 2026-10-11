@@ -142,6 +142,42 @@ def collection_accepts(
     return _parts_match(parts[len(base) :], _parts(glob, flavour), flavour)
 
 
+def rebase_glob(glob: str, prefix: str, *, flavour: type[PurePath] = NATIVE_FLAVOUR) -> tuple[str, ...]:
+    """Re-root ``glob`` from a directory to its subdirectory ``prefix``.
+
+    Returns the globs that, walked from ``prefix``, select exactly the files
+    ``glob`` selects beneath ``prefix`` when walked from the original
+    directory: ``rebase_glob("notes/**/*.md", "notes") == ("**/*.md",)`` and
+    ``rebase_glob("**/*.md", "notes") == ("**/*.md",)``. An empty tuple means
+    ``glob`` selects nothing under ``prefix`` (as for a directory-only glob).
+
+    Memoised on ``(pattern index, prefix index)``, so repeated ``**``
+    components against a deep prefix cost O(len(patterns) · len(prefix))
+    states rather than branching combinatorially.
+    """
+    if _directory_only(glob, flavour):
+        return ()
+    patterns = _parts(glob, flavour)
+    prefix_parts = _parts(prefix, flavour)
+
+    @cache
+    def derive(i: int, j: int) -> frozenset[tuple[str, ...]]:
+        if j == len(prefix_parts):
+            return frozenset({patterns[i:]})
+        if i == len(patterns):
+            return frozenset()
+        head = patterns[i]
+        derived: frozenset[tuple[str, ...]] = frozenset()
+        if head == "**":
+            # ``**`` either absorbs the next prefix directory or matches none.
+            derived = derive(i, j + 1) | derive(i + 1, j)
+        elif flavour(prefix_parts[j]).match(head):
+            derived = derive(i + 1, j + 1)
+        return derived
+
+    return tuple(sorted("/".join(d) for d in derive(0, 0) if d))
+
+
 def _directory_only(glob: str, flavour: type[PurePath]) -> bool:
     """True when ``glob`` ends in a separator, so ``Path.glob`` selects directories only."""
     separators = ("/", "\\") if issubclass(flavour, PureWindowsPath) else ("/",)
