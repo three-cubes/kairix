@@ -1454,3 +1454,33 @@ def test_note_replaced_by_a_symlink_loop_is_tombstoned(vault: Path) -> None:
         events = list(connector.list_changes(cursor=None))
 
     assert [(e.op, e.item_id) for e in events] == [("deleted", "alpha.md")]
+
+
+@pytest.mark.unit
+def test_container_pass_with_a_dot_prefixed_container_path(tmp_path: Path) -> None:
+    """A ``./notes`` container keeps its known notes: unchanged ones are quiet, deleted ones tombstone.
+
+    Sabotage-proof: compare raw string prefixes in ``_in_container``
+    (``item_id.startswith(container_prefix + "/")``); this test fails because
+    the known state empties, ``notes/kept.md`` reads as ``created`` and the
+    deletion is lost.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"notes/kept.md": "k", "notes/gone.md": "g"})
+    known = _hash_snapshot(vault)
+    (vault / "notes" / "gone.md").unlink()
+
+    with _reconciling_connector(vault, known) as connector:
+        events = list(
+            connector.list_changes_for_container(
+                Container(
+                    cc_pair_id=1,
+                    container_id="./notes",
+                    access_state="ACCESSIBLE",
+                    cursor_token=None,
+                    last_synced_at=None,
+                )
+            )
+        )
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "notes/gone.md")]

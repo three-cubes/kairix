@@ -40,7 +40,7 @@ import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -766,10 +766,14 @@ def _known_in_container(known: Mapping[str, str], container_prefix: str) -> dict
 
 
 def _in_container(item_id: str, container_prefix: str) -> bool:
-    """True when ``item_id`` is under ``container_prefix``; ``""`` is the root container."""
-    if container_prefix == "":
-        return True
-    return item_id.startswith(container_prefix.rstrip("/") + "/")
+    """True when ``item_id`` is under ``container_prefix``, compared by normalised components.
+
+    ``""`` and ``"."`` are the root container; ``"./notes"`` and ``"notes/"``
+    are ``notes``, as the scoped scan resolves them — and ``notes-old/x.md``
+    is not under ``notes``.
+    """
+    container = PurePosixPath(container_prefix).parts
+    return PurePosixPath(item_id).parts[: len(container)] == container
 
 
 def _scoped_specs_for_container(
