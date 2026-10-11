@@ -1176,3 +1176,48 @@ def test_unreadable_directory_keeps_the_source_verdict_and_siblings(vault: Path)
             locked.chmod(0o755)
 
     assert [(e.op, e.item_id) for e in events] == [("modified", "locked/note.md"), ("modified", "alpha.md")]
+
+
+@pytest.mark.unit
+def test_note_replaced_by_a_symlink_outside_the_vault_is_tombstoned(vault: Path) -> None:
+    """A deleted note replaced by a symlink to a file outside the vault stays ``deleted``.
+
+    ``stat`` follows the link and finds a regular file, but ``fetch`` refuses a
+    path that resolves outside the vault, so reviving the tombstone would
+    dead-letter the note and leave its old chunks searchable.
+
+    Sabotage-proof: use ``self._vault_root / item_id`` in ``_is_live``
+    instead of ``self._safe_resolve(item_id)``; this test fails because the
+    tombstone becomes ``modified``.
+    """
+    outside = vault.parent / "outside.md"
+    outside.write_text("# Outside", encoding="utf-8")
+    observers: list[FakeWatchdogObserver] = []
+    with _watchdog_only_connector(vault, observers) as connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        (vault / "alpha.md").unlink()
+        observers[0].emit(FileDeletedEvent(str(vault / "alpha.md")))
+        (vault / "alpha.md").symlink_to(outside)
+        events = list(connector.list_changes(cursor=_PAST_CURSOR))
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "alpha.md")]
+
+
+@pytest.mark.unit
+def test_reconciled_note_now_a_symlink_outside_the_vault_is_tombstoned(vault: Path) -> None:
+    """The walk follows a note's symlink out of the vault and reports ``modified``; it settles to ``deleted``.
+
+    Sabotage-proof: use ``self._vault_root / item_id`` in ``_is_live``
+    instead of ``self._safe_resolve(item_id)``; this test fails because
+    ``modified`` is emitted for a note ``fetch`` refuses.
+    """
+    known = _hash_snapshot(vault)
+    outside = vault.parent / "outside.md"
+    outside.write_text("# Outside", encoding="utf-8")
+    (vault / "alpha.md").unlink()
+    (vault / "alpha.md").symlink_to(outside)
+
+    with _reconciling_connector(vault, known) as connector:
+        events = list(connector.list_changes(cursor=None))
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "alpha.md")]

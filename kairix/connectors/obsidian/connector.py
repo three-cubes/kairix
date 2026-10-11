@@ -442,14 +442,23 @@ class ObsidianConnector:
     def _is_live(self, item_id: str) -> bool | None:
         """Whether ``item_id`` is a regular file in the vault right now.
 
-        ``None`` when the check itself fails — a parent directory that became
-        unreadable raises ``PermissionError`` — so the merge keeps the source's
-        verdict for that item instead of failing the whole tick. ``os.stat``
-        rather than ``Path.is_file`` so the answer is the same on every
-        interpreter (3.13's ``is_file`` swallows the error as ``False``).
+        Resolved through :meth:`_safe_resolve`, the boundary :meth:`fetch`
+        applies: a note replaced by a symlink to a file outside the vault is
+        not live, since fetching it would be refused. ``None`` when the check
+        itself fails — a parent directory that became unreadable raises
+        ``PermissionError`` — so the merge keeps the source's verdict for that
+        item instead of failing the whole tick. ``stat`` rather than
+        ``Path.is_file`` so the answer is the same on every interpreter
+        (3.13's ``is_file`` swallows the error as ``False``).
         """
         try:
-            mode = (self._vault_root / item_id).stat().st_mode
+            candidate = self._safe_resolve(item_id)
+        except ValueError:
+            return False
+        except (OSError, RuntimeError):  # RuntimeError: 3.12 resolve() on a symlink loop
+            return None
+        try:
+            mode = candidate.stat().st_mode
         except (FileNotFoundError, NotADirectoryError):
             return False
         except OSError:
