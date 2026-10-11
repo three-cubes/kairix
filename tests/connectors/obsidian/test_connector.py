@@ -1432,3 +1432,25 @@ def test_watchdog_tombstone_for_a_note_replaced_by_a_directory_stays_deleted(vau
         events = list(connector.list_changes(cursor=_PAST_CURSOR))
 
     assert [(e.op, e.item_id) for e in events] == [("deleted", "alpha.md")]
+
+
+@pytest.mark.unit
+def test_note_replaced_by_a_symlink_loop_is_tombstoned(vault: Path) -> None:
+    """A note replaced by a symlink loop is gone for good: reconciliation tombstones it.
+
+    The walk skips the loop, and the liveness check must call it missing —
+    not indeterminate, which would drop the tombstone on every tick.
+
+    Sabotage-proof: return ``"unknown"`` for every ``OSError`` and the
+    ``RuntimeError`` in ``_liveness``; this test fails because no event is
+    emitted.
+    """
+    known = _hash_snapshot(vault)
+    (vault / "alpha.md").unlink()
+    (vault / "alpha.md").symlink_to(vault / "loop.md")
+    (vault / "loop.md").symlink_to(vault / "alpha.md")
+
+    with _reconciling_connector(vault, known) as connector:
+        events = list(connector.list_changes(cursor=None))
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "alpha.md")]

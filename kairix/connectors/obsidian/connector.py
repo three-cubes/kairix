@@ -34,6 +34,7 @@ into other connectors, no reach into the extractor layer.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -450,8 +451,8 @@ class ObsidianConnector:
         Resolved through :meth:`_safe_resolve`, the boundary :meth:`fetch`
         applies:
 
-          * ``"missing"`` — no regular file there, or it resolves outside
-            the vault (a symlink ``fetch`` would refuse).
+          * ``"missing"`` — no regular file there, a symlink loop, or a path
+            that resolves outside the vault (a symlink ``fetch`` would refuse).
           * ``"revivable"`` — a regular file whose path resolves to itself
             (no symlinked file or directory on the way), so the scan's walk
             is sure to reach it (``Path.glob("**")`` does not traverse
@@ -467,12 +468,12 @@ class ObsidianConnector:
         try:
             candidate = self._safe_resolve(item_id)
             mode = candidate.stat().st_mode
-        except ValueError:
+        except (ValueError, FileNotFoundError, NotADirectoryError):
             return "missing"
-        except (FileNotFoundError, NotADirectoryError):
+        except RuntimeError:  # 3.12 resolve() on a symlink loop: never a readable file
             return "missing"
-        except (OSError, RuntimeError):  # RuntimeError: 3.12 resolve() on a symlink loop
-            return "unknown"
+        except OSError as exc:  # ELOOP: 3.13's symlink loop; anything else is indeterminate
+            return "missing" if exc.errno == errno.ELOOP else "unknown"
         if not stat.S_ISREG(mode):
             return "missing"
         return "revivable" if candidate == self._vault_root / item_id else "present"
