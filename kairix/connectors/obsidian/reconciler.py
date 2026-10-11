@@ -30,9 +30,9 @@ from pathlib import Path
 
 from kairix.connectors.obsidian.fs import (
     collection_accepts,
+    glob_selects_files_under,
     iter_collection_files,
     read_text_for_hash,
-    rebase_glob,
 )
 from kairix.core.protocols import ChangeEvent
 from kairix.knowledge.reflib.dedup import hash_content
@@ -278,11 +278,12 @@ def _could_hold_indexed_files(directory: tuple[str, ...], spec: CollectionScanSp
     """Whether ``spec`` could index a file beneath ``directory`` (parts relative to its base).
 
     Not when an exclude token already matches the directory, nor when the
-    collection's glob selects nothing beneath it — decided by
-    :func:`rebase_glob`, the scanner's own rule (directory-only globs and the
-    platform's case rules included).
+    collection's glob selects no file beneath it — decided by
+    :func:`glob_selects_files_under`, the scanner's own rule (directory-only
+    globs, the platform's case rules and the interpreter's trailing-``**``
+    rule included).
     """
     as_path = "/".join((*Path(spec.path).parts, *directory)) + "/"
     if any(token and token in as_path for token in spec.exclude):
         return False
-    return bool(rebase_glob(spec.glob, "/".join(directory)))
+    return glob_selects_files_under(spec.glob, "/".join(directory))

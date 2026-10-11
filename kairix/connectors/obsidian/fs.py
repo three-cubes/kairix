@@ -178,6 +178,26 @@ def rebase_glob(glob: str, prefix: str, *, flavour: type[PurePath] = NATIVE_FLAV
     return tuple(sorted("/".join(d) for d in derive(0, 0) if d))
 
 
+def glob_selects_files_under(
+    glob: str,
+    prefix: str,
+    *,
+    flavour: type[PurePath] = NATIVE_FLAVOUR,
+    trailing_recursive_matches_files: bool = TRAILING_RECURSIVE_MATCHES_FILES,
+) -> bool:
+    """True when ``glob`` could select a file beneath ``prefix`` (``""`` is the glob's own root).
+
+    :func:`rebase_glob` re-roots the glob at ``prefix``; a re-rooted glob
+    ending in ``**`` selects files only where ``Path.glob`` does — from
+    Python 3.13 (:data:`TRAILING_RECURSIVE_MATCHES_FILES`); on 3.12 it
+    selects directories only.
+    """
+    return any(
+        trailing_recursive_matches_files or _parts(rebased, flavour)[-1] != "**"
+        for rebased in rebase_glob(glob, prefix, flavour=flavour)
+    )
+
+
 def _directory_only(glob: str, flavour: type[PurePath]) -> bool:
     """True when ``glob`` ends in a separator, so ``Path.glob`` selects directories only."""
     separators = ("/", "\\") if issubclass(flavour, PureWindowsPath) else ("/",)

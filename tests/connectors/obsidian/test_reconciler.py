@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from kairix.connectors.obsidian.fs import collection_accepts, read_text_for_hash
+from kairix.connectors.obsidian.fs import TRAILING_RECURSIVE_MATCHES_FILES, collection_accepts, read_text_for_hash
 from kairix.connectors.obsidian.reconciler import CollectionScanSpec, FullScanReconciler, IncompleteScanError
 from kairix.knowledge.reflib.dedup import hash_content
 
@@ -457,3 +457,33 @@ def test_an_unlistable_root_of_a_collection_that_indexes_nothing_does_not_block(
         (vault / "tests").chmod(0o755)
 
     assert enumerated == ["notes/n.md"]
+
+
+# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unlistable directory",
+)
+@pytest.mark.parametrize("glob", ["**", "daily/**"])
+def test_a_trailing_recursive_glob_blocks_only_where_it_selects_files(tmp_path: Path, glob: str) -> None:
+    """``**`` selects files only from Python 3.13; on 3.12 such a collection indexes nothing.
+
+    So an unlistable directory under it blocks the enumeration exactly when
+    the interpreter's ``Path.glob`` would have listed files there.
+
+    Sabotage-proof: drop the trailing-``**`` filter in
+    ``_could_hold_indexed_files``; on Python 3.12 this test fails with
+    ``IncompleteScanError`` for a collection that indexes nothing.
+    """
+    vault = _vault(tmp_path, {"notes/daily/sub/x.md": "x", "notes/n.md": "n"})
+    reconciler = FullScanReconciler(vault, [CollectionScanSpec(path="notes", glob=glob)])
+    locked = vault / "notes" / "daily" / "sub"
+    locked.chmod(0o000)
+    try:
+        if TRAILING_RECURSIVE_MATCHES_FILES:
+            with pytest.raises(IncompleteScanError):
+                reconciler.item_ids()
+        else:
+            reconciler.item_ids()
+    finally:
+        locked.chmod(0o755)

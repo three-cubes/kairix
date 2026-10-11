@@ -16,6 +16,7 @@ import pytest
 from kairix.connectors.obsidian.fs import (
     DEFAULT_MIME,
     collection_accepts,
+    glob_selects_files_under,
     iter_collection_files,
     mime_for_bytes,
     mime_for_path,
@@ -397,4 +398,30 @@ def test_rebasing_repeated_recursive_globs_onto_a_deep_prefix_stays_fast() -> No
     prefix = "/".join(f"d{i}" for i in range(24))
     assert rebase_glob(glob, prefix, flavour=PurePosixPath) == tuple(
         sorted("/".join(["**"] * k + ["*.md"]) for k in range(1, 15))
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("glob", "prefix", "trailing", "expected"),
+    [
+        ("**/*.md", "", False, True),
+        ("**/*.md", "notes", False, True),
+        ("**", "", False, False),
+        ("**", "", True, True),
+        ("daily/**", "daily", False, False),
+        ("daily/**", "daily", True, True),
+        ("*.md/", "", True, False),
+        ("*.md", "sub", True, False),
+    ],
+)
+def test_glob_selects_files_under_follows_the_interpreters_trailing_rule(
+    glob: str, prefix: str, trailing: bool, expected: bool
+) -> None:
+    """Sabotage-proof: drop the trailing-``**`` check; the ``False`` trailing rows
+    for ``**`` and ``daily/**`` fail. Ignore ``trailing_recursive_matches_files``
+    (treat it as ``False``); the ``True`` trailing rows fail."""
+    assert (
+        glob_selects_files_under(glob, prefix, flavour=PurePosixPath, trailing_recursive_matches_files=trailing)
+        is expected
     )
