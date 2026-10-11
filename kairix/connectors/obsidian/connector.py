@@ -328,12 +328,10 @@ class ObsidianConnector:
         change-event construction). Used by the prune cycle to diff
         against ``documents.item_id`` and stage tombstones.
         """
-        # An empty known-state mapping forces the reconciler to emit one
-        # ChangeEvent per file; we strip down to item_ids only so the
-        # caller pays no chunk-construction cost. Behavioural shape:
-        # same enumeration order as the change-detection path.
-        events = self._reconciler.reconcile({})
-        return iter(ev.item_id for ev in events)
+        # Every file the walk finds, unreadable ones included: a file whose
+        # read fails is still present, so the prune cycle must not stage a
+        # tombstone for it. Same sorted order as the change-detection path.
+        return iter(self._reconciler.item_ids())
 
     def load_hierarchy(self, cc_pair_id: int) -> Iterator[HierarchyNode]:
         """HierarchyConnector — emit FOLDER nodes parent-before-child.

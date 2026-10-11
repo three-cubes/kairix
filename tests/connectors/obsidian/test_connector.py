@@ -1221,3 +1221,78 @@ def test_reconciled_note_now_a_symlink_outside_the_vault_is_tombstoned(vault: Pa
         events = list(connector.list_changes(cursor=None))
 
     assert [(e.op, e.item_id) for e in events] == [("deleted", "alpha.md")]
+
+
+# Root reads any file regardless of mode bits, so the read cannot fail there;
+# Windows has no POSIX mode bits to lock a file with.
+_NEEDS_UNREADABLE_FILE = pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unreadable file",
+)
+
+
+@pytest.mark.unit
+@_NEEDS_UNREADABLE_FILE
+def test_unreadable_indexed_note_keeps_the_watchdog_modification(vault: Path) -> None:
+    """A note the walk cannot read is present, not deleted: the watchdog's ``modified`` stands.
+
+    Sabotage-proof: let ``_discover`` skip an unreadable file as absent (drop
+    it from ``unreadable``); this test fails because the reconciler's false
+    tombstone wins the merge and the note's indexed content is retired.
+    """
+    known = _hash_snapshot(vault)
+    alpha = vault / "alpha.md"
+    alpha.chmod(0o000)
+    try:
+        with _replaying_connector(vault, known, [FileModifiedEvent(str(alpha))]) as connector:
+            events = list(connector.list_changes(cursor=None))
+    finally:
+        alpha.chmod(0o644)
+
+    assert [(e.op, e.item_id) for e in events] == [("modified", "alpha.md")]
+
+
+@pytest.mark.unit
+@_NEEDS_UNREADABLE_FILE
+def test_unreadable_indexed_note_is_never_tombstoned_by_reconciliation(vault: Path) -> None:
+    """Reconciliation alone emits nothing for an indexed note it cannot read.
+
+    Sabotage-proof: drop ``- unreadable`` from the ``deleted`` loop in
+    ``FullScanReconciler.reconcile``; this test fails because ``deleted`` is
+    emitted for a note that is still on disk.
+    """
+    known = _hash_snapshot(vault)
+    alpha = vault / "alpha.md"
+    alpha.chmod(0o000)
+    try:
+        with _reconciling_connector(vault, known) as connector:
+            events = list(connector.list_changes(cursor=None))
+    finally:
+        alpha.chmod(0o644)
+
+    assert events == []
+
+
+@pytest.mark.unit
+@_NEEDS_UNREADABLE_FILE
+def test_slim_docs_enumerate_unreadable_notes(vault: Path) -> None:
+    """The prune cycle's enumeration includes a note it cannot read, so it is not pruned.
+
+    Sabotage-proof: return ``sorted(live)`` from ``FullScanReconciler.item_ids``;
+    this test fails because ``alpha.md`` is missing and would be pruned.
+    """
+    alpha = vault / "alpha.md"
+    alpha.chmod(0o000)
+    try:
+        with _reconciling_connector(vault, {}) as connector:
+            slim = list(
+                connector.retrieve_all_slim_docs(
+                    Container(
+                        cc_pair_id=1, container_id="", access_state="ACCESSIBLE", cursor_token=None, last_synced_at=None
+                    )
+                )
+            )
+    finally:
+        alpha.chmod(0o644)
+
+    assert slim == ["alpha.md", "bravo.md", "charlie.md"]

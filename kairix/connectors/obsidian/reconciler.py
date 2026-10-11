@@ -68,15 +68,18 @@ class FullScanReconciler:
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    def _discover(self) -> dict[str, str]:
-        """Walk the configured collections; return ``{item_id: hash}``.
+    def _discover(self) -> tuple[dict[str, str], frozenset[str]]:
+        """Walk the configured collections; return ``({item_id: hash}, unreadable)``.
 
         ``item_id`` is the vault-root-relative POSIX path (Obsidian's
         canonical identifier). Files that disappear mid-scan (race
         with a delete) are silently skipped — the next reconciliation
-        will surface the delete on its own.
+        will surface the delete on its own. A file the walk finds but
+        cannot read (``PermissionError`` or another ``OSError``) is in
+        ``unreadable``: present, content unknown — never a deletion.
         """
         out: dict[str, str] = {}
+        unreadable: set[str] = set()
         for spec in self._collections:
             for abs_path in iter_collection_files(
                 vault_root=self._vault_root,
@@ -84,13 +87,25 @@ class FullScanReconciler:
                 glob=spec.glob,
                 exclude=spec.exclude,
             ):
+                item_id = abs_path.relative_to(self._vault_root).as_posix()
                 try:
                     text = read_text_for_hash(abs_path)
-                except OSError:
+                except FileNotFoundError:
                     continue
-                item_id = abs_path.relative_to(self._vault_root).as_posix()
+                except OSError:
+                    unreadable.add(item_id)
+                    continue
                 out[item_id] = hash_content(text)
-        return out
+        return out, frozenset(unreadable)
+
+    def item_ids(self) -> list[str]:
+        """Every file the walk finds, readable or not, sorted.
+
+        The enumeration the prune cycle diffs against the store: an
+        unreadable file is still present, so it must not be pruned.
+        """
+        live, unreadable = self._discover()
+        return sorted(live.keys() | unreadable)
 
     def reconcile(self, known_state: Mapping[str, str]) -> list[ChangeEvent]:
         """Compare the live vault against ``known_state``.
@@ -106,7 +121,7 @@ class FullScanReconciler:
             last (so a worker that dies mid-batch still records new
             content before tombstones).
         """
-        live = self._discover()
+        live, unreadable = self._discover()
         live_ids = set(live.keys())
         known_ids = set(known_state.keys())
 
@@ -122,7 +137,9 @@ class FullScanReconciler:
             if live[item_id] != known_state[item_id]:
                 modified.append(ChangeEvent(op="modified", item_id=item_id, modified_at=now))
 
-        for item_id in sorted(known_ids - live_ids):
+        # An unreadable file is present with unknown content: no event, so a
+        # read failure never retires indexed content.
+        for item_id in sorted(known_ids - live_ids - unreadable):
             deleted.append(ChangeEvent(op="deleted", item_id=item_id, modified_at=now))
 
         return [*created, *modified, *deleted]
