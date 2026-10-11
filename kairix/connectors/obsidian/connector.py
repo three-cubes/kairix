@@ -426,7 +426,10 @@ class ObsidianConnector:
             vault_root=self._vault_root,
             collections=container_specs,
         )
-        known = self._known_state_resolver(cursor)
+        # The walk covers only this container, so compare it against only this
+        # container's known items: a connector-wide snapshot would make every
+        # other container's notes look absent and tombstone them.
+        known = _known_in_container(self._known_state_resolver(cursor), container_prefix)
         reconcile_events = reconciler.reconcile(known)
 
         # One event per item_id: see _merge_change_events for the rule.
@@ -734,10 +737,19 @@ def _filter_to_container(changes: list[FileChange], container_prefix: str) -> li
     ``"01-Projects-Old/"`` matching when the container is
     ``"01-Projects"``.
     """
+    return [c for c in changes if _in_container(c.item_id, container_prefix)]
+
+
+def _known_in_container(known: Mapping[str, str], container_prefix: str) -> dict[str, str]:
+    """The known-state entries under ``container_prefix`` (all of them for the root container)."""
+    return {item_id: digest for item_id, digest in known.items() if _in_container(item_id, container_prefix)}
+
+
+def _in_container(item_id: str, container_prefix: str) -> bool:
+    """True when ``item_id`` is under ``container_prefix``; ``""`` is the root container."""
     if container_prefix == "":
-        return list(changes)
-    prefix_with_slash = container_prefix.rstrip("/") + "/"
-    return [c for c in changes if c.item_id.startswith(prefix_with_slash)]
+        return True
+    return item_id.startswith(container_prefix.rstrip("/") + "/")
 
 
 def _scoped_specs_for_container(

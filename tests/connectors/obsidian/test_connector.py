@@ -1116,31 +1116,37 @@ def test_note_left_on_disk_but_moved_out_of_scope_keeps_its_tombstone(vault: Pat
 
 
 @pytest.mark.unit
-def test_container_pass_keeps_tombstones_for_notes_outside_the_container(tmp_path: Path) -> None:
-    """A container pass keeps its reconciler's tombstones for notes outside the container.
+def test_container_pass_leaves_other_containers_alone(tmp_path: Path) -> None:
+    """A container pass tombstones only its own notes, given a connector-wide known state.
 
-    ``beta/other.md`` is indexed and still on disk, but outside container
-    ``alpha``: the container's reconciler does not walk it, so it reports a
-    tombstone, and the merge must not reverse it.
+    The resolver API is cursor-only, so it can return every indexed note; the
+    ``alpha`` walk must not read ``beta/other.md``'s absence from its own walk
+    as a deletion. A note genuinely gone from ``alpha`` is still tombstoned.
 
-    Sabotage-proof: pass ``may_revive=True`` for every winner in
-    ``_merge_change_events``; this test fails because the tombstone becomes
-    ``modified``.
+    Sabotage-proof: pass the resolver's full mapping to ``reconcile`` in
+    ``_list_changes_scoped`` (drop ``_known_in_container``); this test fails
+    because ``deleted beta/other.md`` is emitted. Drop the trailing ``/`` in
+    ``_in_container``; it fails because ``alpha-old/x.md`` counts as ``alpha``.
     """
     vault = tmp_path / "vault"
-    _seed_vault(vault, {"alpha/note.md": "a", "beta/other.md": "b"})
-    container = Container(
-        cc_pair_id=1,
-        container_id="alpha",
-        access_state="ACCESSIBLE",
-        cursor_token=None,
-        last_synced_at=None,
-    )
+    _seed_vault(vault, {"alpha/note.md": "a", "alpha/gone.md": "g", "beta/other.md": "b", "alpha-old/x.md": "x"})
+    known = _hash_snapshot(vault)
+    (vault / "alpha" / "gone.md").unlink()
 
-    with _reconciling_connector(vault, _hash_snapshot(vault)) as connector:
-        events = list(connector.list_changes_for_container(container))
+    with _reconciling_connector(vault, known) as connector:
+        events = list(
+            connector.list_changes_for_container(
+                Container(
+                    cc_pair_id=1,
+                    container_id="alpha",
+                    access_state="ACCESSIBLE",
+                    cursor_token=None,
+                    last_synced_at=None,
+                )
+            )
+        )
 
-    assert [(e.op, e.item_id) for e in events] == [("deleted", "beta/other.md")]
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "alpha/gone.md")]
 
 
 @pytest.mark.unit
@@ -1296,3 +1302,26 @@ def test_slim_docs_enumerate_unreadable_notes(vault: Path) -> None:
         alpha.chmod(0o644)
 
     assert slim == ["alpha.md", "bravo.md", "charlie.md"]
+
+
+@pytest.mark.unit
+def test_root_container_pass_compares_every_known_note(vault: Path) -> None:
+    """The root container (``""``) keeps the whole known state: in-sync notes emit nothing.
+
+    Sabotage-proof: return ``False`` for the root container in
+    ``_in_container``; this test fails because the empty known state makes
+    every note ``created`` and the deletion is lost.
+    """
+    known = _hash_snapshot(vault)
+    (vault / "bravo.md").unlink()
+
+    with _reconciling_connector(vault, known) as connector:
+        events = list(
+            connector.list_changes_for_container(
+                Container(
+                    cc_pair_id=1, container_id="", access_state="ACCESSIBLE", cursor_token=None, last_synced_at=None
+                )
+            )
+        )
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "bravo.md")]
