@@ -453,11 +453,11 @@ class ObsidianConnector:
 
           * ``"missing"`` — no regular file there, a symlink loop, or a path
             that resolves outside the vault (a symlink ``fetch`` would refuse).
-          * ``"revivable"`` — a regular file whose path resolves to itself
-            (no symlinked file or directory on the way), so the scan's walk
-            is sure to reach it (``Path.glob("**")`` does not traverse
-            directory symlinks).
-          * ``"present"`` — a regular file reached through a symlink.
+          * ``"revivable"`` — a regular file inside the vault whose parent
+            directory resolves to itself, so the scan's walk is sure to reach
+            it: ``Path.glob`` lists a file symlink, but does not traverse a
+            directory symlink.
+          * ``"present"`` — a regular file under a symlinked directory.
           * ``"unknown"`` — the check itself failed (a parent directory that
             became unreadable raises ``PermissionError``), so the merge keeps
             the source's verdict instead of failing the whole tick.
@@ -465,9 +465,11 @@ class ObsidianConnector:
         ``stat`` rather than ``Path.is_file`` so the answer is the same on
         every interpreter (3.13's ``is_file`` swallows the error as missing).
         """
+        lexical = self._vault_root / item_id
         try:
             candidate = self._safe_resolve(item_id)
             mode = candidate.stat().st_mode
+            parent_is_own = lexical.parent.resolve() == lexical.parent
         except (ValueError, FileNotFoundError, NotADirectoryError):
             return "missing"
         except RuntimeError:  # 3.12 resolve() on a symlink loop: never a readable file
@@ -476,7 +478,7 @@ class ObsidianConnector:
             return "missing" if exc.errno == errno.ELOOP else "unknown"
         if not stat.S_ISREG(mode):
             return "missing"
-        return "revivable" if candidate == self._vault_root / item_id else "present"
+        return "revivable" if parent_is_own else "present"
 
     def _safe_resolve(self, item_id: str) -> Path:
         """Resolve ``vault_root / item_id`` and reject path traversal.

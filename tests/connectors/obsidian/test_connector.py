@@ -1604,3 +1604,27 @@ def test_watchdog_event_queued_during_the_walk_survives_the_next_cursor(vault: P
 
     assert [(e.op, e.item_id) for e in first] == [("deleted", "bravo.md")]
     assert [(e.op, e.item_id) for e in second] == [("created", "delta.md")]
+
+
+@pytest.mark.unit
+def test_replayed_delete_for_an_in_vault_file_symlink_is_revived(vault: Path) -> None:
+    """A stale watchdog delete for an alias that is an in-vault file symlink settles to ``modified``.
+
+    ``Path.glob`` lists file symlinks, so the scan still indexes the alias;
+    only a symlinked directory takes a note out of the walk's reach.
+
+    Sabotage-proof: require the note's own path, not just its parent, to
+    resolve to itself in ``_liveness``; this test fails because the alias
+    keeps the tombstone and its indexed chunks would be deleted.
+    """
+    alias = vault / "alias.md"
+    alias.symlink_to(vault / "alpha.md")
+    observers: list[FakeWatchdogObserver] = []
+    with _watchdog_only_connector(vault, observers) as connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        alias.unlink()
+        observers[0].emit(FileDeletedEvent(str(alias)))
+        alias.symlink_to(vault / "alpha.md")
+        events = list(connector.list_changes(cursor=_PAST_CURSOR))
+
+    assert [(e.op, e.item_id) for e in events] == [("modified", "alias.md")]

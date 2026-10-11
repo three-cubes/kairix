@@ -134,8 +134,9 @@ class FullScanReconciler:
     def _present_but_unlisted(self, item_id: str) -> bool:
         """A known file the walk should have found but did not: absence unproven.
 
-        In scope, a regular file, and at its own path (no symlink on the way,
-        which ``Path.glob("**")`` would not traverse) — so the walk missed it
+        In scope, a regular file inside the vault, and in a directory that
+        resolves to itself (``Path.glob`` lists a file symlink but does not
+        traverse a directory symlink) — so the walk missed it
         only because it could not list a directory (a non-root worker on a
         mode-``0111`` directory can read the file but not enumerate it). Such
         a note is not tombstoned; a note moved out of scope, or reachable
@@ -145,7 +146,9 @@ class FullScanReconciler:
             return False
         path = self._vault_root / item_id
         try:
-            return path.resolve() == path and stat.S_ISREG(path.stat().st_mode)
+            return (
+                path.parent.resolve() == path.parent and self._inside_vault(path) and stat.S_ISREG(path.stat().st_mode)
+            )
         except (OSError, RuntimeError):  # missing, unreadable parent, or a symlink loop
             return False
 

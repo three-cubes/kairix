@@ -146,3 +146,60 @@ def test_an_unreadable_note_inside_the_vault_is_not_tombstoned(tmp_path: Path) -
 
     assert ops == []
     assert enumerated == ["alpha.md", "bravo.md"]
+
+
+# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unlistable directory",
+)
+def test_an_in_vault_file_symlink_in_an_unlistable_directory_is_not_tombstoned(tmp_path: Path) -> None:
+    """A file symlink to an in-vault note, in a directory the walk cannot list, keeps its index.
+
+    Sabotage-proof: require the note's own path to resolve to itself in
+    ``_present_but_unlisted`` (``path.resolve() == path``); this test fails
+    because the alias the walk would list is tombstoned.
+    """
+    files = {"alpha.md": "a"}
+    vault = _vault(tmp_path, files)
+    listless = vault / "listless"
+    listless.mkdir()
+    (listless / "alias.md").symlink_to(vault / "alpha.md")
+    known = {**_known(files), "listless/alias.md": hash_content("a")}
+    listless.chmod(0o111)
+    try:
+        ops = _ops(FullScanReconciler(vault, [CollectionScanSpec(path=".")]), known)
+    finally:
+        listless.chmod(0o755)
+
+    assert ops == []
+
+
+# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unlistable directory",
+)
+def test_an_out_of_vault_file_symlink_in_an_unlistable_directory_is_tombstoned(tmp_path: Path) -> None:
+    """A file symlink pointing outside the vault, in a directory the walk cannot list, is tombstoned.
+
+    ``fetch`` refuses the path, so its absence from the walk stands.
+
+    Sabotage-proof: drop ``self._inside_vault(path)`` from
+    ``_present_but_unlisted``; this test fails because the out-of-vault
+    alias keeps its stale index.
+    """
+    vault = _vault(tmp_path, {"alpha.md": "a"})
+    outside = tmp_path / "outside.md"
+    outside.write_text("o", encoding="utf-8")
+    listless = vault / "listless"
+    listless.mkdir()
+    (listless / "out.md").symlink_to(outside)
+    known = {**_known({"alpha.md": "a"}), "listless/out.md": hash_content("o")}
+    listless.chmod(0o111)
+    try:
+        ops = _ops(FullScanReconciler(vault, [CollectionScanSpec(path=".")]), known)
+    finally:
+        listless.chmod(0o755)
+
+    assert ops == [("deleted", "listless/out.md")]
