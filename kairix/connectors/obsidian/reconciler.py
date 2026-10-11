@@ -20,17 +20,24 @@ passes the result of a SQLite ``SELECT path, hash FROM documents``.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import errno
+import os
+import stat
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from kairix.connectors.obsidian.fs import (
+    collection_accepts,
     iter_collection_files,
     read_text_for_hash,
 )
 from kairix.core.protocols import ChangeEvent
 from kairix.knowledge.reflib.dedup import hash_content
+
+# ``stat`` errors that prove a walked path no longer holds a note.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
 
 
 @dataclass(frozen=True)
@@ -57,40 +64,126 @@ class FullScanReconciler:
     ``docs/architecture/connector-ingestion-architecture.md`` §3.
     """
 
-    def __init__(self, vault_root: Path, collections: Iterable[CollectionScanSpec]) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        collections: Iterable[CollectionScanSpec],
+        *,
+        read_text: Callable[[Path], str] = read_text_for_hash,
+    ) -> None:
+        """``read_text`` reads one walked file for hashing; tests inject a reader
+        that changes the filesystem between the walk and the read."""
         self._vault_root = vault_root.resolve()
         self._collections = tuple(collections)
+        self._read_text = read_text
 
     @property
     def vault_root(self) -> Path:
         return self._vault_root
 
+    def accepts(self, item_id: str) -> bool:
+        """True when any configured collection indexes ``item_id`` — the rule :meth:`_discover` walks with."""
+        return any(
+            collection_accepts(item_id, collection_path=spec.path, glob=spec.glob, exclude=spec.exclude)
+            for spec in self._collections
+        )
+
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    def _discover(self) -> dict[str, str]:
-        """Walk the configured collections; return ``{item_id: hash}``.
+    def _discover(self) -> tuple[dict[str, str], frozenset[str]]:
+        """Walk the configured collections; return ``({item_id: hash}, unreadable)``.
 
         ``item_id`` is the vault-root-relative POSIX path (Obsidian's
         canonical identifier). Files that disappear mid-scan (race
         with a delete) are silently skipped — the next reconciliation
-        will surface the delete on its own.
+        will surface the delete on its own. A file the walk finds but
+        cannot read (``PermissionError`` or another ``OSError``) is in
+        ``unreadable``: present, content unknown — never a deletion. A
+        symlink that resolves outside the vault is not: ``fetch`` refuses
+        it, so it counts as absent and an indexed note there is tombstoned.
         """
         out: dict[str, str] = {}
+        unreadable: set[str] = set()
+        for abs_path in self._walk():
+            item_id = abs_path.relative_to(self._vault_root).as_posix()
+            try:
+                text = self._read_text(abs_path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                if self._still_present(abs_path):
+                    unreadable.add(item_id)
+                continue
+            out[item_id] = hash_content(text)
+        return out, frozenset(unreadable)
+
+    def _walk(self) -> Iterator[Path]:
+        """Every file the configured collections select, in collection order."""
         for spec in self._collections:
-            for abs_path in iter_collection_files(
+            yield from iter_collection_files(
                 vault_root=self._vault_root,
                 collection_path=spec.path,
                 glob=spec.glob,
                 exclude=spec.exclude,
-            ):
-                try:
-                    text = read_text_for_hash(abs_path)
-                except OSError:
-                    continue
-                item_id = abs_path.relative_to(self._vault_root).as_posix()
-                out[item_id] = hash_content(text)
-        return out
+            )
+
+    def _still_present(self, abs_path: Path) -> bool:
+        """After a failed read: whether the walked path still credibly holds a note.
+
+        A regular file inside the vault is present (content unknown). A path
+        that is gone, sits under a non-directory or loops (``ENOENT``,
+        ``ENOTDIR``, ``ELOOP``) or is no longer a regular file (replaced by a
+        directory) is absent, and is tombstoned. Any other ``stat`` failure
+        (a parent that became unreadable) proves nothing, so the note is kept
+        — unless the path resolves outside the vault, which ``fetch`` refuses.
+        """
+        try:
+            mode = abs_path.stat().st_mode
+        except OSError as exc:
+            return exc.errno not in _ABSENT_ERRNOS and self._inside_vault(abs_path)
+        return stat.S_ISREG(mode) and self._inside_vault(abs_path)
+
+    def _inside_vault(self, abs_path: Path) -> bool:
+        """True when ``abs_path`` resolves inside the vault — the boundary ``fetch`` applies.
+
+        Only a proven outside target is outside: non-strict ``realpath`` never
+        raises, so a resolution it cannot complete (a parent that became
+        unreadable) leaves the path inside the vault and the entry is kept.
+        Called only for paths the walk saw as files, so a symlink loop
+        (which ``is_file`` rejects) never reaches it.
+        """
+        return Path(os.path.realpath(abs_path)).is_relative_to(self._vault_root)
+
+    def item_ids(self) -> list[str]:
+        """Every file the walk finds, readable or not, sorted.
+
+        The enumeration the prune cycle diffs against the store: an
+        unreadable file is still present, so it must not be pruned.
+        """
+        live, unreadable = self._discover()
+        return sorted(live.keys() | unreadable)
+
+    def _present_but_unlisted(self, item_id: str) -> bool:
+        """A known file the walk should have found but did not: absence unproven.
+
+        In scope, a regular file inside the vault, and in a directory that
+        resolves to itself (``Path.glob`` lists a file symlink but does not
+        traverse a directory symlink) — so the walk missed it
+        only because it could not list a directory (a non-root worker on a
+        mode-``0111`` directory can read the file but not enumerate it). Such
+        a note is not tombstoned; a note moved out of scope, or reachable
+        only through a symlink, still is.
+        """
+        if not self.accepts(item_id):
+            return False
+        path = self._vault_root / item_id
+        try:
+            return (
+                path.parent.resolve() == path.parent and self._inside_vault(path) and stat.S_ISREG(path.stat().st_mode)
+            )
+        except (OSError, RuntimeError):  # missing, unreadable parent, or a symlink loop
+            return False
 
     def reconcile(self, known_state: Mapping[str, str]) -> list[ChangeEvent]:
         """Compare the live vault against ``known_state``.
@@ -106,11 +199,14 @@ class FullScanReconciler:
             last (so a worker that dies mid-batch still records new
             content before tombstones).
         """
-        live = self._discover()
+        # Stamp events with the walk's START: a watchdog event queued during
+        # or after the walk (a note recreated mid-tick) must stay after the
+        # cursor these events advance, or the next tick would filter it out.
+        now = self._now_iso()
+        live, unreadable = self._discover()
         live_ids = set(live.keys())
         known_ids = set(known_state.keys())
 
-        now = self._now_iso()
         created: list[ChangeEvent] = []
         modified: list[ChangeEvent] = []
         deleted: list[ChangeEvent] = []
@@ -122,7 +218,11 @@ class FullScanReconciler:
             if live[item_id] != known_state[item_id]:
                 modified.append(ChangeEvent(op="modified", item_id=item_id, modified_at=now))
 
-        for item_id in sorted(known_ids - live_ids):
+        # An unreadable file is present with unknown content: no event, so a
+        # read failure never retires indexed content.
+        for item_id in sorted(known_ids - live_ids - unreadable):
+            if self._present_but_unlisted(item_id):
+                continue
             deleted.append(ChangeEvent(op="deleted", item_id=item_id, modified_at=now))
 
         return [*created, *modified, *deleted]

@@ -34,12 +34,14 @@ into other connectors, no reach into the extractor layer.
 
 from __future__ import annotations
 
+import errno
 import os
+import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 from urllib.parse import quote
 
 from kairix.connectors.obsidian.fs import (
@@ -65,6 +67,10 @@ from kairix.core.protocols import (
 )
 
 CONNECTOR_NAME = "obsidian"
+
+# What the filesystem says about one item at merge time; see
+# ``ObsidianConnector._liveness``.
+Liveness = Literal["missing", "present", "revivable", "unknown"]
 
 # Default reconciliation cadence: every Nth ``list_changes`` call runs
 # a full-scan pass in addition to draining the watchdog queue. Picked
@@ -182,7 +188,7 @@ class ObsidianConnector:
             reconcile_events = self._reconciler.reconcile(known)
 
         # One event per item_id: see _merge_change_events for the rule.
-        merged = _merge_change_events(watchdog_events, reconcile_events, cursor, is_live=self._is_live)
+        merged = _merge_change_events(watchdog_events, reconcile_events, cursor, liveness=self._liveness)
         # Track the max modified_at observed so next_cursor() can return
         # the high-water-mark to persist. When the drain yields no
         # events but cursor was non-None, preserve cursor so the next
@@ -327,12 +333,10 @@ class ObsidianConnector:
         change-event construction). Used by the prune cycle to diff
         against ``documents.item_id`` and stage tombstones.
         """
-        # An empty known-state mapping forces the reconciler to emit one
-        # ChangeEvent per file; we strip down to item_ids only so the
-        # caller pays no chunk-construction cost. Behavioural shape:
-        # same enumeration order as the change-detection path.
-        events = self._reconciler.reconcile({})
-        return iter(ev.item_id for ev in events)
+        # Every file the walk finds, unreadable ones included: a file whose
+        # read fails is still present, so the prune cycle must not stage a
+        # tombstone for it. Same sorted order as the change-detection path.
+        return iter(self._reconciler.item_ids())
 
     def load_hierarchy(self, cc_pair_id: int) -> Iterator[HierarchyNode]:
         """HierarchyConnector — emit FOLDER nodes parent-before-child.
@@ -410,7 +414,9 @@ class ObsidianConnector:
         """
         self._ensure_watcher_started()
         cursor = container.cursor_token
-        container_prefix = container.container_id
+        # One normalised spelling for every rule below: "./notes" and
+        # "notes/" are "notes", "." is the root container "".
+        container_prefix = "/".join(PurePosixPath(container.container_id).parts)
 
         # Drain watchdog events; keep only those under this container
         # that the container's collections index.
@@ -427,20 +433,54 @@ class ObsidianConnector:
             vault_root=self._vault_root,
             collections=container_specs,
         )
-        known = self._known_state_resolver(cursor)
+        # The walk covers only this container, so compare it against only this
+        # container's known items: a connector-wide snapshot would make every
+        # other container's notes look absent and tombstone them.
+        known = _known_in_container(self._known_state_resolver(cursor), container_prefix)
         reconcile_events = reconciler.reconcile(known)
 
         # One event per item_id: see _merge_change_events for the rule.
-        merged = _merge_change_events(watchdog_events, reconcile_events, cursor, is_live=self._is_live)
+        merged = _merge_change_events(watchdog_events, reconcile_events, cursor, liveness=self._liveness)
         # High-water-mark tracking matches the legacy list_changes path
         # so next_cursor() returns the correct token regardless of
         # which path was taken last.
         self._last_max_modified_at = _max_modified_at(merged, fallback=cursor)
         return iter(merged)
 
-    def _is_live(self, item_id: str) -> bool:
-        """Whether ``item_id`` is a regular file in the vault right now."""
-        return (self._vault_root / item_id).is_file()
+    def _liveness(self, item_id: str) -> Liveness:
+        """What the filesystem says about ``item_id`` right now.
+
+        Resolved through :meth:`_safe_resolve`, the boundary :meth:`fetch`
+        applies:
+
+          * ``"missing"`` — no regular file there, a symlink loop, or a path
+            that resolves outside the vault (a symlink ``fetch`` would refuse).
+          * ``"revivable"`` — a regular file inside the vault whose parent
+            directory resolves to itself, so the scan's walk is sure to reach
+            it: ``Path.glob`` lists a file symlink, but does not traverse a
+            directory symlink.
+          * ``"present"`` — a regular file under a symlinked directory.
+          * ``"unknown"`` — the check itself failed (a parent directory that
+            became unreadable raises ``PermissionError``), so the merge keeps
+            the source's verdict instead of failing the whole tick.
+
+        ``stat`` rather than ``Path.is_file`` so the answer is the same on
+        every interpreter (3.13's ``is_file`` swallows the error as missing).
+        """
+        lexical = self._vault_root / item_id
+        try:
+            candidate = self._safe_resolve(item_id)
+            mode = candidate.stat().st_mode
+            parent_is_own = lexical.parent.resolve() == lexical.parent
+        except (ValueError, FileNotFoundError, NotADirectoryError):
+            return "missing"
+        except RuntimeError:  # 3.12 resolve() on a symlink loop: never a readable file
+            return "missing"
+        except OSError as exc:  # ELOOP: 3.13's symlink loop; anything else is indeterminate
+            return "missing" if exc.errno == errno.ELOOP else "unknown"
+        if not stat.S_ISREG(mode):
+            return "missing"
+        return "revivable" if parent_is_own else "present"
 
     def _safe_resolve(self, item_id: str) -> Path:
         """Resolve ``vault_root / item_id`` and reject path traversal.
@@ -573,7 +613,7 @@ def _merge_change_events(
     reconcile_events: list[ChangeEvent],
     cursor: Cursor | None,
     *,
-    is_live: Callable[[str], bool],
+    liveness: Callable[[str], Liveness],
 ) -> list[ChangeEvent]:
     """Merge the watchdog drain and the reconciler pass into one event per item.
 
@@ -589,25 +629,57 @@ def _merge_change_events(
       3. When the reconciler also reports the item, its op wins: it
          read the live filesystem, whereas the watchdog may replay
          stale events (macOS FSEvents history on observer start).
-      4. An item only the watchdog reports is checked against the live
-         filesystem with ``is_live``: a non-delete op for a missing file
-         becomes ``deleted``, and a ``deleted`` for a file that exists
-         becomes ``modified``. This covers replayed or reordered events
-         on ticks where the reconciler has no verdict for the item.
+      4. Every winner is then checked with ``liveness`` at merge time, later
+         than either source looked (:func:`_settle_watched`,
+         :func:`_settle_reconciled`; states in ``ObsidianConnector._liveness``). A non-delete op
+         for a missing file becomes ``deleted``. A reconciler tombstone is
+         never reversed — the walk applies reachability rules (scope, glob,
+         directory symlinks) that existence does not prove — but it is only
+         confirmed when liveness is known: a walk that could not list a
+         directory proves nothing, so the watchdog's verdict stands, or no
+         event is emitted. A watchdog-only ``deleted`` becomes ``modified``
+         only for a regular file at its own path (``"revivable"``: no
+         symlink on the way), which the scan is sure to reach.
       5. The merged event keeps the EARLIEST surviving timestamp, so the
          cursor high-water-mark stays conservative.
 
     Output order is first appearance, watchdog events first.
     """
-    merged: dict[str, ChangeEvent] = {}
+    watched: dict[str, ChangeEvent] = {}
     for ev in _after_cursor(watchdog_events, cursor):
-        prior = merged.get(ev.item_id)
-        merged[ev.item_id] = ev if prior is None else _collapse_watchdog(prior, ev)
-    merged = {item_id: _settle_against_fs(ev, is_live(item_id)) for item_id, ev in merged.items()}
-    for ev in _after_cursor(reconcile_events, cursor):
-        prior = merged.get(ev.item_id)
-        merged[ev.item_id] = ev if prior is None else _with_earliest(ev, prior.modified_at)
-    return list(merged.values())
+        prior = watched.get(ev.item_id)
+        watched[ev.item_id] = ev if prior is None else _collapse_watchdog(prior, ev)
+    reconciled = {ev.item_id: ev for ev in _after_cursor(reconcile_events, cursor)}
+    merged: list[ChangeEvent] = []
+    for item_id in [*watched, *(i for i in reconciled if i not in watched)]:
+        state = liveness(item_id)
+        if item_id in reconciled:
+            settled = _settle_reconciled(reconciled[item_id], watched.get(item_id), state)
+        else:
+            settled = _settle_watched(watched[item_id], state)
+        if settled is not None:
+            merged.append(settled)
+    return merged
+
+
+def _settle_watched(watched: ChangeEvent, state: Liveness) -> ChangeEvent:
+    """A watchdog-only verdict, corrected by the filesystem when it is sure.
+
+    A tombstone is revived only for a ``"revivable"`` file; a non-delete op
+    becomes ``deleted`` only for a ``"missing"`` one.
+    """
+    if watched.op == "deleted":
+        return replace(watched, op="modified") if state == "revivable" else watched
+    return replace(watched, op="deleted") if state == "missing" else watched
+
+
+def _settle_reconciled(reconciled: ChangeEvent, watched: ChangeEvent | None, state: Liveness) -> ChangeEvent | None:
+    """The reconciler's verdict wins; a tombstone needs an observed absence to stand."""
+    winner = reconciled if watched is None else _with_earliest(reconciled, watched.modified_at)
+    if winner.op == "deleted":
+        # A walk that could not list a directory proves nothing.
+        return watched if state == "unknown" else winner
+    return replace(winner, op="deleted") if state == "missing" else winner
 
 
 def _after_cursor(events: list[ChangeEvent], cursor: Cursor | None) -> list[ChangeEvent]:
@@ -620,15 +692,6 @@ def _collapse_watchdog(prior: ChangeEvent, later: ChangeEvent) -> ChangeEvent:
     """Fold a later watchdog event for the same item onto the earlier one."""
     op = "created" if prior.op == "created" and later.op == "modified" else later.op
     return _with_earliest(replace(later, op=op), prior.modified_at)
-
-
-def _settle_against_fs(ev: ChangeEvent, live: bool) -> ChangeEvent:
-    """Correct a watchdog op that contradicts whether the file exists now."""
-    if live and ev.op == "deleted":
-        return replace(ev, op="modified")
-    if not live and ev.op != "deleted":
-        return replace(ev, op="deleted")
-    return ev
 
 
 def _filter_to_specs(changes: list[FileChange], specs: list[CollectionScanSpec]) -> list[FileChange]:
@@ -698,10 +761,23 @@ def _filter_to_container(changes: list[FileChange], container_prefix: str) -> li
     ``"01-Projects-Old/"`` matching when the container is
     ``"01-Projects"``.
     """
-    if container_prefix == "":
-        return list(changes)
-    prefix_with_slash = container_prefix.rstrip("/") + "/"
-    return [c for c in changes if c.item_id.startswith(prefix_with_slash)]
+    return [c for c in changes if _in_container(c.item_id, container_prefix)]
+
+
+def _known_in_container(known: Mapping[str, str], container_prefix: str) -> dict[str, str]:
+    """The known-state entries under ``container_prefix`` (all of them for the root container)."""
+    return {item_id: digest for item_id, digest in known.items() if _in_container(item_id, container_prefix)}
+
+
+def _in_container(item_id: str, container_prefix: str) -> bool:
+    """True when ``item_id`` is under ``container_prefix``, compared by normalised components.
+
+    ``""`` and ``"."`` are the root container; ``"./notes"`` and ``"notes/"``
+    are ``notes``, as the scoped scan resolves them — and ``notes-old/x.md``
+    is not under ``notes``.
+    """
+    container = PurePosixPath(container_prefix).parts
+    return PurePosixPath(item_id).parts[: len(container)] == container
 
 
 def _scoped_specs_for_container(
