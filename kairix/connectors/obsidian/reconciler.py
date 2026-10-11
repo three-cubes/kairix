@@ -26,6 +26,7 @@ import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from kairix.connectors.obsidian.fs import (
@@ -190,18 +191,28 @@ class FullScanReconciler:
         return sorted(live.keys() | unreadable)
 
     def _unlistable_directories(self) -> list[str]:
-        """Directories under the collections that could not be listed, vault-relative.
+        """In-scope directories under the collections that could not be listed, vault-relative.
 
         ``os.walk`` without following symlinks reaches what the scan's
         ``Path.glob`` reaches, and reports each listing failure that the
-        glob silently skips.
+        glob silently skips. A missing collection directory is an empty
+        collection, as it is to the scan; a failure counts only for a
+        directory the collection could index files beneath — not excluded,
+        and reachable by its glob.
         """
-        failures: list[OSError] = []
+        unlistable: set[str] = set()
         for spec in self._collections:
             base = self._vault_root if spec.path in ("", ".") else self._vault_root / spec.path
+            if not base.is_dir():
+                continue
+            failures: list[OSError] = []
             for _ in os.walk(base, onerror=failures.append):
                 pass
-        return sorted(Path(str(f.filename)).relative_to(self._vault_root).as_posix() for f in failures)
+            for failure in failures:
+                directory = Path(str(failure.filename))
+                if _could_hold_indexed_files(directory.relative_to(base).parts, spec):
+                    unlistable.add(directory.relative_to(self._vault_root).as_posix())
+        return sorted(unlistable)
 
     def _present_but_unlisted(self, item_id: str) -> bool:
         """A known file the walk should have found but did not: absence unproven.
@@ -265,3 +276,25 @@ class FullScanReconciler:
             deleted.append(ChangeEvent(op="deleted", item_id=item_id, modified_at=now))
 
         return [*created, *modified, *deleted]
+
+
+def _could_hold_indexed_files(directory: tuple[str, ...], spec: CollectionScanSpec) -> bool:
+    """Whether ``spec`` could index a file beneath ``directory`` (parts relative to its base).
+
+    Not when an exclude token already matches the directory, nor when the
+    glob cannot reach it: each directory component must match the glob's
+    directory segment at that depth, and a ``**`` segment reaches anything
+    below it.
+    """
+    as_path = "/".join((*Path(spec.path).parts, *directory)) + "/"
+    if any(token and token in as_path for token in spec.exclude):
+        return False
+    segments = Path(spec.glob).parts[:-1]  # the last segment names files
+    for depth, part in enumerate(directory):
+        if depth >= len(segments):
+            return False
+        if segments[depth] == "**":
+            return True
+        if not fnmatchcase(part, segments[depth]):
+            return False
+    return True

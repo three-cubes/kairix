@@ -343,3 +343,78 @@ def test_the_prune_enumeration_refuses_a_partial_walk(tmp_path: Path) -> None:
 
     assert raised.value.directories == ("listless",)
     assert "fix:" in str(raised.value)
+
+
+def test_a_missing_collection_directory_enumerates_as_empty(tmp_path: Path) -> None:
+    """A collection whose directory does not exist is empty for the prune enumeration too.
+
+    Sabotage-proof: drop the ``base.is_dir()`` skip in
+    ``_unlistable_directories``; this test fails with ``IncompleteScanError``.
+    """
+    vault = _vault(tmp_path, {"alpha.md": "a"})
+
+    assert FullScanReconciler(vault, [CollectionScanSpec(path="absent")]).item_ids() == []
+
+
+# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unlistable directory",
+)
+@pytest.mark.parametrize(
+    "spec,locked",
+    [
+        (CollectionScanSpec(path="notes", exclude=("WIP/",)), "notes/WIP"),
+        (CollectionScanSpec(path="notes", glob="*.md"), "notes/sub"),
+        (CollectionScanSpec(path="notes", glob="daily/*.md"), "notes/other"),
+    ],
+    ids=["excluded", "below-a-flat-glob", "off-the-glob-path"],
+)
+def test_an_unlistable_directory_out_of_scope_does_not_block_the_enumeration(
+    tmp_path: Path, spec: CollectionScanSpec, locked: str
+) -> None:
+    """A directory the collection could never index files beneath does not make the walk partial.
+
+    Sabotage-proof: make ``_could_hold_indexed_files`` return ``True``; every
+    case fails with ``IncompleteScanError``.
+    """
+    vault = _vault(tmp_path, {"notes/kept.md": "k", "notes/daily/d.md": "d", f"{locked}/x.md": "x"})
+    (vault / locked).chmod(0o000)
+    try:
+        enumerated = FullScanReconciler(vault, [spec]).item_ids()
+    finally:
+        (vault / locked).chmod(0o755)
+
+    assert "notes/kept.md" in enumerated or "notes/daily/d.md" in enumerated
+
+
+# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unlistable directory",
+)
+@pytest.mark.parametrize(
+    "spec,locked",
+    [
+        (CollectionScanSpec(path="notes", glob="daily/*.md"), "notes/daily"),
+        (CollectionScanSpec(path="notes", exclude=("",)), "notes/sub"),
+    ],
+    ids=["on-a-flat-glob-path", "empty-exclude-token"],
+)
+def test_an_unlistable_directory_in_scope_blocks_the_enumeration(
+    tmp_path: Path, spec: CollectionScanSpec, locked: str
+) -> None:
+    """A directory the collection does index beneath makes the walk partial.
+
+    Sabotage-proof: make ``_could_hold_indexed_files`` return ``False`` after
+    matching every glob segment; the flat-glob case fails. Turn its exclude
+    check's ``and`` into ``or``; the empty-token case fails. Either way the
+    partial enumeration is returned.
+    """
+    vault = _vault(tmp_path, {"notes/kept.md": "k", f"{locked}/x.md": "x"})
+    (vault / locked).chmod(0o000)
+    try:
+        with pytest.raises(IncompleteScanError):
+            FullScanReconciler(vault, [spec]).item_ids()
+    finally:
+        (vault / locked).chmod(0o755)
