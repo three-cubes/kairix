@@ -1628,3 +1628,30 @@ def test_replayed_delete_for_an_in_vault_file_symlink_is_revived(vault: Path) ->
         events = list(connector.list_changes(cursor=_PAST_CURSOR))
 
     assert [(e.op, e.item_id) for e in events] == [("modified", "alias.md")]
+
+
+@pytest.mark.unit
+def test_dot_prefixed_container_path_keeps_its_collections_exclusions(tmp_path: Path) -> None:
+    """A ``./notes`` container is scanned with the ``notes`` collection's own glob and excludes.
+
+    Sabotage-proof: pass the raw ``container.container_id`` as
+    ``container_prefix`` in ``_list_changes_scoped``; this test fails because
+    the collection no longer matches, the scan falls back to ``**/*.md`` and
+    the excluded draft is emitted.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"notes/kept.md": "k", "notes/WIP/draft.md": "d"})
+    connector = ObsidianConnector(
+        vault_root=vault,
+        collections=[CollectionConfig(name="notes", path="notes", exclude=["WIP/"])],
+        known_state_resolver=lambda _c: {},
+        watcher_factory=fake_obsidian_watcher_factory(),
+    )
+    container = Container(
+        cc_pair_id=1, container_id="./notes", access_state="ACCESSIBLE", cursor_token=None, last_synced_at=None
+    )
+
+    with connector:
+        events = list(connector.list_changes_for_container(container))
+
+    assert [(e.op, e.item_id) for e in events] == [("created", "notes/kept.md")]

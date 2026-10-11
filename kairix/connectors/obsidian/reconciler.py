@@ -99,7 +99,10 @@ class FullScanReconciler:
             except FileNotFoundError:
                 continue
             except OSError:
-                if self._inside_vault(abs_path):
+                # Present only if it is still a regular file inside the vault:
+                # a note replaced since the walk by a directory, a symlink loop
+                # or a path under a non-directory is absent, and is tombstoned.
+                if abs_path.is_file() and self._inside_vault(abs_path):
                     unreadable.add(item_id)
                 continue
             out[item_id] = hash_content(text)

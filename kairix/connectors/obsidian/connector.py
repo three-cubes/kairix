@@ -414,7 +414,9 @@ class ObsidianConnector:
         """
         self._ensure_watcher_started()
         cursor = container.cursor_token
-        container_prefix = container.container_id
+        # One normalised spelling for every rule below: "./notes" and
+        # "notes/" are "notes", "." is the root container "".
+        container_prefix = "/".join(PurePosixPath(container.container_id).parts)
 
         # Drain watchdog events; keep only those under this container
         # that the container's collections index.
