@@ -1047,8 +1047,8 @@ def test_note_recreated_after_the_walk_is_tombstoned_then_recreated_next_tick(va
     not prove the scan can reach a file. Recreating the note queues a
     watchdog ``created``, which brings it back one tick later.
 
-    Sabotage-proof: pass ``may_revive=True`` for every winner in
-    ``_merge_change_events``; this test fails because the first tick emits
+    Sabotage-proof: make ``_settle_reconciled`` turn a tombstone whose note
+    is ``"present"`` or ``"revivable"`` into ``modified``; this test fails because the first tick emits
     ``modified`` instead of keeping the reconciler's tombstone.
     """
     known = _hash_snapshot(vault)
@@ -1076,22 +1076,22 @@ def test_tombstone_under_a_directory_the_scan_no_longer_traverses_stands(vault: 
 
     ``Path.glob("**/*.md")`` does not traverse directory symlinks, so the
     walk stops reporting the note and the reconciler tombstones it, though
-    the file is still reachable on disk.
+    the file is still reachable on disk — inside the vault, so only the
+    never-reverse rule (not the vault boundary) keeps the tombstone.
 
-    Sabotage-proof: pass ``may_revive=True`` for every winner in
-    ``_merge_change_events``; this test fails because the tombstone becomes
-    ``modified``.
+    Sabotage-proof: make ``_settle_reconciled`` turn a tombstone whose note
+    is ``"present"`` or ``"revivable"`` into ``modified``; this test fails because ``modified`` is emitted.
     """
     _seed_vault(vault, {"notes/deep.md": "d"})
     known = _hash_snapshot(vault)
-    real = vault.parent / "elsewhere"
-    (vault / "notes").rename(real)
-    (vault / "notes").symlink_to(real, target_is_directory=True)
+    (vault / "notes").rename(vault / "archive")
+    (vault / "notes").symlink_to(vault / "archive", target_is_directory=True)
 
     with _reconciling_connector(vault, known) as connector:
         events = list(connector.list_changes(cursor=None))
 
-    assert [(e.op, e.item_id) for e in events] == [("deleted", "notes/deep.md")]
+    # The scan now reaches the note only at its real path, as a new item.
+    assert sorted((e.op, e.item_id) for e in events) == [("created", "archive/deep.md"), ("deleted", "notes/deep.md")]
 
 
 @pytest.mark.unit
@@ -1102,8 +1102,8 @@ def test_note_left_on_disk_but_moved_out_of_scope_keeps_its_tombstone(vault: Pat
     would turn the reconciler's tombstone into ``modified`` and re-index
     out-of-scope content.
 
-    Sabotage-proof: pass ``may_revive=True`` for every winner in
-    ``_merge_change_events``; this test fails because ``modified`` is emitted.
+    Sabotage-proof: make ``_settle_reconciled`` turn a tombstone whose note
+    is ``"present"`` or ``"revivable"`` into ``modified``; this test fails because ``modified`` is emitted.
     """
     _seed_vault(vault, {"notes/kept.md": "k", "notes/WIP/draft.md": "d"})
     known = {k: v for k, v in _hash_snapshot(vault).items() if k.startswith("notes/")}
@@ -1163,9 +1163,9 @@ def test_unreadable_directory_keeps_the_source_verdict_and_siblings(vault: Path)
     ``PermissionError``; the merge must keep that item's watchdog verdict and
     still emit the sibling change, not fail the tick.
 
-    Sabotage-proof: let ``_is_live`` re-raise the ``OSError`` instead of
-    returning ``None``; this test fails with ``PermissionError``. Map it to
-    ``False`` instead; this test fails because the note is tombstoned.
+    Sabotage-proof: let ``_liveness`` re-raise the ``OSError`` instead of
+    returning ``"unknown"``; this test fails with ``PermissionError``. Map it
+    to ``"missing"`` instead; this test fails because the note is tombstoned.
     """
     _seed_vault(vault, {"locked/note.md": "n"})
     observers: list[FakeWatchdogObserver] = []
@@ -1192,7 +1192,7 @@ def test_note_replaced_by_a_symlink_outside_the_vault_is_tombstoned(vault: Path)
     path that resolves outside the vault, so reviving the tombstone would
     dead-letter the note and leave its old chunks searchable.
 
-    Sabotage-proof: use ``self._vault_root / item_id`` in ``_is_live``
+    Sabotage-proof: use ``self._vault_root / item_id`` in ``_liveness``
     instead of ``self._safe_resolve(item_id)``; this test fails because the
     tombstone becomes ``modified``.
     """
@@ -1213,7 +1213,7 @@ def test_note_replaced_by_a_symlink_outside_the_vault_is_tombstoned(vault: Path)
 def test_reconciled_note_now_a_symlink_outside_the_vault_is_tombstoned(vault: Path) -> None:
     """The walk follows a note's symlink out of the vault and reports ``modified``; it settles to ``deleted``.
 
-    Sabotage-proof: use ``self._vault_root / item_id`` in ``_is_live``
+    Sabotage-proof: use ``self._vault_root / item_id`` in ``_liveness``
     instead of ``self._safe_resolve(item_id)``; this test fails because
     ``modified`` is emitted for a note ``fetch`` refuses.
     """
@@ -1325,3 +1325,110 @@ def test_root_container_pass_compares_every_known_note(vault: Path) -> None:
         )
 
     assert [(e.op, e.item_id) for e in events] == [("deleted", "bravo.md")]
+
+
+# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
+_NEEDS_UNREADABLE_DIRECTORY = pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unreadable directory",
+)
+
+
+@pytest.mark.unit
+@_NEEDS_UNREADABLE_DIRECTORY
+def test_unlistable_directory_does_not_tombstone_over_a_watchdog_modification(vault: Path) -> None:
+    """A walk that cannot list a directory proves no deletion; the watchdog's ``modified`` stands.
+
+    Sabotage-proof: return ``winner`` for a tombstone in ``_settle_reconciled``
+    regardless of ``state``; this test fails because the reconciler's false
+    ``deleted`` retires the note.
+    """
+    _seed_vault(vault, {"locked/note.md": "n"})
+    known = _hash_snapshot(vault)
+    observers: list[FakeWatchdogObserver] = []
+    locked = vault / "locked"
+    connector = ObsidianConnector(
+        vault_root=vault,
+        known_state_resolver=lambda _c: known,
+        watcher_factory=fake_obsidian_watcher_factory(observers),
+        reconcile_every=1,
+    )
+    with connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        (locked / "note.md").write_text("edited", encoding="utf-8")
+        observers[0].emit(FileModifiedEvent(str(locked / "note.md")))
+        locked.chmod(0o000)
+        try:
+            events = list(connector.list_changes(cursor=_PAST_CURSOR))
+        finally:
+            locked.chmod(0o755)
+
+    assert [(e.op, e.item_id) for e in events] == [("modified", "locked/note.md")]
+
+
+@pytest.mark.unit
+@_NEEDS_UNREADABLE_DIRECTORY
+def test_unlistable_directory_alone_emits_no_tombstone(vault: Path) -> None:
+    """With no watchdog verdict, an unconfirmed reconciler tombstone is dropped, not emitted.
+
+    Sabotage-proof: return ``winner`` for a tombstone in ``_settle_reconciled``
+    regardless of ``state``; this test fails because ``deleted`` is emitted.
+    """
+    _seed_vault(vault, {"locked/note.md": "n"})
+    known = _hash_snapshot(vault)
+    locked = vault / "locked"
+    connector = ObsidianConnector(
+        vault_root=vault,
+        known_state_resolver=lambda _c: known,
+        watcher_factory=fake_obsidian_watcher_factory([]),
+    )
+    locked.chmod(0o000)
+    try:
+        with connector:
+            events = list(connector.list_changes(cursor=None))
+    finally:
+        locked.chmod(0o755)
+
+    assert events == []
+
+
+@pytest.mark.unit
+def test_watchdog_tombstone_under_a_symlinked_directory_is_not_revived(vault: Path) -> None:
+    """A queued delete stays ``deleted`` when the note's parent became an in-vault directory symlink.
+
+    The resolved target is a regular file inside the vault, but the scan's
+    walk does not traverse directory symlinks, so the note is not one the
+    scan indexes any more.
+
+    Sabotage-proof: revive on ``"present"`` too in ``_settle_watched``;
+    this test fails because ``modified`` is emitted.
+    """
+    _seed_vault(vault, {"notes/deep.md": "d"})
+    observers: list[FakeWatchdogObserver] = []
+    with _watchdog_only_connector(vault, observers) as connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        (vault / "notes").rename(vault / "archive")
+        observers[0].emit(FileDeletedEvent(str(vault / "notes" / "deep.md")))
+        (vault / "notes").symlink_to(vault / "archive", target_is_directory=True)
+        events = list(connector.list_changes(cursor=_PAST_CURSOR))
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "notes/deep.md")]
+
+
+@pytest.mark.unit
+def test_watchdog_tombstone_for_a_note_replaced_by_a_directory_stays_deleted(vault: Path) -> None:
+    """A queued delete for a note now replaced by a same-named directory is not revived.
+
+    Sabotage-proof: drop the ``S_ISREG`` check in ``_liveness``; this test
+    fails because the directory counts as a revivable file and ``modified``
+    is emitted for a path ``fetch`` cannot read.
+    """
+    observers: list[FakeWatchdogObserver] = []
+    with _watchdog_only_connector(vault, observers) as connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        (vault / "alpha.md").unlink()
+        observers[0].emit(FileDeletedEvent(str(vault / "alpha.md")))
+        (vault / "alpha.md").mkdir()
+        events = list(connector.list_changes(cursor=_PAST_CURSOR))
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "alpha.md")]

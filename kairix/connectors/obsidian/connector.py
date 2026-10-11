@@ -40,7 +40,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from kairix.connectors.obsidian.fs import (
@@ -66,6 +66,10 @@ from kairix.core.protocols import (
 )
 
 CONNECTOR_NAME = "obsidian"
+
+# What the filesystem says about one item at merge time; see
+# ``ObsidianConnector._liveness``.
+Liveness = Literal["missing", "present", "revivable", "unknown"]
 
 # Default reconciliation cadence: every Nth ``list_changes`` call runs
 # a full-scan pass in addition to draining the watchdog queue. Picked
@@ -183,7 +187,7 @@ class ObsidianConnector:
             reconcile_events = self._reconciler.reconcile(known)
 
         # One event per item_id: see _merge_change_events for the rule.
-        merged = _merge_change_events(watchdog_events, reconcile_events, cursor, is_live=self._is_live)
+        merged = _merge_change_events(watchdog_events, reconcile_events, cursor, liveness=self._liveness)
         # Track the max modified_at observed so next_cursor() can return
         # the high-water-mark to persist. When the drain yields no
         # events but cursor was non-None, preserve cursor so the next
@@ -433,38 +437,45 @@ class ObsidianConnector:
         reconcile_events = reconciler.reconcile(known)
 
         # One event per item_id: see _merge_change_events for the rule.
-        merged = _merge_change_events(watchdog_events, reconcile_events, cursor, is_live=self._is_live)
+        merged = _merge_change_events(watchdog_events, reconcile_events, cursor, liveness=self._liveness)
         # High-water-mark tracking matches the legacy list_changes path
         # so next_cursor() returns the correct token regardless of
         # which path was taken last.
         self._last_max_modified_at = _max_modified_at(merged, fallback=cursor)
         return iter(merged)
 
-    def _is_live(self, item_id: str) -> bool | None:
-        """Whether ``item_id`` is a regular file in the vault right now.
+    def _liveness(self, item_id: str) -> Liveness:
+        """What the filesystem says about ``item_id`` right now.
 
         Resolved through :meth:`_safe_resolve`, the boundary :meth:`fetch`
-        applies: a note replaced by a symlink to a file outside the vault is
-        not live, since fetching it would be refused. ``None`` when the check
-        itself fails — a parent directory that became unreadable raises
-        ``PermissionError`` — so the merge keeps the source's verdict for that
-        item instead of failing the whole tick. ``stat`` rather than
-        ``Path.is_file`` so the answer is the same on every interpreter
-        (3.13's ``is_file`` swallows the error as ``False``).
+        applies:
+
+          * ``"missing"`` — no regular file there, or it resolves outside
+            the vault (a symlink ``fetch`` would refuse).
+          * ``"revivable"`` — a regular file whose path resolves to itself
+            (no symlinked file or directory on the way), so the scan's walk
+            is sure to reach it (``Path.glob("**")`` does not traverse
+            directory symlinks).
+          * ``"present"`` — a regular file reached through a symlink.
+          * ``"unknown"`` — the check itself failed (a parent directory that
+            became unreadable raises ``PermissionError``), so the merge keeps
+            the source's verdict instead of failing the whole tick.
+
+        ``stat`` rather than ``Path.is_file`` so the answer is the same on
+        every interpreter (3.13's ``is_file`` swallows the error as missing).
         """
         try:
             candidate = self._safe_resolve(item_id)
-        except ValueError:
-            return False
-        except (OSError, RuntimeError):  # RuntimeError: 3.12 resolve() on a symlink loop
-            return None
-        try:
             mode = candidate.stat().st_mode
+        except ValueError:
+            return "missing"
         except (FileNotFoundError, NotADirectoryError):
-            return False
-        except OSError:
-            return None
-        return stat.S_ISREG(mode)
+            return "missing"
+        except (OSError, RuntimeError):  # RuntimeError: 3.12 resolve() on a symlink loop
+            return "unknown"
+        if not stat.S_ISREG(mode):
+            return "missing"
+        return "revivable" if candidate == self._vault_root / item_id else "present"
 
     def _safe_resolve(self, item_id: str) -> Path:
         """Resolve ``vault_root / item_id`` and reject path traversal.
@@ -597,7 +608,7 @@ def _merge_change_events(
     reconcile_events: list[ChangeEvent],
     cursor: Cursor | None,
     *,
-    is_live: Callable[[str], bool | None],
+    liveness: Callable[[str], Liveness],
 ) -> list[ChangeEvent]:
     """Merge the watchdog drain and the reconciler pass into one event per item.
 
@@ -613,34 +624,57 @@ def _merge_change_events(
       3. When the reconciler also reports the item, its op wins: it
          read the live filesystem, whereas the watchdog may replay
          stale events (macOS FSEvents history on observer start).
-      4. Every winner is then checked with ``is_live`` at merge time, later
-         than either source looked. A non-delete op for a missing file
-         becomes ``deleted`` — a replayed watchdog event, or a note deleted
-         after the reconciler's walk read it. A watchdog-only ``deleted``
-         for a file that exists becomes ``modified``. A reconciler
-         tombstone is never reversed: the walk applies the scan's full
-         reachability rules (scope, glob, directory symlinks), which a
-         file's mere existence does not prove. A note recreated after the
-         walk is tombstoned this tick and re-created from the watchdog's
-         ``created`` event on the next. When the check itself fails (an
-         unreadable parent directory), the source's verdict stands.
+      4. Every winner is then checked with ``liveness`` at merge time, later
+         than either source looked (:func:`_settle_watched`,
+         :func:`_settle_reconciled`; states in ``ObsidianConnector._liveness``). A non-delete op
+         for a missing file becomes ``deleted``. A reconciler tombstone is
+         never reversed — the walk applies reachability rules (scope, glob,
+         directory symlinks) that existence does not prove — but it is only
+         confirmed when liveness is known: a walk that could not list a
+         directory proves nothing, so the watchdog's verdict stands, or no
+         event is emitted. A watchdog-only ``deleted`` becomes ``modified``
+         only for a regular file at its own path (``"revivable"``: no
+         symlink on the way), which the scan is sure to reach.
       5. The merged event keeps the EARLIEST surviving timestamp, so the
          cursor high-water-mark stays conservative.
 
     Output order is first appearance, watchdog events first.
     """
-    merged: dict[str, ChangeEvent] = {}
+    watched: dict[str, ChangeEvent] = {}
     for ev in _after_cursor(watchdog_events, cursor):
-        prior = merged.get(ev.item_id)
-        merged[ev.item_id] = ev if prior is None else _collapse_watchdog(prior, ev)
-    reconciled: set[str] = set()
-    for ev in _after_cursor(reconcile_events, cursor):
-        prior = merged.get(ev.item_id)
-        merged[ev.item_id] = ev if prior is None else _with_earliest(ev, prior.modified_at)
-        reconciled.add(ev.item_id)
-    return [
-        _settle_against_fs(ev, is_live(item_id), may_revive=item_id not in reconciled) for item_id, ev in merged.items()
-    ]
+        prior = watched.get(ev.item_id)
+        watched[ev.item_id] = ev if prior is None else _collapse_watchdog(prior, ev)
+    reconciled = {ev.item_id: ev for ev in _after_cursor(reconcile_events, cursor)}
+    merged: list[ChangeEvent] = []
+    for item_id in [*watched, *(i for i in reconciled if i not in watched)]:
+        state = liveness(item_id)
+        if item_id in reconciled:
+            settled = _settle_reconciled(reconciled[item_id], watched.get(item_id), state)
+        else:
+            settled = _settle_watched(watched[item_id], state)
+        if settled is not None:
+            merged.append(settled)
+    return merged
+
+
+def _settle_watched(watched: ChangeEvent, state: Liveness) -> ChangeEvent:
+    """A watchdog-only verdict, corrected by the filesystem when it is sure.
+
+    A tombstone is revived only for a ``"revivable"`` file; a non-delete op
+    becomes ``deleted`` only for a ``"missing"`` one.
+    """
+    if watched.op == "deleted":
+        return replace(watched, op="modified") if state == "revivable" else watched
+    return replace(watched, op="deleted") if state == "missing" else watched
+
+
+def _settle_reconciled(reconciled: ChangeEvent, watched: ChangeEvent | None, state: Liveness) -> ChangeEvent | None:
+    """The reconciler's verdict wins; a tombstone needs an observed absence to stand."""
+    winner = reconciled if watched is None else _with_earliest(reconciled, watched.modified_at)
+    if winner.op == "deleted":
+        # A walk that could not list a directory proves nothing.
+        return watched if state == "unknown" else winner
+    return replace(winner, op="deleted") if state == "missing" else winner
 
 
 def _after_cursor(events: list[ChangeEvent], cursor: Cursor | None) -> list[ChangeEvent]:
@@ -653,21 +687,6 @@ def _collapse_watchdog(prior: ChangeEvent, later: ChangeEvent) -> ChangeEvent:
     """Fold a later watchdog event for the same item onto the earlier one."""
     op = "created" if prior.op == "created" and later.op == "modified" else later.op
     return _with_earliest(replace(later, op=op), prior.modified_at)
-
-
-def _settle_against_fs(ev: ChangeEvent, live: bool | None, *, may_revive: bool) -> ChangeEvent:
-    """Correct an op that contradicts whether the file exists now.
-
-    ``may_revive`` is False for a reconciler winner: its tombstone stands.
-    ``live is None`` (the check failed) keeps the event as the source reported it.
-    """
-    if live is None:
-        return ev
-    if live and may_revive and ev.op == "deleted":
-        return replace(ev, op="modified")
-    if not live and ev.op != "deleted":
-        return replace(ev, op="deleted")
-    return ev
 
 
 def _filter_to_specs(changes: list[FileChange], specs: list[CollectionScanSpec]) -> list[FileChange]:
