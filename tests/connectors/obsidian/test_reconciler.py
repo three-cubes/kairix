@@ -424,3 +424,36 @@ def test_an_unlistable_directory_in_scope_blocks_the_enumeration(
             FullScanReconciler(vault, [spec]).item_ids()
     finally:
         (vault / locked).chmod(0o755)
+
+
+# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unlistable directory",
+)
+@pytest.mark.parametrize(
+    "spec",
+    [
+        CollectionScanSpec(path="tests", exclude=("tests/",)),
+        CollectionScanSpec(path="tests", glob="*.md/"),
+    ],
+    ids=["excluded-root", "directory-only-glob-root"],
+)
+def test_an_unlistable_root_of_a_collection_that_indexes_nothing_does_not_block(
+    tmp_path: Path, spec: CollectionScanSpec
+) -> None:
+    """A collection whose root can hold no indexed file is not probed, so it cannot abort the prune.
+
+    Sabotage-proof: drop ``not _could_hold_indexed_files((), spec)`` from the
+    skip in ``_unlistable_directories``; both cases fail with
+    ``IncompleteScanError`` and a healthy collection's prune is blocked.
+    """
+    vault = _vault(tmp_path, {"tests/t.md": "t", "notes/n.md": "n"})
+    reconciler = FullScanReconciler(vault, [spec, CollectionScanSpec(path="notes")])
+    (vault / "tests").chmod(0o000)
+    try:
+        enumerated = reconciler.item_ids()
+    finally:
+        (vault / "tests").chmod(0o755)
+
+    assert enumerated == ["notes/n.md"]

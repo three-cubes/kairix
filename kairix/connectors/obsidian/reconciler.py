@@ -203,8 +203,8 @@ class FullScanReconciler:
         failures: list[OSError] = []
         for spec in self._collections:
             base = self._vault_root if spec.path in ("", ".") else self._vault_root / spec.path
-            if not base.is_dir():
-                continue
+            if not base.is_dir() or not _could_hold_indexed_files((), spec):
+                continue  # missing, fully excluded or a directory-only glob: indexes nothing
             for dirpath, dirnames, _files in os.walk(base, onerror=failures.append):
                 here = Path(dirpath).relative_to(base).parts
                 dirnames[:] = [d for d in dirnames if _could_hold_indexed_files((*here, d), spec)]
