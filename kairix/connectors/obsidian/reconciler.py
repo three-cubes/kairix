@@ -20,9 +20,10 @@ passes the result of a SQLite ``SELECT path, hash FROM documents``.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,9 @@ from kairix.connectors.obsidian.fs import (
 )
 from kairix.core.protocols import ChangeEvent
 from kairix.knowledge.reflib.dedup import hash_content
+
+# ``stat`` errors that prove a walked path no longer holds a note.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
 
 
 @dataclass(frozen=True)
@@ -60,9 +64,18 @@ class FullScanReconciler:
     ``docs/architecture/connector-ingestion-architecture.md`` §3.
     """
 
-    def __init__(self, vault_root: Path, collections: Iterable[CollectionScanSpec]) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        collections: Iterable[CollectionScanSpec],
+        *,
+        read_text: Callable[[Path], str] = read_text_for_hash,
+    ) -> None:
+        """``read_text`` reads one walked file for hashing; tests inject a reader
+        that changes the filesystem between the walk and the read."""
         self._vault_root = vault_root.resolve()
         self._collections = tuple(collections)
+        self._read_text = read_text
 
     @property
     def vault_root(self) -> Path:
@@ -95,14 +108,11 @@ class FullScanReconciler:
         for abs_path in self._walk():
             item_id = abs_path.relative_to(self._vault_root).as_posix()
             try:
-                text = read_text_for_hash(abs_path)
+                text = self._read_text(abs_path)
             except FileNotFoundError:
                 continue
             except OSError:
-                # Present only if it is still a regular file inside the vault:
-                # a note replaced since the walk by a directory, a symlink loop
-                # or a path under a non-directory is absent, and is tombstoned.
-                if abs_path.is_file() and self._inside_vault(abs_path):
+                if self._still_present(abs_path):
                     unreadable.add(item_id)
                 continue
             out[item_id] = hash_content(text)
@@ -117,6 +127,21 @@ class FullScanReconciler:
                 glob=spec.glob,
                 exclude=spec.exclude,
             )
+
+    def _still_present(self, abs_path: Path) -> bool:
+        """After a failed read: whether the walked path still credibly holds a note.
+
+        A regular file inside the vault is present (content unknown). A path
+        that is gone, sits under a non-directory or loops (``ENOENT``,
+        ``ENOTDIR``, ``ELOOP``) or is no longer a regular file (replaced by a
+        directory) is absent, and is tombstoned. Any other ``stat`` failure
+        (a parent that became unreadable) proves nothing, so the note is kept.
+        """
+        try:
+            mode = abs_path.stat().st_mode
+        except OSError as exc:
+            return exc.errno not in _ABSENT_ERRNOS
+        return stat.S_ISREG(mode) and self._inside_vault(abs_path)
 
     def _inside_vault(self, abs_path: Path) -> bool:
         """True when ``abs_path`` resolves inside the vault — the boundary ``fetch`` applies.

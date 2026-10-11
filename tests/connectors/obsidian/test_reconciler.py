@@ -12,10 +12,12 @@ F8 carries ``@pytest.mark.unit``.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+from kairix.connectors.obsidian.fs import read_text_for_hash
 from kairix.connectors.obsidian.reconciler import CollectionScanSpec, FullScanReconciler
 from kairix.knowledge.reflib.dedup import hash_content
 
@@ -203,3 +205,72 @@ def test_an_out_of_vault_file_symlink_in_an_unlistable_directory_is_tombstoned(t
         listless.chmod(0o755)
 
     assert ops == [("deleted", "listless/out.md")]
+
+
+def _replacing_reader(target: Path, replace: Callable[[Path], None]) -> Callable[[Path], str]:
+    """A reader that changes ``target`` on disk just before reading it — between walk and read."""
+
+    def _read(path: Path) -> str:
+        if path == target:
+            replace(path)
+        return read_text_for_hash(path)
+
+    return _read
+
+
+def _to_directory(path: Path) -> None:
+    path.unlink()
+    path.mkdir()
+
+
+def _to_loop(path: Path) -> None:
+    path.unlink()
+    path.symlink_to(path)
+
+
+@pytest.mark.parametrize("replace", [_to_directory, _to_loop], ids=["directory", "symlink-loop"])
+def test_a_note_replaced_during_read_is_tombstoned(tmp_path: Path, replace: Callable[[Path], None]) -> None:
+    """A note replaced between the walk and the read by a directory or a loop is absent.
+
+    Sabotage-proof: return ``True`` from ``_still_present`` whenever ``stat``
+    succeeds (drop the ``S_ISREG`` check); the directory case fails. Drop
+    ``ELOOP`` from ``_ABSENT_ERRNOS``; the loop case fails. Either way the
+    note keeps its stale index.
+    """
+    files = {"alpha.md": "a", "bravo.md": "b"}
+    vault = _vault(tmp_path, files)
+    reconciler = FullScanReconciler(
+        vault,
+        [CollectionScanSpec(path=".")],
+        read_text=_replacing_reader(vault / "bravo.md", replace),
+    )
+
+    assert _ops(reconciler, _known(files)) == [("deleted", "bravo.md")]
+
+
+# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unreadable directory",
+)
+def test_a_note_whose_directory_becomes_unreadable_during_read_is_kept(tmp_path: Path) -> None:
+    """A note whose parent becomes unreadable between the walk and the read proves nothing: no event.
+
+    Sabotage-proof: treat every ``stat`` failure as absent in
+    ``_still_present`` (``return False``); this test fails because the note
+    is tombstoned on an indeterminate error.
+    """
+    files = {"locked/note.md": "n"}
+    vault = _vault(tmp_path, files)
+    locked = vault / "locked"
+    reconciler = FullScanReconciler(
+        vault,
+        [CollectionScanSpec(path=".")],
+        read_text=_replacing_reader(locked / "note.md", lambda _p: locked.chmod(0o000)),
+    )
+    try:
+        ops = _ops(reconciler, _known(files))
+    finally:
+        locked.chmod(0o755)
+
+    assert ops == []
