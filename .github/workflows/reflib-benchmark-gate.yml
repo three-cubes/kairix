@@ -89,7 +89,7 @@ jobs:
 
       - name: Upload per-corpus results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: conversation-eval-results
           path: /tmp/conversation-eval/

@@ -70,7 +70,7 @@ jobs:
 
       - name: Upload nightly artifacts
         if: steps.suite_check.outputs.present == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: locomo-nightly-${{ github.run_id }}
           path: artifacts/

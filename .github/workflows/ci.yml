@@ -240,7 +240,7 @@ jobs:
           exit 0
 
       - name: Upload test results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
           name: test-results-contracts
@@ -390,7 +390,7 @@ jobs:
             -v --tb=short
 
       - name: Upload test results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
           name: test-results-unit-${{ matrix.python-version }}-${{ matrix.group }}
@@ -418,7 +418,7 @@ jobs:
         # upload-artifact@v4 excludes dotfiles and `.coverage.<group>` is a
         # dotfile.
         if: matrix.python-version == '3.13'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: coverage-shard-${{ matrix.group }}
           include-hidden-files: true
@@ -546,7 +546,7 @@ jobs:
         # `!cancelled()` so the merged report is still available to debug a floor
         # failure.
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: coverage-data
           include-hidden-files: true
@@ -676,7 +676,7 @@ jobs:
         # directly so we don't depend on `coverage combine`'s data-file
         # behaviour.
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: coverage-data-integration
           path: coverage-integration.xml
@@ -708,7 +708,7 @@ jobs:
           python -c "from kairix.knowledge.reflib.sources import SOURCES; print(f'Reflib OK: {len(SOURCES)} sources')"
 
       - name: Upload test results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
           name: test-results-integration
@@ -906,7 +906,7 @@ jobs:
           detect-secrets audit --report .secrets.baseline || true
 
       - name: Upload security reports
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
           name: security-reports-${{ github.run_id }}
