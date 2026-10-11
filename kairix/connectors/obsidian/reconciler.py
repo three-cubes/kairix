@@ -20,6 +20,7 @@ passes the result of a SQLite ``SELECT path, hash FROM documents``.
 
 from __future__ import annotations
 
+import os
 import stat
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -115,12 +116,15 @@ class FullScanReconciler:
             )
 
     def _inside_vault(self, abs_path: Path) -> bool:
-        """True when ``abs_path`` resolves inside the vault — the boundary ``fetch`` applies."""
-        try:
-            abs_path.resolve().relative_to(self._vault_root)
-        except (ValueError, OSError, RuntimeError):  # outside, or a symlink loop
-            return False
-        return True
+        """True when ``abs_path`` resolves inside the vault — the boundary ``fetch`` applies.
+
+        Only a proven outside target is outside: non-strict ``realpath`` never
+        raises, so a resolution it cannot complete (a parent that became
+        unreadable) leaves the path inside the vault and the entry is kept.
+        Called only for paths the walk saw as files, so a symlink loop
+        (which ``is_file`` rejects) never reaches it.
+        """
+        return Path(os.path.realpath(abs_path)).is_relative_to(self._vault_root)
 
     def item_ids(self) -> list[str]:
         """Every file the walk finds, readable or not, sorted.
