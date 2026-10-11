@@ -35,6 +35,7 @@ into other connectors, no reach into the extractor layer.
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -438,9 +439,22 @@ class ObsidianConnector:
         self._last_max_modified_at = _max_modified_at(merged, fallback=cursor)
         return iter(merged)
 
-    def _is_live(self, item_id: str) -> bool:
-        """Whether ``item_id`` is a regular file in the vault right now."""
-        return (self._vault_root / item_id).is_file()
+    def _is_live(self, item_id: str) -> bool | None:
+        """Whether ``item_id`` is a regular file in the vault right now.
+
+        ``None`` when the check itself fails — a parent directory that became
+        unreadable raises ``PermissionError`` — so the merge keeps the source's
+        verdict for that item instead of failing the whole tick. ``os.stat``
+        rather than ``Path.is_file`` so the answer is the same on every
+        interpreter (3.13's ``is_file`` swallows the error as ``False``).
+        """
+        try:
+            mode = (self._vault_root / item_id).stat().st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError:
+            return None
+        return stat.S_ISREG(mode)
 
     def _safe_resolve(self, item_id: str) -> Path:
         """Resolve ``vault_root / item_id`` and reject path traversal.
@@ -573,7 +587,7 @@ def _merge_change_events(
     reconcile_events: list[ChangeEvent],
     cursor: Cursor | None,
     *,
-    is_live: Callable[[str], bool],
+    is_live: Callable[[str], bool | None],
 ) -> list[ChangeEvent]:
     """Merge the watchdog drain and the reconciler pass into one event per item.
 
@@ -589,11 +603,17 @@ def _merge_change_events(
       3. When the reconciler also reports the item, its op wins: it
          read the live filesystem, whereas the watchdog may replay
          stale events (macOS FSEvents history on observer start).
-      4. An item only the watchdog reports is checked against the live
-         filesystem with ``is_live``: a non-delete op for a missing file
-         becomes ``deleted``, and a ``deleted`` for a file that exists
-         becomes ``modified``. This covers replayed or reordered events
-         on ticks where the reconciler has no verdict for the item.
+      4. Every winner is then checked with ``is_live`` at merge time, later
+         than either source looked. A non-delete op for a missing file
+         becomes ``deleted`` — a replayed watchdog event, or a note deleted
+         after the reconciler's walk read it. A watchdog-only ``deleted``
+         for a file that exists becomes ``modified``. A reconciler
+         tombstone is never reversed: the walk applies the scan's full
+         reachability rules (scope, glob, directory symlinks), which a
+         file's mere existence does not prove. A note recreated after the
+         walk is tombstoned this tick and re-created from the watchdog's
+         ``created`` event on the next. When the check itself fails (an
+         unreadable parent directory), the source's verdict stands.
       5. The merged event keeps the EARLIEST surviving timestamp, so the
          cursor high-water-mark stays conservative.
 
@@ -603,11 +623,14 @@ def _merge_change_events(
     for ev in _after_cursor(watchdog_events, cursor):
         prior = merged.get(ev.item_id)
         merged[ev.item_id] = ev if prior is None else _collapse_watchdog(prior, ev)
-    merged = {item_id: _settle_against_fs(ev, is_live(item_id)) for item_id, ev in merged.items()}
+    reconciled: set[str] = set()
     for ev in _after_cursor(reconcile_events, cursor):
         prior = merged.get(ev.item_id)
         merged[ev.item_id] = ev if prior is None else _with_earliest(ev, prior.modified_at)
-    return list(merged.values())
+        reconciled.add(ev.item_id)
+    return [
+        _settle_against_fs(ev, is_live(item_id), may_revive=item_id not in reconciled) for item_id, ev in merged.items()
+    ]
 
 
 def _after_cursor(events: list[ChangeEvent], cursor: Cursor | None) -> list[ChangeEvent]:
@@ -622,9 +645,15 @@ def _collapse_watchdog(prior: ChangeEvent, later: ChangeEvent) -> ChangeEvent:
     return _with_earliest(replace(later, op=op), prior.modified_at)
 
 
-def _settle_against_fs(ev: ChangeEvent, live: bool) -> ChangeEvent:
-    """Correct a watchdog op that contradicts whether the file exists now."""
-    if live and ev.op == "deleted":
+def _settle_against_fs(ev: ChangeEvent, live: bool | None, *, may_revive: bool) -> ChangeEvent:
+    """Correct an op that contradicts whether the file exists now.
+
+    ``may_revive`` is False for a reconciler winner: its tombstone stands.
+    ``live is None`` (the check failed) keeps the event as the source reported it.
+    """
+    if live is None:
+        return ev
+    if live and may_revive and ev.op == "deleted":
         return replace(ev, op="modified")
     if not live and ev.op != "deleted":
         return replace(ev, op="deleted")
