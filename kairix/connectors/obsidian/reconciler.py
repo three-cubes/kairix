@@ -20,12 +20,14 @@ passes the result of a SQLite ``SELECT path, hash FROM documents``.
 
 from __future__ import annotations
 
+import stat
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from kairix.connectors.obsidian.fs import (
+    collection_accepts,
     iter_collection_files,
     read_text_for_hash,
 )
@@ -64,6 +66,13 @@ class FullScanReconciler:
     @property
     def vault_root(self) -> Path:
         return self._vault_root
+
+    def accepts(self, item_id: str) -> bool:
+        """True when any configured collection indexes ``item_id`` — the rule :meth:`_discover` walks with."""
+        return any(
+            collection_accepts(item_id, collection_path=spec.path, glob=spec.glob, exclude=spec.exclude)
+            for spec in self._collections
+        )
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -107,6 +116,24 @@ class FullScanReconciler:
         live, unreadable = self._discover()
         return sorted(live.keys() | unreadable)
 
+    def _present_but_unlisted(self, item_id: str) -> bool:
+        """A known file the walk should have found but did not: absence unproven.
+
+        In scope, a regular file, and at its own path (no symlink on the way,
+        which ``Path.glob("**")`` would not traverse) — so the walk missed it
+        only because it could not list a directory (a non-root worker on a
+        mode-``0111`` directory can read the file but not enumerate it). Such
+        a note is not tombstoned; a note moved out of scope, or reachable
+        only through a symlink, still is.
+        """
+        if not self.accepts(item_id):
+            return False
+        path = self._vault_root / item_id
+        try:
+            return path.resolve() == path and stat.S_ISREG(path.stat().st_mode)
+        except (OSError, RuntimeError):  # missing, unreadable parent, or a symlink loop
+            return False
+
     def reconcile(self, known_state: Mapping[str, str]) -> list[ChangeEvent]:
         """Compare the live vault against ``known_state``.
 
@@ -140,6 +167,8 @@ class FullScanReconciler:
         # An unreadable file is present with unknown content: no event, so a
         # read failure never retires indexed content.
         for item_id in sorted(known_ids - live_ids - unreadable):
+            if self._present_but_unlisted(item_id):
+                continue
             deleted.append(ChangeEvent(op="deleted", item_id=item_id, modified_at=now))
 
         return [*created, *modified, *deleted]

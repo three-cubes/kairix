@@ -1040,16 +1040,16 @@ def test_note_deleted_after_the_walk_tombstones_without_a_watchdog_event(vault: 
 
 
 @pytest.mark.unit
-def test_note_recreated_after_the_walk_is_tombstoned_then_recreated_next_tick(vault: Path) -> None:
-    """A reconciler tombstone stands this tick; the watchdog re-creates the note on the next.
+def test_note_recreated_after_the_walk_is_not_tombstoned(vault: Path) -> None:
+    """A note recreated after the walk, before the tombstone is decided, is not tombstoned.
 
-    The merge never reverses a reconciler ``deleted``: existence alone does
-    not prove the scan can reach a file. Recreating the note queues a
-    watchdog ``created``, which brings it back one tick later.
+    The reconciler checks a known note the walk missed: in scope, a regular
+    file at its own path, so the walk should have found it — absence is
+    unproven. The watchdog's ``created`` for the recreation then brings the
+    new content in on the next tick.
 
-    Sabotage-proof: make ``_settle_reconciled`` turn a tombstone whose note
-    is ``"present"`` or ``"revivable"`` into ``modified``; this test fails because the first tick emits
-    ``modified`` instead of keeping the reconciler's tombstone.
+    Sabotage-proof: make ``_present_but_unlisted`` return ``False``; this
+    test fails because the first tick tombstones the live note.
     """
     known = _hash_snapshot(vault)
     (vault / "bravo.md").unlink()
@@ -1066,7 +1066,7 @@ def test_note_recreated_after_the_walk_is_tombstoned_then_recreated_next_tick(va
         observers[0].emit(FileCreatedEvent(str(vault / "bravo.md")))
         second = list(connector.list_changes(cursor=_PAST_CURSOR))
 
-    assert [(e.op, e.item_id) for e in first] == [("deleted", "bravo.md")]
+    assert first == []
     assert [(e.op, e.item_id) for e in second] == [("created", "bravo.md")]
 
 
@@ -1484,3 +1484,60 @@ def test_container_pass_with_a_dot_prefixed_container_path(tmp_path: Path) -> No
         )
 
     assert [(e.op, e.item_id) for e in events] == [("deleted", "notes/gone.md")]
+
+
+@pytest.mark.unit
+@_NEEDS_UNREADABLE_DIRECTORY
+def test_unenumerable_directory_keeps_the_watchdog_modification(vault: Path) -> None:
+    """A mode-``0111`` directory: the note is readable but the walk cannot list it; ``modified`` stands.
+
+    Sabotage-proof: make ``_present_but_unlisted`` return ``False``; this
+    test fails because the reconciler's tombstone retires a readable note.
+    """
+    _seed_vault(vault, {"listless/note.md": "n"})
+    known = _hash_snapshot(vault)
+    observers: list[FakeWatchdogObserver] = []
+    listless = vault / "listless"
+    connector = ObsidianConnector(
+        vault_root=vault,
+        known_state_resolver=lambda _c: known,
+        watcher_factory=fake_obsidian_watcher_factory(observers),
+        reconcile_every=1,
+    )
+    with connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        (listless / "note.md").write_text("edited", encoding="utf-8")
+        observers[0].emit(FileModifiedEvent(str(listless / "note.md")))
+        listless.chmod(0o111)
+        try:
+            events = list(connector.list_changes(cursor=_PAST_CURSOR))
+        finally:
+            listless.chmod(0o755)
+
+    assert [(e.op, e.item_id) for e in events] == [("modified", "listless/note.md")]
+
+
+@pytest.mark.unit
+@_NEEDS_UNREADABLE_DIRECTORY
+def test_unenumerable_directory_alone_emits_no_tombstone(vault: Path) -> None:
+    """Reconciliation alone does not tombstone a readable note in a directory it cannot list.
+
+    Sabotage-proof: make ``_present_but_unlisted`` return ``False``; this
+    test fails because ``deleted`` is emitted.
+    """
+    _seed_vault(vault, {"listless/note.md": "n"})
+    known = _hash_snapshot(vault)
+    listless = vault / "listless"
+    connector = ObsidianConnector(
+        vault_root=vault,
+        known_state_resolver=lambda _c: known,
+        watcher_factory=fake_obsidian_watcher_factory([]),
+    )
+    listless.chmod(0o111)
+    try:
+        with connector:
+            events = list(connector.list_changes(cursor=None))
+    finally:
+        listless.chmod(0o755)
+
+    assert events == []
