@@ -21,7 +21,7 @@ passes the result of a SQLite ``SELECT path, hash FROM documents``.
 from __future__ import annotations
 
 import stat
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,27 +85,42 @@ class FullScanReconciler:
         with a delete) are silently skipped — the next reconciliation
         will surface the delete on its own. A file the walk finds but
         cannot read (``PermissionError`` or another ``OSError``) is in
-        ``unreadable``: present, content unknown — never a deletion.
+        ``unreadable``: present, content unknown — never a deletion. A
+        symlink that resolves outside the vault is not: ``fetch`` refuses
+        it, so it counts as absent and an indexed note there is tombstoned.
         """
         out: dict[str, str] = {}
         unreadable: set[str] = set()
+        for abs_path in self._walk():
+            item_id = abs_path.relative_to(self._vault_root).as_posix()
+            try:
+                text = read_text_for_hash(abs_path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                if self._inside_vault(abs_path):
+                    unreadable.add(item_id)
+                continue
+            out[item_id] = hash_content(text)
+        return out, frozenset(unreadable)
+
+    def _walk(self) -> Iterator[Path]:
+        """Every file the configured collections select, in collection order."""
         for spec in self._collections:
-            for abs_path in iter_collection_files(
+            yield from iter_collection_files(
                 vault_root=self._vault_root,
                 collection_path=spec.path,
                 glob=spec.glob,
                 exclude=spec.exclude,
-            ):
-                item_id = abs_path.relative_to(self._vault_root).as_posix()
-                try:
-                    text = read_text_for_hash(abs_path)
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    unreadable.add(item_id)
-                    continue
-                out[item_id] = hash_content(text)
-        return out, frozenset(unreadable)
+            )
+
+    def _inside_vault(self, abs_path: Path) -> bool:
+        """True when ``abs_path`` resolves inside the vault — the boundary ``fetch`` applies."""
+        try:
+            abs_path.resolve().relative_to(self._vault_root)
+        except (ValueError, OSError, RuntimeError):  # outside, or a symlink loop
+            return False
+        return True
 
     def item_ids(self) -> list[str]:
         """Every file the walk finds, readable or not, sorted.
@@ -148,11 +163,14 @@ class FullScanReconciler:
             last (so a worker that dies mid-batch still records new
             content before tombstones).
         """
+        # Stamp events with the walk's START: a watchdog event queued during
+        # or after the walk (a note recreated mid-tick) must stay after the
+        # cursor these events advance, or the next tick would filter it out.
+        now = self._now_iso()
         live, unreadable = self._discover()
         live_ids = set(live.keys())
         known_ids = set(known_state.keys())
 
-        now = self._now_iso()
         created: list[ChangeEvent] = []
         modified: list[ChangeEvent] = []
         deleted: list[ChangeEvent] = []

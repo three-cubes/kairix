@@ -22,7 +22,7 @@ callable default), F8 carries ``@pytest.mark.unit``.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -969,10 +969,18 @@ class _ChangesFileOnRead(Mapping[str, str]):
     a deterministic stand-in for a note deleted or recreated mid-tick.
     """
 
-    def __init__(self, known: Mapping[str, str], target: Path, *, recreate_with: str | None = None) -> None:
+    def __init__(
+        self,
+        known: Mapping[str, str],
+        target: Path,
+        *,
+        recreate_with: str | None = None,
+        on_fire: Callable[[], None] = lambda: None,
+    ) -> None:
         self._known = dict(known)
         self._target = target
         self._recreate_with = recreate_with
+        self._on_fire = on_fire
         self._fired = False
 
     def _fire(self) -> None:
@@ -983,6 +991,7 @@ class _ChangesFileOnRead(Mapping[str, str]):
             self._target.unlink()
         else:
             self._target.write_text(self._recreate_with, encoding="utf-8")
+        self._on_fire()
 
     def __getitem__(self, key: str) -> str:
         self._fire()
@@ -1541,3 +1550,57 @@ def test_unenumerable_directory_alone_emits_no_tombstone(vault: Path) -> None:
         listless.chmod(0o755)
 
     assert events == []
+
+
+@pytest.mark.unit
+def test_watchdog_modification_for_a_note_replaced_by_a_self_symlink_is_tombstoned(vault: Path) -> None:
+    """A note replaced by a self-referential symlink is gone: its queued ``modified`` settles to ``deleted``.
+
+    Sabotage-proof: map ``ELOOP`` to ``"unknown"`` in ``_liveness``; this
+    test fails because ``modified`` is emitted and ``fetch`` would hit the
+    same loop.
+    """
+    observers: list[FakeWatchdogObserver] = []
+    with _watchdog_only_connector(vault, observers) as connector:
+        assert list(connector.list_changes(cursor=None)) == []
+        (vault / "alpha.md").unlink()
+        observers[0].emit(FileModifiedEvent(str(vault / "alpha.md")))
+        (vault / "alpha.md").symlink_to(vault / "alpha.md")
+        events = list(connector.list_changes(cursor=_PAST_CURSOR))
+
+    assert [(e.op, e.item_id) for e in events] == [("deleted", "alpha.md")]
+
+
+@pytest.mark.unit
+def test_watchdog_event_queued_during_the_walk_survives_the_next_cursor(vault: Path) -> None:
+    """A note created mid-walk comes in on the next tick, past the cursor the tombstones advanced.
+
+    The reconciler stamps its events with the walk's start, so a watchdog
+    event observed during the walk sorts after them.
+
+    Sabotage-proof: stamp reconciler events after ``_discover`` in
+    ``FullScanReconciler.reconcile``; this test fails because the next tick's
+    cursor filters out the mid-walk ``created``.
+    """
+    known = _hash_snapshot(vault)
+    (vault / "bravo.md").unlink()
+    observers: list[FakeWatchdogObserver] = []
+    delta = vault / "delta.md"
+    racing = _ChangesFileOnRead(
+        known,
+        delta,
+        recreate_with="# Delta",
+        on_fire=lambda: observers[0].emit(FileCreatedEvent(str(delta))),
+    )
+    connector = ObsidianConnector(
+        vault_root=vault,
+        known_state_resolver=lambda _c: racing,
+        watcher_factory=fake_obsidian_watcher_factory(observers),
+        reconcile_every=100,
+    )
+    with connector:
+        first = list(connector.list_changes(cursor=None))
+        second = list(connector.list_changes(cursor=connector.next_cursor()))
+
+    assert [(e.op, e.item_id) for e in first] == [("deleted", "bravo.md")]
+    assert [(e.op, e.item_id) for e in second] == [("created", "delta.md")]

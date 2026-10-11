@@ -91,3 +91,58 @@ def test_a_readable_note_in_an_unlistable_directory_is_not_tombstoned(tmp_path: 
         listless.chmod(0o755)
 
     assert ops == []
+
+
+# Root reads any file regardless of mode bits; Windows has no POSIX mode bits.
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unreadable file",
+)
+def test_an_unreadable_symlink_outside_the_vault_is_tombstoned(tmp_path: Path) -> None:
+    """A note replaced by a symlink to an unreadable file outside the vault is absent, not unreadable.
+
+    Sabotage-proof: add every read failure to ``unreadable`` (drop the
+    ``_inside_vault`` check in ``_discover``); this test fails because the
+    note ``fetch`` refuses is never tombstoned.
+    """
+    files = {"alpha.md": "a"}
+    vault = _vault(tmp_path, files)
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+    (vault / "alpha.md").unlink()
+    (vault / "alpha.md").symlink_to(outside)
+    outside.chmod(0o000)
+    try:
+        ops = _ops(FullScanReconciler(vault, [CollectionScanSpec(path=".")]), _known(files))
+    finally:
+        outside.chmod(0o644)
+
+    assert ops == [("deleted", "alpha.md")]
+
+
+# Root reads any file regardless of mode bits; Windows has no POSIX mode bits.
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for an unreadable file",
+)
+def test_an_unreadable_note_inside_the_vault_is_not_tombstoned(tmp_path: Path) -> None:
+    """A note the walk finds but cannot read is present with unknown content.
+
+    No event, and it stays in the prune cycle's enumeration so it is not
+    pruned either.
+
+    Sabotage-proof: make ``_inside_vault`` return ``False``; this test fails
+    because ``alpha.md`` drops out of ``item_ids`` and would be pruned.
+    """
+    files = {"alpha.md": "a", "bravo.md": "b"}
+    vault = _vault(tmp_path, files)
+    reconciler = FullScanReconciler(vault, [CollectionScanSpec(path=".")])
+    (vault / "alpha.md").chmod(0o000)
+    try:
+        ops = _ops(reconciler, _known(files))
+        enumerated = reconciler.item_ids()
+    finally:
+        (vault / "alpha.md").chmod(0o644)
+
+    assert ops == []
+    assert enumerated == ["alpha.md", "bravo.md"]
