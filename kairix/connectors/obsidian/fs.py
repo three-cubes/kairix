@@ -8,7 +8,9 @@ not re-export anything from this module.
 
 from __future__ import annotations
 
+import errno
 import os
+import stat
 import sys
 from collections.abc import Iterable, Iterator
 from functools import cache, lru_cache
@@ -203,6 +205,31 @@ def _parts_match(parts: tuple[str, ...], patterns: tuple[str, ...], flavour: typ
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
 
 
+# ``fcntl`` command that reports an open descriptor's path (macOS); Linux
+# answers through ``/proc/self/fd`` instead, and Windows through neither.
+if sys.platform == "win32":
+    _F_GETPATH: int | None = None
+else:
+    import fcntl
+
+    _F_GETPATH = getattr(fcntl, "F_GETPATH", None)
+_PATH_MAX = 1024
+
+
+def _descriptor_path(fd: int) -> Path | None:
+    """The path the OS reports for an open descriptor — the name it was opened by.
+
+    Call it straight after the open: macOS reports the latest name looked
+    up for the file. ``None`` where the platform cannot say (Windows).
+    """
+    if _F_GETPATH is not None:
+        return Path(os.fsdecode(fcntl.fcntl(fd, _F_GETPATH, bytes(_PATH_MAX)).rstrip(b"\0")))
+    proc = f"/proc/self/fd/{fd}"
+    if os.path.islink(proc):
+        return Path(os.readlink(proc))
+    return None
+
+
 class OutsideVaultError(ValueError):
     """A path resolves outside the vault, so the connector will not read it."""
 
@@ -218,10 +245,14 @@ def read_at(real: Path, abs_path: Path, vault_root: Path, size: int = -1) -> tup
     """Stat and read ``real`` — ``abs_path`` as resolved earlier — only while it is still that file.
 
     ``real`` is opened without following a final symlink, then, before a
-    byte is read, ``abs_path`` is resolved again: it must still land inside
-    the vault, on the very file that was opened. A symlink swapped in at
-    any level after the first resolve fails one of the two, so no byte
-    outside the vault is ever read. Opening needs no directory listing
+    byte is read: the opened file must be a regular file (a FIFO or device
+    swapped in never reads as empty content); ``abs_path`` is resolved
+    again and must still land inside the vault on the very file opened;
+    and the OS must report the descriptor itself under the vault — the
+    name it was opened by, which no later swap of a parent directory can
+    change. So no byte outside the vault is ever read. (Windows reports no
+    descriptor path; there the re-resolve alone guards, and creating
+    symlinks needs privilege.) Opening needs no directory listing
     permission and works on every platform. Returns the opened file's
     ``fstat`` with up to ``size`` bytes (all of them by default), so
     metadata and content come from the same verified file.
@@ -229,10 +260,17 @@ def read_at(real: Path, abs_path: Path, vault_root: Path, size: int = -1) -> tup
     Raises:
         OutsideVaultError: ``abs_path`` now resolves outside the vault, or to
             a file other than the one opened.
-        OSError: the path is gone or ``real`` is now a symlink.
+        OSError: the path is gone, ``real`` is now a symlink, or it is not a
+            regular file.
     """
     with os.fdopen(os.open(real, _READ_FLAGS), "rb") as fh:
         opened = os.fstat(fh.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(abs_path))
+        # Ask before any lookup by name: macOS reports the latest name used.
+        held = _descriptor_path(fh.fileno())
+        if held is not None and not held.is_relative_to(vault_root):
+            raise OutsideVaultError(f"{abs_path} was opened outside the vault")
         now = os.stat(_resolved_inside(abs_path, vault_root))
         if (now.st_dev, now.st_ino) != (opened.st_dev, opened.st_ino):
             raise OutsideVaultError(f"{abs_path} changed while it was opened")

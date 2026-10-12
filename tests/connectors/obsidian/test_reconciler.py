@@ -307,6 +307,28 @@ def test_a_note_swapped_for_an_outside_symlink_after_the_check_is_tombstoned_unr
     assert _ops(reconciler, _known(files)) == [("deleted", "alpha.md")]
 
 
+def test_a_note_swapped_for_a_fifo_during_read_is_tombstoned(tmp_path: Path) -> None:
+    """A note replaced by a FIFO between walk and read is absent, not empty content.
+
+    Sabotage-proof: drop the ``S_ISREG`` check in ``read_at``; the FIFO
+    hashes as ``""`` and ``modified`` is emitted instead of ``deleted``.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("needs POSIX FIFOs")  # Windows has none
+    files = {"alpha.md": "a"}
+    vault = _vault(tmp_path, files)
+
+    def _to_fifo(path: Path) -> None:
+        path.unlink()
+        os.mkfifo(path)
+
+    reconciler = FullScanReconciler(
+        vault, [CollectionScanSpec(path=".")], read_text=_replacing_reader(vault / "alpha.md", _to_fifo)
+    )
+
+    assert _ops(reconciler, _known(files)) == [("deleted", "alpha.md")]
+
+
 def _to_directory(path: Path) -> None:
     path.unlink()
     path.mkdir()

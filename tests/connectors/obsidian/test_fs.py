@@ -367,6 +367,44 @@ def test_read_at_refuses_a_file_that_is_not_the_one_the_path_names(tmp_path: Pat
 
 
 @pytest.mark.unit
+def test_read_at_refuses_a_file_opened_through_a_swapped_parent(tmp_path: Path) -> None:
+    """An open that a parent-directory swap led out of the vault is refused, even when every name check passes.
+
+    Replays the double swap: the open went through a parent that pointed out
+    of the vault, while the path resolves back inside onto a hard link of the
+    very file opened — so the re-resolve and the inode check both pass. Only
+    the name the descriptor was opened by gives it away.
+    Sabotage-proof: drop the ``_descriptor_path`` check; the outside bytes
+    come back.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (vault / "named.md").write_bytes(b"secret")
+    os.link(vault / "named.md", outside / "x.md")
+    (vault / "swapped").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OutsideVaultError):
+        read_at(vault / "swapped" / "x.md", vault / "named.md", vault.resolve())
+
+
+@pytest.mark.unit
+def test_read_at_refuses_a_fifo(tmp_path: Path) -> None:
+    """A note swapped for a FIFO is refused, never read as empty content.
+
+    Sabotage-proof: drop the ``S_ISREG`` check; ``b""`` comes back.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("needs POSIX FIFOs")  # Windows has none
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    os.mkfifo(vault / "note.md")
+    with pytest.raises(OSError) as raised:
+        read_at(vault / "note.md", vault / "note.md", vault.resolve())
+    assert not isinstance(raised.value, OutsideVaultError)
+
+
+@pytest.mark.unit
 def test_read_bytes_inside_vault_reads_a_file_in_an_execute_only_directory(tmp_path: Path) -> None:
     """A note in a directory the worker can search but not list still reads.
 
