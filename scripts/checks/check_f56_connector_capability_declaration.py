@@ -73,9 +73,8 @@ next: see docs/architecture/connector-scope-topology/ADR.md
 run: python3 scripts/checks/check_f56_connector_capability_declaration.py
 
 Pass example:
-  class ObsidianConnector(SourceConnector, PollConnector, SlimConnector,
-                          HierarchyConnector):
-      ...
+  class ObsidianConnector(SourceConnector, PollConnector, HierarchyConnector):
+      ...  # not SlimConnector: a local walk cannot prove a prune enumeration complete
 
 Forbidden example:
   class ObsidianConnector:  # no Protocol bases, no CAPABILITIES marker
