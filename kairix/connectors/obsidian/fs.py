@@ -230,6 +230,21 @@ def _descriptor_path(fd: int) -> Path | None:
     return None
 
 
+@lru_cache(maxsize=16)
+def _descriptor_root(vault_root: Path) -> Path:
+    """``vault_root`` as descriptor paths spell it.
+
+    A case-insensitive volume (macOS) reports the on-disk casing, which may
+    differ from the configured root; asking for the root's own descriptor
+    path compares like with like.
+    """
+    fd = os.open(vault_root, os.O_RDONLY)
+    try:
+        return _descriptor_path(fd) or vault_root
+    finally:
+        os.close(fd)
+
+
 class OutsideVaultError(ValueError):
     """A path resolves outside the vault, so the connector will not read it."""
 
@@ -269,7 +284,7 @@ def read_at(real: Path, abs_path: Path, vault_root: Path, size: int = -1) -> tup
             raise OSError(errno.EINVAL, "not a regular file", str(abs_path))
         # Ask before any lookup by name: macOS reports the latest name used.
         held = _descriptor_path(fh.fileno())
-        if held is not None and not held.is_relative_to(vault_root):
+        if held is not None and not held.is_relative_to(_descriptor_root(vault_root)):
             raise OutsideVaultError(f"{abs_path} was opened outside the vault")
         now = os.stat(_resolved_inside(abs_path, vault_root))
         if (now.st_dev, now.st_ino) != (opened.st_dev, opened.st_ino):

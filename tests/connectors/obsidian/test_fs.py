@@ -24,6 +24,7 @@ from kairix.connectors.obsidian.fs import (
     mime_for_path,
     read_at,
     read_bytes_inside_vault,
+    read_inside_vault,
     read_text_for_hash,
 )
 
@@ -389,6 +390,21 @@ def test_read_at_refuses_a_file_opened_through_a_swapped_parent(tmp_path: Path) 
     (vault / "swapped").symlink_to(outside, target_is_directory=True)
     with pytest.raises(OutsideVaultError):
         read_at(vault / "swapped" / "x.md", vault / "named.md", vault.resolve())
+
+
+@pytest.mark.unit
+def test_read_inside_vault_accepts_a_root_configured_in_other_casing(tmp_path: Path) -> None:
+    """On a case-insensitive volume, a root spelled ``vault`` for an on-disk ``Vault`` still reads.
+
+    Sabotage-proof: compare the descriptor path with ``vault_root`` itself;
+    the on-disk ``Vault`` casing it reports is refused as outside.
+    """
+    (tmp_path / "Vault").mkdir()
+    if not (tmp_path / "vault").exists():
+        pytest.skip("needs a case-insensitive volume")  # case-sensitive volumes have one spelling
+    (tmp_path / "Vault" / "note.md").write_bytes(b"note")
+    vault = Path(os.path.realpath(tmp_path)) / "vault"
+    assert read_inside_vault(vault / "note.md", vault)[1] == b"note"
 
 
 @pytest.mark.unit
