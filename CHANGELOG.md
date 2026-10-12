@@ -7,6 +7,33 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
+### Obsidian change detection no longer loses deletions or deletes live notes
+
+Several fixes to how the Obsidian connector decides that a note was created,
+changed or deleted:
+
+- **Deleted notes leave the index reliably.** A note edited and then deleted
+  between ticks, or deleted while the scan was running, is now retired instead
+  of being fetched as "modified" and failing. On macOS, a stale file-system
+  event replayed at startup no longer hides a real deletion.
+- **Live notes are no longer deleted by mistake.** A note the connector cannot
+  read (permissions), or that sits in a folder it cannot list, keeps its
+  indexed content. A note recreated during a scan comes back on the next tick
+  instead of being dropped.
+- **Symlinks are handled correctly.** A note that is a symlink to a file
+  inside the vault stays indexed; a note that points outside the vault, or a
+  symlink loop, is treated as gone (the connector will not read outside the
+  vault).
+- **The watcher follows your collection rules.** File events for paths a
+  collection excludes or does not match (for example `.obsidian/` settings
+  files or non-Markdown files) are ignored, as the full scan already ignored
+  them.
+- **Folder-scoped syncs only touch their own folder.** Syncing one container
+  (top-level folder) no longer reports notes in other folders as deleted, and
+  container paths such as `./notes` match their notes.
+
+No configuration change is needed.
+
 ### Obsidian connector no longer offers a prune enumeration (`SlimConnector` removed)
 
 **Breaking for direct callers.** `ObsidianConnector.retrieve_all_slim_docs` is
