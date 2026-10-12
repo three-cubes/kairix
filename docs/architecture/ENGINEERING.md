@@ -461,10 +461,10 @@ refactor/embed-staging-table   # internal restructure
 test/search-intent-classifier  # test additions
 docs/engineering-disciplines   # documentation
 chore/deps-bump-requests       # dependency updates
-agent/<short-desc>             # authored by the three-cubes-agent App
+agent/pla-553-obsidian-prune  # three-cubes-agent App; key from the Linear work item
 ```
 
-Branch prefixes are convention: kairix does not bind the `branch_naming` gate. The canonical cross-repo branch shape `<user>/<team>-<number>-<slug>`, enforced by `branch_naming` in repos that bind it, lives in [tc-pipelines `governance/STANDARDS.md`](https://github.com/three-cubes/tc-pipelines/blob/main/governance/STANDARDS.md).
+Branch names are enforced: the org branch-naming ruleset accepts only `<type>/<slug>` (`feat/`, `fix/`, `docs/`, `chore/`, …) or the work-item form `<user>/<team>-<number>-<slug>`. Agent branches use the work-item form — `agent/pla-<number>-<slug>`, named from the Linear issue created first (see [CLAUDE.md](../../CLAUDE.md)); a bare `agent/<desc>` is rejected. The canonical cross-repo branch shape lives in [tc-pipelines `governance/STANDARDS.md`](https://github.com/three-cubes/tc-pipelines/blob/main/governance/STANDARDS.md).
 
 ### 7.2 Version discipline
 

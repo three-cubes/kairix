@@ -783,6 +783,42 @@ def test_container_scoped_path_reconciled_delete_beats_replayed_create(tmp_path:
 
 
 @pytest.mark.unit
+def test_container_no_collection_covers_indexes_nothing(tmp_path: Path) -> None:
+    """A scoped sync of a folder outside every configured collection emits nothing.
+
+    The whole-vault sync never indexes ``private/``; the scoped sync must not
+    either, for the watchdog or the walk.
+
+    Sabotage-proof: restore the ``**/*.md`` fallback in
+    ``_scoped_specs_for_container``; this test fails because
+    ``created private/secret.md`` is emitted.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"notes/a.md": "a", "private/secret.md": "s"})
+    replay = [FileCreatedEvent(str(vault / "private" / "secret.md"))]
+    container = Container(
+        cc_pair_id=1,
+        container_id="private",
+        access_state="ACCESSIBLE",
+        cursor_token=None,
+        last_synced_at=None,
+    )
+
+    def _factory(root: Path) -> WatchdogSource:
+        return WatchdogSource(root, observer_factory=lambda: _ReplayingObserver(replay))
+
+    with ObsidianConnector(
+        vault_root=vault,
+        collections=[CollectionConfig(name="notes", path="notes")],
+        known_state_resolver=lambda _c: {},
+        watcher_factory=_factory,
+    ) as connector:
+        events = list(connector.list_changes_for_container(container))
+
+    assert events == []
+
+
+@pytest.mark.unit
 def test_watchdog_create_then_delete_between_ticks_emits_tombstone(vault: Path) -> None:
     """A scratch note created then deleted between ticks surfaces as ``deleted``.
 

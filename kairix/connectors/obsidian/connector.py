@@ -782,10 +782,9 @@ def _scoped_specs_for_container(
     its ``path`` at the container so the reconciler walks only the
     container's subtree.
 
-    Falls back to a single spec covering the container's path when no
-    configured collection overlaps the container — this keeps the
-    Wave E ON branch working on a vault that has only the default
-    "whole vault" collection.
+    A container no configured collection overlaps gets no specs: the
+    scoped sync indexes nothing there, exactly as the whole-vault sync
+    would. (The default "whole vault" collection overlaps every container.)
     """
     if container_prefix == "":
         return _to_scan_specs(collections)
@@ -801,10 +800,6 @@ def _scoped_specs_for_container(
             # narrow to container when at-or-above container root.
             scoped_path = collection_norm if inside_container else container_norm
             specs.append(CollectionScanSpec(path=scoped_path, glob=c.glob, exclude=tuple(c.exclude)))
-    if not specs:
-        # No configured collection overlaps the container. Default to a
-        # whole-container walk with the standard ``**/*.md`` glob.
-        specs.append(CollectionScanSpec(path=container_norm, glob="**/*.md"))
     return specs
 
 

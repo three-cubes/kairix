@@ -100,13 +100,17 @@ class FullScanReconciler:
         will surface the delete on its own. A file the walk finds but
         cannot read (``PermissionError`` or another ``OSError``) is in
         ``unreadable``: present, content unknown — never a deletion. A
-        symlink that resolves outside the vault is not: ``fetch`` refuses
-        it, so it counts as absent and an indexed note there is tombstoned.
+        symlink that resolves outside the vault is never read: ``fetch``
+        refuses it, so it counts as absent and an indexed note there is
+        tombstoned, even when the outside target hashes the same.
         """
         out: dict[str, str] = {}
         unreadable: set[str] = set()
         for abs_path in self._walk():
             item_id = abs_path.relative_to(self._vault_root).as_posix()
+            if not self._inside_vault(abs_path):
+                # ``fetch`` refuses it, so it is absent whatever its content.
+                continue
             try:
                 text = self._read_text(abs_path)
             except FileNotFoundError:

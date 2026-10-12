@@ -103,9 +103,9 @@ def test_a_readable_note_in_an_unlistable_directory_is_not_tombstoned(tmp_path: 
 def test_an_unreadable_symlink_outside_the_vault_is_tombstoned(tmp_path: Path) -> None:
     """A note replaced by a symlink to an unreadable file outside the vault is absent, not unreadable.
 
-    Sabotage-proof: add every read failure to ``unreadable`` (drop the
-    ``_inside_vault`` check in ``_discover``); this test fails because the
-    note ``fetch`` refuses is never tombstoned.
+    Sabotage-proof: drop the ``_inside_vault`` skip before the read in
+    ``_discover`` and the ``_inside_vault`` check in ``_still_present``; this
+    test fails because the note ``fetch`` refuses is never tombstoned.
     """
     files = {"alpha.md": "a"}
     vault = _vault(tmp_path, files)
@@ -120,6 +120,46 @@ def test_an_unreadable_symlink_outside_the_vault_is_tombstoned(tmp_path: Path) -
         outside.chmod(0o644)
 
     assert ops == [("deleted", "alpha.md")]
+
+
+def test_an_out_of_vault_symlink_with_the_same_content_is_tombstoned(tmp_path: Path) -> None:
+    """A note replaced by a symlink to an outside file with identical content is tombstoned.
+
+    The hash still matches, so only the vault boundary can tell: ``fetch``
+    refuses the symlink, so the indexed note must go.
+
+    Sabotage-proof: remove the ``_inside_vault`` skip before the read in
+    ``_discover``; this test fails because the matching hash emits nothing.
+    """
+    files = {"alpha.md": "a"}
+    vault = _vault(tmp_path, files)
+    outside = tmp_path / "outside.md"
+    outside.write_text("a", encoding="utf-8")
+    (vault / "alpha.md").unlink()
+    (vault / "alpha.md").symlink_to(outside)
+
+    assert _ops(FullScanReconciler(vault, [CollectionScanSpec(path=".")]), _known(files)) == [("deleted", "alpha.md")]
+
+
+def test_an_out_of_vault_symlink_is_never_read(tmp_path: Path) -> None:
+    """The walk does not read a file that resolves outside the vault.
+
+    Sabotage-proof: remove the ``_inside_vault`` skip before the read in
+    ``_discover``; this test fails because the outside file is read.
+    """
+    vault = _vault(tmp_path, {"alpha.md": "a"})
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+    (vault / "link.md").symlink_to(outside)
+    read: list[Path] = []
+
+    def _recording(path: Path) -> str:
+        read.append(path)
+        return read_text_for_hash(path)
+
+    FullScanReconciler(vault, [CollectionScanSpec(path=".")], read_text=_recording).reconcile({})
+
+    assert read == [vault / "alpha.md"]
 
 
 # Root reads any file regardless of mode bits; Windows has no POSIX mode bits.
