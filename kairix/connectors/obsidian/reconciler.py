@@ -30,30 +30,11 @@ from pathlib import Path
 
 from kairix.connectors.obsidian.fs import (
     collection_accepts,
-    glob_selects_files_under,
     iter_collection_files,
     read_text_for_hash,
 )
 from kairix.core.protocols import ChangeEvent
 from kairix.knowledge.reflib.dedup import hash_content
-
-
-class IncompleteScanError(OSError):
-    """The walk could not list every directory, so its enumeration is partial.
-
-    Raised by :meth:`FullScanReconciler.item_ids` so a prune cycle aborts
-    instead of retiring the notes beneath an unlistable directory.
-    """
-
-    def __init__(self, directories: list[str]) -> None:
-        self.directories = tuple(directories)
-        super().__init__(
-            f"obsidian: could not list {len(directories)} directory(ies) under the vault "
-            f"({', '.join(directories[:5])}); the enumeration is incomplete, so nothing is pruned. "
-            "fix: give the worker read and execute permission on those directories. "
-            "next: re-run the prune cycle."
-        )
-
 
 # ``stat`` errors that prove a walked path no longer holds a note.
 _ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
@@ -174,42 +155,6 @@ class FullScanReconciler:
         """
         return Path(os.path.realpath(abs_path)).is_relative_to(self._vault_root)
 
-    def item_ids(self) -> list[str]:
-        """Every file the walk finds, readable or not, sorted.
-
-        The enumeration the prune cycle diffs against the store: an
-        unreadable file is still present, so it must not be pruned. A walk
-        that could not list some directory under a collection is not a
-        complete enumeration — every note beneath it would look deleted — so
-        it raises :class:`IncompleteScanError` instead of returning a partial
-        list, and the prune cycle stages nothing.
-        """
-        unlistable = self._unlistable_directories()
-        if unlistable:
-            raise IncompleteScanError(unlistable)
-        live, unreadable = self._discover()
-        return sorted(live.keys() | unreadable)
-
-    def _unlistable_directories(self) -> list[str]:
-        """In-scope directories under the collections that could not be listed, vault-relative.
-
-        A top-down ``os.walk`` without following symlinks — the scan's
-        reach — that prunes before descending: it lists only directories the
-        collection could index files beneath (not excluded, reachable by its
-        glob), so its cost follows the configured scope and every listing
-        failure it reports is in scope. A missing collection directory is an
-        empty collection, as it is to the scan.
-        """
-        failures: list[OSError] = []
-        for spec in self._collections:
-            base = self._vault_root if spec.path in ("", ".") else self._vault_root / spec.path
-            if not base.is_dir() or not _could_hold_indexed_files((), spec):
-                continue  # missing, fully excluded or a directory-only glob: indexes nothing
-            for dirpath, dirnames, _files in os.walk(base, onerror=failures.append):
-                here = Path(dirpath).relative_to(base).parts
-                dirnames[:] = [d for d in dirnames if _could_hold_indexed_files((*here, d), spec)]
-        return sorted({Path(str(f.filename)).relative_to(self._vault_root).as_posix() for f in failures})
-
     def _present_but_unlisted(self, item_id: str) -> bool:
         """A known file the walk should have found but did not: absence unproven.
 
@@ -272,18 +217,3 @@ class FullScanReconciler:
             deleted.append(ChangeEvent(op="deleted", item_id=item_id, modified_at=now))
 
         return [*created, *modified, *deleted]
-
-
-def _could_hold_indexed_files(directory: tuple[str, ...], spec: CollectionScanSpec) -> bool:
-    """Whether ``spec`` could index a file beneath ``directory`` (parts relative to its base).
-
-    Not when an exclude token already matches the directory, nor when the
-    collection's glob selects no file beneath it — decided by
-    :func:`glob_selects_files_under`, the scanner's own rule (directory-only
-    globs, the platform's case rules and the interpreter's trailing-``**``
-    rule included).
-    """
-    as_path = "/".join((*Path(spec.path).parts, *directory)) + "/"
-    if any(token and token in as_path for token in spec.exclude):
-        return False
-    return glob_selects_files_under(spec.glob, "/".join(directory))

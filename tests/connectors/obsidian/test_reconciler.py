@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from kairix.connectors.obsidian.fs import TRAILING_RECURSIVE_MATCHES_FILES, collection_accepts, read_text_for_hash
-from kairix.connectors.obsidian.reconciler import CollectionScanSpec, FullScanReconciler, IncompleteScanError
+from kairix.connectors.obsidian.fs import read_text_for_hash
+from kairix.connectors.obsidian.reconciler import CollectionScanSpec, FullScanReconciler
 from kairix.knowledge.reflib.dedup import hash_content
 
 pytestmark = pytest.mark.unit
@@ -128,13 +128,10 @@ def test_an_unreadable_symlink_outside_the_vault_is_tombstoned(tmp_path: Path) -
     reason="needs a non-root POSIX user for an unreadable file",
 )
 def test_an_unreadable_note_inside_the_vault_is_not_tombstoned(tmp_path: Path) -> None:
-    """A note the walk finds but cannot read is present with unknown content.
-
-    No event, and it stays in the prune cycle's enumeration so it is not
-    pruned either.
+    """A note the walk finds but cannot read is present with unknown content: no event.
 
     Sabotage-proof: make ``_inside_vault`` return ``False``; this test fails
-    because ``alpha.md`` drops out of ``item_ids`` and would be pruned.
+    because ``alpha.md`` is tombstoned.
     """
     files = {"alpha.md": "a", "bravo.md": "b"}
     vault = _vault(tmp_path, files)
@@ -142,12 +139,10 @@ def test_an_unreadable_note_inside_the_vault_is_not_tombstoned(tmp_path: Path) -
     (vault / "alpha.md").chmod(0o000)
     try:
         ops = _ops(reconciler, _known(files))
-        enumerated = reconciler.item_ids()
     finally:
         (vault / "alpha.md").chmod(0o644)
 
     assert ops == []
-    assert enumerated == ["alpha.md", "bravo.md"]
 
 
 # Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
@@ -254,14 +249,14 @@ def test_a_note_replaced_during_read_is_tombstoned(tmp_path: Path, replace: Call
     reason="needs a non-root POSIX user for an unreadable directory",
 )
 def test_a_note_whose_directory_becomes_unreadable_during_read_is_kept(tmp_path: Path) -> None:
-    """A note whose parent becomes unreadable between the walk and the read proves nothing.
+    """A note whose parent becomes unreadable between the walk and the read proves nothing: no event.
 
-    No event, and the note stays in ``item_ids()`` — the prune cycle's
-    enumeration — although neither its read nor its ``stat`` can complete.
+    Neither its read nor its ``stat`` can complete, so its absence is
+    unproven.
 
     Sabotage-proof: treat every ``stat`` failure as absent in
     ``_still_present`` (``return False``); this test fails because the note
-    is tombstoned and drops out of the enumeration on an indeterminate error.
+    is tombstoned on an indeterminate error.
     """
     files = {"locked/note.md": "n"}
     vault = _vault(tmp_path, files)
@@ -273,13 +268,10 @@ def test_a_note_whose_directory_becomes_unreadable_during_read_is_kept(tmp_path:
     )
     try:
         ops = _ops(reconciler, _known(files))
-        locked.chmod(0o755)  # list it again; the reader locks it during the read
-        enumerated = reconciler.item_ids()
     finally:
         locked.chmod(0o755)
 
     assert ops == []
-    assert enumerated == ["locked/note.md"]
 
 
 # Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
@@ -315,175 +307,3 @@ def test_an_out_of_vault_alias_whose_target_becomes_unreadable_during_read_is_to
         elsewhere.chmod(0o755)
 
     assert ops == [("deleted", "alias.md")]
-
-
-# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
-@pytest.mark.skipif(
-    not hasattr(os, "geteuid") or os.geteuid() == 0,
-    reason="needs a non-root POSIX user for an unlistable directory",
-)
-def test_the_prune_enumeration_refuses_a_partial_walk(tmp_path: Path) -> None:
-    """``item_ids`` raises rather than omit the notes beneath a directory it cannot list.
-
-    Sabotage-proof: make ``_unlistable_directories`` return ``[]``; this test
-    fails because ``item_ids`` returns a list without ``listless/alias.md``,
-    which a prune cycle would retire.
-    """
-    vault = _vault(tmp_path, {"alpha.md": "a"})
-    listless = vault / "listless"
-    listless.mkdir()
-    (listless / "alias.md").symlink_to(vault / "alpha.md")
-    reconciler = FullScanReconciler(vault, [CollectionScanSpec(path=".")])
-    listless.chmod(0o111)
-    try:
-        with pytest.raises(IncompleteScanError) as raised:
-            reconciler.item_ids()
-    finally:
-        listless.chmod(0o755)
-
-    assert raised.value.directories == ("listless",)
-    assert "fix:" in str(raised.value)
-
-
-def test_a_missing_collection_directory_enumerates_as_empty(tmp_path: Path) -> None:
-    """A collection whose directory does not exist is empty for the prune enumeration too.
-
-    Sabotage-proof: drop the ``base.is_dir()`` skip in
-    ``_unlistable_directories``; this test fails with ``IncompleteScanError``.
-    """
-    vault = _vault(tmp_path, {"alpha.md": "a"})
-
-    assert FullScanReconciler(vault, [CollectionScanSpec(path="absent")]).item_ids() == []
-
-
-# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
-@pytest.mark.skipif(
-    not hasattr(os, "geteuid") or os.geteuid() == 0,
-    reason="needs a non-root POSIX user for an unlistable directory",
-)
-@pytest.mark.parametrize(
-    "spec,locked",
-    [
-        (CollectionScanSpec(path="notes", exclude=("WIP/",)), "notes/WIP"),
-        (CollectionScanSpec(path="notes", glob="*.md"), "notes/sub"),
-        (CollectionScanSpec(path="notes", glob="daily/*.md"), "notes/other"),
-        (CollectionScanSpec(path="notes", glob="daily/*.md/"), "notes/daily"),
-    ],
-    ids=["excluded", "below-a-flat-glob", "off-the-glob-path", "directory-only-glob"],
-)
-def test_an_unlistable_directory_out_of_scope_does_not_block_the_enumeration(
-    tmp_path: Path, spec: CollectionScanSpec, locked: str
-) -> None:
-    """A directory the collection could never index files beneath does not make the walk partial.
-
-    Sabotage-proof: make ``_could_hold_indexed_files`` return ``True``; every
-    case fails with ``IncompleteScanError``.
-    """
-    vault = _vault(tmp_path, {"notes/kept.md": "k", "notes/daily/d.md": "d", f"{locked}/x.md": "x"})
-    (vault / locked).chmod(0o000)
-    try:
-        enumerated = FullScanReconciler(vault, [spec]).item_ids()
-    finally:
-        (vault / locked).chmod(0o755)
-
-    in_scope = ("notes/kept.md", "notes/daily/d.md")
-    assert enumerated == sorted(
-        rel
-        for rel in in_scope
-        if collection_accepts(rel, collection_path=spec.path, glob=spec.glob, exclude=spec.exclude)
-    )
-
-
-# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
-@pytest.mark.skipif(
-    not hasattr(os, "geteuid") or os.geteuid() == 0,
-    reason="needs a non-root POSIX user for an unlistable directory",
-)
-@pytest.mark.parametrize(
-    "spec,locked",
-    [
-        (CollectionScanSpec(path="notes", glob="daily/*.md"), "notes/daily"),
-        (CollectionScanSpec(path="notes", exclude=("",)), "notes/sub"),
-    ],
-    ids=["on-a-flat-glob-path", "empty-exclude-token"],
-)
-def test_an_unlistable_directory_in_scope_blocks_the_enumeration(
-    tmp_path: Path, spec: CollectionScanSpec, locked: str
-) -> None:
-    """A directory the collection does index beneath makes the walk partial.
-
-    Sabotage-proof: make ``_could_hold_indexed_files`` return ``False`` after
-    matching every glob segment; the flat-glob case fails. Turn its exclude
-    check's ``and`` into ``or``; the empty-token case fails. Either way the
-    partial enumeration is returned.
-    """
-    vault = _vault(tmp_path, {"notes/kept.md": "k", f"{locked}/x.md": "x"})
-    (vault / locked).chmod(0o000)
-    try:
-        with pytest.raises(IncompleteScanError):
-            FullScanReconciler(vault, [spec]).item_ids()
-    finally:
-        (vault / locked).chmod(0o755)
-
-
-# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
-@pytest.mark.skipif(
-    not hasattr(os, "geteuid") or os.geteuid() == 0,
-    reason="needs a non-root POSIX user for an unlistable directory",
-)
-@pytest.mark.parametrize(
-    "spec",
-    [
-        CollectionScanSpec(path="tests", exclude=("tests/",)),
-        CollectionScanSpec(path="tests", glob="*.md/"),
-    ],
-    ids=["excluded-root", "directory-only-glob-root"],
-)
-def test_an_unlistable_root_of_a_collection_that_indexes_nothing_does_not_block(
-    tmp_path: Path, spec: CollectionScanSpec
-) -> None:
-    """A collection whose root can hold no indexed file is not probed, so it cannot abort the prune.
-
-    Sabotage-proof: drop ``not _could_hold_indexed_files((), spec)`` from the
-    skip in ``_unlistable_directories``; both cases fail with
-    ``IncompleteScanError`` and a healthy collection's prune is blocked.
-    """
-    vault = _vault(tmp_path, {"tests/t.md": "t", "notes/n.md": "n"})
-    reconciler = FullScanReconciler(vault, [spec, CollectionScanSpec(path="notes")])
-    (vault / "tests").chmod(0o000)
-    try:
-        enumerated = reconciler.item_ids()
-    finally:
-        (vault / "tests").chmod(0o755)
-
-    assert enumerated == ["notes/n.md"]
-
-
-# Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
-@pytest.mark.skipif(
-    not hasattr(os, "geteuid") or os.geteuid() == 0,
-    reason="needs a non-root POSIX user for an unlistable directory",
-)
-@pytest.mark.parametrize("glob", ["**", "daily/**"])
-def test_a_trailing_recursive_glob_blocks_only_where_it_selects_files(tmp_path: Path, glob: str) -> None:
-    """``**`` selects files only from Python 3.13; on 3.12 such a collection indexes nothing.
-
-    So an unlistable directory under it blocks the enumeration exactly when
-    the interpreter's ``Path.glob`` would have listed files there.
-
-    Sabotage-proof: drop the trailing-``**`` filter in
-    ``_could_hold_indexed_files``; on Python 3.12 this test fails with
-    ``IncompleteScanError`` for a collection that indexes nothing.
-    """
-    vault = _vault(tmp_path, {"notes/daily/sub/x.md": "x", "notes/n.md": "n"})
-    reconciler = FullScanReconciler(vault, [CollectionScanSpec(path="notes", glob=glob)])
-    locked = vault / "notes" / "daily" / "sub"
-    locked.chmod(0o000)
-    try:
-        if TRAILING_RECURSIVE_MATCHES_FILES:
-            with pytest.raises(IncompleteScanError):
-                reconciler.item_ids()
-        else:
-            reconciler.item_ids()
-    finally:
-        locked.chmod(0o755)

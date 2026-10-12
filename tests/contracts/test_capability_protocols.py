@@ -29,7 +29,7 @@ from kairix.connectors.m365_calendar import M365CalendarConnector
 from kairix.connectors.m365_calendar.connector import M365CalendarConfig
 from kairix.connectors.m365_email_headers import M365EmailHeadersConnector
 from kairix.connectors.m365_email_headers.connector import M365Credentials
-from kairix.connectors.obsidian.connector import ObsidianConnector
+from kairix.connectors.obsidian.connector import ObsidianConnector, PruneNotSupportedError
 from kairix.core.protocols import (
     CheckpointedConnector,
     CredentialsConnector,
@@ -311,11 +311,12 @@ def test_obsidian_list_changes_for_container_delegates_to_list_changes(tmp_path:
     assert events == []
 
 
-def test_obsidian_retrieve_all_slim_docs_yields_item_ids(tmp_path: Path) -> None:
-    """The SlimConnector shim walks the reconciler and yields item_id strings.
+def test_obsidian_retrieve_all_slim_docs_refuses_to_act_as_a_prune_authority(tmp_path: Path) -> None:
+    """Obsidian declares SlimConnector but refuses the prune enumeration.
 
-    Seed the vault with one markdown file so the reconciler emits one
-    event; the shim must yield the corresponding item_id.
+    A local walk cannot prove its enumeration complete, so Obsidian is not a
+    prune authority: its deletions come from reconciliation. The refusal is
+    a ``NotImplementedError`` subclass, so a prune cycle can skip it.
     """
     from kairix.core.protocols import Container
 
@@ -330,8 +331,8 @@ def test_obsidian_retrieve_all_slim_docs_yields_item_ids(tmp_path: Path) -> None
         cursor_token=None,
         last_synced_at=None,
     )
-    ids = list(conn.retrieve_all_slim_docs(container))
-    assert "note.md" in ids
+    with pytest.raises(PruneNotSupportedError):
+        conn.retrieve_all_slim_docs(container)
 
 
 def test_dex_crm_list_changes_for_container_delegates() -> None:

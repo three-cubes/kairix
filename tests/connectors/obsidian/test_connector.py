@@ -33,8 +33,7 @@ from watchdog.events import FileCreatedEvent, FileDeletedEvent, FileModifiedEven
 # Imported from the defining module (not the package re-export) so the
 # mutation-parity import graph (scripts/checks/mutation_parity.py) selects
 # this file as connector.py's own test when mutating that module.
-from kairix.connectors.obsidian.connector import ObsidianConnector, make_connector
-from kairix.connectors.obsidian.reconciler import IncompleteScanError
+from kairix.connectors.obsidian.connector import ObsidianConnector, PruneNotSupportedError, make_connector
 from kairix.connectors.obsidian.watcher import FileChange, WatchdogSource
 from kairix.core.db.scanner import CollectionConfig
 from kairix.core.protocols import Container, RawArtefact
@@ -1290,28 +1289,27 @@ def test_unreadable_indexed_note_is_never_tombstoned_by_reconciliation(vault: Pa
 
 
 @pytest.mark.unit
-@_NEEDS_UNREADABLE_FILE
-def test_slim_docs_enumerate_unreadable_notes(vault: Path) -> None:
-    """The prune cycle's enumeration includes a note it cannot read, so it is not pruned.
+def test_slim_docs_refuse_to_act_as_a_prune_authority(vault: Path) -> None:
+    """Obsidian refuses the prune enumeration: a local walk cannot prove it complete.
 
-    Sabotage-proof: return ``sorted(live)`` from ``FullScanReconciler.item_ids``;
-    this test fails because ``alpha.md`` is missing and would be pruned.
+    The refusal names the reason and where Obsidian's deletions come from,
+    so a prune cycle can skip the connector instead of retiring live notes
+    from a partial list.
+
+    Sabotage-proof: make ``retrieve_all_slim_docs`` enumerate the walk again
+    (``return iter(sorted(...))``); this test fails because no
+    ``PruneNotSupportedError`` is raised.
     """
-    alpha = vault / "alpha.md"
-    alpha.chmod(0o000)
-    try:
-        with _reconciling_connector(vault, {}) as connector:
-            slim = list(
-                connector.retrieve_all_slim_docs(
-                    Container(
-                        cc_pair_id=1, container_id="", access_state="ACCESSIBLE", cursor_token=None, last_synced_at=None
-                    )
-                )
-            )
-    finally:
-        alpha.chmod(0o644)
+    root = Container(cc_pair_id=1, container_id="", access_state="ACCESSIBLE", cursor_token=None, last_synced_at=None)
+    connector = ObsidianConnector(vault_root=vault, watcher_factory=fake_obsidian_watcher_factory())
+    with connector, pytest.raises(PruneNotSupportedError) as refused:
+        connector.retrieve_all_slim_docs(root)
 
-    assert slim == ["alpha.md", "bravo.md", "charlie.md"]
+    assert isinstance(refused.value, NotImplementedError)
+    message = str(refused.value)
+    assert "not a prune authority" in message
+    assert "fix:" in message
+    assert "reconciliation" in message
 
 
 @pytest.mark.unit
@@ -1656,28 +1654,3 @@ def test_dot_prefixed_container_path_keeps_its_collections_exclusions(tmp_path: 
         events = list(connector.list_changes_for_container(container))
 
     assert [(e.op, e.item_id) for e in events] == [("created", "notes/kept.md")]
-
-
-@pytest.mark.unit
-@_NEEDS_UNREADABLE_FILE
-def test_slim_docs_refuse_a_partial_walk(vault: Path) -> None:
-    """The prune cycle's enumeration raises when a directory cannot be listed, so nothing is pruned.
-
-    Sabotage-proof: make ``FullScanReconciler._unlistable_directories``
-    return ``[]``; this test fails because ``retrieve_all_slim_docs`` returns
-    the vault without ``listless/note.md``.
-    """
-    _seed_vault(vault, {"listless/note.md": "n"})
-    listless = vault / "listless"
-    listless.chmod(0o111)
-    try:
-        with _reconciling_connector(vault, {}) as connector, pytest.raises(IncompleteScanError):
-            list(
-                connector.retrieve_all_slim_docs(
-                    Container(
-                        cc_pair_id=1, container_id="", access_state="ACCESSIBLE", cursor_token=None, last_synced_at=None
-                    )
-                )
-            )
-    finally:
-        listless.chmod(0o755)

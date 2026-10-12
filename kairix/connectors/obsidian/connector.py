@@ -101,6 +101,10 @@ def _default_known_state(_cursor: Cursor | None) -> Mapping[str, str]:
     return {}
 
 
+class PruneNotSupportedError(NotImplementedError):
+    """The Obsidian connector refuses to act as a prune authority (see ``retrieve_all_slim_docs``)."""
+
+
 class ObsidianConnector:
     """SourceConnector implementation for an Obsidian markdown vault.
 
@@ -326,17 +330,27 @@ class ObsidianConnector:
         return self._list_changes_scoped(container)
 
     def retrieve_all_slim_docs(self, _container: Container) -> Iterator[str]:
-        """SlimConnector shim — enumerate item_ids only via the reconciler walk.
+        """SlimConnector — refused: Obsidian is not a prune authority.
 
-        Drives the same :class:`FullScanReconciler` the change-detection
-        path uses, but extracts only ``item_id`` (no hash compare, no
-        change-event construction). Used by the prune cycle to diff
-        against ``documents.item_id`` and stage tombstones.
+        A prune cycle deletes every indexed item missing from this
+        enumeration, so the enumeration must be provably complete. A local
+        vault cannot promise that: ``Path.glob`` silently skips a directory
+        it cannot list, and permissions or symlinks can change mid-walk, so
+        a partial list would retire live notes. Obsidian's deletions come
+        from reconciliation instead (:meth:`list_changes`), which compares
+        the walk against the known state and tombstones only a note whose
+        absence it can prove. The capability stays declared so callers see
+        this refusal rather than a missing method.
+
+        Raises:
+            PruneNotSupportedError: always.
         """
-        # Every file the walk finds, unreadable ones included: a file whose
-        # read fails is still present, so the prune cycle must not stage a
-        # tombstone for it. Same sorted order as the change-detection path.
-        return iter(self._reconciler.item_ids())
+        raise PruneNotSupportedError(
+            "obsidian: retrieve_all_slim_docs is not supported — the Obsidian connector is not a prune "
+            "authority, because a local walk cannot prove its enumeration complete. "
+            "fix: skip Obsidian in the prune cycle; its deletions come from reconciliation in "
+            "list_changes / list_changes_for_container. next: run list_changes on the next tick."
+        )
 
     def load_hierarchy(self, cc_pair_id: int) -> Iterator[HierarchyNode]:
         """HierarchyConnector — emit FOLDER nodes parent-before-child.
