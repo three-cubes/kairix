@@ -408,6 +408,25 @@ def test_read_inside_vault_accepts_a_root_configured_in_other_casing(tmp_path: P
 
 
 @pytest.mark.unit
+def test_read_inside_vault_reads_under_a_root_it_cannot_open(tmp_path: Path) -> None:
+    """A vault root the worker can traverse but not open still reads its notes.
+
+    Sabotage-proof: let the root's ``os.open`` failure propagate; the read
+    raises ``PermissionError``.
+    """
+    if not hasattr(os, "geteuid") or os.geteuid() == 0:
+        pytest.skip("needs a non-root POSIX user for an unopenable directory")  # root opens any directory
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "note.md").write_bytes(b"note")
+    vault.chmod(0o111)
+    try:
+        assert read_inside_vault(vault / "note.md", vault.resolve())[1] == b"note"
+    finally:
+        vault.chmod(0o755)
+
+
+@pytest.mark.unit
 def test_read_at_refuses_a_fifo(tmp_path: Path) -> None:
     """A note swapped for a FIFO is refused, never read as empty content.
 

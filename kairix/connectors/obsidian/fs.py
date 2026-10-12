@@ -236,9 +236,13 @@ def _descriptor_root(vault_root: Path) -> Path:
 
     A case-insensitive volume (macOS) reports the on-disk casing, which may
     differ from the configured root; asking for the root's own descriptor
-    path compares like with like.
+    path compares like with like. A root the worker may traverse but not
+    open (mode ``0111``) keeps its configured spelling.
     """
-    fd = os.open(vault_root, os.O_RDONLY)
+    try:
+        fd = os.open(vault_root, os.O_RDONLY)
+    except OSError:
+        return vault_root
     try:
         return _descriptor_path(fd) or vault_root
     finally:
