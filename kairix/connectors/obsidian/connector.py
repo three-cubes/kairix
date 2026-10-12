@@ -220,7 +220,8 @@ class ObsidianConnector:
         pipeline, per the SC-3 separation of concerns.
         """
         abs_path = self._safe_resolve(item_id)
-        raw = read_bytes_inside_vault(abs_path, self._vault_root)
+        # Read by the item's own path, so an alias retargeted since the resolve is re-checked.
+        raw = read_bytes_inside_vault(self._vault_root / item_id, self._vault_root)
         mime = mime_for_path(abs_path)
         if mime == DEFAULT_MIME:
             mime = mime_for_bytes(raw, fallback=DEFAULT_MIME)
@@ -518,13 +519,15 @@ class ObsidianConnector:
         vault — even one swapped in mid-read — yields nothing from outside.
         """
         try:
-            abs_path = self._safe_resolve(item_id)
+            self._safe_resolve(item_id)  # rejects absolute and traversing item_ids
         except ValueError:
             return SourceMetadata()
         # One verified open supplies both the timestamps and the frontmatter,
         # so a note swapped for an outside symlink yields nothing from outside.
         try:
-            file_stat, head_bytes = read_inside_vault(abs_path, self._vault_root, _FRONTMATTER_HEAD_BYTES)
+            file_stat, head_bytes = read_inside_vault(
+                self._vault_root / item_id, self._vault_root, _FRONTMATTER_HEAD_BYTES
+            )
         except (OSError, ValueError):
             return SourceMetadata()
         modified_at = _iso_z(datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc))

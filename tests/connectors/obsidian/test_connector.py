@@ -591,6 +591,70 @@ def test_load_hierarchy_emits_subdir_folders_in_parent_before_child_order(tmp_pa
 # ---------------------------------------------------------------------------
 
 
+def _retarget_on_first_open(monkeypatch: pytest.MonkeyPatch, alias: Path, outside: Path) -> list[bool]:
+    """Retarget ``alias`` outside the vault on the first stdlib ``os.open`` — after the resolve, before the read.
+
+    Stdlib only, per F1, as in ``test_fetch_sabotage_proof_dev_null``.
+    """
+    real_open = os.open
+    fired: list[bool] = []
+
+    def _open(path: Any, *args: Any, **kwargs: Any) -> int:
+        if not fired:
+            fired.append(True)
+            alias.unlink()
+            alias.symlink_to(outside)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _open)
+    return fired
+
+
+@pytest.mark.unit
+def test_fetch_refuses_an_alias_retargeted_outside_after_the_resolve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An in-vault alias retargeted outside mid-fetch is refused, not served stale.
+
+    Sabotage-proof: read the resolved target (``abs_path``) instead of the
+    item's own path; the fetch returns the old target's bytes.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"target.md": "# Target"})
+    (vault / "alias.md").symlink_to(vault / "target.md")
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+    connector = _connector_with_known(vault, {})
+    assert connector.fetch("alias.md").raw == b"# Target"
+    fired = _retarget_on_first_open(monkeypatch, vault / "alias.md", outside)
+
+    with pytest.raises(ValueError):
+        connector.fetch("alias.md")
+    assert fired
+
+
+@pytest.mark.unit
+def test_metadata_for_refuses_an_alias_retargeted_outside_after_the_resolve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An in-vault alias retargeted outside mid-read yields empty metadata.
+
+    Sabotage-proof: read the resolved target (``abs_path``) instead of the
+    item's own path; the old target's author is returned.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"target.md": "---\nauthor: agent-alpha\n---\nBody."})
+    (vault / "alias.md").symlink_to(vault / "target.md")
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+    connector = _connector_with_known(vault, {})
+    assert connector.metadata_for("alias.md").author == "agent-alpha"
+    fired = _retarget_on_first_open(monkeypatch, vault / "alias.md", outside)
+
+    assert connector.metadata_for("alias.md") == SourceMetadata()
+    assert fired
+
+
 @pytest.mark.unit
 def test_metadata_for_never_reads_a_note_swapped_out_of_the_vault(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
