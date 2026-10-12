@@ -49,7 +49,6 @@ from kairix.connectors.obsidian.fs import (
     collection_accepts,
     mime_for_bytes,
     mime_for_path,
-    read_bytes_inside_vault,
     read_inside_vault,
 )
 from kairix.connectors.obsidian.reconciler import (
@@ -219,10 +218,12 @@ class ObsidianConnector:
         (passthrough vs markitdown vs ocr) happens upstream in the
         pipeline, per the SC-3 separation of concerns.
         """
-        abs_path = self._safe_resolve(item_id)
-        # Read by the item's own path, so an alias retargeted since the resolve is re-checked.
-        raw = read_bytes_inside_vault(self._vault_root / item_id, self._vault_root)
-        mime = mime_for_path(abs_path)
+        self._safe_resolve(item_id)  # rejects absolute and traversing item_ids
+        # Read by the item's own path, so an alias retargeted since the resolve
+        # is re-checked; name the MIME from the file actually read.
+        read = read_inside_vault(self._vault_root / item_id, self._vault_root)
+        raw = read.data
+        mime = mime_for_path(read.path)
         if mime == DEFAULT_MIME:
             mime = mime_for_bytes(raw, fallback=DEFAULT_MIME)
         return RawArtefact(raw=raw, mime=mime, fetched_at=_now_iso())
@@ -525,7 +526,7 @@ class ObsidianConnector:
         # One verified open supplies both the timestamps and the frontmatter,
         # so a note swapped for an outside symlink yields nothing from outside.
         try:
-            file_stat, head_bytes = read_inside_vault(
+            _, file_stat, head_bytes = read_inside_vault(
                 self._vault_root / item_id, self._vault_root, _FRONTMATTER_HEAD_BYTES
             )
         except (OSError, ValueError):

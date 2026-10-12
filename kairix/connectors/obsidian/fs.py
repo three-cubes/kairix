@@ -15,6 +15,7 @@ import sys
 from collections.abc import Iterable, Iterator
 from functools import cache, lru_cache
 from pathlib import Path, PurePath, PureWindowsPath
+from typing import NamedTuple
 
 # Extension → mime mapping for the file families an Obsidian vault
 # typically holds. ``.md`` is the canonical Obsidian note; the rest are
@@ -249,6 +250,14 @@ def _descriptor_root(vault_root: Path) -> Path:
         os.close(fd)
 
 
+class VaultRead(NamedTuple):
+    """One verified read: the file opened, its ``fstat`` and the bytes read from it."""
+
+    path: Path
+    stat: os.stat_result
+    data: bytes
+
+
 class OutsideVaultError(ValueError):
     """A path resolves outside the vault, so the connector will not read it."""
 
@@ -260,7 +269,7 @@ def _resolved_inside(abs_path: Path, vault_root: Path) -> Path:
     return real
 
 
-def read_at(real: Path, abs_path: Path, vault_root: Path, size: int = -1) -> tuple[os.stat_result, bytes]:
+def read_at(real: Path, abs_path: Path, vault_root: Path, size: int = -1) -> VaultRead:
     """Stat and read ``real`` — ``abs_path`` as resolved earlier — only while it is still that file.
 
     ``real`` is opened without following a final symlink, then, before a
@@ -272,9 +281,9 @@ def read_at(real: Path, abs_path: Path, vault_root: Path, size: int = -1) -> tup
     change. So no byte outside the vault is ever read. (Windows reports no
     descriptor path; there the re-resolve alone guards, and creating
     symlinks needs privilege.) Opening needs no directory listing
-    permission and works on every platform. Returns the opened file's
-    ``fstat`` with up to ``size`` bytes (all of them by default), so
-    metadata and content come from the same verified file.
+    permission and works on every platform. Returns the file opened
+    (``real``), its ``fstat`` and up to ``size`` bytes (all of them by
+    default), so name, metadata and content all describe the same file.
 
     Raises:
         OutsideVaultError: ``abs_path`` now resolves outside the vault, or to
@@ -293,10 +302,10 @@ def read_at(real: Path, abs_path: Path, vault_root: Path, size: int = -1) -> tup
         now = os.stat(_resolved_inside(abs_path, vault_root))
         if (now.st_dev, now.st_ino) != (opened.st_dev, opened.st_ino):
             raise OutsideVaultError(f"{abs_path} changed while it was opened")
-        return opened, fh.read(size)
+        return VaultRead(real, opened, fh.read(size))
 
 
-def read_inside_vault(abs_path: Path, vault_root: Path, size: int = -1) -> tuple[os.stat_result, bytes]:
+def read_inside_vault(abs_path: Path, vault_root: Path, size: int = -1) -> VaultRead:
     """Stat and read ``abs_path`` only if it resolves inside ``vault_root``, with no symlink race.
 
     ``vault_root`` must already be resolved. See :func:`read_at`.
@@ -310,7 +319,7 @@ def read_inside_vault(abs_path: Path, vault_root: Path, size: int = -1) -> tuple
 
 def read_bytes_inside_vault(abs_path: Path, vault_root: Path) -> bytes:
     """Every byte of ``abs_path``, read as :func:`read_inside_vault` does."""
-    return read_inside_vault(abs_path, vault_root)[1]
+    return read_inside_vault(abs_path, vault_root).data
 
 
 def read_text_for_hash(abs_path: Path, vault_root: Path) -> str:

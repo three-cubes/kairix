@@ -634,6 +634,42 @@ def test_fetch_refuses_an_alias_retargeted_outside_after_the_resolve(
 
 
 @pytest.mark.unit
+def test_fetch_names_the_mime_from_the_file_it_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An alias retargeted to another in-vault file mid-fetch is typed by the file read.
+
+    The retarget lands between ``_safe_resolve`` and the verified read, so
+    the bytes are the new file's. Stdlib-only hook, per F1.
+    Sabotage-proof: name the MIME from the resolved target (``abs_path``);
+    the PDF bytes come back labelled ``text/markdown``.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"target.md": "# Target"})
+    (vault / "doc.pdf").write_bytes(b"%PDF-1.7 body")
+    (vault / "alias.md").symlink_to(vault / "target.md")
+    connector = _connector_with_known(vault, {})
+    target = (vault / "doc.pdf").resolve()
+    real_resolve = Path.resolve
+    fired: list[bool] = []
+
+    def _resolve(self: Path, strict: bool = False) -> Path:
+        # Retarget right after ``_safe_resolve`` — the connector's only
+        # ``Path.resolve`` — before the verified read resolves on its own.
+        resolved = real_resolve(self, strict)
+        if not fired and self.name == "alias.md":
+            fired.append(True)
+            (vault / "alias.md").unlink()
+            (vault / "alias.md").symlink_to(target)
+        return resolved
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+
+    artefact = connector.fetch("alias.md")
+
+    assert fired
+    assert (artefact.raw, artefact.mime) == (b"%PDF-1.7 body", "application/pdf")
+
+
+@pytest.mark.unit
 def test_metadata_for_refuses_an_alias_retargeted_outside_after_the_resolve(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

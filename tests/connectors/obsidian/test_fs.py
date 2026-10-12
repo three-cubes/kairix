@@ -329,7 +329,7 @@ def test_read_at_refuses_a_resolved_path_that_became_a_symlink(tmp_path: Path) -
     note = vault / "note.md"
     note.symlink_to(tmp_path / "outside.md")
     with pytest.raises(OSError) as raised:
-        read_at(note, note, vault.resolve())[1]
+        read_at(note, note, vault.resolve())
     assert not isinstance(raised.value, OutsideVaultError)
 
 
@@ -348,7 +348,7 @@ def test_read_at_refuses_a_path_swapped_out_of_the_vault_after_the_open(tmp_path
     os.link(vault / "real.md", tmp_path / "outside.md")
     (vault / "link.md").symlink_to(tmp_path / "outside.md")
     with pytest.raises(OutsideVaultError):
-        read_at(vault / "real.md", vault / "link.md", vault.resolve())[1]
+        read_at(vault / "real.md", vault / "link.md", vault.resolve())
 
 
 @pytest.mark.unit
@@ -365,7 +365,7 @@ def test_read_at_refuses_a_file_that_is_not_the_one_the_path_names(tmp_path: Pat
     (vault / "opened.md").write_bytes(b"opened")
     (vault / "named.md").write_bytes(b"named")
     with pytest.raises(OutsideVaultError):
-        read_at(vault / "opened.md", vault / "named.md", vault.resolve())[1]
+        read_at(vault / "opened.md", vault / "named.md", vault.resolve())
 
 
 @pytest.mark.unit
@@ -404,7 +404,7 @@ def test_read_inside_vault_accepts_a_root_configured_in_other_casing(tmp_path: P
         pytest.skip("needs a case-insensitive volume")  # case-sensitive volumes have one spelling
     (tmp_path / "Vault" / "note.md").write_bytes(b"note")
     vault = Path(os.path.realpath(tmp_path)) / "vault"
-    assert read_inside_vault(vault / "note.md", vault)[1] == b"note"
+    assert read_inside_vault(vault / "note.md", vault).data == b"note"
 
 
 @pytest.mark.unit
@@ -421,7 +421,7 @@ def test_read_inside_vault_reads_under_a_root_it_cannot_open(tmp_path: Path) -> 
     (vault / "note.md").write_bytes(b"note")
     vault.chmod(0o111)
     try:
-        assert read_inside_vault(vault / "note.md", vault.resolve())[1] == b"note"
+        assert read_inside_vault(vault / "note.md", vault.resolve()).data == b"note"
     finally:
         vault.chmod(0o755)
 
