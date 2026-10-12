@@ -340,6 +340,13 @@ class ConfluenceConnector(SourceConnector, CheckpointedConnector, SlimConnector,
     ...
 ```
 
+An `ObsidianConnector` declares only:
+```python
+class ObsidianConnector(SourceConnector, PollConnector, HierarchyConnector):
+    ...
+```
+It deliberately does **not** declare `SlimConnector` (PLA-553): a prune cycle deletes every indexed item missing from a slim enumeration, and a local vault walk cannot prove that enumeration complete (`Path.glob` silently skips a directory it cannot list). Obsidian's deletions come only from reconciliation, which compares the walk against known state; a prune cycle selecting by `isinstance(c, SlimConnector)` skips it.
+
 This is more explicit than v1's flat Protocol — capability is declarative at the connector class, not buried in optional methods returning `None`. New F-rule: **F56 — every connector under `kairix/connectors/<name>/` declares at least `SourceConnector` + one of `{PollConnector, CheckpointedConnector, EventConnector}`**.
 
 ---
@@ -490,7 +497,7 @@ Feature flag: `topology_schema` (introduce stage default-off; controls whether n
 
 ### Wave B — Protocol capability split
 
-Extend `kairix.core.protocols` with the capability Protocols (`PollConnector`, `CheckpointedConnector`, `SlimConnector`, `SlimConnectorWithPermSync`, `EventConnector`, `Resolver`, `HierarchyConnector`, `OAuthConnector`). Existing 4 shipped connectors (obsidian, dex_crm, m365_email_headers, m365_calendar) get default-impl shims so they continue to satisfy the new shapes without behavioural change. F-rule **F56** lands (per-connector capability declaration check).
+Extend `kairix.core.protocols` with the capability Protocols (`PollConnector`, `CheckpointedConnector`, `SlimConnector`, `SlimConnectorWithPermSync`, `EventConnector`, `Resolver`, `HierarchyConnector`, `OAuthConnector`). Existing 4 shipped connectors (obsidian, dex_crm, m365_email_headers, m365_calendar) get default-impl shims so they continue to satisfy the new shapes without behavioural change. (Obsidian's `SlimConnector` shim was later removed — PLA-553; see the capability mix-ins section.) F-rule **F56** lands (per-connector capability declaration check).
 
 Feature flag: `topology_protocol` (introduce stage default-off).
 
