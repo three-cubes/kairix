@@ -103,9 +103,9 @@ def test_a_readable_note_in_an_unlistable_directory_is_not_tombstoned(tmp_path: 
 def test_an_unreadable_symlink_outside_the_vault_is_tombstoned(tmp_path: Path) -> None:
     """A note replaced by a symlink to an unreadable file outside the vault is absent, not unreadable.
 
-    Sabotage-proof: add every read failure to ``unreadable`` (drop the
-    ``_inside_vault`` check in ``_discover``); this test fails because the
-    note ``fetch`` refuses is never tombstoned.
+    Sabotage-proof: drop the ``_inside_vault`` skip before the read in
+    ``_discover`` and the ``_inside_vault`` check in ``_still_present``; this
+    test fails because the note ``fetch`` refuses is never tombstoned.
     """
     files = {"alpha.md": "a"}
     vault = _vault(tmp_path, files)
@@ -120,6 +120,46 @@ def test_an_unreadable_symlink_outside_the_vault_is_tombstoned(tmp_path: Path) -
         outside.chmod(0o644)
 
     assert ops == [("deleted", "alpha.md")]
+
+
+def test_an_out_of_vault_symlink_with_the_same_content_is_tombstoned(tmp_path: Path) -> None:
+    """A note replaced by a symlink to an outside file with identical content is tombstoned.
+
+    The hash still matches, so only the vault boundary can tell: ``fetch``
+    refuses the symlink, so the indexed note must go.
+
+    Sabotage-proof: remove the ``_inside_vault`` skip before the read in
+    ``_discover``; this test fails because the matching hash emits nothing.
+    """
+    files = {"alpha.md": "a"}
+    vault = _vault(tmp_path, files)
+    outside = tmp_path / "outside.md"
+    outside.write_text("a", encoding="utf-8")
+    (vault / "alpha.md").unlink()
+    (vault / "alpha.md").symlink_to(outside)
+
+    assert _ops(FullScanReconciler(vault, [CollectionScanSpec(path=".")]), _known(files)) == [("deleted", "alpha.md")]
+
+
+def test_an_out_of_vault_symlink_is_never_read(tmp_path: Path) -> None:
+    """The walk does not read a file that resolves outside the vault.
+
+    Sabotage-proof: remove the ``_inside_vault`` skip before the read in
+    ``_discover``; this test fails because the outside file is read.
+    """
+    vault = _vault(tmp_path, {"alpha.md": "a"})
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+    (vault / "link.md").symlink_to(outside)
+    read: list[Path] = []
+
+    def _recording(path: Path) -> str:
+        read.append(path)
+        return read_text_for_hash(path, vault)
+
+    FullScanReconciler(vault, [CollectionScanSpec(path=".")], read_text=_recording).reconcile({})
+
+    assert read == [vault / "alpha.md"]
 
 
 # Root reads any file regardless of mode bits; Windows has no POSIX mode bits.
@@ -202,15 +242,91 @@ def test_an_out_of_vault_file_symlink_in_an_unlistable_directory_is_tombstoned(t
     assert ops == [("deleted", "listless/out.md")]
 
 
+def _vault_of(path: Path) -> Path:
+    """The ``vault`` directory :func:`_vault` creates, above ``path``."""
+    return next(p for p in path.parents if p.name == "vault").resolve()
+
+
 def _replacing_reader(target: Path, replace: Callable[[Path], None]) -> Callable[[Path], str]:
-    """A reader that changes ``target`` on disk just before reading it — between walk and read."""
+    """A reader that changes ``target`` on disk just before reading it — between walk and read.
+
+    It reads with the production reader, bound to the vault that holds ``target``.
+    """
+    vault = _vault_of(target)
 
     def _read(path: Path) -> str:
         if path == target:
             replace(path)
-        return read_text_for_hash(path)
+        return read_text_for_hash(path, vault)
 
     return _read
+
+
+def test_a_one_argument_reader_still_reconciles(tmp_path: Path) -> None:
+    """``read_text`` keeps its public one-argument shape: ``read_text(path) -> str``.
+
+    Sabotage-proof: call ``self._read_text(abs_path, self._vault_root)``; this
+    test fails with ``TypeError``.
+    """
+    files = {"alpha.md": "a"}
+    vault = _vault(tmp_path, files)
+
+    def _plain(path: Path) -> str:
+        return path.read_text(encoding="utf-8")
+
+    reconciler = FullScanReconciler(vault, [CollectionScanSpec(path=".")], read_text=_plain)
+
+    assert _ops(reconciler, {"alpha.md": hash_content("old")}) == [("modified", "alpha.md")]
+
+
+@pytest.mark.parametrize("outside_body", ["secret", "a"], ids=["different-content", "same-content"])
+def test_a_note_swapped_for_an_outside_symlink_after_the_check_is_tombstoned_unread(
+    tmp_path: Path, outside_body: str
+) -> None:
+    """A note replaced by an outside symlink between the boundary check and the read is never read.
+
+    The swap lands after ``_discover`` checked the path, so only the read
+    itself can refuse it. Sabotage-proof: make ``read_text_for_hash`` read
+    ``abs_path`` directly (``abs_path.read_bytes()``); this test fails because
+    the outside bytes are hashed — ``modified`` for different content, nothing
+    for the same content — instead of the note being tombstoned.
+    """
+    files = {"alpha.md": "a"}
+    vault = _vault(tmp_path, files)
+    outside = tmp_path / "outside.md"
+    outside.write_text(outside_body, encoding="utf-8")
+
+    def _swap(path: Path) -> None:
+        path.unlink()
+        path.symlink_to(outside)
+
+    reconciler = FullScanReconciler(
+        vault, [CollectionScanSpec(path=".")], read_text=_replacing_reader(vault / "alpha.md", _swap)
+    )
+
+    assert _ops(reconciler, _known(files)) == [("deleted", "alpha.md")]
+
+
+def test_a_note_swapped_for_a_fifo_during_read_is_tombstoned(tmp_path: Path) -> None:
+    """A note replaced by a FIFO between walk and read is absent, not empty content.
+
+    Sabotage-proof: drop the ``S_ISREG`` check in ``read_at``; the FIFO
+    hashes as ``""`` and ``modified`` is emitted instead of ``deleted``.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("needs POSIX FIFOs")  # Windows has none
+    files = {"alpha.md": "a"}
+    vault = _vault(tmp_path, files)
+
+    def _to_fifo(path: Path) -> None:
+        path.unlink()
+        os.mkfifo(path)
+
+    reconciler = FullScanReconciler(
+        vault, [CollectionScanSpec(path=".")], read_text=_replacing_reader(vault / "alpha.md", _to_fifo)
+    )
+
+    assert _ops(reconciler, _known(files)) == [("deleted", "alpha.md")]
 
 
 def _to_directory(path: Path) -> None:

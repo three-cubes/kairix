@@ -21,6 +21,7 @@ callable default), F8 carries ``@pytest.mark.unit``.
 
 from __future__ import annotations
 
+import io
 import os
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
@@ -38,7 +39,7 @@ from kairix.core.db.scanner import CollectionConfig
 # Imported from the defining module (not the package re-export) so the
 # mutation-parity import graph (scripts/checks/mutation_parity.py) selects
 # this file as connector.py's own test when mutating that module.
-from kairix.core.protocols import Container, RawArtefact, SlimConnector
+from kairix.core.protocols import Container, RawArtefact, SlimConnector, SourceMetadata
 from kairix.knowledge.reflib.dedup import hash_content
 from tests.fakes import FakeWatchdogObserver, fake_obsidian_watcher_factory
 
@@ -233,10 +234,10 @@ def test_fetch_sabotage_proof_dev_null(monkeypatch: pytest.MonkeyPatch, vault: P
     refactor accidentally turned the fetch into a ``/dev/null`` read,
     the previous test would catch it.
 
-    The monkeypatch here targets :class:`pathlib.Path.read_bytes`
-    *only inside this test's call frame* and only for the specific
-    sabotage path — we're not patching kairix code (which F1 would
-    reject), we're patching ``pathlib`` (stdlib) to substitute a
+    The monkeypatch here targets :func:`os.fdopen` — the read behind the
+    connector's vault-bounded open — *only inside this test's call frame*,
+    after the baseline fetch — we're not patching kairix code (which F1
+    would reject), we're patching ``os`` (stdlib) to substitute a
     sabotage payload, then asserting the contract test's invariant no
     longer holds. F1 carves stdlib out as the allowed substitution
     surface.
@@ -247,14 +248,15 @@ def test_fetch_sabotage_proof_dev_null(monkeypatch: pytest.MonkeyPatch, vault: P
     good = connector.fetch("alpha.md")
     assert b"# Alpha" in good.raw, "baseline must hold before sabotage"
 
-    # Sabotage: redirect Path.read_bytes to /dev/null's bytes.
-    original = Path.read_bytes
+    # Sabotage: every opened file reads as /dev/null's (empty) bytes.
+    class _ReadsNothing(io.FileIO):
+        def read(self, _size: int | None = -1) -> bytes:
+            return Path("/dev/null").read_bytes()
 
-    def _sabotaged(self: Path) -> bytes:
-        # Read from /dev/null (always empty) to simulate the bug.
-        return Path("/dev/null").read_bytes() if str(self).endswith("alpha.md") else original(self)
+    def _sabotaged(fd: int, *_args: Any, **_kwargs: Any) -> io.FileIO:
+        return _ReadsNothing(fd, "r")
 
-    monkeypatch.setattr(Path, "read_bytes", _sabotaged)
+    monkeypatch.setattr(os, "fdopen", _sabotaged)
 
     sabotaged = connector.fetch("alpha.md")
     # The round-trip invariant no longer holds — proving the assertion above is load-bearing.
@@ -589,6 +591,151 @@ def test_load_hierarchy_emits_subdir_folders_in_parent_before_child_order(tmp_pa
 # ---------------------------------------------------------------------------
 
 
+def _retarget_on_first_open(monkeypatch: pytest.MonkeyPatch, alias: Path, outside: Path) -> list[bool]:
+    """Retarget ``alias`` outside the vault on the first stdlib ``os.open`` — after the resolve, before the read.
+
+    Stdlib only, per F1, as in ``test_fetch_sabotage_proof_dev_null``.
+    """
+    real_open = os.open
+    fired: list[bool] = []
+
+    def _open(path: Any, *args: Any, **kwargs: Any) -> int:
+        if not fired:
+            fired.append(True)
+            alias.unlink()
+            alias.symlink_to(outside)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _open)
+    return fired
+
+
+@pytest.mark.unit
+def test_fetch_refuses_an_alias_retargeted_outside_after_the_resolve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An in-vault alias retargeted outside mid-fetch is refused, not served stale.
+
+    Sabotage-proof: read the resolved target (``abs_path``) instead of the
+    item's own path; the fetch returns the old target's bytes.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"target.md": "# Target"})
+    (vault / "alias.md").symlink_to(vault / "target.md")
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+    connector = _connector_with_known(vault, {})
+    assert connector.fetch("alias.md").raw == b"# Target"
+    fired = _retarget_on_first_open(monkeypatch, vault / "alias.md", outside)
+
+    with pytest.raises(ValueError):
+        connector.fetch("alias.md")
+    assert fired
+
+
+@pytest.mark.unit
+def test_fetch_names_the_mime_from_the_file_it_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An alias retargeted to another in-vault file mid-fetch is typed by the file read.
+
+    The retarget lands between ``_safe_resolve`` and the verified read, so
+    the bytes are the new file's. Stdlib-only hook, per F1.
+    Sabotage-proof: name the MIME from the resolved target (``abs_path``);
+    the PDF bytes come back labelled ``text/markdown``.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"target.md": "# Target"})
+    (vault / "doc.pdf").write_bytes(b"%PDF-1.7 body")
+    (vault / "alias.md").symlink_to(vault / "target.md")
+    connector = _connector_with_known(vault, {})
+    target = (vault / "doc.pdf").resolve()
+    real_resolve = Path.resolve
+    fired: list[bool] = []
+
+    def _resolve(self: Path, strict: bool = False) -> Path:
+        # Retarget right after ``_safe_resolve`` — the connector's only
+        # ``Path.resolve`` — before the verified read resolves on its own.
+        resolved = real_resolve(self, strict)
+        if not fired and self.name == "alias.md":
+            fired.append(True)
+            (vault / "alias.md").unlink()
+            (vault / "alias.md").symlink_to(target)
+        return resolved
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+
+    artefact = connector.fetch("alias.md")
+
+    assert fired
+    assert (artefact.raw, artefact.mime) == (b"%PDF-1.7 body", "application/pdf")
+
+
+@pytest.mark.unit
+def test_metadata_for_refuses_an_alias_retargeted_outside_after_the_resolve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An in-vault alias retargeted outside mid-read yields empty metadata.
+
+    Sabotage-proof: read the resolved target (``abs_path``) instead of the
+    item's own path; the old target's author is returned.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"target.md": "---\nauthor: agent-alpha\n---\nBody."})
+    (vault / "alias.md").symlink_to(vault / "target.md")
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+    connector = _connector_with_known(vault, {})
+    assert connector.metadata_for("alias.md").author == "agent-alpha"
+    fired = _retarget_on_first_open(monkeypatch, vault / "alias.md", outside)
+
+    assert connector.metadata_for("alias.md") == SourceMetadata()
+    assert fired
+
+
+@pytest.mark.unit
+def test_metadata_for_never_reads_a_note_swapped_out_of_the_vault(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A note swapped for an outside symlink mid-read yields no outside metadata.
+
+    The swap fires on the first stdlib ``os.stat`` / ``os.open`` that names the
+    note — after ``_safe_resolve``, before the frontmatter read. (Stdlib only,
+    per F1, as in ``test_fetch_sabotage_proof_dev_null``.)
+    Sabotage-proof: restore the separate ``is_file`` / ``stat`` /
+    ``read_bytes`` calls; the outside file's author is returned.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"note.md": "---\nauthor: agent-alpha\n---\nIn vault."})
+    outside = tmp_path / "outside.md"
+    outside.write_text("---\nauthor: agent-outside\n---\nOutside.", encoding="utf-8")
+    connector = _connector_with_known(vault, {})
+    note = (vault / "note.md").resolve()
+    real_stat, real_open = os.stat, os.open
+    swapped: list[bool] = []
+
+    def _swap_once(path: Any) -> None:
+        if not swapped and Path(os.fsdecode(path)) == note:
+            swapped.append(True)
+            note.unlink()
+            note.symlink_to(outside)
+
+    def _stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        _swap_once(path)
+        return real_stat(path, *args, **kwargs)
+
+    def _open(path: Any, *args: Any, **kwargs: Any) -> int:
+        _swap_once(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", _stat)
+    monkeypatch.setattr(os, "open", _open)
+
+    meta = connector.metadata_for("note.md")
+
+    assert swapped, "the swap must fire, or the test proves nothing"
+    assert meta.author != "agent-outside"
+    assert meta == SourceMetadata()
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("frontmatter", "expected_author", "expected_tags"),
@@ -780,6 +927,73 @@ def test_container_scoped_path_reconciled_delete_beats_replayed_create(tmp_path:
         events = list(connector.list_changes_for_container(container))
 
     assert [(e.op, e.item_id) for e in events] == [("deleted", "alpha/gone.md")]
+
+
+@pytest.mark.unit
+def test_container_no_collection_covers_indexes_nothing(tmp_path: Path) -> None:
+    """A scoped sync of a folder outside every configured collection emits nothing.
+
+    The whole-vault sync never indexes ``private/``; the scoped sync must not
+    either, for the watchdog or the walk.
+
+    Sabotage-proof: restore the ``**/*.md`` fallback in
+    ``_scoped_specs_for_container``; this test fails because
+    ``created private/secret.md`` is emitted.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"notes/a.md": "a", "private/secret.md": "s"})
+    replay = [FileCreatedEvent(str(vault / "private" / "secret.md"))]
+    container = Container(
+        cc_pair_id=1,
+        container_id="private",
+        access_state="ACCESSIBLE",
+        cursor_token=None,
+        last_synced_at=None,
+    )
+
+    def _factory(root: Path) -> WatchdogSource:
+        return WatchdogSource(root, observer_factory=lambda: _ReplayingObserver(replay))
+
+    with ObsidianConnector(
+        vault_root=vault,
+        collections=[CollectionConfig(name="notes", path="notes")],
+        known_state_resolver=lambda _c: {},
+        watcher_factory=_factory,
+    ) as connector:
+        events = list(connector.list_changes_for_container(container))
+
+    assert events == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("collection_path", ["./notes", "notes/.", "notes/"])
+def test_container_matches_a_collection_however_its_path_is_spelled(tmp_path: Path, collection_path: str) -> None:
+    """A collection spelled ``./notes`` or ``notes/.`` scopes the ``notes`` container.
+
+    It keeps its glob and exclusions there, and its indexed notes are not
+    reported as deleted. Sabotage-proof: compare the raw ``c.path.rstrip("/")``
+    again; ``./notes`` then overlaps nothing, so ``notes/a.md`` is tombstoned.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"notes/a.md": "a", "notes/drafts/wip.md": "w"})
+    known = {"notes/a.md": hash_content("a")}
+    container = Container(
+        cc_pair_id=1,
+        container_id="notes",
+        access_state="ACCESSIBLE",
+        cursor_token=None,
+        last_synced_at=None,
+    )
+
+    with ObsidianConnector(
+        vault_root=vault,
+        collections=[CollectionConfig(name="notes", path=collection_path, exclude=["drafts/"])],
+        known_state_resolver=lambda _c: known,
+        watcher_factory=fake_obsidian_watcher_factory(),
+    ) as connector:
+        events = list(connector.list_changes_for_container(container))
+
+    assert events == []
 
 
 @pytest.mark.unit

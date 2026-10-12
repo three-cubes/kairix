@@ -139,9 +139,9 @@ Trunk-based on `main` — every change targets `main` through a PR.
 |---|---|
 | `main` | **Default branch.** All work lands here via PR; release tags point at `main` SHAs. |
 | `feat/*`, `fix/*` | Human feature branches for grouped commits, release stabilisation, or external review — PR targets `main`. |
-| `agent/*` | Branches authored by the `three-cubes-agent` GitHub App — PR targets `main`. |
+| `agent/pla-<number>-<slug>` | Branches authored by the `three-cubes-agent` GitHub App, keyed to a Linear work item — PR targets `main`. |
 
-Branch prefixes are convention: kairix does not bind the `branch_naming` gate. The canonical cross-repo branch shape `<user>/<team>-<number>-<slug>`, enforced by `branch_naming` in repos that bind it, lives in [tc-pipelines `governance/STANDARDS.md`](https://github.com/three-cubes/tc-pipelines/blob/main/governance/STANDARDS.md).
+Branch names are enforced: the org branch-naming ruleset accepts only `<type>/<slug>` (`feat/`, `fix/`, `docs/`, `chore/`, …) or the work-item form `<user>/<team>-<number>-<slug>`. Agent branches use the work-item form — `agent/pla-<number>-<slug>`, named from the Linear issue created first (see [CLAUDE.md](CLAUDE.md)); a bare `agent/<desc>` is rejected. The canonical cross-repo branch shape lives in [tc-pipelines `governance/STANDARDS.md`](https://github.com/three-cubes/tc-pipelines/blob/main/governance/STANDARDS.md).
 
 The `raw.githubusercontent.com/.../main/...` URLs in [README.md](README.md) and [docker-compose.yml](docker-compose.yml) point at `main`, which serves both as default and as the last-released compose source.
 

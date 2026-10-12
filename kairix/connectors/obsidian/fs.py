@@ -8,10 +8,14 @@ not re-export anything from this module.
 
 from __future__ import annotations
 
+import errno
+import os
+import stat
 import sys
 from collections.abc import Iterable, Iterator
 from functools import cache, lru_cache
 from pathlib import Path, PurePath, PureWindowsPath
+from typing import NamedTuple
 
 # Extension → mime mapping for the file families an Obsidian vault
 # typically holds. ``.md`` is the canonical Obsidian note; the rest are
@@ -197,13 +201,137 @@ def _parts_match(parts: tuple[str, ...], patterns: tuple[str, ...], flavour: typ
     return match(0, 0)
 
 
-def read_text_for_hash(abs_path: Path) -> str:
-    """Read a file as UTF-8 for content-hashing.
+# ``os.open`` flags for a read that will not follow a final symlink, block on a
+# FIFO or translate bytes; each is 0 where the host lacks it.
+_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
 
-    Binary files (PDF / DOCX / etc.) round-trip through
+
+# ``fcntl`` command that reports an open descriptor's path (macOS); Linux
+# answers through ``/proc/self/fd`` instead, and Windows through neither.
+if sys.platform == "win32":
+    _F_GETPATH: int | None = None
+else:
+    import fcntl
+
+    _F_GETPATH = getattr(fcntl, "F_GETPATH", None)
+_PATH_MAX = 1024
+
+
+def _descriptor_path(fd: int) -> Path | None:
+    """The path the OS reports for an open descriptor — the name it was opened by.
+
+    Call it straight after the open: macOS reports the latest name looked
+    up for the file. ``None`` where the platform cannot say (Windows).
+    """
+    if _F_GETPATH is not None:
+        return Path(os.fsdecode(fcntl.fcntl(fd, _F_GETPATH, bytes(_PATH_MAX)).rstrip(b"\0")))
+    proc = f"/proc/self/fd/{fd}"
+    if os.path.islink(proc):
+        return Path(os.readlink(proc))
+    return None
+
+
+@lru_cache(maxsize=16)
+def _descriptor_root(vault_root: Path) -> Path:
+    """``vault_root`` as descriptor paths spell it.
+
+    A case-insensitive volume (macOS) reports the on-disk casing, which may
+    differ from the configured root; asking for the root's own descriptor
+    path compares like with like. A root the worker may traverse but not
+    open (mode ``0111``) keeps its configured spelling.
+    """
+    try:
+        fd = os.open(vault_root, os.O_RDONLY)
+    except OSError:
+        return vault_root
+    try:
+        return _descriptor_path(fd) or vault_root
+    finally:
+        os.close(fd)
+
+
+class VaultRead(NamedTuple):
+    """One verified read: the file opened, its ``fstat`` and the bytes read from it."""
+
+    path: Path
+    stat: os.stat_result
+    data: bytes
+
+
+class OutsideVaultError(ValueError):
+    """A path resolves outside the vault, so the connector will not read it."""
+
+
+def _resolved_inside(abs_path: Path, vault_root: Path) -> Path:
+    real = Path(os.path.realpath(abs_path))
+    if not real.is_relative_to(vault_root):
+        raise OutsideVaultError(f"{abs_path} resolves outside the vault")
+    return real
+
+
+def read_at(real: Path, abs_path: Path, vault_root: Path, size: int = -1) -> VaultRead:
+    """Stat and read ``real`` — ``abs_path`` as resolved earlier — only while it is still that file.
+
+    ``real`` is opened without following a final symlink, then, before a
+    byte is read: the opened file must be a regular file (a FIFO or device
+    swapped in never reads as empty content); ``abs_path`` is resolved
+    again and must still land inside the vault on the very file opened;
+    and the OS must report the descriptor itself under the vault — the
+    name it was opened by, which no later swap of a parent directory can
+    change. So no byte outside the vault is ever read. (Windows reports no
+    descriptor path; there the re-resolve alone guards, and creating
+    symlinks needs privilege.) Opening needs no directory listing
+    permission and works on every platform. Returns the file opened
+    (``real``), its ``fstat`` and up to ``size`` bytes (all of them by
+    default), so name, metadata and content all describe the same file.
+
+    Raises:
+        OutsideVaultError: ``abs_path`` now resolves outside the vault, or to
+            a file other than the one opened.
+        OSError: the path is gone, ``real`` is now a symlink, or it is not a
+            regular file.
+    """
+    with os.fdopen(os.open(real, _READ_FLAGS), "rb") as fh:
+        opened = os.fstat(fh.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(abs_path))
+        # Ask before any lookup by name: macOS reports the latest name used.
+        held = _descriptor_path(fh.fileno())
+        if held is not None and not held.is_relative_to(_descriptor_root(vault_root)):
+            raise OutsideVaultError(f"{abs_path} was opened outside the vault")
+        now = os.stat(_resolved_inside(abs_path, vault_root))
+        if (now.st_dev, now.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OutsideVaultError(f"{abs_path} changed while it was opened")
+        return VaultRead(real, opened, fh.read(size))
+
+
+def read_inside_vault(abs_path: Path, vault_root: Path, size: int = -1) -> VaultRead:
+    """Stat and read ``abs_path`` only if it resolves inside ``vault_root``, with no symlink race.
+
+    ``vault_root`` must already be resolved. See :func:`read_at`.
+
+    Raises:
+        OutsideVaultError: ``abs_path`` resolves outside ``vault_root``.
+        OSError: the path is gone, is not readable, or changed during the read.
+    """
+    return read_at(_resolved_inside(abs_path, vault_root), abs_path, vault_root, size)
+
+
+def read_bytes_inside_vault(abs_path: Path, vault_root: Path) -> bytes:
+    """Every byte of ``abs_path``, read as :func:`read_inside_vault` does."""
+    return read_inside_vault(abs_path, vault_root).data
+
+
+def read_text_for_hash(abs_path: Path, vault_root: Path) -> str:
+    """Read a file inside the vault as UTF-8 for content-hashing.
+
+    Reads through :func:`read_bytes_inside_vault`, so it never reads
+    outside the vault. Binary files (PDF / DOCX / etc.) round-trip through
     ``utf-8 + errors="ignore"`` — the hash is over whatever bytes the
     file contained, the loss of round-trippability is acceptable
     because reconciliation only needs the hash to detect drift, not
-    to reconstruct the file.
+    to reconstruct the file. Line endings are normalised to ``\\n``, as
+    a text-mode read does, so the hash of a CRLF note does not change.
     """
-    return abs_path.read_text(encoding="utf-8", errors="ignore")
+    text = read_bytes_inside_vault(abs_path, vault_root).decode("utf-8", errors="ignore")
+    return text.replace("\r\n", "\n").replace("\r", "\n")

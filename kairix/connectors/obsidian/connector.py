@@ -49,6 +49,7 @@ from kairix.connectors.obsidian.fs import (
     collection_accepts,
     mime_for_bytes,
     mime_for_path,
+    read_inside_vault,
 )
 from kairix.connectors.obsidian.reconciler import (
     CollectionScanSpec,
@@ -67,6 +68,9 @@ from kairix.core.protocols import (
 )
 
 CONNECTOR_NAME = "obsidian"
+
+# ``metadata_for`` parses frontmatter from at most this many leading bytes.
+_FRONTMATTER_HEAD_BYTES = 4096
 
 # What the filesystem says about one item at merge time; see
 # ``ObsidianConnector._liveness``.
@@ -214,9 +218,12 @@ class ObsidianConnector:
         (passthrough vs markitdown vs ocr) happens upstream in the
         pipeline, per the SC-3 separation of concerns.
         """
-        abs_path = self._safe_resolve(item_id)
-        raw = abs_path.read_bytes()
-        mime = mime_for_path(abs_path)
+        self._safe_resolve(item_id)  # rejects absolute and traversing item_ids
+        # Read by the item's own path, so an alias retargeted since the resolve
+        # is re-checked; name the MIME from the file actually read.
+        read = read_inside_vault(self._vault_root / item_id, self._vault_root)
+        raw = read.data
+        mime = mime_for_path(read.path)
         if mime == DEFAULT_MIME:
             mime = mime_for_bytes(raw, fallback=DEFAULT_MIME)
         return RawArtefact(raw=raw, mime=mime, fetched_at=_now_iso())
@@ -509,26 +516,24 @@ class ObsidianConnector:
         (string or list). Author comes from the ``author:`` frontmatter
         key. Missing files / unreadable files / parse failures collapse
         to an empty :class:`SourceMetadata` so the pipeline keeps
-        running on a corrupt vault entry.
+        running on a corrupt vault entry, and a path that leads out of the
+        vault — even one swapped in mid-read — yields nothing from outside.
         """
         try:
-            abs_path = self._safe_resolve(item_id)
+            self._safe_resolve(item_id)  # rejects absolute and traversing item_ids
         except ValueError:
             return SourceMetadata()
-        if not abs_path.is_file():
-            return SourceMetadata()
+        # One verified open supplies both the timestamps and the frontmatter,
+        # so a note swapped for an outside symlink yields nothing from outside.
         try:
-            stat = abs_path.stat()
-        except OSError:
+            _, file_stat, head_bytes = read_inside_vault(
+                self._vault_root / item_id, self._vault_root, _FRONTMATTER_HEAD_BYTES
+            )
+        except (OSError, ValueError):
             return SourceMetadata()
-        modified_at = _iso_z(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
-        created_at = _iso_z(datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc))
-        try:
-            head_bytes = abs_path.read_bytes()[:4096]
-            head = head_bytes.decode("utf-8", errors="replace")
-            front = _parse_frontmatter(head)
-        except OSError:
-            front = {}
+        modified_at = _iso_z(datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc))
+        created_at = _iso_z(datetime.fromtimestamp(file_stat.st_ctime, tz=timezone.utc))
+        front = _parse_frontmatter(head_bytes.decode("utf-8", errors="replace"))
         author, tags = _frontmatter_author_tags(front)
         return SourceMetadata(
             modified_at=modified_at,
@@ -782,17 +787,18 @@ def _scoped_specs_for_container(
     its ``path`` at the container so the reconciler walks only the
     container's subtree.
 
-    Falls back to a single spec covering the container's path when no
-    configured collection overlaps the container — this keeps the
-    Wave E ON branch working on a vault that has only the default
-    "whole vault" collection.
+    A container no configured collection overlaps gets no specs: the
+    scoped sync indexes nothing there, exactly as the whole-vault sync
+    would. (The default "whole vault" collection overlaps every container.)
     """
     if container_prefix == "":
         return _to_scan_specs(collections)
     container_norm = container_prefix.rstrip("/")
     specs: list[CollectionScanSpec] = []
     for c in collections:
-        collection_norm = c.path.rstrip("/") if c.path not in ("", ".") else ""
+        # Compare by normalised components, as the container is: "./notes"
+        # and "notes/." are "notes", "." is the vault root "".
+        collection_norm = "/".join(PurePosixPath(c.path).parts)
         is_root = collection_norm == ""
         equals_container = container_norm == collection_norm
         inside_container = _path_is_under(collection_norm, container_norm)
@@ -801,10 +807,6 @@ def _scoped_specs_for_container(
             # narrow to container when at-or-above container root.
             scoped_path = collection_norm if inside_container else container_norm
             specs.append(CollectionScanSpec(path=scoped_path, glob=c.glob, exclude=tuple(c.exclude)))
-    if not specs:
-        # No configured collection overlaps the container. Default to a
-        # whole-container walk with the standard ``**/*.md`` glob.
-        specs.append(CollectionScanSpec(path=container_norm, glob="**/*.md"))
     return specs
 
 
