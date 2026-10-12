@@ -24,6 +24,12 @@ the walk against the known state and removes only a note it can prove is gone.
 Obsidian then drops out of the prune cycle on its own; nothing else changes.
 No kairix component called this method, so a default install is unaffected.
 
+`FullScanReconciler.item_ids()`, which only fed that enumeration, is removed
+with it. It was added after the last release (`v2026.7.23a2`) and never
+shipped, so no released caller depends on it. To detect deletions, call
+`FullScanReconciler.reconcile(known_state)`, which emits a `deleted` event only
+for a note it can prove is gone.
+
 ### `kairix curator drain --max-batches` must be at least 1
 
 `--max-batches 0` (or a negative number) used to run no drain at all yet still

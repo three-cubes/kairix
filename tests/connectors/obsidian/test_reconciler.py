@@ -307,3 +307,18 @@ def test_an_out_of_vault_alias_whose_target_becomes_unreadable_during_read_is_to
         elsewhere.chmod(0o755)
 
     assert ops == [("deleted", "alias.md")]
+
+
+def test_the_reconciler_offers_no_prune_enumeration(tmp_path: Path) -> None:
+    """``reconcile(known_state)`` is the reconciler's only deletion surface; there is no ``item_ids``.
+
+    A bare enumeration of what the walk found cannot prove absence (PLA-553),
+    so deletions are decided only against known state.
+
+    Sabotage-proof: add an ``item_ids`` method back to ``FullScanReconciler``;
+    this test fails.
+    """
+    reconciler = FullScanReconciler(_vault(tmp_path, {"alpha.md": "a"}), [CollectionScanSpec(path=".")])
+
+    assert not hasattr(reconciler, "item_ids")
+    assert _ops(reconciler, {}) == [("created", "alpha.md")]
