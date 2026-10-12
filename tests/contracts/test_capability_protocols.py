@@ -29,7 +29,7 @@ from kairix.connectors.m365_calendar import M365CalendarConnector
 from kairix.connectors.m365_calendar.connector import M365CalendarConfig
 from kairix.connectors.m365_email_headers import M365EmailHeadersConnector
 from kairix.connectors.m365_email_headers.connector import M365Credentials
-from kairix.connectors.obsidian.connector import ObsidianConnector, PruneNotSupportedError
+from kairix.connectors.obsidian.connector import ObsidianConnector
 from kairix.core.protocols import (
     CheckpointedConnector,
     CredentialsConnector,
@@ -142,9 +142,14 @@ def test_obsidian_satisfies_poll_connector(tmp_path: Path) -> None:
     assert isinstance(_obsidian(tmp_path), PollConnector)
 
 
-def test_obsidian_satisfies_slim_connector(tmp_path: Path) -> None:
-    """ObsidianConnector advertises SlimConnector via the Wave B shim."""
-    assert isinstance(_obsidian(tmp_path), SlimConnector)
+def test_obsidian_is_not_a_slim_connector(tmp_path: Path) -> None:
+    """ObsidianConnector does not advertise SlimConnector: it is not a prune authority.
+
+    A local walk cannot prove a prune enumeration complete, so a prune
+    cycle selecting connectors with ``isinstance(c, SlimConnector)`` must
+    skip Obsidian; its deletions come only from reconciliation (PLA-553).
+    """
+    assert not isinstance(_obsidian(tmp_path), SlimConnector)
 
 
 def test_obsidian_satisfies_hierarchy_connector(tmp_path: Path) -> None:
@@ -194,12 +199,13 @@ def test_m365_calendar_satisfies_oauth_connector() -> None:
 
 
 def test_obsidian_capability_set(tmp_path: Path) -> None:
-    """ObsidianConnector satisfies SourceConnector + PollConnector + SlimConnector + HierarchyConnector."""
+    """ObsidianConnector satisfies SourceConnector + PollConnector + HierarchyConnector, not SlimConnector."""
     obsidian = _obsidian(tmp_path)
-    expected = {SourceConnector, PollConnector, SlimConnector, HierarchyConnector}
+    expected = {SourceConnector, PollConnector, HierarchyConnector}
     actual = {p for p in CAPABILITY_PROTOCOLS if isinstance(obsidian, p)}
     missing = expected - actual
     assert not missing, f"obsidian missing capabilities: {sorted(p.__name__ for p in missing)}"
+    assert SlimConnector not in actual, "obsidian must not advertise SlimConnector (PLA-553)"
 
 
 def test_dex_crm_capability_set() -> None:
@@ -309,30 +315,6 @@ def test_obsidian_list_changes_for_container_delegates_to_list_changes(tmp_path:
     events = list(conn.list_changes_for_container(container))
     # No markdown files on a fresh vault → no events
     assert events == []
-
-
-def test_obsidian_retrieve_all_slim_docs_refuses_to_act_as_a_prune_authority(tmp_path: Path) -> None:
-    """Obsidian declares SlimConnector but refuses the prune enumeration.
-
-    A local walk cannot prove its enumeration complete, so Obsidian is not a
-    prune authority: its deletions come from reconciliation. The refusal is
-    a ``NotImplementedError`` subclass, so a prune cycle can skip it.
-    """
-    from kairix.core.protocols import Container
-
-    vault = tmp_path / "agent-beta-vault"
-    vault.mkdir()
-    (vault / "note.md").write_text("# hello\n", encoding="utf-8")
-    conn = ObsidianConnector(vault_root=vault)
-    container = Container(
-        cc_pair_id=1,
-        container_id="default",
-        access_state="ACCESSIBLE",
-        cursor_token=None,
-        last_synced_at=None,
-    )
-    with pytest.raises(PruneNotSupportedError):
-        conn.retrieve_all_slim_docs(container)
 
 
 def test_dex_crm_list_changes_for_container_delegates() -> None:

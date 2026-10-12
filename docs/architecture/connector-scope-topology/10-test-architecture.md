@@ -49,6 +49,8 @@ def test_slim_connector_contract_real_obsidian() -> None:
 
 This satisfies F43 (every plugin has contract test against canonical fake AND real impl).
 
+> **Superseded for Obsidian (PLA-553):** the Obsidian connector does not declare `SlimConnector`. A local walk cannot prove a prune enumeration complete, so Obsidian's deletions come only from reconciliation. The Obsidian rows in the examples below predate that decision.
+
 **Plus a "capability inventory" test** per connector: assert the connector declares the expected capability set:
 
 ```python

@@ -30,13 +30,15 @@ from typing import Any
 import pytest
 from watchdog.events import FileCreatedEvent, FileDeletedEvent, FileModifiedEvent
 
+from kairix.connectors.obsidian import CAPABILITIES as OBSIDIAN_CAPABILITIES
+from kairix.connectors.obsidian.connector import ObsidianConnector, make_connector
+from kairix.connectors.obsidian.watcher import FileChange, WatchdogSource
+from kairix.core.db.scanner import CollectionConfig
+
 # Imported from the defining module (not the package re-export) so the
 # mutation-parity import graph (scripts/checks/mutation_parity.py) selects
 # this file as connector.py's own test when mutating that module.
-from kairix.connectors.obsidian.connector import ObsidianConnector, PruneNotSupportedError, make_connector
-from kairix.connectors.obsidian.watcher import FileChange, WatchdogSource
-from kairix.core.db.scanner import CollectionConfig
-from kairix.core.protocols import Container, RawArtefact
+from kairix.core.protocols import Container, RawArtefact, SlimConnector
 from kairix.knowledge.reflib.dedup import hash_content
 from tests.fakes import FakeWatchdogObserver, fake_obsidian_watcher_factory
 
@@ -1289,27 +1291,21 @@ def test_unreadable_indexed_note_is_never_tombstoned_by_reconciliation(vault: Pa
 
 
 @pytest.mark.unit
-def test_slim_docs_refuse_to_act_as_a_prune_authority(vault: Path) -> None:
-    """Obsidian refuses the prune enumeration: a local walk cannot prove it complete.
+def test_the_connector_offers_no_prune_enumeration(vault: Path) -> None:
+    """Obsidian is not a prune authority: no ``retrieve_all_slim_docs`` to select it by.
 
-    The refusal names the reason and where Obsidian's deletions come from,
-    so a prune cycle can skip the connector instead of retiring live notes
-    from a partial list.
+    A prune cycle deletes every indexed item missing from a slim
+    enumeration, and a local walk cannot prove one complete; Obsidian's
+    deletions come only from reconciliation (PLA-553).
 
-    Sabotage-proof: make ``retrieve_all_slim_docs`` enumerate the walk again
-    (``return iter(sorted(...))``); this test fails because no
-    ``PruneNotSupportedError`` is raised.
+    Sabotage-proof: add ``retrieve_all_slim_docs`` back to
+    ``ObsidianConnector``; this test fails because the connector is
+    selectable as a ``SlimConnector`` again.
     """
-    root = Container(cc_pair_id=1, container_id="", access_state="ACCESSIBLE", cursor_token=None, last_synced_at=None)
-    connector = ObsidianConnector(vault_root=vault, watcher_factory=fake_obsidian_watcher_factory())
-    with connector, pytest.raises(PruneNotSupportedError) as refused:
-        connector.retrieve_all_slim_docs(root)
-
-    assert isinstance(refused.value, NotImplementedError)
-    message = str(refused.value)
-    assert "not a prune authority" in message
-    assert "fix:" in message
-    assert "reconciliation" in message
+    connector = ObsidianConnector(vault_root=vault)
+    assert not hasattr(connector, "retrieve_all_slim_docs")
+    assert not isinstance(connector, SlimConnector)
+    assert "SlimConnector" not in OBSIDIAN_CAPABILITIES
 
 
 @pytest.mark.unit
