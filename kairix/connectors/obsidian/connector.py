@@ -49,6 +49,7 @@ from kairix.connectors.obsidian.fs import (
     collection_accepts,
     mime_for_bytes,
     mime_for_path,
+    read_bytes_inside_vault,
 )
 from kairix.connectors.obsidian.reconciler import (
     CollectionScanSpec,
@@ -215,7 +216,7 @@ class ObsidianConnector:
         pipeline, per the SC-3 separation of concerns.
         """
         abs_path = self._safe_resolve(item_id)
-        raw = abs_path.read_bytes()
+        raw = read_bytes_inside_vault(abs_path, self._vault_root)
         mime = mime_for_path(abs_path)
         if mime == DEFAULT_MIME:
             mime = mime_for_bytes(raw, fallback=DEFAULT_MIME)

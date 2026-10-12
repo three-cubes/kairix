@@ -8,6 +8,7 @@ not re-export anything from this module.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Iterable, Iterator
 from functools import cache, lru_cache
@@ -197,13 +198,67 @@ def _parts_match(parts: tuple[str, ...], patterns: tuple[str, ...], flavour: typ
     return match(0, 0)
 
 
-def read_text_for_hash(abs_path: Path) -> str:
-    """Read a file as UTF-8 for content-hashing.
+# ``os.open`` flags for a read that will not follow a final symlink, block on a
+# FIFO or translate bytes; each is 0 where the host lacks it.
+_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
 
-    Binary files (PDF / DOCX / etc.) round-trip through
+
+class OutsideVaultError(ValueError):
+    """A path resolves outside the vault, so the connector will not read it."""
+
+
+def _resolved_inside(abs_path: Path, vault_root: Path) -> Path:
+    real = Path(os.path.realpath(abs_path))
+    if not real.is_relative_to(vault_root):
+        raise OutsideVaultError(f"{abs_path} resolves outside the vault")
+    return real
+
+
+def read_bytes_at(real: Path, abs_path: Path, vault_root: Path) -> bytes:
+    """Read ``real`` — ``abs_path`` as resolved earlier — only while it is still that file.
+
+    ``real`` is opened without following a final symlink, then, before a
+    byte is read, ``abs_path`` is resolved again: it must still land inside
+    the vault, on the very file that was opened. A symlink swapped in at
+    any level after the first resolve fails one of the two, so no byte
+    outside the vault is ever read. Opening needs no directory listing
+    permission and works on every platform.
+
+    Raises:
+        OutsideVaultError: ``abs_path`` now resolves outside the vault, or to
+            a file other than the one opened.
+        OSError: the path is gone or ``real`` is now a symlink.
+    """
+    with os.fdopen(os.open(real, _READ_FLAGS), "rb") as fh:
+        opened = os.fstat(fh.fileno())
+        now = os.stat(_resolved_inside(abs_path, vault_root))
+        if (now.st_dev, now.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OutsideVaultError(f"{abs_path} changed while it was opened")
+        return fh.read()
+
+
+def read_bytes_inside_vault(abs_path: Path, vault_root: Path) -> bytes:
+    """Read ``abs_path`` only if it resolves inside ``vault_root``, with no symlink race.
+
+    ``vault_root`` must already be resolved. See :func:`read_bytes_at`.
+
+    Raises:
+        OutsideVaultError: ``abs_path`` resolves outside ``vault_root``.
+        OSError: the path is gone, is not readable, or changed during the read.
+    """
+    return read_bytes_at(_resolved_inside(abs_path, vault_root), abs_path, vault_root)
+
+
+def read_text_for_hash(abs_path: Path, vault_root: Path) -> str:
+    """Read a file inside the vault as UTF-8 for content-hashing.
+
+    Reads through :func:`read_bytes_inside_vault`, so it never reads
+    outside the vault. Binary files (PDF / DOCX / etc.) round-trip through
     ``utf-8 + errors="ignore"`` — the hash is over whatever bytes the
     file contained, the loss of round-trippability is acceptable
     because reconciliation only needs the hash to detect drift, not
-    to reconstruct the file.
+    to reconstruct the file. Line endings are normalised to ``\\n``, as
+    a text-mode read does, so the hash of a CRLF note does not change.
     """
-    return abs_path.read_text(encoding="utf-8", errors="ignore")
+    text = read_bytes_inside_vault(abs_path, vault_root).decode("utf-8", errors="ignore")
+    return text.replace("\r\n", "\n").replace("\r", "\n")

@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from kairix.connectors.obsidian.fs import (
+    OutsideVaultError,
     collection_accepts,
     iter_collection_files,
     read_text_for_hash,
@@ -69,10 +70,10 @@ class FullScanReconciler:
         vault_root: Path,
         collections: Iterable[CollectionScanSpec],
         *,
-        read_text: Callable[[Path], str] = read_text_for_hash,
+        read_text: Callable[[Path, Path], str] = read_text_for_hash,
     ) -> None:
-        """``read_text`` reads one walked file for hashing; tests inject a reader
-        that changes the filesystem between the walk and the read."""
+        """``read_text(path, vault_root)`` reads one walked file for hashing; tests
+        inject a reader that changes the filesystem between the walk and the read."""
         self._vault_root = vault_root.resolve()
         self._collections = tuple(collections)
         self._read_text = read_text
@@ -100,9 +101,10 @@ class FullScanReconciler:
         will surface the delete on its own. A file the walk finds but
         cannot read (``PermissionError`` or another ``OSError``) is in
         ``unreadable``: present, content unknown — never a deletion. A
-        symlink that resolves outside the vault is never read: ``fetch``
-        refuses it, so it counts as absent and an indexed note there is
-        tombstoned, even when the outside target hashes the same.
+        symlink that resolves outside the vault is never read — not even one
+        swapped in between the check and the read, which ``read_text`` refuses:
+        ``fetch`` refuses it too, so it counts as absent and an indexed note
+        there is tombstoned, even when the outside target hashes the same.
         """
         out: dict[str, str] = {}
         unreadable: set[str] = set()
@@ -112,10 +114,11 @@ class FullScanReconciler:
                 # ``fetch`` refuses it, so it is absent whatever its content.
                 continue
             try:
-                text = self._read_text(abs_path)
+                text = self._read_text(abs_path, self._vault_root)
             except FileNotFoundError:
                 continue
-            except OSError:
+            except (OSError, OutsideVaultError):
+                # Swapped for an outside symlink after the check above: absent.
                 if self._still_present(abs_path):
                     unreadable.add(item_id)
                 continue

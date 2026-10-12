@@ -9,16 +9,20 @@ F8 carries ``@pytest.mark.unit``.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from kairix.connectors.obsidian.fs import (
     DEFAULT_MIME,
+    OutsideVaultError,
     collection_accepts,
     iter_collection_files,
     mime_for_bytes,
     mime_for_path,
+    read_bytes_at,
+    read_bytes_inside_vault,
     read_text_for_hash,
 )
 
@@ -228,7 +232,7 @@ def test_read_text_for_hash_roundtrips_utf8(tmp_path: Path) -> None:
     target = tmp_path / "note.md"
     body = "# Alpha — first note\n"
     target.write_text(body, encoding="utf-8")
-    assert read_text_for_hash(target) == body
+    assert read_text_for_hash(target, tmp_path.resolve()) == body
 
 
 @pytest.mark.unit
@@ -240,11 +244,146 @@ def test_read_text_for_hash_handles_binary_payload(tmp_path: Path) -> None:
     """
     target = tmp_path / "doc.pdf"
     target.write_bytes(b"%PDF-1.7\n\x00\x01\xffbody")
-    out = read_text_for_hash(target)
+    out = read_text_for_hash(target, tmp_path.resolve())
     # The function only needs to return something hashable + stable;
     # the exact decoded form is implementation-defined.
     assert isinstance(out, str)
     assert "PDF-1.7" in out
+
+
+@pytest.mark.unit
+def test_read_text_for_hash_normalises_line_endings(tmp_path: Path) -> None:
+    """A CRLF note hashes as a text-mode read saw it, so upgrading changes no hash.
+
+    Sabotage-proof: drop the ``\\r\\n`` replacement; the CRLF body comes back unchanged.
+    """
+    target = tmp_path / "note.md"
+    target.write_bytes(b"one\r\ntwo\rthree\n")
+    assert read_text_for_hash(target, tmp_path.resolve()) == "one\ntwo\nthree\n"
+
+
+@pytest.mark.unit
+def test_read_bytes_inside_vault_refuses_a_symlink_out_of_the_vault(tmp_path: Path) -> None:
+    """A path that resolves outside the vault raises instead of reading.
+
+    Sabotage-proof: drop the ``is_relative_to`` check; the outside bytes come back.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (tmp_path / "outside.md").write_bytes(b"secret")
+    (vault / "link.md").symlink_to(tmp_path / "outside.md")
+    with pytest.raises(OutsideVaultError):
+        read_bytes_inside_vault(vault / "link.md", vault.resolve())
+
+
+@pytest.mark.unit
+def test_read_bytes_inside_vault_refuses_an_outside_target_before_opening_it(tmp_path: Path) -> None:
+    """An outside target is refused on the resolve, before any open.
+
+    The target is unreadable, so an open would raise ``PermissionError``.
+    Sabotage-proof: pass ``realpath(abs_path)`` to ``read_bytes_at`` unchecked;
+    the open of the outside file raises ``PermissionError`` instead.
+    """
+    if not hasattr(os, "geteuid") or os.geteuid() == 0:
+        pytest.skip("needs a non-root POSIX user for an unreadable file")  # root opens any file
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(b"secret")
+    (vault / "link.md").symlink_to(outside)
+    outside.chmod(0o000)
+    try:
+        with pytest.raises(OutsideVaultError):
+            read_bytes_inside_vault(vault / "link.md", vault.resolve())
+    finally:
+        outside.chmod(0o644)
+
+
+@pytest.mark.unit
+def test_read_bytes_inside_vault_follows_an_in_vault_symlink(tmp_path: Path) -> None:
+    """An in-vault symlink reads its in-vault target: the real path is opened."""
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+    (vault / "notes" / "alpha.md").write_bytes(b"alpha")
+    (vault / "alias.md").symlink_to(vault / "notes" / "alpha.md")
+    assert read_bytes_inside_vault(vault / "alias.md", vault.resolve()) == b"alpha"
+
+
+# The tests below pass a stale ``real`` — the resolve taken before a swap —
+# to replay each moment of the race deterministically.
+
+
+@pytest.mark.unit
+def test_read_bytes_at_refuses_a_resolved_path_that_became_a_symlink(tmp_path: Path) -> None:
+    """A note swapped for an outside symlink after the resolve fails the open itself.
+
+    Sabotage-proof: drop ``O_NOFOLLOW`` from ``_READ_FLAGS``; the open follows
+    the link and the identity check is the only guard left — this test then
+    fails because the error is ``OutsideVaultError``, not the open's ``OSError``.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (tmp_path / "outside.md").write_bytes(b"secret")
+    note = vault / "note.md"
+    note.symlink_to(tmp_path / "outside.md")
+    with pytest.raises(OSError) as raised:
+        read_bytes_at(note, note, vault.resolve())
+    assert not isinstance(raised.value, OutsideVaultError)
+
+
+@pytest.mark.unit
+def test_read_bytes_at_refuses_a_path_swapped_out_of_the_vault_after_the_open(tmp_path: Path) -> None:
+    """The opened file is read only if the path still resolves inside the vault.
+
+    ``real`` is an in-vault file, but ``abs_path`` now leads out of the vault —
+    to a hard link of that same file, so only the boundary can tell.
+    Sabotage-proof: drop the second ``_resolved_inside`` (stat ``abs_path``
+    directly); the bytes are returned for a path ``fetch`` refuses.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "real.md").write_bytes(b"in vault")
+    os.link(vault / "real.md", tmp_path / "outside.md")
+    (vault / "link.md").symlink_to(tmp_path / "outside.md")
+    with pytest.raises(OutsideVaultError):
+        read_bytes_at(vault / "real.md", vault / "link.md", vault.resolve())
+
+
+@pytest.mark.unit
+def test_read_bytes_at_refuses_a_file_that_is_not_the_one_the_path_names(tmp_path: Path) -> None:
+    """The opened file must be the very file the path resolves to now.
+
+    A parent directory swapped for a link out of the vault, then back, can
+    leave the open on an outside file while the path resolves inside again.
+    Sabotage-proof: drop the ``st_ino`` comparison; the other file's bytes
+    come back.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "opened.md").write_bytes(b"opened")
+    (vault / "named.md").write_bytes(b"named")
+    with pytest.raises(OutsideVaultError):
+        read_bytes_at(vault / "opened.md", vault / "named.md", vault.resolve())
+
+
+@pytest.mark.unit
+def test_read_bytes_inside_vault_reads_a_file_in_an_execute_only_directory(tmp_path: Path) -> None:
+    """A note in a directory the worker can search but not list still reads.
+
+    Sabotage-proof: open each parent directory before the file; the open of
+    the mode-``0111`` directory fails with ``PermissionError``.
+    """
+    if not hasattr(os, "geteuid") or os.geteuid() == 0:
+        pytest.skip("needs a non-root POSIX user for an unlistable directory")  # root lists any directory
+    vault = tmp_path / "vault"
+    locked = vault / "locked"
+    locked.mkdir(parents=True)
+    (locked / "note.md").write_bytes(b"note")
+    locked.chmod(0o111)
+    try:
+        assert read_bytes_inside_vault(locked / "note.md", vault.resolve()) == b"note"
+    finally:
+        locked.chmod(0o755)
 
 
 # ---------------------------------------------------------------------------

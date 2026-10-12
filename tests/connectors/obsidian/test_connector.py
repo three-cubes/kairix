@@ -21,6 +21,7 @@ callable default), F8 carries ``@pytest.mark.unit``.
 
 from __future__ import annotations
 
+import io
 import os
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
@@ -233,10 +234,10 @@ def test_fetch_sabotage_proof_dev_null(monkeypatch: pytest.MonkeyPatch, vault: P
     refactor accidentally turned the fetch into a ``/dev/null`` read,
     the previous test would catch it.
 
-    The monkeypatch here targets :class:`pathlib.Path.read_bytes`
-    *only inside this test's call frame* and only for the specific
-    sabotage path — we're not patching kairix code (which F1 would
-    reject), we're patching ``pathlib`` (stdlib) to substitute a
+    The monkeypatch here targets :func:`os.fdopen` — the read behind the
+    connector's vault-bounded open — *only inside this test's call frame*,
+    after the baseline fetch — we're not patching kairix code (which F1
+    would reject), we're patching ``os`` (stdlib) to substitute a
     sabotage payload, then asserting the contract test's invariant no
     longer holds. F1 carves stdlib out as the allowed substitution
     surface.
@@ -247,14 +248,15 @@ def test_fetch_sabotage_proof_dev_null(monkeypatch: pytest.MonkeyPatch, vault: P
     good = connector.fetch("alpha.md")
     assert b"# Alpha" in good.raw, "baseline must hold before sabotage"
 
-    # Sabotage: redirect Path.read_bytes to /dev/null's bytes.
-    original = Path.read_bytes
+    # Sabotage: every opened file reads as /dev/null's (empty) bytes.
+    class _ReadsNothing(io.FileIO):
+        def read(self, _size: int | None = -1) -> bytes:
+            return Path("/dev/null").read_bytes()
 
-    def _sabotaged(self: Path) -> bytes:
-        # Read from /dev/null (always empty) to simulate the bug.
-        return Path("/dev/null").read_bytes() if str(self).endswith("alpha.md") else original(self)
+    def _sabotaged(fd: int, *_args: Any, **_kwargs: Any) -> io.FileIO:
+        return _ReadsNothing(fd, "r")
 
-    monkeypatch.setattr(Path, "read_bytes", _sabotaged)
+    monkeypatch.setattr(os, "fdopen", _sabotaged)
 
     sabotaged = connector.fetch("alpha.md")
     # The round-trip invariant no longer holds — proving the assertion above is load-bearing.
