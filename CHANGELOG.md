@@ -22,15 +22,16 @@ changed or deleted:
   instead of being dropped.
 - **Symlinks are handled correctly.** A note that is a symlink to a file
   inside the vault stays indexed; a note that points outside the vault, or a
-  symlink loop, is treated as gone (the connector will not read outside the
-  vault).
+  symlink loop, is treated as gone — even when the outside file has the same
+  content (the connector will not read outside the vault).
 - **The watcher follows your collection rules.** File events for paths a
   collection excludes or does not match (for example `.obsidian/` settings
   files or non-Markdown files) are ignored, as the full scan already ignored
   them.
 - **Folder-scoped syncs only touch their own folder.** Syncing one container
-  (top-level folder) no longer reports notes in other folders as deleted, and
-  container paths such as `./notes` match their notes.
+  (top-level folder) no longer reports notes in other folders as deleted,
+  container paths such as `./notes` match their notes, and a folder no
+  collection covers is not indexed by its own sync.
 
 No configuration change is needed.
 
