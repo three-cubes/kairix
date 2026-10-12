@@ -10,6 +10,7 @@ F8 carries ``@pytest.mark.unit``.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -377,6 +378,8 @@ def test_read_at_refuses_a_file_opened_through_a_swapped_parent(tmp_path: Path) 
     Sabotage-proof: drop the ``_descriptor_path`` check; the outside bytes
     come back.
     """
+    if sys.platform == "win32":
+        pytest.skip("Windows reports no descriptor path")  # the re-resolve alone guards there
     vault = tmp_path / "vault"
     vault.mkdir()
     outside = tmp_path / "outside"
