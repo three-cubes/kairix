@@ -39,26 +39,26 @@ def test_slim_connector_contract_canonical_fake() -> None:
     assert {d.id for d in docs} == {"a", "b"}
 
 @pytest.mark.contract
-def test_slim_connector_contract_real_obsidian() -> None:
-    """The shipped Obsidian connector satisfies SlimConnector after Wave B shim."""
-    obsidian = ObsidianConnector(vault_root=Path("/tmp/vault"))
-    container = Container(cc_pair_id=1, container_id="default", access_state="ACCESSIBLE", cursor_token=None, last_synced_at=None)
-    docs = list(obsidian.retrieve_all_slim_docs(container, start=..., end=...))
-    assert all(isinstance(d, SlimDoc) for d in docs)
+def test_obsidian_is_not_a_slim_connector() -> None:
+    """Obsidian is not a prune authority (PLA-553).
+
+    A local walk cannot prove a slim enumeration complete, so Obsidian does
+    not declare SlimConnector; a prune cycle selecting by isinstance skips
+    it, and its deletions come only from reconciliation.
+    """
+    assert not isinstance(ObsidianConnector(vault_root=Path("/tmp/vault")), SlimConnector)
 ```
 
-This satisfies F43 (every plugin has contract test against canonical fake AND real impl).
-
-> **Superseded for Obsidian (PLA-553):** the Obsidian connector does not declare `SlimConnector`. A local walk cannot prove a prune enumeration complete, so Obsidian's deletions come only from reconciliation. The Obsidian rows in the examples below predate that decision.
+This satisfies F43 (every plugin has contract test against canonical fake AND real impl): the real-impl half runs against each connector that declares the capability, and a connector that must not declare it — Obsidian here — gets a negative contract instead.
 
 **Plus a "capability inventory" test** per connector: assert the connector declares the expected capability set:
 
 ```python
 @pytest.mark.contract
 def test_obsidian_capability_inventory() -> None:
-    """Obsidian declares: SourceConnector, PollConnector, SlimConnector, HierarchyConnector. Not: OAuthConnector (no auth), Resolver (no remote failures)."""
-    expected = {SourceConnector, PollConnector, SlimConnector, HierarchyConnector}
-    forbidden = {OAuthConnector, EventConnector}
+    """Obsidian declares: SourceConnector, PollConnector, HierarchyConnector. Not: SlimConnector (not a prune authority, PLA-553), OAuthConnector (no auth), Resolver (no remote failures)."""
+    expected = {SourceConnector, PollConnector, HierarchyConnector}
+    forbidden = {SlimConnector, OAuthConnector, EventConnector}
     actual = {p for p in CAPABILITY_PROTOCOLS if isinstance(ObsidianConnector(...), p)}
     assert expected.issubset(actual)
     assert not (forbidden & actual)
@@ -302,7 +302,7 @@ For the test families above, the sabotage matrix:
 
 | Test family | Sabotage target | Expected failure mode |
 |---|---|---|
-| Capability inventory | Remove `SlimConnector` from `ObsidianConnector`'s declared bases | F56 fires; capability-inventory test fails |
+| Capability inventory | Add `retrieve_all_slim_docs` back to `ObsidianConnector` (re-advertising `SlimConnector`) | negative capability contract and capability-inventory test fail |
 | Chunker contract | Change `MarkdownStructuralChunker.version` from "2" to "1" while keeping behaviour | F55 fires (version regression detected) |
 | Property — intersection | Replace `compose_scope_profiles` with a union | hypothesis finds a profile pair where intersection isn't a subset |
 | Failure-injection | Replace `CredentialExpiredError` handling with `pass` | cc_pair stays ACTIVE instead of moving to INVALID; test fails |
