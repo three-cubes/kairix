@@ -7,6 +7,29 @@ Git tags: `v2026.04.18`. Deploy by pinning to a tag: `pip install git+...@v2026.
 
 ## [Unreleased]
 
+### Obsidian connector no longer offers a prune enumeration (`SlimConnector` removed)
+
+**Breaking for direct callers.** `ObsidianConnector.retrieve_all_slim_docs` is
+removed, and the Obsidian connector no longer declares `SlimConnector`
+(`kairix.connectors.obsidian.CAPABILITIES` is now `SourceConnector`,
+`PollConnector`, `HierarchyConnector`). A prune cycle deletes every indexed item
+missing from a slim enumeration, and a local vault walk cannot prove that
+enumeration complete — a directory the walk cannot list is skipped silently —
+so a partial list would delete live notes. Obsidian's deletions come only from
+reconciliation in `list_changes` / `list_changes_for_container`, which compares
+the walk against the known state and removes only a note it can prove is gone.
+
+**Migration:** select prune sources by capability, not by calling the method:
+`if isinstance(connector, SlimConnector): ids = connector.retrieve_all_slim_docs(container)`.
+Obsidian then drops out of the prune cycle on its own; nothing else changes.
+No kairix component called this method, so a default install is unaffected.
+
+`FullScanReconciler.item_ids()`, which only fed that enumeration, is removed
+with it. It was added after the last release (`v2026.7.23a2`) and never
+shipped, so no released caller depends on it. To detect deletions, call
+`FullScanReconciler.reconcile(known_state)`, which emits a `deleted` event only
+for a note it can prove is gone.
+
 ### `kairix curator drain --max-batches` must be at least 1
 
 `--max-batches 0` (or a negative number) used to run no drain at all yet still

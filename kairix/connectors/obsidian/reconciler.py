@@ -155,15 +155,6 @@ class FullScanReconciler:
         """
         return Path(os.path.realpath(abs_path)).is_relative_to(self._vault_root)
 
-    def item_ids(self) -> list[str]:
-        """Every file the walk finds, readable or not, sorted.
-
-        The enumeration the prune cycle diffs against the store: an
-        unreadable file is still present, so it must not be pruned.
-        """
-        live, unreadable = self._discover()
-        return sorted(live.keys() | unreadable)
-
     def _present_but_unlisted(self, item_id: str) -> bool:
         """A known file the walk should have found but did not: absence unproven.
 

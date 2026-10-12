@@ -33,7 +33,9 @@ from kairix.connectors.obsidian.watcher import WatchdogSource
 # duck-typing rather than inheritance; this marker lets the AST detector
 # agree (the runtime isinstance probe also passes locally but CI may not
 # have optional deps installed for the import probe to succeed).
-CAPABILITIES: frozenset[str] = frozenset({"SourceConnector", "PollConnector", "SlimConnector", "HierarchyConnector"})
+# Not SlimConnector: a local walk cannot prove a prune enumeration complete,
+# so Obsidian's deletions come only from reconciliation (PLA-553).
+CAPABILITIES: frozenset[str] = frozenset({"SourceConnector", "PollConnector", "HierarchyConnector"})
 
 __all__ = [
     "CAPABILITIES",

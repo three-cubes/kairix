@@ -246,7 +246,10 @@ class ObsidianConnector:
     # Topology Wave E — per-connector multi-container pilot
     # ------------------------------------------------------------------
     # Wave B landed shim implementations of the capability Protocols
-    # (PollConnector / SlimConnector / HierarchyConnector). Wave E adds
+    # (PollConnector / HierarchyConnector). Obsidian does not implement
+    # SlimConnector: a local walk cannot prove a prune enumeration
+    # complete, so its deletions come only from reconciliation (PLA-553).
+    # Wave E adds
     # real implementations behind the ``topology_obsidian`` flag:
     #
     #   * :meth:`iter_containers` — one :class:`Container` per top-level
@@ -324,19 +327,6 @@ class ObsidianConnector:
         per-container path is now the only behaviour.
         """
         return self._list_changes_scoped(container)
-
-    def retrieve_all_slim_docs(self, _container: Container) -> Iterator[str]:
-        """SlimConnector shim — enumerate item_ids only via the reconciler walk.
-
-        Drives the same :class:`FullScanReconciler` the change-detection
-        path uses, but extracts only ``item_id`` (no hash compare, no
-        change-event construction). Used by the prune cycle to diff
-        against ``documents.item_id`` and stage tombstones.
-        """
-        # Every file the walk finds, unreadable ones included: a file whose
-        # read fails is still present, so the prune cycle must not stage a
-        # tombstone for it. Same sorted order as the change-detection path.
-        return iter(self._reconciler.item_ids())
 
     def load_hierarchy(self, cc_pair_id: int) -> Iterator[HierarchyNode]:
         """HierarchyConnector — emit FOLDER nodes parent-before-child.

@@ -128,13 +128,10 @@ def test_an_unreadable_symlink_outside_the_vault_is_tombstoned(tmp_path: Path) -
     reason="needs a non-root POSIX user for an unreadable file",
 )
 def test_an_unreadable_note_inside_the_vault_is_not_tombstoned(tmp_path: Path) -> None:
-    """A note the walk finds but cannot read is present with unknown content.
-
-    No event, and it stays in the prune cycle's enumeration so it is not
-    pruned either.
+    """A note the walk finds but cannot read is present with unknown content: no event.
 
     Sabotage-proof: make ``_inside_vault`` return ``False``; this test fails
-    because ``alpha.md`` drops out of ``item_ids`` and would be pruned.
+    because ``alpha.md`` is tombstoned.
     """
     files = {"alpha.md": "a", "bravo.md": "b"}
     vault = _vault(tmp_path, files)
@@ -142,12 +139,10 @@ def test_an_unreadable_note_inside_the_vault_is_not_tombstoned(tmp_path: Path) -
     (vault / "alpha.md").chmod(0o000)
     try:
         ops = _ops(reconciler, _known(files))
-        enumerated = reconciler.item_ids()
     finally:
         (vault / "alpha.md").chmod(0o644)
 
     assert ops == []
-    assert enumerated == ["alpha.md", "bravo.md"]
 
 
 # Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
@@ -254,14 +249,14 @@ def test_a_note_replaced_during_read_is_tombstoned(tmp_path: Path, replace: Call
     reason="needs a non-root POSIX user for an unreadable directory",
 )
 def test_a_note_whose_directory_becomes_unreadable_during_read_is_kept(tmp_path: Path) -> None:
-    """A note whose parent becomes unreadable between the walk and the read proves nothing.
+    """A note whose parent becomes unreadable between the walk and the read proves nothing: no event.
 
-    No event, and the note stays in ``item_ids()`` — the prune cycle's
-    enumeration — although neither its read nor its ``stat`` can complete.
+    Neither its read nor its ``stat`` can complete, so its absence is
+    unproven.
 
     Sabotage-proof: treat every ``stat`` failure as absent in
     ``_still_present`` (``return False``); this test fails because the note
-    is tombstoned and drops out of the enumeration on an indeterminate error.
+    is tombstoned on an indeterminate error.
     """
     files = {"locked/note.md": "n"}
     vault = _vault(tmp_path, files)
@@ -273,13 +268,10 @@ def test_a_note_whose_directory_becomes_unreadable_during_read_is_kept(tmp_path:
     )
     try:
         ops = _ops(reconciler, _known(files))
-        locked.chmod(0o755)  # list it again; the reader locks it during the read
-        enumerated = reconciler.item_ids()
     finally:
         locked.chmod(0o755)
 
     assert ops == []
-    assert enumerated == ["locked/note.md"]
 
 
 # Root lists any directory regardless of mode bits; Windows has no POSIX mode bits.
@@ -315,3 +307,18 @@ def test_an_out_of_vault_alias_whose_target_becomes_unreadable_during_read_is_to
         elsewhere.chmod(0o755)
 
     assert ops == [("deleted", "alias.md")]
+
+
+def test_the_reconciler_offers_no_prune_enumeration(tmp_path: Path) -> None:
+    """``reconcile(known_state)`` is the reconciler's only deletion surface; there is no ``item_ids``.
+
+    A bare enumeration of what the walk found cannot prove absence (PLA-553),
+    so deletions are decided only against known state.
+
+    Sabotage-proof: add an ``item_ids`` method back to ``FullScanReconciler``;
+    this test fails.
+    """
+    reconciler = FullScanReconciler(_vault(tmp_path, {"alpha.md": "a"}), [CollectionScanSpec(path=".")])
+
+    assert not hasattr(reconciler, "item_ids")
+    assert _ops(reconciler, {}) == [("created", "alpha.md")]
