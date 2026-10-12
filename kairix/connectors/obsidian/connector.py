@@ -50,6 +50,7 @@ from kairix.connectors.obsidian.fs import (
     mime_for_bytes,
     mime_for_path,
     read_bytes_inside_vault,
+    read_inside_vault,
 )
 from kairix.connectors.obsidian.reconciler import (
     CollectionScanSpec,
@@ -68,6 +69,9 @@ from kairix.core.protocols import (
 )
 
 CONNECTOR_NAME = "obsidian"
+
+# ``metadata_for`` parses frontmatter from at most this many leading bytes.
+_FRONTMATTER_HEAD_BYTES = 4096
 
 # What the filesystem says about one item at merge time; see
 # ``ObsidianConnector._liveness``.
@@ -510,26 +514,22 @@ class ObsidianConnector:
         (string or list). Author comes from the ``author:`` frontmatter
         key. Missing files / unreadable files / parse failures collapse
         to an empty :class:`SourceMetadata` so the pipeline keeps
-        running on a corrupt vault entry.
+        running on a corrupt vault entry, and a path that leads out of the
+        vault — even one swapped in mid-read — yields nothing from outside.
         """
         try:
             abs_path = self._safe_resolve(item_id)
         except ValueError:
             return SourceMetadata()
-        if not abs_path.is_file():
-            return SourceMetadata()
+        # One verified open supplies both the timestamps and the frontmatter,
+        # so a note swapped for an outside symlink yields nothing from outside.
         try:
-            stat = abs_path.stat()
-        except OSError:
+            file_stat, head_bytes = read_inside_vault(abs_path, self._vault_root, _FRONTMATTER_HEAD_BYTES)
+        except (OSError, ValueError):
             return SourceMetadata()
-        modified_at = _iso_z(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
-        created_at = _iso_z(datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc))
-        try:
-            head_bytes = abs_path.read_bytes()[:4096]
-            head = head_bytes.decode("utf-8", errors="replace")
-            front = _parse_frontmatter(head)
-        except OSError:
-            front = {}
+        modified_at = _iso_z(datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc))
+        created_at = _iso_z(datetime.fromtimestamp(file_stat.st_ctime, tz=timezone.utc))
+        front = _parse_frontmatter(head_bytes.decode("utf-8", errors="replace"))
         author, tags = _frontmatter_author_tags(front)
         return SourceMetadata(
             modified_at=modified_at,
@@ -792,7 +792,9 @@ def _scoped_specs_for_container(
     container_norm = container_prefix.rstrip("/")
     specs: list[CollectionScanSpec] = []
     for c in collections:
-        collection_norm = c.path.rstrip("/") if c.path not in ("", ".") else ""
+        # Compare by normalised components, as the container is: "./notes"
+        # and "notes/." are "notes", "." is the vault root "".
+        collection_norm = "/".join(PurePosixPath(c.path).parts)
         is_root = collection_norm == ""
         equals_container = container_norm == collection_norm
         inside_container = _path_is_under(collection_norm, container_norm)

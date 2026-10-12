@@ -26,6 +26,7 @@ import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 from kairix.connectors.obsidian.fs import (
@@ -70,13 +71,14 @@ class FullScanReconciler:
         vault_root: Path,
         collections: Iterable[CollectionScanSpec],
         *,
-        read_text: Callable[[Path, Path], str] = read_text_for_hash,
+        read_text: Callable[[Path], str] | None = None,
     ) -> None:
-        """``read_text(path, vault_root)`` reads one walked file for hashing; tests
-        inject a reader that changes the filesystem between the walk and the read."""
+        """``read_text(path)`` reads one walked file for hashing; tests inject a
+        reader that changes the filesystem between the walk and the read. The
+        default is :func:`read_text_for_hash` bound to this vault."""
         self._vault_root = vault_root.resolve()
         self._collections = tuple(collections)
-        self._read_text = read_text
+        self._read_text = read_text or partial(read_text_for_hash, vault_root=self._vault_root)
 
     @property
     def vault_root(self) -> Path:
@@ -114,7 +116,7 @@ class FullScanReconciler:
                 # ``fetch`` refuses it, so it is absent whatever its content.
                 continue
             try:
-                text = self._read_text(abs_path, self._vault_root)
+                text = self._read_text(abs_path)
             except FileNotFoundError:
                 continue
             except (OSError, OutsideVaultError):

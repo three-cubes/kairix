@@ -21,7 +21,7 @@ from kairix.connectors.obsidian.fs import (
     iter_collection_files,
     mime_for_bytes,
     mime_for_path,
-    read_bytes_at,
+    read_at,
     read_bytes_inside_vault,
     read_text_for_hash,
 )
@@ -281,7 +281,7 @@ def test_read_bytes_inside_vault_refuses_an_outside_target_before_opening_it(tmp
     """An outside target is refused on the resolve, before any open.
 
     The target is unreadable, so an open would raise ``PermissionError``.
-    Sabotage-proof: pass ``realpath(abs_path)`` to ``read_bytes_at`` unchecked;
+    Sabotage-proof: pass ``realpath(abs_path)`` to ``read_at`` unchecked;
     the open of the outside file raises ``PermissionError`` instead.
     """
     if not hasattr(os, "geteuid") or os.geteuid() == 0:
@@ -314,7 +314,7 @@ def test_read_bytes_inside_vault_follows_an_in_vault_symlink(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
-def test_read_bytes_at_refuses_a_resolved_path_that_became_a_symlink(tmp_path: Path) -> None:
+def test_read_at_refuses_a_resolved_path_that_became_a_symlink(tmp_path: Path) -> None:
     """A note swapped for an outside symlink after the resolve fails the open itself.
 
     Sabotage-proof: drop ``O_NOFOLLOW`` from ``_READ_FLAGS``; the open follows
@@ -327,12 +327,12 @@ def test_read_bytes_at_refuses_a_resolved_path_that_became_a_symlink(tmp_path: P
     note = vault / "note.md"
     note.symlink_to(tmp_path / "outside.md")
     with pytest.raises(OSError) as raised:
-        read_bytes_at(note, note, vault.resolve())
+        read_at(note, note, vault.resolve())[1]
     assert not isinstance(raised.value, OutsideVaultError)
 
 
 @pytest.mark.unit
-def test_read_bytes_at_refuses_a_path_swapped_out_of_the_vault_after_the_open(tmp_path: Path) -> None:
+def test_read_at_refuses_a_path_swapped_out_of_the_vault_after_the_open(tmp_path: Path) -> None:
     """The opened file is read only if the path still resolves inside the vault.
 
     ``real`` is an in-vault file, but ``abs_path`` now leads out of the vault —
@@ -346,11 +346,11 @@ def test_read_bytes_at_refuses_a_path_swapped_out_of_the_vault_after_the_open(tm
     os.link(vault / "real.md", tmp_path / "outside.md")
     (vault / "link.md").symlink_to(tmp_path / "outside.md")
     with pytest.raises(OutsideVaultError):
-        read_bytes_at(vault / "real.md", vault / "link.md", vault.resolve())
+        read_at(vault / "real.md", vault / "link.md", vault.resolve())[1]
 
 
 @pytest.mark.unit
-def test_read_bytes_at_refuses_a_file_that_is_not_the_one_the_path_names(tmp_path: Path) -> None:
+def test_read_at_refuses_a_file_that_is_not_the_one_the_path_names(tmp_path: Path) -> None:
     """The opened file must be the very file the path resolves to now.
 
     A parent directory swapped for a link out of the vault, then back, can
@@ -363,7 +363,7 @@ def test_read_bytes_at_refuses_a_file_that_is_not_the_one_the_path_names(tmp_pat
     (vault / "opened.md").write_bytes(b"opened")
     (vault / "named.md").write_bytes(b"named")
     with pytest.raises(OutsideVaultError):
-        read_bytes_at(vault / "opened.md", vault / "named.md", vault.resolve())
+        read_at(vault / "opened.md", vault / "named.md", vault.resolve())[1]
 
 
 @pytest.mark.unit

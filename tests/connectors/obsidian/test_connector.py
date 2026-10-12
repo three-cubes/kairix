@@ -39,7 +39,7 @@ from kairix.core.db.scanner import CollectionConfig
 # Imported from the defining module (not the package re-export) so the
 # mutation-parity import graph (scripts/checks/mutation_parity.py) selects
 # this file as connector.py's own test when mutating that module.
-from kairix.core.protocols import Container, RawArtefact, SlimConnector
+from kairix.core.protocols import Container, RawArtefact, SlimConnector, SourceMetadata
 from kairix.knowledge.reflib.dedup import hash_content
 from tests.fakes import FakeWatchdogObserver, fake_obsidian_watcher_factory
 
@@ -592,6 +592,51 @@ def test_load_hierarchy_emits_subdir_folders_in_parent_before_child_order(tmp_pa
 
 
 @pytest.mark.unit
+def test_metadata_for_never_reads_a_note_swapped_out_of_the_vault(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A note swapped for an outside symlink mid-read yields no outside metadata.
+
+    The swap fires on the first stdlib ``os.stat`` / ``os.open`` that names the
+    note — after ``_safe_resolve``, before the frontmatter read. (Stdlib only,
+    per F1, as in ``test_fetch_sabotage_proof_dev_null``.)
+    Sabotage-proof: restore the separate ``is_file`` / ``stat`` /
+    ``read_bytes`` calls; the outside file's author is returned.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"note.md": "---\nauthor: agent-alpha\n---\nIn vault."})
+    outside = tmp_path / "outside.md"
+    outside.write_text("---\nauthor: agent-outside\n---\nOutside.", encoding="utf-8")
+    connector = _connector_with_known(vault, {})
+    note = (vault / "note.md").resolve()
+    real_stat, real_open = os.stat, os.open
+    swapped: list[bool] = []
+
+    def _swap_once(path: Any) -> None:
+        if not swapped and Path(os.fsdecode(path)) == note:
+            swapped.append(True)
+            note.unlink()
+            note.symlink_to(outside)
+
+    def _stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        _swap_once(path)
+        return real_stat(path, *args, **kwargs)
+
+    def _open(path: Any, *args: Any, **kwargs: Any) -> int:
+        _swap_once(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", _stat)
+    monkeypatch.setattr(os, "open", _open)
+
+    meta = connector.metadata_for("note.md")
+
+    assert swapped, "the swap must fire, or the test proves nothing"
+    assert meta.author != "agent-outside"
+    assert meta == SourceMetadata()
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("frontmatter", "expected_author", "expected_tags"),
     [
@@ -814,6 +859,37 @@ def test_container_no_collection_covers_indexes_nothing(tmp_path: Path) -> None:
         collections=[CollectionConfig(name="notes", path="notes")],
         known_state_resolver=lambda _c: {},
         watcher_factory=_factory,
+    ) as connector:
+        events = list(connector.list_changes_for_container(container))
+
+    assert events == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("collection_path", ["./notes", "notes/.", "notes/"])
+def test_container_matches_a_collection_however_its_path_is_spelled(tmp_path: Path, collection_path: str) -> None:
+    """A collection spelled ``./notes`` or ``notes/.`` scopes the ``notes`` container.
+
+    It keeps its glob and exclusions there, and its indexed notes are not
+    reported as deleted. Sabotage-proof: compare the raw ``c.path.rstrip("/")``
+    again; ``./notes`` then overlaps nothing, so ``notes/a.md`` is tombstoned.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, {"notes/a.md": "a", "notes/drafts/wip.md": "w"})
+    known = {"notes/a.md": hash_content("a")}
+    container = Container(
+        cc_pair_id=1,
+        container_id="notes",
+        access_state="ACCESSIBLE",
+        cursor_token=None,
+        last_synced_at=None,
+    )
+
+    with ObsidianConnector(
+        vault_root=vault,
+        collections=[CollectionConfig(name="notes", path=collection_path, exclude=["drafts/"])],
+        known_state_resolver=lambda _c: known,
+        watcher_factory=fake_obsidian_watcher_factory(),
     ) as connector:
         events = list(connector.list_changes_for_container(container))
 

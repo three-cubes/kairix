@@ -153,9 +153,9 @@ def test_an_out_of_vault_symlink_is_never_read(tmp_path: Path) -> None:
     (vault / "link.md").symlink_to(outside)
     read: list[Path] = []
 
-    def _recording(path: Path, root: Path) -> str:
+    def _recording(path: Path) -> str:
         read.append(path)
-        return read_text_for_hash(path, root)
+        return read_text_for_hash(path, vault)
 
     FullScanReconciler(vault, [CollectionScanSpec(path=".")], read_text=_recording).reconcile({})
 
@@ -242,15 +242,41 @@ def test_an_out_of_vault_file_symlink_in_an_unlistable_directory_is_tombstoned(t
     assert ops == [("deleted", "listless/out.md")]
 
 
-def _replacing_reader(target: Path, replace: Callable[[Path], None]) -> Callable[[Path, Path], str]:
-    """A reader that changes ``target`` on disk just before reading it — between walk and read."""
+def _vault_of(path: Path) -> Path:
+    """The ``vault`` directory :func:`_vault` creates, above ``path``."""
+    return next(p for p in path.parents if p.name == "vault").resolve()
 
-    def _read(path: Path, root: Path) -> str:
+
+def _replacing_reader(target: Path, replace: Callable[[Path], None]) -> Callable[[Path], str]:
+    """A reader that changes ``target`` on disk just before reading it — between walk and read.
+
+    It reads with the production reader, bound to the vault that holds ``target``.
+    """
+    vault = _vault_of(target)
+
+    def _read(path: Path) -> str:
         if path == target:
             replace(path)
-        return read_text_for_hash(path, root)
+        return read_text_for_hash(path, vault)
 
     return _read
+
+
+def test_a_one_argument_reader_still_reconciles(tmp_path: Path) -> None:
+    """``read_text`` keeps its public one-argument shape: ``read_text(path) -> str``.
+
+    Sabotage-proof: call ``self._read_text(abs_path, self._vault_root)``; this
+    test fails with ``TypeError``.
+    """
+    files = {"alpha.md": "a"}
+    vault = _vault(tmp_path, files)
+
+    def _plain(path: Path) -> str:
+        return path.read_text(encoding="utf-8")
+
+    reconciler = FullScanReconciler(vault, [CollectionScanSpec(path=".")], read_text=_plain)
+
+    assert _ops(reconciler, {"alpha.md": hash_content("old")}) == [("modified", "alpha.md")]
 
 
 @pytest.mark.parametrize("outside_body", ["secret", "a"], ids=["different-content", "same-content"])

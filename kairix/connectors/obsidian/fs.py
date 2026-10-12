@@ -214,15 +214,17 @@ def _resolved_inside(abs_path: Path, vault_root: Path) -> Path:
     return real
 
 
-def read_bytes_at(real: Path, abs_path: Path, vault_root: Path) -> bytes:
-    """Read ``real`` — ``abs_path`` as resolved earlier — only while it is still that file.
+def read_at(real: Path, abs_path: Path, vault_root: Path, size: int = -1) -> tuple[os.stat_result, bytes]:
+    """Stat and read ``real`` — ``abs_path`` as resolved earlier — only while it is still that file.
 
     ``real`` is opened without following a final symlink, then, before a
     byte is read, ``abs_path`` is resolved again: it must still land inside
     the vault, on the very file that was opened. A symlink swapped in at
     any level after the first resolve fails one of the two, so no byte
     outside the vault is ever read. Opening needs no directory listing
-    permission and works on every platform.
+    permission and works on every platform. Returns the opened file's
+    ``fstat`` with up to ``size`` bytes (all of them by default), so
+    metadata and content come from the same verified file.
 
     Raises:
         OutsideVaultError: ``abs_path`` now resolves outside the vault, or to
@@ -234,19 +236,24 @@ def read_bytes_at(real: Path, abs_path: Path, vault_root: Path) -> bytes:
         now = os.stat(_resolved_inside(abs_path, vault_root))
         if (now.st_dev, now.st_ino) != (opened.st_dev, opened.st_ino):
             raise OutsideVaultError(f"{abs_path} changed while it was opened")
-        return fh.read()
+        return opened, fh.read(size)
 
 
-def read_bytes_inside_vault(abs_path: Path, vault_root: Path) -> bytes:
-    """Read ``abs_path`` only if it resolves inside ``vault_root``, with no symlink race.
+def read_inside_vault(abs_path: Path, vault_root: Path, size: int = -1) -> tuple[os.stat_result, bytes]:
+    """Stat and read ``abs_path`` only if it resolves inside ``vault_root``, with no symlink race.
 
-    ``vault_root`` must already be resolved. See :func:`read_bytes_at`.
+    ``vault_root`` must already be resolved. See :func:`read_at`.
 
     Raises:
         OutsideVaultError: ``abs_path`` resolves outside ``vault_root``.
         OSError: the path is gone, is not readable, or changed during the read.
     """
-    return read_bytes_at(_resolved_inside(abs_path, vault_root), abs_path, vault_root)
+    return read_at(_resolved_inside(abs_path, vault_root), abs_path, vault_root, size)
+
+
+def read_bytes_inside_vault(abs_path: Path, vault_root: Path) -> bytes:
+    """Every byte of ``abs_path``, read as :func:`read_inside_vault` does."""
+    return read_inside_vault(abs_path, vault_root)[1]
 
 
 def read_text_for_hash(abs_path: Path, vault_root: Path) -> str:
