@@ -6,12 +6,7 @@ runtime agent behaviour lives inside kairix's skills and MCP/CLI surfaces, never
 
 ## Read-only mirror — changes land in agent-platform (ADR-0001 D6)
 
-This repository is the one-way, read-only mirror of the `memory/` directory of `three-cubes/agent-platform`.
-Do not change it here. Make the change in agent-platform under `memory/`, with its tests; it reaches this
-repository only through the export, which opens a pull request from the export identity. A pull request
-here from anyone else is closed and redone in agent-platform. The org ruleset `org-export-mirrors` lets
-only the export identity and the maintainers create branches here. If this repository holds a change
-agent-platform lacks, port it into `memory/` with its tests first.
+The source of this code is `memory/` in `three-cubes/agent-platform`. The `three-cubes/kairix` repository is its one-way, read-only mirror. Make every change in agent-platform, under `memory/`, with its tests; it reaches `three-cubes/kairix` only through the export, which opens a pull request from the export identity. A pull request to `three-cubes/kairix` from anyone else is closed and redone in agent-platform. The org ruleset `org-export-mirrors` admits only the export identity and the maintainers to create branches there. If the mirror holds a change agent-platform lacks, port it into `memory/` with its tests first.
 
 ## Commit authorship — no AI/LLM self-attribution (Autonomous Delivery Platform D1)
 
