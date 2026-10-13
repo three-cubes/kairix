@@ -4,6 +4,15 @@ Agent entrypoint for this repo. This file governs how *contributors* (human or a
 runtime agent behaviour lives inside kairix's skills and MCP/CLI surfaces, never here (see
 [`ETHOS.md`](ETHOS.md) — "Authoring context never reaches runtime").
 
+## Read-only mirror — changes land in agent-platform (ADR-0001 D6)
+
+This repository is the one-way, read-only mirror of the `memory/` directory of `three-cubes/agent-platform`.
+Do not change it here. Make the change in agent-platform under `memory/`, with its tests; it reaches this
+repository only through the export, which opens a pull request from the export identity. A pull request
+here from anyone else is closed and redone in agent-platform. The org ruleset `org-export-mirrors` lets
+only the export identity and the maintainers create branches here. If this repository holds a change
+agent-platform lacks, port it into `memory/` with its tests first.
+
 ## Commit authorship — no AI/LLM self-attribution (Autonomous Delivery Platform D1)
 
 Never add AI/LLM self-attribution to commits, PRs, or code: no `Co-Authored-By: <model>`
